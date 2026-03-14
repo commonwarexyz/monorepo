@@ -6,13 +6,14 @@
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
 //! - [`BufferPool`]: Pool of reusable, aligned buffers
 
+mod aligned;
 mod pool;
 
+use aligned::{AlignedBuf, AlignedBufMut, AlignedBuffer, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
 pub use pool::{BufferPool, BufferPoolConfig, PoolError};
-use pool::{PooledBuf, PooledBufMut};
-use std::{collections::VecDeque, io::IoSlice, ops::RangeBounds};
+use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize, ops::RangeBounds};
 
 /// Immutable byte buffer.
 ///
@@ -37,6 +38,7 @@ pub struct IoBuf {
 #[derive(Clone, Debug)]
 enum IoBufInner {
     Bytes(Bytes),
+    Aligned(AlignedBuf),
     Pooled(PooledBuf),
 }
 
@@ -52,9 +54,18 @@ impl IoBuf {
     }
 
     /// Create a buffer from a pooled allocation.
+    #[inline]
     const fn from_pooled(pooled: PooledBuf) -> Self {
         Self {
             inner: IoBufInner::Pooled(pooled),
+        }
+    }
+
+    /// Create a buffer from an untracked aligned allocation.
+    #[inline]
+    const fn from_aligned(aligned: AlignedBuf) -> Self {
+        Self {
+            inner: IoBufInner::Aligned(aligned),
         }
     }
 
@@ -63,13 +74,15 @@ impl IoBuf {
     /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to the pool when the final reference is dropped.
     ///
-    /// Buffers backed by [`Bytes`], and untracked fallback allocations from
-    /// [`BufferPool::alloc`], return `false`.
+    /// Buffers backed by [`Bytes`], and untracked aligned allocations used for
+    /// fallback or requests smaller than [`BufferPoolConfig::pool_min_size`], return
+    /// `false`.
     #[inline]
-    pub fn is_pooled(&self) -> bool {
+    pub const fn is_pooled(&self) -> bool {
         match &self.inner {
             IoBufInner::Bytes(_) => false,
-            IoBufInner::Pooled(p) => p.is_tracked(),
+            IoBufInner::Aligned(_) => false,
+            IoBufInner::Pooled(_) => true,
         }
     }
 
@@ -90,6 +103,7 @@ impl IoBuf {
     pub fn as_ptr(&self) -> *const u8 {
         match &self.inner {
             IoBufInner::Bytes(b) => b.as_ptr(),
+            IoBufInner::Aligned(a) => a.as_ptr(),
             IoBufInner::Pooled(p) => p.as_ptr(),
         }
     }
@@ -104,6 +118,9 @@ impl IoBuf {
             IoBufInner::Bytes(b) => Self {
                 inner: IoBufInner::Bytes(b.slice(range)),
             },
+            IoBufInner::Aligned(a) => a
+                .slice(range)
+                .map_or_else(Self::default, Self::from_aligned),
             IoBufInner::Pooled(p) => p.slice(range).map_or_else(Self::default, Self::from_pooled),
         }
     }
@@ -131,6 +148,7 @@ impl IoBuf {
             IoBufInner::Bytes(b) => Self {
                 inner: IoBufInner::Bytes(b.split_to(at)),
             },
+            IoBufInner::Aligned(a) => Self::from_aligned(a.split_to(at)),
             IoBufInner::Pooled(p) => Self::from_pooled(p.split_to(at)),
         }
     }
@@ -156,6 +174,14 @@ impl IoBuf {
                 .map_err(|bytes| Self {
                     inner: IoBufInner::Bytes(bytes),
                 }),
+            IoBufInner::Aligned(aligned) => aligned
+                .try_into_mut()
+                .map(|mut_aligned| IoBufMut {
+                    inner: IoBufMutInner::Aligned(mut_aligned),
+                })
+                .map_err(|aligned| Self {
+                    inner: IoBufInner::Aligned(aligned),
+                }),
             IoBufInner::Pooled(pooled) => pooled
                 .try_into_mut()
                 .map(|mut_pooled| IoBufMut {
@@ -173,6 +199,7 @@ impl AsRef<[u8]> for IoBuf {
     fn as_ref(&self) -> &[u8] {
         match &self.inner {
             IoBufInner::Bytes(b) => b.as_ref(),
+            IoBufInner::Aligned(a) => a.as_ref(),
             IoBufInner::Pooled(p) => p.as_ref(),
         }
     }
@@ -227,6 +254,7 @@ impl Buf for IoBuf {
     fn remaining(&self) -> usize {
         match &self.inner {
             IoBufInner::Bytes(b) => b.remaining(),
+            IoBufInner::Aligned(a) => a.remaining(),
             IoBufInner::Pooled(p) => p.remaining(),
         }
     }
@@ -235,6 +263,7 @@ impl Buf for IoBuf {
     fn chunk(&self) -> &[u8] {
         match &self.inner {
             IoBufInner::Bytes(b) => b.chunk(),
+            IoBufInner::Aligned(a) => a.chunk(),
             IoBufInner::Pooled(p) => p.chunk(),
         }
     }
@@ -243,6 +272,7 @@ impl Buf for IoBuf {
     fn advance(&mut self, cnt: usize) {
         match &mut self.inner {
             IoBufInner::Bytes(b) => b.advance(cnt),
+            IoBufInner::Aligned(a) => a.advance(cnt),
             IoBufInner::Pooled(p) => p.advance(cnt),
         }
     }
@@ -251,6 +281,17 @@ impl Buf for IoBuf {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         match &mut self.inner {
             IoBufInner::Bytes(b) => b.copy_to_bytes(len),
+            IoBufInner::Aligned(a) => {
+                if len != 0 && len == a.remaining() {
+                    let inner = std::mem::replace(&mut self.inner, IoBufInner::Bytes(Bytes::new()));
+                    match inner {
+                        IoBufInner::Aligned(a) => a.into_bytes(),
+                        IoBufInner::Bytes(_) | IoBufInner::Pooled(_) => unreachable!(),
+                    }
+                } else {
+                    a.copy_to_bytes(len)
+                }
+            }
             IoBufInner::Pooled(p) => {
                 // Full non-empty drain: transfer ownership so the drained source no
                 // longer retains the pooled allocation. Keep len == 0 on the normal
@@ -258,6 +299,7 @@ impl Buf for IoBuf {
                 if len != 0 && len == p.remaining() {
                     let inner = std::mem::replace(&mut self.inner, IoBufInner::Bytes(Bytes::new()));
                     match inner {
+                        IoBufInner::Aligned(a) => a.into_bytes(),
                         IoBufInner::Pooled(p) => p.into_bytes(),
                         IoBufInner::Bytes(_) => unreachable!(),
                     }
@@ -310,6 +352,7 @@ impl From<IoBuf> for Vec<u8> {
     fn from(buf: IoBuf) -> Self {
         match buf.inner {
             IoBufInner::Bytes(bytes) => Self::from(bytes),
+            IoBufInner::Aligned(aligned) => aligned.as_ref().to_vec(),
             IoBufInner::Pooled(pooled) => pooled.as_ref().to_vec(),
         }
     }
@@ -322,6 +365,7 @@ impl From<IoBuf> for Bytes {
     fn from(buf: IoBuf) -> Self {
         match buf.inner {
             IoBufInner::Bytes(bytes) => bytes,
+            IoBufInner::Aligned(aligned) => Self::from_owner(aligned),
             IoBufInner::Pooled(pooled) => Self::from_owner(pooled),
         }
     }
@@ -379,6 +423,7 @@ pub struct IoBufMut {
 #[derive(Debug)]
 enum IoBufMutInner {
     Bytes(BytesMut),
+    Aligned(AlignedBufMut),
     Pooled(PooledBufMut),
 }
 
@@ -398,6 +443,34 @@ impl IoBufMut {
         }
     }
 
+    /// Create an untracked aligned buffer with the given capacity and alignment.
+    ///
+    /// This uses the aligned backing path directly rather than `BytesMut`.
+    /// The returned buffer is not tracked by a [`BufferPool`], so dropping it
+    /// deallocates the aligned allocation immediately.
+    ///
+    /// Use this when the caller needs a specific alignment but does not need
+    /// pooled reuse.
+    #[inline]
+    pub fn with_alignment(capacity: usize, alignment: NonZeroUsize) -> Self {
+        let buffer = AlignedBuffer::new(capacity, alignment.get());
+        Self::from_aligned(AlignedBufMut::new(buffer))
+    }
+
+    /// Create a zero-initialized untracked aligned buffer with the given
+    /// length and alignment.
+    ///
+    /// Unlike [`Self::with_alignment`], this initializes the full readable
+    /// range to zero and sets `len == capacity == len`.
+    #[inline]
+    pub fn zeroed_with_alignment(len: usize, alignment: NonZeroUsize) -> Self {
+        let buffer = AlignedBuffer::new_zeroed(len, alignment.get());
+        let mut buffer = Self::from_aligned(AlignedBufMut::new(buffer));
+        // SAFETY: the aligned allocation was zero-initialized for `len` bytes.
+        unsafe { buffer.set_len(len) };
+        buffer
+    }
+
     /// Create a buffer of `len` bytes, all initialized to zero.
     ///
     /// Unlike `with_capacity`, this sets both capacity and length to `len`,
@@ -410,9 +483,18 @@ impl IoBufMut {
     }
 
     /// Create a buffer from a pooled allocation.
+    #[inline]
     const fn from_pooled(pooled: PooledBufMut) -> Self {
         Self {
             inner: IoBufMutInner::Pooled(pooled),
+        }
+    }
+
+    /// Create a buffer from an untracked aligned allocation.
+    #[inline]
+    const fn from_aligned(aligned: AlignedBufMut) -> Self {
+        Self {
+            inner: IoBufMutInner::Aligned(aligned),
         }
     }
 
@@ -421,13 +503,15 @@ impl IoBufMut {
     /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to the pool when dropped.
     ///
-    /// Buffers backed by [`BytesMut`], and untracked fallback allocations from
-    /// [`BufferPool::alloc`], return `false`.
+    /// Buffers backed by [`BytesMut`], and untracked aligned allocations used
+    /// for fallback or requests smaller than [`BufferPoolConfig::pool_min_size`],
+    /// return `false`.
     #[inline]
-    pub fn is_pooled(&self) -> bool {
+    pub const fn is_pooled(&self) -> bool {
         match &self.inner {
             IoBufMutInner::Bytes(_) => false,
-            IoBufMutInner::Pooled(p) => p.is_tracked(),
+            IoBufMutInner::Aligned(_) => false,
+            IoBufMutInner::Pooled(_) => true,
         }
     }
 
@@ -454,6 +538,7 @@ impl IoBufMut {
         );
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.set_len(len),
+            IoBufMutInner::Aligned(b) => b.set_len(len),
             IoBufMutInner::Pooled(b) => b.set_len(len),
         }
     }
@@ -469,6 +554,7 @@ impl IoBufMut {
     pub fn is_empty(&self) -> bool {
         match &self.inner {
             IoBufMutInner::Bytes(b) => b.is_empty(),
+            IoBufMutInner::Aligned(b) => b.is_empty(),
             IoBufMutInner::Pooled(b) => b.is_empty(),
         }
     }
@@ -478,6 +564,7 @@ impl IoBufMut {
     pub fn freeze(self) -> IoBuf {
         match self.inner {
             IoBufMutInner::Bytes(b) => b.freeze().into(),
+            IoBufMutInner::Aligned(b) => b.freeze(),
             IoBufMutInner::Pooled(b) => b.freeze(),
         }
     }
@@ -487,6 +574,7 @@ impl IoBufMut {
     pub fn capacity(&self) -> usize {
         match &self.inner {
             IoBufMutInner::Bytes(b) => b.capacity(),
+            IoBufMutInner::Aligned(b) => b.capacity(),
             IoBufMutInner::Pooled(b) => b.capacity(),
         }
     }
@@ -496,6 +584,7 @@ impl IoBufMut {
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.as_mut_ptr(),
+            IoBufMutInner::Aligned(b) => b.as_mut_ptr(),
             IoBufMutInner::Pooled(b) => b.as_mut_ptr(),
         }
     }
@@ -507,6 +596,7 @@ impl IoBufMut {
     pub fn truncate(&mut self, len: usize) {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.truncate(len),
+            IoBufMutInner::Aligned(b) => b.truncate(len),
             IoBufMutInner::Pooled(b) => b.truncate(len),
         }
     }
@@ -516,6 +606,7 @@ impl IoBufMut {
     pub fn clear(&mut self) {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.clear(),
+            IoBufMutInner::Aligned(b) => b.clear(),
             IoBufMutInner::Pooled(b) => b.clear(),
         }
     }
@@ -526,6 +617,7 @@ impl AsRef<[u8]> for IoBufMut {
     fn as_ref(&self) -> &[u8] {
         match &self.inner {
             IoBufMutInner::Bytes(b) => b.as_ref(),
+            IoBufMutInner::Aligned(b) => b.as_ref(),
             IoBufMutInner::Pooled(b) => b.as_ref(),
         }
     }
@@ -536,6 +628,7 @@ impl AsMut<[u8]> for IoBufMut {
     fn as_mut(&mut self) -> &mut [u8] {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.as_mut(),
+            IoBufMutInner::Aligned(b) => b.as_mut(),
             IoBufMutInner::Pooled(b) => b.as_mut(),
         }
     }
@@ -574,6 +667,7 @@ impl Buf for IoBufMut {
     fn remaining(&self) -> usize {
         match &self.inner {
             IoBufMutInner::Bytes(b) => b.remaining(),
+            IoBufMutInner::Aligned(b) => b.remaining(),
             IoBufMutInner::Pooled(b) => b.remaining(),
         }
     }
@@ -582,6 +676,7 @@ impl Buf for IoBufMut {
     fn chunk(&self) -> &[u8] {
         match &self.inner {
             IoBufMutInner::Bytes(b) => b.chunk(),
+            IoBufMutInner::Aligned(b) => b.chunk(),
             IoBufMutInner::Pooled(b) => b.chunk(),
         }
     }
@@ -590,6 +685,7 @@ impl Buf for IoBufMut {
     fn advance(&mut self, cnt: usize) {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.advance(cnt),
+            IoBufMutInner::Aligned(b) => b.advance(cnt),
             IoBufMutInner::Pooled(b) => b.advance(cnt),
         }
     }
@@ -598,6 +694,18 @@ impl Buf for IoBufMut {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.copy_to_bytes(len),
+            IoBufMutInner::Aligned(a) => {
+                if len != 0 && len == a.remaining() {
+                    let inner =
+                        std::mem::replace(&mut self.inner, IoBufMutInner::Bytes(BytesMut::new()));
+                    match inner {
+                        IoBufMutInner::Aligned(a) => a.into_bytes(),
+                        IoBufMutInner::Bytes(_) | IoBufMutInner::Pooled(_) => unreachable!(),
+                    }
+                } else {
+                    a.copy_to_bytes(len)
+                }
+            }
             IoBufMutInner::Pooled(p) => {
                 // Full non-empty drain: transfer ownership so the drained source no
                 // longer retains the pooled allocation. Keep len == 0 on the normal
@@ -606,6 +714,7 @@ impl Buf for IoBufMut {
                     let inner =
                         std::mem::replace(&mut self.inner, IoBufMutInner::Bytes(BytesMut::new()));
                     match inner {
+                        IoBufMutInner::Aligned(a) => a.into_bytes(),
                         IoBufMutInner::Pooled(p) => p.into_bytes(),
                         IoBufMutInner::Bytes(_) => unreachable!(),
                     }
@@ -623,6 +732,7 @@ unsafe impl BufMut for IoBufMut {
     fn remaining_mut(&self) -> usize {
         match &self.inner {
             IoBufMutInner::Bytes(b) => b.remaining_mut(),
+            IoBufMutInner::Aligned(b) => b.remaining_mut(),
             IoBufMutInner::Pooled(b) => b.remaining_mut(),
         }
     }
@@ -631,6 +741,7 @@ unsafe impl BufMut for IoBufMut {
     unsafe fn advance_mut(&mut self, cnt: usize) {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.advance_mut(cnt),
+            IoBufMutInner::Aligned(b) => b.advance_mut(cnt),
             IoBufMutInner::Pooled(b) => b.advance_mut(cnt),
         }
     }
@@ -639,6 +750,7 @@ unsafe impl BufMut for IoBufMut {
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.chunk_mut(),
+            IoBufMutInner::Aligned(b) => b.chunk_mut(),
             IoBufMutInner::Pooled(b) => b.chunk_mut(),
         }
     }
@@ -2085,11 +2197,12 @@ mod tests {
             if #[cfg(miri)] {
                 // Reduce max_per_class to avoid slow atomics under miri.
                 let pool_config = BufferPoolConfig {
+                    pool_min_size: 0,
                     max_per_class: commonware_utils::NZUsize!(32),
                     ..BufferPoolConfig::for_network()
                 };
             } else {
-                let pool_config = BufferPoolConfig::for_network();
+                let pool_config = BufferPoolConfig::for_network().with_pool_min_size(0);
             }
         }
         let mut registry = prometheus_client::registry::Registry::default();
