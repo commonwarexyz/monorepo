@@ -64,7 +64,7 @@ stability_scope!(BETA {
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::types::Round;
-    use commonware_cryptography::Digest;
+    use commonware_cryptography::{Digest, PublicKey};
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
 
@@ -183,12 +183,22 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Hash of an arbitrary payload.
         type Digest: Digest;
 
-        /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
-        /// it isn't dropped).
+        /// Identity key of a network participant.
+        type PublicKey: PublicKey;
+
+        /// Directive for how a payload should be broadcast.
         ///
-        /// Other participants may not begin voting on a proposal until they have the full contents,
-        /// so timely delivery often yields better performance.
-        fn broadcast(&mut self, payload: Self::Digest) -> impl Future<Output = ()> + Send;
+        /// Consensus mechanisms that need broadcast control (e.g. distinguishing
+        /// initial broadcast from rebroadcasts) define a custom enum here. Mechanisms that
+        /// treat every broadcast identically can set this to `()`.
+        type Plan: Send;
+
+        /// Broadcast a payload to the given recipients.
+        fn broadcast(
+            &mut self,
+            payload: Self::Digest,
+            plan: Self::Plan,
+        ) -> impl Future<Output = ()> + Send;
     }
 
     /// Reporter is the interface responsible for reporting activity to some external actor.

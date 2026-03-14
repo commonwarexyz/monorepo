@@ -14,7 +14,8 @@
 
 use crate::{types::Round, Block};
 use commonware_codec::{Codec, Read};
-use commonware_cryptography::{Digest, Digestible};
+use commonware_cryptography::{Digest, Digestible, PublicKey};
+use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 use std::{future::Future, sync::Arc};
 
@@ -77,6 +78,9 @@ pub trait Variant: Clone + Send + Sync + 'static {
 /// - By commitment: Lookup using the full consensus commitment, which may enable
 ///   additional retrieval mechanisms depending on the variant
 pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
+    /// The public key type used to identify peers.
+    type PublicKey: PublicKey;
+
     /// The cached block type held internally by the buffer.
     ///
     /// This allows buffers to use efficient internal representations (e.g., `Arc<Block>`)
@@ -137,10 +141,13 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     /// This allows the buffer to perform variant-specific cleanup operations.
     fn finalized(&self, commitment: V::Commitment) -> impl Future<Output = ()> + Send;
 
-    /// Broadcast a proposed block to peers.
-    ///
-    /// This handles the initial dissemination of a newly proposed block.
-    fn proposed(&self, round: Round, block: V::Block) -> impl Future<Output = ()> + Send;
+    /// Send a block to peers.
+    fn send(
+        &self,
+        round: Round,
+        block: V::Block,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> impl Future<Output = ()> + Send;
 }
 
 /// A trait for cached block types that can be converted to the underlying block.

@@ -23,6 +23,7 @@ use commonware_cryptography::{
     Digestible,
 };
 use commonware_macros::select_loop;
+use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::Resolver;
 use commonware_runtime::{
@@ -371,7 +372,7 @@ where
             Key = handler::Request<V::Commitment>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
-        Buf: Buffer<V>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver).await)
     }
@@ -387,7 +388,7 @@ where
             Key = handler::Request<V::Commitment>,
             PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
         >,
-        Buf: Buffer<V>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
     {
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<Result<V::Block, BlockSubscriptionKeyFor<V>>>::default();
@@ -516,7 +517,22 @@ where
                     Message::Proposed { round, block } => {
                         self.cache_verified(round, block.digest(), block.clone())
                             .await;
-                        buffer.proposed(round, block).await;
+                        buffer.send(round, block, Recipients::All).await;
+                    }
+                    Message::Forwarded {
+                        round,
+                        commitment,
+                        peers,
+                    } => {
+                        if peers.is_empty() {
+                            continue;
+                        }
+                        let Some(block) = self.find_block_by_commitment(&buffer, commitment).await
+                        else {
+                            debug!(?commitment, "block not found for forwarding");
+                            continue;
+                        };
+                        buffer.send(round, block, Recipients::Some(peers)).await;
                     }
                     Message::Verified { round, block } => {
                         self.cache_verified(round, block.digest(), block).await;

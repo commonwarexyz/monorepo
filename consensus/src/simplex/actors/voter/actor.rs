@@ -13,6 +13,7 @@ use crate::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, Proposal, Vote,
         },
+        Plan,
     },
     types::{Round as Rnd, View},
     CertifiableAutomaton, Relay, Reporter, Viewable, LATENCY,
@@ -127,7 +128,7 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
-        R: Relay<Digest = D>,
+        R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
         F: Reporter<Activity = Activity<S, D>>,
     > Actor<E, S, L, B, D, A, R, F>
 {
@@ -927,7 +928,7 @@ impl<
                 view = self.state.current_view();
 
                 // Notify application of proposal
-                self.relay.broadcast(proposed).await;
+                self.relay.broadcast(proposed, Plan::Propose).await;
             },
             (context, verified) = verify_wait => {
                 // Clear verify waiter

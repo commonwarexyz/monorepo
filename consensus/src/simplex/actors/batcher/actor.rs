@@ -2,13 +2,15 @@ use super::{Config, Mailbox, Message, Round};
 use crate::{
     simplex::{
         actors::voter,
+        config::ForwardingPolicy,
         interesting,
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
-        types::{Activity, Certificate, Vote},
+        types::{Activity, Certificate, Proposal, Vote},
+        Plan,
     },
     types::{Epoch, Participant, View, ViewDelta},
-    Epochable, Reporter, Viewable,
+    Epochable, Relay, Reporter, Viewable,
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
@@ -41,25 +43,29 @@ struct Current {
     timed_out: bool,
 }
 
-pub struct Actor<
+pub struct Actor<E, S, B, D, Re, Rl, T>
+where
     E: Spawner + Metrics + Clock + CryptoRngCore,
     S: Scheme<D>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    R: Reporter<Activity = Activity<S, D>>,
+    Re: Reporter<Activity = Activity<S, D>>,
+    Rl: Relay,
     T: Strategy,
-> {
+{
     context: ContextCell<E>,
 
     participants: Set<S::PublicKey>,
     scheme: S,
 
     blocker: B,
-    reporter: R,
+    reporter: Re,
+    relay: Rl,
     strategy: T,
 
     activity_timeout: ViewDelta,
     skip_timeout: ViewDelta,
+    forwarding: ForwardingPolicy,
     epoch: Epoch,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
@@ -68,21 +74,25 @@ pub struct Actor<
     verified: Counter,
     inbound_messages: Family<Inbound, Counter>,
     latest_vote: Family<Peer, Gauge>,
+    latest_seen: Vec<View>,
     batch_size: Histogram,
     verify_latency: histogram::Timed<E>,
     recover_latency: histogram::Timed<E>,
 }
 
-impl<
-        E: Spawner + Metrics + Clock + CryptoRngCore,
-        S: Scheme<D>,
-        B: Blocker<PublicKey = S::PublicKey>,
-        D: Digest,
-        R: Reporter<Activity = Activity<S, D>>,
-        T: Strategy,
-    > Actor<E, S, B, D, R, T>
+impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>
+where
+    E: Spawner + Metrics + Clock + CryptoRngCore,
+    S: Scheme<D>,
+    B: Blocker<PublicKey = S::PublicKey>,
+    D: Digest,
+    Re: Reporter<Activity = Activity<S, D>>,
+    Rl: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
+    T: Strategy,
 {
-    pub fn new(context: E, cfg: Config<S, B, R, T>) -> (Self, Mailbox<S, D>) {
+    pub fn new(context: E, cfg: Config<S, B, Re, Rl, T>) -> (Self, Mailbox<S, D>) {
+        let participants = cfg.scheme.participants().clone();
+        let participant_count = participants.len();
         let added = Counter::default();
         let verified = Counter::default();
         let inbound_messages = Family::<Inbound, Counter>::default();
@@ -105,7 +115,7 @@ impl<
             "view of latest vote received per peer",
             latest_vote.clone(),
         );
-        for participant in cfg.scheme.participants().iter() {
+        for participant in participants.iter() {
             latest_vote.get_or_create(&Peer::new(participant)).set(0);
         }
         context.register(
@@ -132,15 +142,17 @@ impl<
             Self {
                 context: ContextCell::new(context),
 
-                participants: cfg.scheme.participants().clone(),
+                participants,
                 scheme: cfg.scheme,
 
                 blocker: cfg.blocker,
                 reporter: cfg.reporter,
+                relay: cfg.relay,
                 strategy: cfg.strategy,
 
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
+                forwarding: cfg.forwarding,
                 epoch: cfg.epoch,
 
                 mailbox_receiver: receiver,
@@ -149,6 +161,7 @@ impl<
                 verified,
                 inbound_messages,
                 latest_vote,
+                latest_seen: vec![View::zero(); participant_count],
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency, clock.clone()),
                 recover_latency: histogram::Timed::new(recover_latency, clock),
@@ -157,7 +170,7 @@ impl<
         )
     }
 
-    fn new_round(&self) -> Round<S, B, D, R> {
+    fn new_round(&self) -> Round<S, B, D, Re> {
         Round::new(
             self.participants.clone(),
             self.scheme.clone(),
@@ -166,9 +179,64 @@ impl<
         )
     }
 
+    /// Records the latest view message received from a participant.
+    ///
+    /// This mechanism is not resistant to malicious validators (nor is
+    /// it meant to be). If a peer sends us a certificate very far in the future,
+    /// we will record that as their latest activity (and not attempt to skip them).
+    fn record_activity(&mut self, sender: &S::PublicKey, view: View) {
+        let Some(participant) = self.participants.index(sender) else {
+            return;
+        };
+        let seen_view = &mut self.latest_seen[usize::from(participant)];
+        if *seen_view < view {
+            *seen_view = view;
+        }
+    }
+
+    /// Returns true if the participant has sent a recent message.
+    fn is_active(
+        &self,
+        work: &BTreeMap<View, Round<S, B, D, Re>>,
+        view: View,
+        participant: Participant,
+    ) -> bool {
+        if work.len() < self.skip_timeout.get() as usize {
+            return true;
+        }
+        let seen_view = self.latest_seen[usize::from(participant)];
+        view.get().saturating_sub(seen_view.get()) < self.skip_timeout.get()
+    }
+
+    /// Resolves the public keys of `missing` participants for a targeted
+    /// block forward. Returns `None` when no peers need the block.
+    fn resolve_peers(&self, missing: &[Participant]) -> Option<Vec<S::PublicKey>> {
+        let peers: Vec<_> = missing
+            .iter()
+            .filter_map(|&p| self.participants.key(p).cloned())
+            .collect();
+        (!peers.is_empty()).then_some(peers)
+    }
+
+    /// Forwards a proposal to the requested peers.
+    async fn forward_proposal(&mut self, proposal: Proposal<D>, missing: Vec<Participant>) {
+        let Some(peers) = self.resolve_peers(&missing) else {
+            return;
+        };
+        self.relay
+            .broadcast(
+                proposal.payload,
+                Plan::Forward {
+                    round: proposal.round,
+                    peers,
+                },
+            )
+            .await;
+    }
+
     /// Returns true if the leader has nullified the current view
     /// and we have not yet notified the voter.
-    fn leader_nullified(current: &Current, work: &BTreeMap<View, Round<S, B, D, R>>) -> bool {
+    fn leader_nullified(current: &Current, work: &BTreeMap<View, Round<S, B, D, Re>>) -> bool {
         if current.timed_out {
             return false;
         }
@@ -244,30 +312,12 @@ impl<
                         // Leader already buffered a nullify for this now-current view
                         // (allowed because we accept votes up to `current+1`).
                         Some(TimeoutReason::LeaderNullify)
+                    } else if !am_leader && !self.is_active(&work, current.view, leader) {
+                        Some(TimeoutReason::Inactivity)
                     } else {
-                        let skip_timeout = self.skip_timeout.get() as usize;
-                        if
-                        // Ensure we have enough data to judge activity (none of this
-                        // data may be in the last skip_timeout views if we jumped ahead
-                        // to a new view)
-                        work.len() >= skip_timeout
-                            // Leader not active in any recent round
-                            && !work
-                                .iter()
-                                .rev()
-                                .take(skip_timeout)
-                                .any(|(_, round)| round.is_active(leader))
-                        {
-                            // If we are the leader, we should attempt to build even if we haven't
-                            // been active recently
-                            if am_leader {
-                                None
-                            } else {
-                                Some(TimeoutReason::Inactivity)
-                            }
-                        } else {
-                            None
-                        }
+                        // If we are not the leader, we should timeout if we haven't
+                        // been active recently.
+                        None
                     };
                     if timeout_reason.is_some() {
                         current.timed_out = true;
@@ -326,6 +376,7 @@ impl<
                 ) {
                     continue;
                 }
+                self.record_activity(&sender, view);
 
                 match message {
                     Certificate::Notarization(notarization) => {
@@ -342,12 +393,20 @@ impl<
                         }
 
                         // Store and forward to voter
-                        work.entry(view)
-                            .or_insert_with(|| self.new_round())
-                            .set_notarization(notarization.clone());
+                        let round = work.entry(view).or_insert_with(|| self.new_round());
+                        round.set_notarization(notarization.clone());
+                        let missing_voters = self.forwarding.is_enabled().then(|| {
+                            let participants = round.missing_voters(&notarization.proposal);
+                            (notarization.proposal.clone(), participants)
+                        });
                         voter
                             .recovered(Certificate::Notarization(notarization))
                             .await;
+
+                        // Forward proposal to missing voters
+                        if let Some((proposal, participants)) = missing_voters {
+                            self.forward_proposal(proposal, participants).await;
+                        }
                     }
                     Certificate::Nullification(nullification) => {
                         // Skip if we already have a nullification for this view
@@ -427,6 +486,7 @@ impl<
                 if !interesting(self.activity_timeout, finalized, current.view, view, false) {
                     continue;
                 }
+                self.record_activity(&sender, view);
 
                 // Add the vote to the verifier
                 let peer = Peer::new(&sender);
@@ -532,11 +592,20 @@ impl<
                 }
 
                 // Try to construct and forward certificates
+                let mut missing_voters = None;
                 if let Some(notarization) = self
                     .recover_latency
                     .time_some(|| round.try_construct_notarization(&self.scheme, &self.strategy))
                 {
                     debug!(view = %updated_view, "constructed notarization, forwarding to voter");
+
+                    // Collect missing voters for proposal forwarding
+                    if self.forwarding.is_enabled() {
+                        let participants = round.missing_voters(&notarization.proposal);
+                        missing_voters = Some((notarization.proposal.clone(), participants));
+                    }
+
+                    // Forward notarization to voter
                     voter
                         .recovered(Certificate::Notarization(notarization))
                         .await;
@@ -558,6 +627,11 @@ impl<
                     voter
                         .recovered(Certificate::Finalization(finalization))
                         .await;
+                }
+
+                // Forward proposal to missing voters
+                if let Some((proposal, participants)) = missing_voters {
+                    self.forward_proposal(proposal, participants).await;
                 }
 
                 // Drop any rounds that are no longer interesting

@@ -86,7 +86,7 @@ use crate::{
         },
         Update,
     },
-    simplex::types::Context,
+    simplex::{types::Context, Plan},
     types::{Epoch, Epocher, Round},
     Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Relay, Reporter,
     VerifyingApplication,
@@ -605,34 +605,37 @@ where
     ES: Epocher,
 {
     type Digest = B::Digest;
+    type PublicKey = S::PublicKey;
+    type Plan = Plan<S::PublicKey>;
 
-    /// Broadcasts a previously built block to the network.
-    ///
-    /// This uses the cached block from the last proposal operation. If no block was built or
-    /// the digest does not match the cached block, the broadcast is skipped with a warning.
-    async fn broadcast(&mut self, digest: Self::Digest) {
-        let Some((round, block)) = self.last_built.lock().take() else {
-            warn!("missing block to broadcast");
-            return;
-        };
-
-        if block.digest() != digest {
-            warn!(
-                round = %round,
-                digest = %block.digest(),
-                height = %block.height(),
-                "skipping requested broadcast of block with mismatched digest"
-            );
-            return;
+    async fn broadcast(&mut self, digest: Self::Digest, plan: Plan<S::PublicKey>) {
+        match plan {
+            Plan::Propose => {
+                let Some((round, block)) = self.last_built.lock().take() else {
+                    warn!("missing block to broadcast");
+                    return;
+                };
+                if block.digest() != digest {
+                    warn!(
+                        round = %round,
+                        digest = %block.digest(),
+                        height = %block.height(),
+                        "skipping requested broadcast of block with mismatched digest"
+                    );
+                    return;
+                }
+                debug!(
+                    round = %round,
+                    digest = %block.digest(),
+                    height = %block.height(),
+                    "requested broadcast of built block"
+                );
+                self.marshal.proposed(round, block).await;
+            }
+            Plan::Forward { round, peers } => {
+                self.marshal.forwarded(round, digest, peers).await;
+            }
         }
-
-        debug!(
-            round = %round,
-            digest = %block.digest(),
-            height = %block.height(),
-            "requested broadcast of built block"
-        );
-        self.marshal.proposed(round, block).await;
     }
 }
 

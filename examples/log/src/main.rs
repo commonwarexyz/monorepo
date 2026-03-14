@@ -226,6 +226,7 @@ fn main() {
             fetch_concurrent: 32,
             page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,
+            forwarding: simplex::ForwardingPolicy::default(),
         };
         let engine = simplex::Engine::new(context.with_label("engine"), cfg);
 
