@@ -47,6 +47,15 @@ pub struct AncestorStream<M, B: Block> {
 }
 
 impl<M, B: Block> AncestorStream<M, B> {
+    /// Returns a reference to the next block that will be yielded by the
+    /// stream, without consuming it.
+    ///
+    /// Returns `None` if the buffer is empty and the next block is being
+    /// fetched asynchronously.
+    pub fn peek(&self) -> Option<&B> {
+        self.buffered.last()
+    }
+
     /// Creates a new [AncestorStream] starting from the given ancestry.
     ///
     /// # Panics
