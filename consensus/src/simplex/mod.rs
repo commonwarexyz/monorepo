@@ -1964,31 +1964,30 @@ mod tests {
                     assert_eq!(*invalid, 0);
                 }
 
-                // Ensure slow node still emits notarizes and finalizes (when receiving certificates)
-                let mut observed = false;
+                // Ensure the slow validator never emits notarize or finalize
+                // votes. It may still emit nullifies after timing out.
                 {
                     let notarizes = reporter.notarizes.lock();
-                    for (_, payloads) in notarizes.iter() {
-                        for (_, participants) in payloads.iter() {
-                            if participants.contains(slow) {
-                                observed = true;
-                                break;
-                            }
-                        }
-                    }
+                    assert!(notarizes.values().all(|payloads| {
+                        payloads
+                            .values()
+                            .all(|participants| !participants.contains(slow))
+                    }));
                 }
                 {
                     let finalizes = reporter.finalizes.lock();
-                    for (_, payloads) in finalizes.iter() {
-                        for (_, finalizers) in payloads.iter() {
-                            if finalizers.contains(slow) {
-                                observed = true;
-                                break;
-                            }
-                        }
-                    }
+                    assert!(finalizes.values().all(|payloads| {
+                        payloads
+                            .values()
+                            .all(|participants| !participants.contains(slow))
+                    }));
                 }
-                assert!(observed);
+
+                // Ensure every reporter observes finalization progress to at least the target view.
+                {
+                    let finalizations = reporter.finalizations.lock();
+                    assert!(finalizations.keys().any(|view| *view >= required_containers));
+                }
             }
 
             // Ensure no blocked connections
