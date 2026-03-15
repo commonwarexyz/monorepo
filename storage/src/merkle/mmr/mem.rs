@@ -1,14 +1,12 @@
 //! A basic, no_std compatible MMR where all nodes are stored in-memory.
 
-use crate::mmr::{
+use crate::merkle::{
+    batch::BatchChainInfo,
     hasher::Hasher,
-    iterator::{nodes_to_pin, PeakIterator},
-    proof,
-    read::{BatchChainInfo, Readable},
-    Error, Location, Position, Proof,
+    mmr::{iterator::PeakIterator, proof, Error, Family, Location, Position, Proof, Readable},
 };
 use alloc::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     vec::Vec,
 };
 use commonware_cryptography::Digest;
@@ -17,50 +15,6 @@ use core::ops::Range;
 /// Minimum number of digest computations required during batch updates to trigger parallelization.
 #[cfg(feature = "std")]
 pub(crate) const MIN_TO_PARALLELIZE: usize = 20;
-
-/// Sealed trait for MMR state types.
-mod private {
-    pub trait Sealed {}
-}
-
-/// Trait for valid batch state types.
-pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {}
-
-/// Marker type for a batch whose root digest has been computed.
-#[derive(Clone, Copy, Debug)]
-pub struct Clean<D: Digest> {
-    /// The root digest of the MMR after this batch has been applied.
-    pub root: D,
-}
-
-impl<D: Digest> private::Sealed for Clean<D> {}
-impl<D: Digest> State<D> for Clean<D> {}
-
-/// Marker type for an unmerkleized batch (root digest not computed).
-#[derive(Clone, Debug, Default)]
-pub struct Dirty {
-    /// Non-leaf nodes that need to have their digests recomputed due to a batched update operation.
-    ///
-    /// This is a set of tuples of the form (node_pos, height).
-    dirty_nodes: BTreeSet<(Position, u32)>,
-}
-
-impl private::Sealed for Dirty {}
-impl<D: Digest> State<D> for Dirty {}
-
-impl Dirty {
-    /// Insert a dirty node. Returns true if newly inserted.
-    pub(crate) fn insert(&mut self, pos: Position, height: u32) -> bool {
-        self.dirty_nodes.insert((pos, height))
-    }
-
-    /// Take all dirty nodes sorted by ascending height (bottom-up for merkleize).
-    pub(crate) fn take_sorted_by_height(&mut self) -> Vec<(Position, u32)> {
-        let mut v: Vec<_> = core::mem::take(&mut self.dirty_nodes).into_iter().collect();
-        v.sort_by_key(|a| a.1);
-        v
-    }
-}
 
 /// Configuration for initializing an [Mmr].
 pub struct Config<D: Digest> {
@@ -119,7 +73,7 @@ pub struct Mmr<D: Digest> {
 
 impl<D: Digest> Mmr<D> {
     /// Create a new, empty MMR.
-    pub fn new(hasher: &mut impl Hasher<Digest = D>) -> Self {
+    pub fn new(hasher: &mut impl Hasher<Family = Family, Digest = D>) -> Self {
         let root = hasher.root(Location::new(0), core::iter::empty::<&D>());
         Self {
             nodes: VecDeque::new(),
@@ -137,32 +91,31 @@ impl<D: Digest> Mmr<D> {
     /// count for `config.pruned_to`.
     ///
     /// Returns [Error::InvalidSize] if the MMR size is invalid.
-    pub fn init(config: Config<D>, hasher: &mut impl Hasher<Digest = D>) -> Result<Self, Error> {
+    pub fn init(
+        config: Config<D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+    ) -> Result<Self, Error> {
         let pruned_to_pos = Position::try_from(config.pruned_to)?;
 
         // Validate that the total size is valid
         let Some(size) = pruned_to_pos.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
         };
-        if !size.is_mmr_size() {
+        if !size.is_valid_size() {
             return Err(Error::InvalidSize(*size));
         }
 
         // Validate and populate pinned nodes
-        let mut pinned_nodes = BTreeMap::new();
-        let mut expected_pinned_nodes = 0;
-        for (i, pos) in nodes_to_pin(pruned_to_pos).enumerate() {
-            expected_pinned_nodes += 1;
-            if i >= config.pinned_nodes.len() {
-                return Err(Error::InvalidPinnedNodes);
-            }
-            pinned_nodes.insert(pos, config.pinned_nodes[i]);
-        }
-
-        // Check for too many pinned nodes
-        if config.pinned_nodes.len() != expected_pinned_nodes {
+        let expected_pinned_positions =
+            <Family as crate::merkle::Family>::nodes_to_pin(size, pruned_to_pos);
+        if config.pinned_nodes.len() != expected_pinned_positions.len() {
             return Err(Error::InvalidPinnedNodes);
         }
+
+        let pinned_nodes = expected_pinned_positions
+            .into_iter()
+            .zip(config.pinned_nodes)
+            .collect();
 
         let nodes = VecDeque::from(config.nodes);
         let root = Self::compute_root(hasher, &nodes, &pinned_nodes, pruned_to_pos);
@@ -181,35 +134,26 @@ impl<D: Digest> Mmr<D> {
     /// Returns [Error::InvalidPinnedNodes] if the length of `pinned_nodes_vec` does not match the
     /// number of nodes required to be pinned at the pruning boundary.
     ///
-    /// Returns [Error::LocationOverflow] if `pruned_to` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LocationOverflow] if `pruned_to` exceeds [crate::merkle::Family::MAX_LOCATION].
     pub fn from_components(
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         nodes: Vec<D>,
         pruned_to: Location,
-        pinned_nodes_vec: Vec<D>,
+        pinned_nodes: Vec<D>,
     ) -> Result<Self, Error> {
-        let pruned_to_pos = Position::try_from(pruned_to)?;
-        let expected_count = nodes_to_pin(pruned_to_pos).count();
-        if pinned_nodes_vec.len() != expected_count {
-            return Err(Error::InvalidPinnedNodes);
-        }
-        let pinned_nodes: BTreeMap<Position, D> = nodes_to_pin(pruned_to_pos)
-            .enumerate()
-            .map(|(i, pos)| (pos, pinned_nodes_vec[i]))
-            .collect();
-        let nodes = VecDeque::from(nodes);
-        let root = Self::compute_root(hasher, &nodes, &pinned_nodes, pruned_to_pos);
-        Ok(Self {
-            nodes,
-            pruned_to_pos,
-            pinned_nodes,
-            root,
-        })
+        Self::init(
+            Config {
+                nodes,
+                pruned_to,
+                pinned_nodes,
+            },
+            hasher,
+        )
     }
 
     /// Compute the root digest from the current peaks.
     fn compute_root(
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         nodes: &VecDeque<D>,
         pinned_nodes: &BTreeMap<Position, D>,
         pruned_to_pos: Position,
@@ -315,7 +259,8 @@ impl<D: Digest> Mmr<D> {
     /// Get the nodes (position + digest) that need to be pinned (those required for proof
     /// generation) in this MMR when pruned to position `prune_pos`.
     pub(crate) fn nodes_to_pin(&self, prune_pos: Position) -> BTreeMap<Position, D> {
-        nodes_to_pin(prune_pos)
+        <Family as crate::merkle::Family>::nodes_to_pin(self.size(), prune_pos)
+            .into_iter()
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
     }
@@ -325,7 +270,7 @@ impl<D: Digest> Mmr<D> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LocationOverflow] if `loc` exceeds [crate::merkle::Family::MAX_LOCATION].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
     pub fn prune(&mut self, loc: Location) -> Result<(), Error> {
         if loc > self.leaves() {
@@ -360,11 +305,15 @@ impl<D: Digest> Mmr<D> {
     /// Truncate the MMR to a smaller valid size, discarding all nodes beyond that size.
     /// Recomputes the root after truncation.
     ///
-    /// `new_size` must be a valid MMR size (i.e., `new_size.is_mmr_size()`) and must be
+    /// `new_size` must be a valid MMR size (i.e., `new_size.is_valid_size()`) and must be
     /// >= `pruned_to_pos`.
     #[cfg(feature = "std")]
-    pub(crate) fn truncate(&mut self, new_size: Position, hasher: &mut impl Hasher<Digest = D>) {
-        debug_assert!(new_size.is_mmr_size());
+    pub(crate) fn truncate(
+        &mut self,
+        new_size: Position,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+    ) {
+        debug_assert!(new_size.is_valid_size());
         debug_assert!(new_size >= self.pruned_to_pos);
         let keep = (*new_size - *self.pruned_to_pos) as usize;
         self.nodes.truncate(keep);
@@ -380,12 +329,12 @@ impl<D: Digest> Mmr<D> {
     ///
     /// # Errors
     ///
-    /// Returns [Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LocationOverflow] if `loc` > [crate::merkle::Family::MAX_LOCATION].
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
     /// Returns [Error::LeafOutOfBounds] if `loc` >= [Self::leaves()].
     pub fn proof(
         &self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         loc: Location,
     ) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
@@ -403,12 +352,12 @@ impl<D: Digest> Mmr<D> {
     /// # Errors
     ///
     /// Returns [Error::Empty] if the range is empty.
-    /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::merkle::Family::MAX_LOCATION].
     /// Returns [Error::RangeOutOfBounds] if `range.end` > [Self::leaves()].
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
     pub fn range_proof(
         &self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
         let leaves = self.leaves();
@@ -419,7 +368,8 @@ impl<D: Digest> Mmr<D> {
     /// this MMR when pruned to position `prune_pos`.
     #[cfg(test)]
     pub(crate) fn node_digests_to_pin(&self, start_pos: Position) -> Vec<D> {
-        nodes_to_pin(start_pos)
+        <Family as crate::merkle::Family>::nodes_to_pin(self.size(), start_pos)
+            .into_iter()
             .map(|pos| *self.get_node_unchecked(pos))
             .collect()
     }
@@ -468,7 +418,10 @@ impl<D: Digest> Mmr<D> {
 }
 
 impl<D: Digest> Readable for Mmr<D> {
+    type Family = Family;
     type Digest = D;
+    type Error = Error;
+    type PeakIterator = PeakIterator;
 
     fn size(&self) -> Position {
         self.size()
@@ -485,9 +438,29 @@ impl<D: Digest> Readable for Mmr<D> {
     fn pruned_to_pos(&self) -> Position {
         self.pruned_to_pos
     }
+
+    fn peak_iterator(&self) -> Self::PeakIterator {
+        PeakIterator::new(self.size())
+    }
+
+    fn proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        loc: Location,
+    ) -> Result<Proof<D>, Error> {
+        self.proof(hasher, loc)
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        range: core::ops::Range<Location>,
+    ) -> Result<Proof<D>, Error> {
+        self.range_proof(hasher, range)
+    }
 }
 
-impl<D: Digest> BatchChainInfo for Mmr<D> {
+impl<D: Digest> BatchChainInfo<Family> for Mmr<D> {
     type Digest = D;
 
     fn base_size(&self) -> Position {
@@ -500,10 +473,12 @@ impl<D: Digest> BatchChainInfo for Mmr<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{
-        conformance::build_test_mmr,
-        hasher::{Hasher as _, Standard},
-        iterator::nodes_needing_parents,
+    use crate::{
+        merkle::hasher::Hasher as _,
+        mmr::{
+            conformance::build_test_mmr, iterator::nodes_needing_parents,
+            StandardHasher as Standard,
+        },
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_parallel::ThreadPool;
@@ -545,7 +520,7 @@ mod tests {
             let mut hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::new(&mut hasher);
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
-            let mut leaves: Vec<Position> = Vec::new();
+            let mut leaves: Vec<Location> = Vec::new();
             for _ in 0..11 {
                 let changeset = {
                     let mut batch = mmr.new_batch();
@@ -561,11 +536,8 @@ mod tests {
             assert_eq!(mmr.size(), 19, "mmr not of expected size");
             assert_eq!(
                 leaves,
-                vec![0, 1, 3, 4, 7, 8, 10, 11, 15, 16, 18]
-                    .into_iter()
-                    .map(Position::new)
-                    .collect::<Vec<_>>(),
-                "mmr leaf positions not as expected"
+                (0..11).map(Location::new).collect::<Vec<_>>(),
+                "mmr leaf locations not as expected"
             );
             let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
             assert_eq!(
@@ -589,8 +561,9 @@ mod tests {
 
             // verify leaf digests
             for leaf in leaves.iter().by_ref() {
-                let digest = hasher.leaf_digest(*leaf, &element);
-                assert_eq!(mmr.get_node(*leaf).unwrap(), digest);
+                let pos = Position::try_from(*leaf).unwrap();
+                let digest = hasher.leaf_digest(pos, &element);
+                assert_eq!(mmr.get_node(pos).unwrap(), digest);
             }
 
             // verify height=1 node digests
@@ -710,7 +683,7 @@ mod tests {
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1001 {
                 assert!(
-                    mmr.size().is_mmr_size(),
+                    mmr.size().is_valid_size(),
                     "mmr of size {} should be valid",
                     mmr.size()
                 );
@@ -723,7 +696,7 @@ mod tests {
                 mmr.apply(changeset).unwrap();
                 for size in *old_size + 1..*mmr.size() {
                     assert!(
-                        !Position::new(size).is_mmr_size(),
+                        !Position::new(size).is_valid_size(),
                         "mmr of size {size} should be invalid",
                     );
                 }

@@ -51,15 +51,16 @@
 //! mmr.apply(changeset).unwrap();
 //! ```
 
+use crate::merkle::{
+    batch::{BatchChainInfo, Clean, Dirty, State},
+    hasher::Hasher,
+    mmr::{
+        iterator::{nodes_needing_parents, PathIterator, PeakIterator},
+        proof, Error, Family, Location, Position, Proof, Readable,
+    },
+};
 #[cfg(any(feature = "std", test))]
 use crate::mmr::iterator::pos_to_height;
-use crate::mmr::{
-    hasher::Hasher,
-    iterator::{nodes_needing_parents, PathIterator, PeakIterator},
-    mem::{Clean, Dirty, State},
-    read::{BatchChainInfo, Readable},
-    Error, Location, Position,
-};
 use alloc::{collections::BTreeMap, vec::Vec};
 use commonware_cryptography::Digest;
 cfg_if::cfg_if! {
@@ -70,7 +71,12 @@ cfg_if::cfg_if! {
 }
 
 /// A batch of mutations against a parent MMR, which may itself be a merkleized batch.
-pub struct Batch<'a, D: Digest, P: Readable<Digest = D>, S: State<D> = Dirty> {
+pub struct Batch<
+    'a,
+    D: Digest,
+    P: Readable<Family = Family, Digest = D, Error = Error>,
+    S: State<D> = Dirty<Family>,
+> {
     /// The parent MMR.
     parent: &'a P,
     /// Nodes appended by this batch, at positions [parent.size(), parent.size() + appended.len()).
@@ -85,25 +91,17 @@ pub struct Batch<'a, D: Digest, P: Readable<Digest = D>, S: State<D> = Dirty> {
 }
 
 /// A batch whose root digest has not been computed.
-pub type UnmerkleizedBatch<'a, D, P> = Batch<'a, D, P, Dirty>;
+pub type UnmerkleizedBatch<'a, D, P> = Batch<'a, D, P, Dirty<Family>>;
 
 /// A batch whose root digest has been computed.
 pub type MerkleizedBatch<'a, D, P> = Batch<'a, D, P, Clean<D>>;
 
 /// Owned set of changes against a base MMR.
-/// Apply via [`super::mem::Mmr::apply`].
-pub struct Changeset<D: Digest> {
-    /// Nodes appended after the base MMR's existing nodes.
-    pub(crate) appended: Vec<D>,
-    /// Overwritten nodes within the base MMR's range.
-    pub(crate) overwrites: BTreeMap<Position, D>,
-    /// Root digest after applying the changeset.
-    pub(crate) root: D,
-    /// Size of the base MMR when this changeset was created.
-    pub(crate) base_size: Position,
-}
+pub type Changeset<D> = crate::merkle::batch::Changeset<Family, D>;
 
-impl<'a, D: Digest, P: Readable<Digest = D>, S: State<D>> Batch<'a, D, P, S> {
+impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>, S: State<D>>
+    Batch<'a, D, P, S>
+{
     /// The total number of nodes visible through this batch.
     pub(crate) fn size(&self) -> Position {
         Position::new(*self.parent.size() + self.appended.len() as u64)
@@ -135,7 +133,9 @@ impl<'a, D: Digest, P: Readable<Digest = D>, S: State<D>> Batch<'a, D, P, S> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
+    UnmerkleizedBatch<'a, D, P>
+{
     /// The number of leaves visible through this batch.
     pub fn leaves(&self) -> Location {
         Location::try_from(self.size()).expect("invalid mmr size")
@@ -161,12 +161,12 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
         self
     }
 
-    /// Add a pre-computed leaf digest. Returns the leaf's position.
-    pub fn add_leaf_digest(&mut self, digest: D) -> Position {
+    /// Add a pre-computed leaf digest. Returns the leaf's location.
+    pub fn add_leaf_digest(&mut self, digest: D) -> Location {
+        let loc = self.leaves();
         let nodes_needing_parents = nodes_needing_parents(PeakIterator::new(self.size()))
             .into_iter()
             .rev();
-        let leaf_pos = self.size();
         self.appended.push(digest);
 
         let mut height = 1;
@@ -177,11 +177,15 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
             height += 1;
         }
 
-        leaf_pos
+        loc
     }
 
-    /// Hash `element` and add it as a leaf. Returns the leaf's position.
-    pub fn add(&mut self, hasher: &mut impl Hasher<Digest = D>, element: &[u8]) -> Position {
+    /// Hash `element` and add it as a leaf. Returns the leaf's location.
+    pub fn add(
+        &mut self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        element: &[u8],
+    ) -> Location {
         let digest = hasher.leaf_digest(self.size(), element);
         self.add_leaf_digest(digest)
     }
@@ -194,7 +198,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     /// Returns [`Error::ElementPruned`] if the leaf has been pruned.
     pub fn update_leaf(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
@@ -254,7 +258,10 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     }
 
     /// Consume this batch and produce an immutable [MerkleizedBatch] with computed root.
-    pub fn merkleize(mut self, hasher: &mut impl Hasher<Digest = D>) -> MerkleizedBatch<'a, D, P> {
+    pub fn merkleize(
+        mut self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+    ) -> MerkleizedBatch<'a, D, P> {
         let dirty = self.state.take_sorted_by_height();
 
         #[cfg(feature = "std")]
@@ -294,7 +301,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     /// Compute digests for dirty internal nodes, bottom-up by height.
     fn merkleize_serial(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         dirty: &[(Position, u32)],
     ) {
         for &(pos, height) in dirty {
@@ -312,7 +319,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     #[cfg(feature = "std")]
     fn merkleize_parallel(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         pool: &ThreadPool,
         dirty: &[(Position, u32)],
     ) {
@@ -347,7 +354,7 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     #[cfg(feature = "std")]
     fn update_node_digests(
         &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         pool: &ThreadPool,
         same_height: &[Position],
         height: u32,
@@ -399,8 +406,13 @@ impl<'a, D: Digest, P: Readable<Digest = D>> UnmerkleizedBatch<'a, D, P> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D>> Readable for MerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>> Readable
+    for MerkleizedBatch<'a, D, P>
+{
+    type Family = Family;
     type Digest = D;
+    type Error = Error;
+    type PeakIterator = PeakIterator;
 
     fn size(&self) -> Position {
         self.size()
@@ -417,10 +429,39 @@ impl<'a, D: Digest, P: Readable<Digest = D>> Readable for MerkleizedBatch<'a, D,
     fn pruned_to_pos(&self) -> Position {
         self.parent.pruned_to_pos()
     }
+
+    fn peak_iterator(&self) -> Self::PeakIterator {
+        PeakIterator::new(self.size())
+    }
+
+    fn proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        loc: Location,
+    ) -> Result<Proof<D>, Error> {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
+            Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
+            _ => e,
+        })
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        range: core::ops::Range<Location>,
+    ) -> Result<Proof<D>, Error> {
+        proof::build_range_proof(hasher, self.leaves(), range, |pos| self.get_node(pos))
+    }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>> BatchChainInfo
-    for MerkleizedBatch<'a, D, P>
+impl<
+        'a,
+        D: Digest,
+        P: Readable<Family = Family, Digest = D, Error = Error> + BatchChainInfo<Family, Digest = D>,
+    > BatchChainInfo<Family> for MerkleizedBatch<'a, D, P>
 {
     type Digest = D;
 
@@ -439,7 +480,9 @@ impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>> BatchC
     }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D>> MerkleizedBatch<'a, D, P> {
+impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
+    MerkleizedBatch<'a, D, P>
+{
     /// Access the parent MMR.
     #[cfg(feature = "std")]
     pub(crate) const fn parent(&self) -> &P {
@@ -473,8 +516,11 @@ impl<'a, D: Digest, P: Readable<Digest = D>> MerkleizedBatch<'a, D, P> {
     }
 }
 
-impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>>
-    MerkleizedBatch<'a, D, P>
+impl<
+        'a,
+        D: Digest,
+        P: Readable<Family = Family, Digest = D, Error = Error> + BatchChainInfo<Family, Digest = D>,
+    > MerkleizedBatch<'a, D, P>
 {
     /// Flatten this batch chain into a single [`Changeset`] relative to the
     /// ultimate base MMR.
@@ -505,7 +551,7 @@ impl<'a, D: Digest, P: Readable<Digest = D> + BatchChainInfo<Digest = D>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{conformance::build_test_mmr, hasher::Standard, mem::Mmr, read::Readable};
+    use crate::mmr::{conformance::build_test_mmr, mem::Mmr, Readable, StandardHasher as Standard};
     use commonware_cryptography::Sha256;
     use commonware_runtime::{deterministic, Runner as _};
 

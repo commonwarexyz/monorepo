@@ -3,10 +3,12 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
-use commonware_storage::mmr::{
-    journaled::{Config, Mmr, SyncConfig},
-    location::{Location, LocationRangeExt},
-    mem, Error, Position, StandardHasher as Standard,
+use commonware_storage::{
+    merkle::LocationRangeExt as _,
+    mmr::{
+        journaled::{Config, Mmr, SyncConfig},
+        mem, Error, Location, Position, StandardHasher as Standard,
+    },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
@@ -137,16 +139,16 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     let size_before = mmr.size();
-                    let (pos, changeset) = {
+                    let (loc, changeset) = {
                         let mut batch = mmr.new_batch();
-                        let pos = batch.add(&mut hasher, limited_data);
-                        (pos, batch.merkleize(&mut hasher).finalize())
+                        let loc = batch.add(&mut hasher, limited_data);
+                        (loc, batch.merkleize(&mut hasher).finalize())
                     };
                     mmr.apply(changeset).unwrap();
                     leaves.push(limited_data.to_vec());
                     historical_sizes.push(mmr.leaves());
                     assert!(mmr.size() > size_before);
-                    assert_eq!(Position::try_from(mmr.leaves() - 1).unwrap(), pos);
+                    assert_eq!(mmr.leaves() - 1, loc);
                 }
 
                 MmrJournaledOperation::AddBatched { items } => {
@@ -167,27 +169,23 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     let size_before = mmr.size();
-                    let (positions, changeset) = {
+                    let (locations, changeset) = {
                         let mut batch = mmr.new_batch();
-                        let positions: Vec<_> = items
+                        let locations: Vec<_> = items
                             .iter()
                             .map(|item| batch.add(&mut hasher, item))
                             .collect();
-                        (positions, batch.merkleize(&mut hasher).finalize())
+                        (locations, batch.merkleize(&mut hasher).finalize())
                     };
                     mmr.apply(changeset).unwrap();
                     assert!(mmr.size() > size_before);
 
-                    for (item, pos) in items.iter().zip(&positions) {
+                    for (item, loc) in items.iter().zip(&locations) {
                         leaves.push(item.to_vec());
-                        // Convert leaf position to location, then +1 for count.
-                        let loc = Location::try_from(*pos).unwrap();
-                        historical_sizes.push(loc + 1);
+                        // +1 for count.
+                        historical_sizes.push(*loc + 1);
                     }
-                    assert_eq!(
-                        Position::try_from(mmr.leaves() - 1).unwrap(),
-                        *positions.last().unwrap()
-                    );
+                    assert_eq!(mmr.leaves() - 1, *locations.last().unwrap());
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {

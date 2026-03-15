@@ -41,9 +41,12 @@
 //! The grafted MMR is incrementally maintained via [GraftedHasher] when grafted leaves
 //! change.
 
-use crate::mmr::{
-    hasher::Hasher as HasherTrait, iterator::pos_to_height, read::Readable,
-    storage::Storage as StorageTrait, Error, Location, Position, StandardHasher,
+use crate::{
+    merkle::hasher::Hasher as HasherTrait,
+    mmr::{
+        self, iterator::pos_to_height, storage::Storage as StorageTrait, Error, Location, Position,
+        Readable, StandardHasher,
+    },
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::bitmap::BitMap;
@@ -150,12 +153,12 @@ pub(super) fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) ->
 /// intercepts [HasherTrait::node_digest] to perform the conversion via [grafted_to_ops_pos];
 /// all other methods delegate unchanged.
 #[derive(Clone)]
-pub(super) struct GraftedHasher<H: HasherTrait> {
+pub(super) struct GraftedHasher<H: HasherTrait<Family = mmr::Family>> {
     inner: H,
     grafting_height: u32,
 }
 
-impl<H: HasherTrait> GraftedHasher<H> {
+impl<H: HasherTrait<Family = mmr::Family>> GraftedHasher<H> {
     pub(super) const fn new(inner: H, grafting_height: u32) -> Self {
         Self {
             inner,
@@ -164,7 +167,8 @@ impl<H: HasherTrait> GraftedHasher<H> {
     }
 }
 
-impl<H: HasherTrait> HasherTrait for GraftedHasher<H> {
+impl<H: HasherTrait<Family = mmr::Family>> HasherTrait for GraftedHasher<H> {
+    type Family = mmr::Family;
     type Digest = H::Digest;
 
     fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
@@ -219,6 +223,7 @@ impl<'a, H: CHasher> Verifier<'a, H> {
 }
 
 impl<H: CHasher> HasherTrait for Verifier<'_, H> {
+    type Family = mmr::Family;
     type Digest = H::Digest;
 
     fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
@@ -269,14 +274,25 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
 /// Nodes below the grafting height are served from the ops MMR. Nodes at or above the grafting
 /// height are served from the grafted MMR (with ops-to-grafted position conversion). This allows
 /// standard MMR proof generation to work transparently over the combined structure.
-pub(super) struct Storage<'a, D: Digest, G: Readable<Digest = D>, S: StorageTrait<Digest = D>> {
+pub(super) struct Storage<
+    'a,
+    D: Digest,
+    G: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
+    S: StorageTrait<Digest = D>,
+> {
     grafted_mmr: &'a G,
     grafting_height: u32,
     ops_mmr: &'a S,
     _digest: PhantomData<D>,
 }
 
-impl<'a, D: Digest, G: Readable<Digest = D>, S: StorageTrait<Digest = D>> Storage<'a, D, G, S> {
+impl<
+        'a,
+        D: Digest,
+        G: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
+        S: StorageTrait<Digest = D>,
+    > Storage<'a, D, G, S>
+{
     /// Creates a new [Storage] instance.
     pub(super) const fn new(grafted_mmr: &'a G, grafting_height: u32, ops_mmr: &'a S) -> Self {
         Self {
@@ -288,8 +304,11 @@ impl<'a, D: Digest, G: Readable<Digest = D>, S: StorageTrait<Digest = D>> Storag
     }
 }
 
-impl<D: Digest, G: Readable<Digest = D>, S: StorageTrait<Digest = D>> StorageTrait
-    for Storage<'_, D, G, S>
+impl<
+        D: Digest,
+        G: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
+        S: StorageTrait<Digest = D>,
+    > StorageTrait for Storage<'_, D, G, S>
 {
     type Digest = D;
 
@@ -309,13 +328,13 @@ impl<D: Digest, G: Readable<Digest = D>, S: StorageTrait<Digest = D>> StorageTra
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{
-        conformance::build_test_mmr, iterator::PeakIterator, mem::Mmr, verification, Location,
-        Position, StandardHasher,
-    };
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
+    use mmr::{
+        conformance::build_test_mmr, iterator::PeakIterator, mem::Mmr, verification, Location,
+        Position, StandardHasher,
+    };
 
     /// Precompute grafted leaf digests and return a [Mmr] in grafted-space.
     ///

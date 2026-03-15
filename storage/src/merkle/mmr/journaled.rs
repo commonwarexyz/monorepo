@@ -12,17 +12,15 @@ use crate::{
         },
         Error as JError,
     },
+    merkle::{batch::BatchChainInfo, hasher::Hasher},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         batch::{self, UnmerkleizedBatch},
-        hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
-        location::Location,
         mem::{Config as MemConfig, Mmr as MemMmr},
-        position::Position,
-        read::{BatchChainInfo, Readable},
+        proof,
         storage::Storage,
-        verification, Error, Proof,
+        verification, Error, Family, Location, Position, Proof, Readable,
     },
 };
 use commonware_codec::DecodeExt;
@@ -199,7 +197,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(
         context: E,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         cfg: Config,
     ) -> Result<Self, Error> {
         let journal_cfg = JConfig {
@@ -390,7 +388,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<D>,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
     ) -> Result<Self, crate::qmdb::Error> {
         let prune_pos = Position::try_from(cfg.range.start)?;
         let end_pos = Position::try_from(cfg.range.end)?;
@@ -599,7 +597,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// This implementation ensures that no failure can leave the MMR in an unrecoverable state,
     /// requiring it sync the MMR to write any potential unsynced updates.
     ///
-    /// Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LocationOverflow] if `loc` exceeds [crate::merkle::Family::MAX_LOCATION].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         let pos = Position::try_from(loc)?;
@@ -640,12 +638,12 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     ///
     /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if `loc`
     ///   is not provable at that historical size.
-    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::merkle::Family::MAX_LOCATION].
     /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
     ///   pruned.
     pub async fn historical_proof(
         &self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         leaves: Location,
         loc: Location,
     ) -> Result<Proof<D>, Error> {
@@ -665,13 +663,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if `range`
     ///   is not provable at that historical size.
     /// - Returns [Error::LocationOverflow] if any location in `range` exceeds
-    ///   [crate::mmr::MAX_LOCATION].
+    ///   [crate::merkle::Family::MAX_LOCATION].
     /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
     ///   pruned.
     /// - Returns [Error::Empty] if the range is empty.
     pub async fn historical_range_proof(
         &self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         leaves: Location,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
@@ -686,13 +684,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     ///
     /// # Errors
     ///
-    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::merkle::Family::MAX_LOCATION].
     /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
     ///   pruned.
     /// - Returns [Error::Empty] if the range is empty.
     pub async fn proof(
         &self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         loc: Location,
     ) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
@@ -709,13 +707,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// # Errors
     ///
     /// - Returns [Error::LocationOverflow] if any location in `range` exceeds
-    ///   [crate::mmr::MAX_LOCATION].
+    ///   [crate::merkle::Family::MAX_LOCATION].
     /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
     ///   pruned.
     /// - Returns [Error::Empty] if the range is empty.
     pub async fn range_proof(
         &self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
         self.historical_range_proof(hasher, self.leaves(), range)
@@ -819,7 +817,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     pub(crate) async fn rewind(
         &mut self,
         leaves_to_remove: usize,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
     ) -> Result<(), Error> {
         if leaves_to_remove == 0 {
             return Ok(());
@@ -883,7 +881,10 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 }
 
 impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
+    type Family = Family;
     type Digest = D;
+    type Error = Error;
+    type PeakIterator = PeakIterator;
 
     fn size(&self) -> Position {
         self.size()
@@ -900,9 +901,40 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
     fn pruned_to_pos(&self) -> Position {
         self.inner.read().pruned_to_pos
     }
+
+    fn peak_iterator(&self) -> Self::PeakIterator {
+        PeakIterator::new(self.size())
+    }
+
+    fn proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        loc: Location,
+    ) -> Result<Proof<D>, Error> {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        proof::build_range_proof(hasher, self.leaves(), loc..loc + 1, |pos| {
+            <Self as Readable>::get_node(self, pos)
+        })
+        .map_err(|e| match e {
+            Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
+            _ => e,
+        })
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        range: core::ops::Range<Location>,
+    ) -> Result<Proof<D>, Error> {
+        proof::build_range_proof(hasher, self.leaves(), range, |pos| {
+            <Self as Readable>::get_node(self, pos)
+        })
+    }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> BatchChainInfo for Mmr<E, D> {
+impl<E: RStorage + Clock + Metrics, D: Digest> BatchChainInfo<Family> for Mmr<E, D> {
     type Digest = D;
 
     fn base_size(&self) -> Position {
@@ -927,9 +959,9 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage for Mmr<E, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{
-        conformance::build_test_mmr, hasher::Hasher as _, location::LocationRangeExt as _, mem,
-        Location, StandardHasher as Standard,
+    use crate::{
+        merkle::{hasher::Hasher as _, LocationRangeExt as _},
+        mmr::{conformance::build_test_mmr, mem, Location, StandardHasher as Standard},
     };
     use commonware_cryptography::{
         sha256::{self, Digest},

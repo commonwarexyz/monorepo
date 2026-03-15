@@ -3,10 +3,8 @@
 use super::Keyless;
 use crate::{
     journal::authenticated::{self, BatchChain},
-    mmr::{
-        read::{BatchChainInfo, Readable},
-        Location,
-    },
+    merkle::batch::BatchChainInfo,
+    mmr::{self, Location, Readable},
     qmdb::{any::VariableValue, keyless::operation::Operation, Error},
 };
 use commonware_cryptography::{Digest, Hasher};
@@ -20,7 +18,9 @@ where
     E: Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<V>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<V>>,
 {
     /// The committed DB this batch is built on top of.
     pub(super) keyless: &'a Keyless<E, V, H>,
@@ -49,7 +49,9 @@ where
     E: Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<V>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<V>>,
 {
     /// The committed DB this batch is built on top of.
     keyless: &'a Keyless<E, V, H>,
@@ -84,7 +86,9 @@ where
     E: Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<V>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<V>>,
 {
     /// Append a value.
     /// Returns the uncommitted location where this value will be placed.
@@ -161,7 +165,9 @@ where
     E: Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<V>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<V>>,
 {
     /// Return the speculative root.
     pub fn root(&self) -> H::Digest {

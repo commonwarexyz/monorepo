@@ -155,7 +155,7 @@ where
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LOCATION].
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
