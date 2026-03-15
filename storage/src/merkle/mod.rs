@@ -16,9 +16,8 @@ mod read;
 
 use alloc::vec::Vec;
 use core::fmt::Debug;
-use location::Location;
-pub use location::LocationRangeExt;
-use position::Position;
+pub use location::{Location, LocationRangeExt};
+pub use position::Position;
 pub use proof::Proof;
 pub use read::Readable;
 use thiserror::Error;

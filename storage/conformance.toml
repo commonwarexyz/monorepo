@@ -78,6 +78,10 @@ hash = "4078ce1f5e242f8edb1d41575d51e166af620404036124f8094fc74d4b401047"
 n_cases = 65536
 hash = "3636363c592dddcff2eaeb4e6b01ec0cfcca654d69f9fdc1c57626c5adea0de1"
 
+["commonware_storage::merkle::mmr::proof::tests::conformance::CodecConformance<Proof<Family,Sha256Digest>>"]
+n_cases = 65536
+hash = "3636363c592dddcff2eaeb4e6b01ec0cfcca654d69f9fdc1c57626c5adea0de1"
+
 ["commonware_storage::ordinal::storage::conformance::CodecConformance<Record<u32>>"]
 n_cases = 65536
 hash = "f93b1dda40f6d9f1ccb3f05994be56189205dcb558551e056c2f3db03a79182d"

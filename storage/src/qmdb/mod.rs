@@ -18,24 +18,24 @@
 //! All variants are modified through a batch API that follows a common pattern:
 //! 1. Create a batch from the database.
 //! 2. Stage mutations on the batch.
-//! 3. Merkleize the batch -- this resolves mutations against the current state and computes the
-//!    Merkle root that would result from applying them.
+//! 3. Merkleize the batch -- this resolves mutations against the current state and computes
+//!    the Merkle root that would result from applying them.
 //! 4. Inspect the root or create child batches.
 //! 5. Finalize the batch into a changeset.
 //! 6. Apply the changeset to the database.
 //!
-//! A merkleized batch can spawn child batches, forming a tree of speculative states that share a
-//! common ancestor. Only the finalized leaf needs to be applied.
+//! A merkleized batch can spawn child batches, forming a tree of speculative states that
+//! share a common ancestor. Only the finalized leaf needs to be applied.
 //!
-//! The specific mutation methods vary by variant. See each variant's module documentation for the
-//! concrete API and usage examples.
+//! The specific mutation methods vary by variant.
+//! See each variant's module documentation for the concrete API and usage examples.
 //!
-//! Persistence and cleanup are managed directly on the database: `sync()`, `prune()`, and
-//! `destroy()`.
+//! Persistence and cleanup are managed directly on the database: `sync()`, `prune()`,
+//! and `destroy()`.
 //!
 //! # Traits
 //!
-//! Keyed mutable variants ([any] and [current]) implement `any::traits::DbAny` and
+//! Keyed mutable variants ([any] and [current]) implement [any::traits::DbAny] and
 //! [crate::Persistable].
 //!
 //! # Acknowledgments

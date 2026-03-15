@@ -1,55 +1,8 @@
-//! A lightweight, borrow-based batch layer over a merkleized MMR.
+//! MMR-specific batch layer built on the shared [`merkle::batch`](crate::merkle::batch)
+//! infrastructure.
 //!
-//! # Overview
-//!
-//! A batch borrows a parent MMR ([`Readable`]) immutably and records mutations -- append
-//! and leaf updates -- without mutating the parent. Multiple batches can coexist on the same
-//! parent, and batches can be stacked (Base <- A <- B <- ...) to arbitrary depth.
-//!
-//! # Lifecycle
-//!
-//! ```text
-//! Mmr ─────borrow────> UnmerkleizedBatch  (accumulate mutations)
-//!                            │
-//!                       merkleize()
-//!                            │
-//!                            v
-//!                      MerkleizedBatch     (has root, supports proofs)
-//!                            │
-//!                       finalize()
-//!                            │
-//!                            v
-//!                        Changeset         (owned delta, no borrow)
-//!                            │
-//!                      mmr.apply(cs).unwrap()
-//!                            │
-//!                            v
-//!                           Mmr             (updated in place)
-//! ```
-//!
-//! # Type aliases
-//!
-//! - [`UnmerkleizedBatch`] -- mutable phase: add, update leaves.
-//! - [`MerkleizedBatch`]   -- immutable phase: root is computed, proofs available.
-//! - [`Changeset`]         -- owned delta that can be applied to the base MMR.
-//!
-//! # Example
-//!
-//! ```ignore
-//! let mut hasher = StandardHasher::<Sha256>::new();
-//! let mut mmr = Mmr::new(&mut hasher);
-//!
-//! // Build a batch of mutations.
-//! let changeset = {
-//!     let mut batch = UnmerkleizedBatch::new(&mmr);
-//!     batch.add(&mut hasher, b"leaf-0");
-//!     batch.add(&mut hasher, b"leaf-1");
-//!     batch.merkleize(&mut hasher).finalize()
-//! };
-//!
-//! // Apply the changeset back to the base MMR.
-//! mmr.apply(changeset).unwrap();
-//! ```
+//! Provides `add`, `update_leaf`, and `merkleize` for the MMR family. See
+//! [`crate::merkle::batch`] for the lifecycle overview.
 
 use crate::merkle::{
     batch::{self, Clean, Dirty},
