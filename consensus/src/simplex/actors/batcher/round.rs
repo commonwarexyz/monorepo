@@ -41,8 +41,10 @@ pub struct Round<
     /// Only these votes are used for certificate construction.
     verified_votes: VoteTracker<S, D>,
 
-    /// Whether we've already received and forwarded the leader's proposal.
+    /// Whether we've already forwarded the leader's proposal to the voter.
     proposal_sent: bool,
+    /// Whether we've already forwarded the certified block to silent peers.
+    block_forwarded: bool,
 
     /// Cached certificates for this view.
     /// Once a certificate exists, we stop verifying votes of that type.
@@ -72,6 +74,7 @@ impl<
             verified_votes: VoteTracker::new(len),
 
             proposal_sent: false,
+            block_forwarded: false,
 
             notarization: None,
             nullification: None,
@@ -300,6 +303,23 @@ impl<
         Some(proposal)
     }
 
+    /// Returns the locally certified proposal and peers missing it.
+    ///
+    /// This is only emitted once per round, when we first enter the next view
+    /// after constructing our own finalize vote for this proposal.
+    pub fn take_forwarding_target(
+        &mut self,
+        me: Participant,
+    ) -> Option<(Proposal<D>, Vec<Participant>)> {
+        if self.block_forwarded {
+            return None;
+        }
+        let proposal = self.pending_votes.finalize(me)?.proposal.clone();
+        self.block_forwarded = true;
+        let participants = self.missing_voters(&proposal);
+        Some((proposal, participants))
+    }
+
     pub fn ready_notarizes(&self) -> bool {
         // Don't bother verifying if we already have a certificate
         if self.has_notarization() {
@@ -353,7 +373,8 @@ impl<
         self.pending_votes.has_nullify(signer)
     }
 
-    /// Returns participant indices that did not vote to notarize or finalize `proposal`.
+    /// Returns participant indices whose matching vote for `proposal` was not
+    /// observed locally.
     ///
     /// Uses `pending_votes` rather than `verified_votes` because we only
     /// verify the first quorum of votes. A peer whose matching vote arrived

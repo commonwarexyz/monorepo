@@ -632,9 +632,9 @@ mod tests {
         quorum_votes_construct_certificate(secp256r1::fixture);
     }
 
-    /// Test that constructing a notarization from votes triggers block forwarding
-    /// to participants that did not send a notarize vote.
-    fn forward_emitted_on_notarization<S, F>(mut fixture: F)
+    /// Test that constructing a notarization does not forward immediately, but
+    /// entering the next view after a local finalize does.
+    fn forward_emitted_on_view_advance_after_finalize<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -760,12 +760,29 @@ mod tests {
             let our_vote = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
             batcher_mailbox.constructed(Vote::Notarize(our_vote)).await;
 
-            // Give the batcher time to process and construct the notarization
+            // Give the batcher time to process and construct the notarization.
             context.sleep(Duration::from_millis(100)).await;
 
             // Drain voter messages (proposal + notarization)
             let _ = voter_receiver.recv().await.unwrap();
             let _ = voter_receiver.recv().await.unwrap();
+
+            {
+                let broadcasts = relay.broadcasts.lock();
+                assert!(
+                    broadcasts.is_empty(),
+                    "notarization alone should not trigger forwarding"
+                );
+            }
+
+            let our_finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
+            batcher_mailbox
+                .constructed(Vote::Finalize(our_finalize))
+                .await;
+            batcher_mailbox
+                .update(View::new(2), Participant::new(2), View::zero())
+                .await;
+            context.sleep(Duration::from_millis(50)).await;
 
             let broadcasts = relay.broadcasts.lock();
             assert_eq!(
@@ -781,20 +798,24 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_forward_emitted_on_notarization() {
-        forward_emitted_on_notarization(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        forward_emitted_on_notarization(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        forward_emitted_on_notarization(bls12381_threshold_std::fixture::<MinPk, _>);
-        forward_emitted_on_notarization(bls12381_threshold_std::fixture::<MinSig, _>);
-        forward_emitted_on_notarization(bls12381_multisig::fixture::<MinPk, _>);
-        forward_emitted_on_notarization(bls12381_multisig::fixture::<MinSig, _>);
-        forward_emitted_on_notarization(ed25519::fixture);
-        forward_emitted_on_notarization(secp256r1::fixture);
+    fn test_forward_emitted_on_view_advance_after_finalize() {
+        forward_emitted_on_view_advance_after_finalize(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        forward_emitted_on_view_advance_after_finalize(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        forward_emitted_on_view_advance_after_finalize(bls12381_threshold_std::fixture::<MinPk, _>);
+        forward_emitted_on_view_advance_after_finalize(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        forward_emitted_on_view_advance_after_finalize(bls12381_multisig::fixture::<MinPk, _>);
+        forward_emitted_on_view_advance_after_finalize(bls12381_multisig::fixture::<MinSig, _>);
+        forward_emitted_on_view_advance_after_finalize(ed25519::fixture);
+        forward_emitted_on_view_advance_after_finalize(secp256r1::fixture);
     }
 
-    /// Test that forwarding still fires when the batcher has advanced past the
-    /// view being notarized (i.e. views were skipped).
-    fn forward_not_dropped_after_skipping_views<S, F>(mut fixture: F)
+    /// Test that a late notarization for a view we already skipped is not
+    /// forwarded, because the certification window for that view has passed.
+    fn late_notarization_not_forwarded_after_skipping_view<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -950,33 +971,38 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             let broadcasts = relay.broadcasts.lock();
-            assert_eq!(
-                broadcasts.len(),
-                1,
-                "expected exactly one targeted broadcast"
+            assert!(
+                broadcasts.is_empty(),
+                "late notarization should not trigger forwarding after the next view was skipped"
             );
-            let (ref digest, forwarded_round, ref peers) = broadcasts[0];
-            assert_eq!(*digest, proposal.payload);
-            assert_eq!(forwarded_round, proposal.round);
-            assert_eq!(peers, &vec![participants[4].clone()]);
         });
     }
 
     #[test_traced]
-    fn test_forward_not_dropped_after_skipping_views() {
-        forward_not_dropped_after_skipping_views(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        forward_not_dropped_after_skipping_views(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        forward_not_dropped_after_skipping_views(bls12381_threshold_std::fixture::<MinPk, _>);
-        forward_not_dropped_after_skipping_views(bls12381_threshold_std::fixture::<MinSig, _>);
-        forward_not_dropped_after_skipping_views(bls12381_multisig::fixture::<MinPk, _>);
-        forward_not_dropped_after_skipping_views(bls12381_multisig::fixture::<MinSig, _>);
-        forward_not_dropped_after_skipping_views(ed25519::fixture);
-        forward_not_dropped_after_skipping_views(secp256r1::fixture);
+    fn test_late_notarization_not_forwarded_after_skipping_view() {
+        late_notarization_not_forwarded_after_skipping_view(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        late_notarization_not_forwarded_after_skipping_view(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        late_notarization_not_forwarded_after_skipping_view(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+        );
+        late_notarization_not_forwarded_after_skipping_view(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        late_notarization_not_forwarded_after_skipping_view(bls12381_multisig::fixture::<MinPk, _>);
+        late_notarization_not_forwarded_after_skipping_view(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        late_notarization_not_forwarded_after_skipping_view(ed25519::fixture);
+        late_notarization_not_forwarded_after_skipping_view(secp256r1::fixture);
     }
 
-    /// Test that receiving a notarization from the network triggers block
-    /// forwarding to participants that did not vote.
-    fn forward_emitted_for_network_notarization<S, F>(mut fixture: F)
+    /// Test that a network notarization waits until local finalize and the next
+    /// view before forwarding the block.
+    fn forward_emitted_for_network_notarization_on_view_advance<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -1079,7 +1105,9 @@ mod tests {
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
             // Send sub-quorum votes for view 1, then inject a network
-            // notarization. The batcher should forward to the non-voters.
+            // notarization. The batcher should wait for local finalize and the
+            // next-view transition before forwarding to peers whose matching
+            // vote was not observed locally.
             let view = View::new(1);
             batcher_mailbox
                 .update(view, Participant::new(1), View::zero())
@@ -1138,6 +1166,21 @@ mod tests {
                 "expected notarization from certificate_receiver"
             );
 
+            {
+                let broadcasts = relay.broadcasts.lock();
+                assert!(
+                    broadcasts.is_empty(),
+                    "network notarization alone should not trigger forwarding"
+                );
+            }
+
+            let our_finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
+            batcher_mailbox
+                .constructed(Vote::Finalize(our_finalize))
+                .await;
+            batcher_mailbox
+                .update(View::new(2), Participant::new(2), View::zero())
+                .await;
             context.sleep(Duration::from_millis(50)).await;
 
             let broadcasts = relay.broadcasts.lock();
@@ -1157,20 +1200,32 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_forward_emitted_for_network_notarization() {
-        forward_emitted_for_network_notarization(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        forward_emitted_for_network_notarization(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        forward_emitted_for_network_notarization(bls12381_threshold_std::fixture::<MinPk, _>);
-        forward_emitted_for_network_notarization(bls12381_threshold_std::fixture::<MinSig, _>);
-        forward_emitted_for_network_notarization(bls12381_multisig::fixture::<MinPk, _>);
-        forward_emitted_for_network_notarization(bls12381_multisig::fixture::<MinSig, _>);
-        forward_emitted_for_network_notarization(ed25519::fixture);
-        forward_emitted_for_network_notarization(secp256r1::fixture);
+    fn test_forward_emitted_for_network_notarization_on_view_advance() {
+        forward_emitted_for_network_notarization_on_view_advance(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        forward_emitted_for_network_notarization_on_view_advance(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        forward_emitted_for_network_notarization_on_view_advance(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+        );
+        forward_emitted_for_network_notarization_on_view_advance(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        forward_emitted_for_network_notarization_on_view_advance(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        forward_emitted_for_network_notarization_on_view_advance(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        forward_emitted_for_network_notarization_on_view_advance(ed25519::fixture);
+        forward_emitted_for_network_notarization_on_view_advance(secp256r1::fixture);
     }
 
-    /// When votes reach quorum AND a network notarization arrives for the same
-    /// view, only one forward should be emitted (whichever path fires first
-    /// sets `has_notarization`, blocking the other).
+    /// When votes reach quorum and a duplicate network notarization arrives for
+    /// the same view, only one forward should be emitted on the subsequent
+    /// view transition.
     fn no_double_forward_on_duplicate_notarization<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -1316,7 +1371,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Wait for everything to be processed
+            // Wait for everything to be processed. Duplicate notarization
+            // should still not trigger forwarding until we locally finalize.
             context.sleep(Duration::from_millis(100)).await;
 
             // Drain voter messages
@@ -1330,8 +1386,28 @@ mod tests {
                 }
             }
 
-            // Only one forward should have been emitted despite both paths
-            // having enough data to trigger forwarding.
+            {
+                let broadcasts = relay.broadcasts.lock();
+                assert!(
+                    broadcasts.is_empty(),
+                    "notarization should not forward before local finalize"
+                );
+            }
+
+            let our_finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
+            batcher_mailbox
+                .constructed(Vote::Finalize(our_finalize))
+                .await;
+            batcher_mailbox
+                .update(View::new(2), Participant::new(2), View::zero())
+                .await;
+            batcher_mailbox
+                .update(View::new(3), Participant::new(3), View::zero())
+                .await;
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Only one forward should have been emitted despite duplicate
+            // notarization input and multiple later view updates.
             let broadcasts = relay.broadcasts.lock();
             assert_eq!(
                 broadcasts.len(),
@@ -1539,6 +1615,19 @@ mod tests {
                 "expected notarization for the leader proposal"
             );
 
+            {
+                let broadcasts = relay.broadcasts.lock();
+                assert!(
+                    broadcasts.is_empty(),
+                    "notarization alone should not trigger forwarding"
+                );
+            }
+
+            let our_finalize = Finalize::sign(&schemes[0], proposal_a.clone()).unwrap();
+            batcher_mailbox
+                .constructed(Vote::Finalize(our_finalize))
+                .await;
+
             let view3 = View::new(3);
             let leader3 = Participant::new(3);
             batcher_mailbox.update(view3, leader3, View::zero()).await;
@@ -1731,6 +1820,19 @@ mod tests {
                 }
             }
             assert!(saw_notarization, "expected notarization");
+
+            {
+                let broadcasts = relay.broadcasts.lock();
+                assert!(
+                    broadcasts.is_empty(),
+                    "notarization alone should not trigger forwarding"
+                );
+            }
+
+            let our_finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
+            batcher_mailbox
+                .constructed(Vote::Finalize(our_finalize))
+                .await;
 
             let view3 = View::new(3);
             batcher_mailbox
