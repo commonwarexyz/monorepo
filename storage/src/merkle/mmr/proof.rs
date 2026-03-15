@@ -1403,7 +1403,7 @@ mod tests {
         let mut hasher: Standard<Sha256> = Standard::new();
         let empty_mmr = Mmr::new(&mut hasher);
         let empty_root = empty_mmr.root();
-        let empty_proof = Proof::default();
+        let empty_proof: Proof<Family, Digest> = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
             &mut hasher,
             &[] as &[(Digest, Location)],
