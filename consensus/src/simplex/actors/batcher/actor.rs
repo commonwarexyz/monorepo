@@ -314,20 +314,6 @@ where
                     response,
                 } => {
                     let me = self.scheme.me();
-                    let forward = if self.forwarding.is_enabled() {
-                        new_current.previous().and_then(|view| {
-                            let round = work.get_mut(&view)?;
-                            // Our local finalize vote is the signal that
-                            // certification succeeded for this round, making
-                            // its block eligible for forwarding on next-view
-                            // entry.
-                            let proposal = round.local_finalize(me?)?.proposal.clone();
-                            let participants = self.forwarding_targets(round, &proposal, leader);
-                            Some((proposal, participants))
-                        })
-                    } else {
-                        None
-                    };
                     let am_leader = me.is_some_and(|me| me == leader);
                     current = Current {
                         view: new_current,
@@ -356,8 +342,22 @@ where
                         current.timed_out = true;
                     }
                     response.send_lossy(timeout_reason);
-                    if let Some((proposal, participants)) = forward {
-                        self.forward_proposal(proposal, participants).await;
+                    if self.forwarding.is_enabled() {
+                        if let Some((proposal, participants)) =
+                            new_current.previous().and_then(|view| {
+                                let round = work.get_mut(&view)?;
+                                // Our local finalize vote is the signal that
+                                // certification succeeded for this round,
+                                // making its block eligible for forwarding on
+                                // next-view entry.
+                                let proposal = round.local_finalize(me?)?.proposal.clone();
+                                let participants =
+                                    self.forwarding_targets(round, &proposal, leader);
+                                Some((proposal, participants))
+                            })
+                        {
+                            self.forward_proposal(proposal, participants).await;
+                        }
                     }
 
                     // Setting leader may enable batch verification
