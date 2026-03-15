@@ -10,7 +10,10 @@ use crate::merkle::{
     },
     proof::{Proof, ReconstructionError},
 };
-use alloc::{collections::BTreeSet, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    vec::Vec,
+};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -57,6 +60,87 @@ impl<D: Digest> Proof<Family, D> {
                 false
             }
         }
+    }
+
+    /// Return true if this proof proves that the elements at the specified locations are included
+    /// in the MMB with root digest `root`. A malformed proof will return false.
+    ///
+    /// The order of the elements does not affect the output.
+    pub fn verify_multi_inclusion<H, E>(
+        &self,
+        hasher: &mut H,
+        elements: &[(E, Location)],
+        root: &D,
+    ) -> bool
+    where
+        H: Hasher<Family = Family, Digest = D>,
+        E: AsRef<[u8]>,
+    {
+        if elements.is_empty() {
+            return self.leaves == Location::new(0)
+                && *root == hasher.root(Location::new(0), core::iter::empty());
+        }
+
+        let mut node_positions = BTreeSet::new();
+        let mut blueprints = BTreeMap::new();
+
+        for (_, loc) in elements {
+            if !loc.is_valid() {
+                return false;
+            }
+            let Ok(bp) = blueprint(self.leaves, *loc..*loc + 1) else {
+                return false;
+            };
+            for &pos in &bp.fold_prefix {
+                node_positions.insert(pos);
+            }
+            for &pos in &bp.fetch_nodes {
+                node_positions.insert(pos);
+            }
+            blueprints.insert(*loc, bp);
+        }
+
+        if node_positions.len() != self.digests.len() {
+            return false;
+        }
+
+        let node_digests: BTreeMap<Position, D> = node_positions
+            .iter()
+            .zip(self.digests.iter())
+            .map(|(&pos, digest)| (pos, *digest))
+            .collect();
+
+        for (element, loc) in elements {
+            let bp = &blueprints[loc];
+
+            let mut digests = Vec::with_capacity(
+                if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len(),
+            );
+            if !bp.fold_prefix.is_empty() {
+                let mut acc = *node_digests
+                    .get(&bp.fold_prefix[0])
+                    .expect("must exist by construction");
+                for &pos in &bp.fold_prefix[1..] {
+                    let d = node_digests.get(&pos).expect("must exist by construction");
+                    acc = hasher.fold(&acc, d);
+                }
+                digests.push(acc);
+            }
+            for &pos in &bp.fetch_nodes {
+                let d = node_digests.get(&pos).expect("must exist by construction");
+                digests.push(*d);
+            }
+            let proof = Self {
+                leaves: self.leaves,
+                digests,
+            };
+
+            if !proof.verify_element_inclusion(hasher, element.as_ref(), *loc, root) {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Reconstruct the root digest from this proof and the given elements.
@@ -672,6 +756,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_multi_proof_generation_and_verify() {
+        let (mut hasher, mmb) = make_mmb(20);
+        let root = *mmb.root();
+
+        let locations = &[Location::new(0), Location::new(5), Location::new(10)];
+        let nodes =
+            nodes_required_for_multi_proof(mmb.leaves(), locations).expect("valid locations");
+        let digests = nodes
+            .into_iter()
+            .map(|pos| mmb.get_node(pos).unwrap())
+            .collect();
+        let multi_proof = Proof {
+            leaves: mmb.leaves(),
+            digests,
+        };
+
+        // Verify the proof.
+        assert!(multi_proof.verify_multi_inclusion(
+            &mut hasher,
+            &[
+                (0u64.to_be_bytes(), Location::new(0)),
+                (5u64.to_be_bytes(), Location::new(5)),
+                (10u64.to_be_bytes(), Location::new(10)),
+            ],
+            &root
+        ));
+
+        // Different order should also verify.
+        assert!(multi_proof.verify_multi_inclusion(
+            &mut hasher,
+            &[
+                (10u64.to_be_bytes(), Location::new(10)),
+                (5u64.to_be_bytes(), Location::new(5)),
+                (0u64.to_be_bytes(), Location::new(0)),
+            ],
+            &root
+        ));
+
+        // Wrong elements should fail.
+        assert!(!multi_proof.verify_multi_inclusion(
+            &mut hasher,
+            &[
+                (99u64.to_be_bytes(), Location::new(0)),
+                (5u64.to_be_bytes(), Location::new(5)),
+                (10u64.to_be_bytes(), Location::new(10)),
+            ],
+            &root
+        ));
+
+        // Wrong root should fail.
+        let wrong_root = hasher.digest(b"wrong");
+        assert!(!multi_proof.verify_multi_inclusion(
+            &mut hasher,
+            &[
+                (0u64.to_be_bytes(), Location::new(0)),
+                (5u64.to_be_bytes(), Location::new(5)),
+                (10u64.to_be_bytes(), Location::new(10)),
+            ],
+            &wrong_root
+        ));
+
+        // Empty multi-proof on empty tree.
+        let mut hasher2 = H::new();
+        let empty_mmb = Mmb::new(&mut hasher2);
+        let empty_proof: Proof<Family, D> = Proof::default();
+        assert!(empty_proof.verify_multi_inclusion(
+            &mut hasher2,
+            &[] as &[([u8; 8], Location)],
+            empty_mmb.root()
+        ));
     }
 
     #[test]

@@ -423,7 +423,7 @@ impl<D: Digest> BatchChainInfo<Family> for Mmb<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::{hasher::Standard, mmb::Family};
+    use crate::merkle::{hasher::Standard, mmb::Family, Readable as _};
     use commonware_cryptography::Sha256;
 
     type D = <Sha256 as commonware_cryptography::Hasher>::Digest;
@@ -1173,9 +1173,412 @@ mod tests {
         ));
     }
 
+    /// Batch root differs from base, proofs work on batch, base unchanged.
+    #[test]
+    fn test_batch_lifecycle() {
+        let (mut hasher, mmb) = build_mmb(50);
+        let base_root = *mmb.root();
+
+        let mut batch = mmb.new_batch();
+        for i in 50u64..60 {
+            batch.add(&mut hasher, &i.to_be_bytes());
+        }
+        let merkleized = batch.merkleize(&mut hasher);
+
+        assert_ne!(merkleized.root(), base_root);
+
+        // Proof from merkleized batch should work.
+        let proof = merkleized.proof(&mut hasher, Location::new(55)).unwrap();
+        assert!(proof.verify_element_inclusion(
+            &mut hasher,
+            &55u64.to_be_bytes(),
+            Location::new(55),
+            &merkleized.root(),
+        ));
+
+        // Base should be unchanged.
+        assert_eq!(*mmb.root(), base_root);
+    }
+
+    /// Two batches on same base with different mutations have independent roots.
+    #[test]
+    fn test_multiple_forks() {
+        let (mut hasher, mmb) = build_mmb(50);
+        let base_root = *mmb.root();
+
+        let mut batch_a = mmb.new_batch();
+        for i in 50u64..60 {
+            batch_a.add(&mut hasher, &i.to_be_bytes());
+        }
+        let merkleized_a = batch_a.merkleize(&mut hasher);
+
+        let mut batch_b = mmb.new_batch();
+        for i in 100u64..105 {
+            batch_b.add(&mut hasher, &i.to_be_bytes());
+        }
+        let merkleized_b = batch_b.merkleize(&mut hasher);
+
+        assert_ne!(merkleized_a.root(), merkleized_b.root());
+        assert_ne!(merkleized_a.root(), base_root);
+        assert_ne!(merkleized_b.root(), base_root);
+        assert_eq!(*mmb.root(), base_root);
+    }
+
+    /// Base <- A <- B. Proofs from B resolve through all layers.
+    #[test]
+    fn test_fork_of_fork_reads() {
+        let (mut hasher, mmb) = build_mmb(50);
+
+        let mut batch_a = mmb.new_batch();
+        for i in 50u64..60 {
+            batch_a.add(&mut hasher, &i.to_be_bytes());
+        }
+        let merkleized_a = batch_a.merkleize(&mut hasher);
+
+        let mut batch_b = merkleized_a.new_batch();
+        for i in 60u64..70 {
+            batch_b.add(&mut hasher, &i.to_be_bytes());
+        }
+        let merkleized_b = batch_b.merkleize(&mut hasher);
+
+        // B should match building 70 elements directly.
+        let (_, ref_mmb) = build_mmb(70);
+        assert_eq!(merkleized_b.root(), *ref_mmb.root());
+
+        // Proofs from B should verify.
+        for i in [0u64, 25, 55, 65, 69] {
+            let proof = merkleized_b.proof(&mut hasher, Location::new(i)).unwrap();
+            assert!(
+                proof.verify_element_inclusion(
+                    &mut hasher,
+                    &i.to_be_bytes(),
+                    Location::new(i),
+                    &merkleized_b.root(),
+                ),
+                "proof failed for element {i}"
+            );
+        }
+    }
+
+    /// Base <- A <- B. B.finalize() captures both A and B changes.
+    #[test]
+    fn test_fork_of_fork_flattened_changeset() {
+        let (mut hasher, mut mmb) = build_mmb(50);
+
+        let mut batch_a = mmb.new_batch();
+        for i in 50u64..60 {
+            batch_a.add(&mut hasher, &i.to_be_bytes());
+        }
+        let merkleized_a = batch_a.merkleize(&mut hasher);
+
+        let mut batch_b = merkleized_a.new_batch();
+        for i in 60u64..70 {
+            batch_b.add(&mut hasher, &i.to_be_bytes());
+        }
+        let merkleized_b = batch_b.merkleize(&mut hasher);
+        let b_root = merkleized_b.root();
+
+        let changeset = merkleized_b.finalize();
+        drop(merkleized_a);
+        mmb.apply(changeset).unwrap();
+
+        assert_eq!(*mmb.root(), b_root);
+
+        let (_, ref_mmb) = build_mmb(70);
+        assert_eq!(mmb.root(), ref_mmb.root());
+    }
+
+    /// Merkleize a no-op batch. Same root as parent.
+    #[test]
+    fn test_empty_batch() {
+        let (mut hasher, mmb) = build_mmb(50);
+        let base_root = *mmb.root();
+
+        let batch = mmb.new_batch();
+        let merkleized = batch.merkleize(&mut hasher);
+
+        assert_eq!(merkleized.root(), base_root);
+
+        for loc in [0u64, 10, 49] {
+            let base_proof = mmb.proof(&mut hasher, Location::new(loc)).unwrap();
+            let batch_proof = merkleized.proof(&mut hasher, Location::new(loc)).unwrap();
+            assert_eq!(base_proof, batch_proof, "proof mismatch at loc {loc}");
+        }
+    }
+
+    /// MerkleizedBatch -> into_dirty -> more mutations -> merkleize -> verify.
+    #[test]
+    fn test_into_dirty_roundtrip() {
+        let (mut hasher, mmb) = build_mmb(50);
+
+        let mut batch = mmb.new_batch();
+        for i in 50u64..55 {
+            batch.add(&mut hasher, &i.to_be_bytes());
+        }
+        let merkleized = batch.merkleize(&mut hasher);
+
+        let mut dirty_again = merkleized.into_dirty();
+        for i in 55u64..60 {
+            dirty_again.add(&mut hasher, &i.to_be_bytes());
+        }
+        let merkleized_again = dirty_again.merkleize(&mut hasher);
+
+        let (_, ref_mmb) = build_mmb(60);
+        assert_eq!(merkleized_again.root(), *ref_mmb.root());
+    }
+
+    /// Apply changeset 1. Create new batch on updated base, apply changeset 2.
+    #[test]
+    fn test_sequential_changesets() {
+        let (mut hasher, mut mmb) = build_mmb(50);
+
+        let cs1 = {
+            let mut batch = mmb.new_batch();
+            for i in 50u64..60 {
+                batch.add(&mut hasher, &i.to_be_bytes());
+            }
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mmb.apply(cs1).unwrap();
+
+        let cs2 = {
+            let mut batch = mmb.new_batch();
+            for i in 60u64..70 {
+                batch.add(&mut hasher, &i.to_be_bytes());
+            }
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mmb.apply(cs2).unwrap();
+
+        let (_, ref_mmb) = build_mmb(70);
+        assert_eq!(mmb.root(), ref_mmb.root());
+    }
+
+    /// Batch on a pruned base. Proofs for retained elements work.
+    #[test]
+    fn test_batch_on_pruned_base() {
+        let (mut hasher, mut mmb) = build_mmb(100);
+        mmb.prune(Location::new(27)).unwrap();
+
+        let changeset = {
+            let mut batch = mmb.new_batch();
+            for i in 100u64..110 {
+                batch.add(&mut hasher, &i.to_be_bytes());
+            }
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mmb.apply(changeset).unwrap();
+
+        // Proof for retained element should work.
+        let proof = mmb.proof(&mut hasher, Location::new(80)).unwrap();
+        assert!(proof.verify_element_inclusion(
+            &mut hasher,
+            &80u64.to_be_bytes(),
+            Location::new(80),
+            mmb.root()
+        ));
+
+        // Proof for pruned element should fail.
+        assert!(matches!(
+            mmb.proof(&mut hasher, Location::new(0)),
+            Err(Error::ElementPruned(_))
+        ));
+    }
+
+    /// Single-element and range proofs from MerkleizedBatch verify.
+    #[test]
+    fn test_batch_proof_verification() {
+        let (mut hasher, mmb) = build_mmb(50);
+
+        let mut batch = mmb.new_batch();
+        for i in 50u64..60 {
+            batch.add(&mut hasher, &i.to_be_bytes());
+        }
+        let merkleized = batch.merkleize(&mut hasher);
+
+        // Single element proof.
+        let proof = merkleized.proof(&mut hasher, Location::new(55)).unwrap();
+        assert!(proof.verify_element_inclusion(
+            &mut hasher,
+            &55u64.to_be_bytes(),
+            Location::new(55),
+            &merkleized.root(),
+        ));
+
+        // Range proof.
+        let range = Location::new(50)..Location::new(55);
+        let range_proof = merkleized.range_proof(&mut hasher, range.clone()).unwrap();
+        let elements: Vec<_> = (50u64..55).map(|i| i.to_be_bytes()).collect();
+        let element_refs: Vec<&[u8]> = elements.iter().map(|e| e.as_slice()).collect();
+        assert!(range_proof.verify_range_inclusion(
+            &mut hasher,
+            &element_refs,
+            range.start,
+            &merkleized.root(),
+        ));
+    }
+
+    /// Base <- A (overwrite leaf 5) <- B (adds). B's changeset includes A's overwrite.
+    #[test]
+    fn test_flattened_changeset_preserves_overwrites() {
+        let (mut hasher, mut mmb) = build_mmb(100);
+
+        // Layer A: overwrite leaf 5.
+        let mut batch_a = mmb.new_batch();
+        batch_a
+            .update_leaf(&mut hasher, Location::new(5), b"overwritten")
+            .unwrap();
+        let merkleized_a = batch_a.merkleize(&mut hasher);
+
+        // Layer B on A: add leaves.
+        let mut batch_b = merkleized_a.new_batch();
+        for i in 100u64..105 {
+            batch_b.add(&mut hasher, &i.to_be_bytes());
+        }
+        let merkleized_b = batch_b.merkleize(&mut hasher);
+        let b_root = merkleized_b.root();
+
+        let changeset = merkleized_b.finalize();
+        drop(merkleized_a);
+        mmb.apply(changeset).unwrap();
+
+        assert_eq!(*mmb.root(), b_root);
+
+        // Verify leaf 5 has the updated data.
+        let proof = mmb.proof(&mut hasher, Location::new(5)).unwrap();
+        assert!(proof.verify_element_inclusion(
+            &mut hasher,
+            b"overwritten",
+            Location::new(5),
+            mmb.root()
+        ));
+    }
+
+    /// Base <- A (overwrite 5) <- B (overwrite 10) <- C (add 10). Flatten and verify.
+    #[test]
+    fn test_three_deep_stacking() {
+        let (mut hasher, mut mmb) = build_mmb(100);
+
+        // Layer A: overwrite leaf 5.
+        let mut batch_a = mmb.new_batch();
+        batch_a
+            .update_leaf(&mut hasher, Location::new(5), b"val-a")
+            .unwrap();
+        let merkleized_a = batch_a.merkleize(&mut hasher);
+
+        // Layer B on A: overwrite leaf 10.
+        let mut batch_b = merkleized_a.new_batch();
+        batch_b
+            .update_leaf(&mut hasher, Location::new(10), b"val-b")
+            .unwrap();
+        let merkleized_b = batch_b.merkleize(&mut hasher);
+
+        // Layer C on B: add 10 leaves.
+        let mut batch_c = merkleized_b.new_batch();
+        for i in 300u64..310 {
+            batch_c.add(&mut hasher, &i.to_be_bytes());
+        }
+        let merkleized_c = batch_c.merkleize(&mut hasher);
+        let c_root = merkleized_c.root();
+
+        let changeset = merkleized_c.finalize();
+        drop(merkleized_b);
+        drop(merkleized_a);
+        mmb.apply(changeset).unwrap();
+
+        assert_eq!(*mmb.root(), c_root);
+
+        // Build the equivalent directly.
+        let (mut ref_hasher, mut ref_mmb) = build_mmb(100);
+        let changeset = {
+            let mut batch = ref_mmb.new_batch();
+            batch
+                .update_leaf(&mut ref_hasher, Location::new(5), b"val-a")
+                .unwrap();
+            batch
+                .update_leaf(&mut ref_hasher, Location::new(10), b"val-b")
+                .unwrap();
+            for i in 300u64..310 {
+                batch.add(&mut ref_hasher, &i.to_be_bytes());
+            }
+            batch.merkleize(&mut ref_hasher).finalize()
+        };
+        ref_mmb.apply(changeset).unwrap();
+        assert_eq!(mmb.root(), ref_mmb.root());
+    }
+
+    /// A overwrites leaf 5 with X, B overwrites leaf 5 with Y. Last writer wins.
+    #[test]
+    fn test_overwrite_collision_in_stack() {
+        let (mut hasher, mut mmb) = build_mmb(100);
+
+        let mut batch_a = mmb.new_batch();
+        batch_a
+            .update_leaf(&mut hasher, Location::new(5), b"val-x")
+            .unwrap();
+        let merkleized_a = batch_a.merkleize(&mut hasher);
+
+        let mut batch_b = merkleized_a.new_batch();
+        batch_b
+            .update_leaf(&mut hasher, Location::new(5), b"val-y")
+            .unwrap();
+        let merkleized_b = batch_b.merkleize(&mut hasher);
+        let b_root = merkleized_b.root();
+
+        let changeset = merkleized_b.finalize();
+        drop(merkleized_a);
+        mmb.apply(changeset).unwrap();
+
+        assert_eq!(*mmb.root(), b_root);
+
+        // Verify leaf 5 has Y, not X.
+        let proof = mmb.proof(&mut hasher, Location::new(5)).unwrap();
+        assert!(proof.verify_element_inclusion(
+            &mut hasher,
+            b"val-y",
+            Location::new(5),
+            mmb.root()
+        ));
+    }
+
+    /// Add leaves in a batch, then update one of those new leaves.
+    #[test]
+    fn test_update_appended_leaf() {
+        let (mut hasher, mmb) = build_mmb(50);
+
+        let mut batch = mmb.new_batch();
+        for i in 50u64..60 {
+            batch.add(&mut hasher, &i.to_be_bytes());
+        }
+        batch
+            .update_leaf(&mut hasher, Location::new(52), b"updated-52")
+            .unwrap();
+        let merkleized = batch.merkleize(&mut hasher);
+
+        // Verify the updated leaf.
+        let proof = merkleized.proof(&mut hasher, Location::new(52)).unwrap();
+        assert!(proof.verify_element_inclusion(
+            &mut hasher,
+            b"updated-52",
+            Location::new(52),
+            &merkleized.root(),
+        ));
+
+        // Build reference the same way.
+        let (mut ref_hasher, mut ref_mmb) = build_mmb(60);
+        let changeset = {
+            let mut batch = ref_mmb.new_batch();
+            batch
+                .update_leaf(&mut ref_hasher, Location::new(52), b"updated-52")
+                .unwrap();
+            batch.merkleize(&mut ref_hasher).finalize()
+        };
+        ref_mmb.apply(changeset).unwrap();
+        assert_eq!(merkleized.root(), *ref_mmb.root());
+    }
+
     /// Regression: add then update_leaf in the same batch where the updated leaf falls within the
-    /// merge parent's subtree. The add only marks the merge parent dirty (not its descendants), so
-    /// mark_dirty must not early-exit when it encounters that parent while walking toward the leaf.
+    /// merge parent's subtree.
     #[test]
     fn test_update_leaf_under_merge_parent() {
         // Start with 2 leaves so the next add triggers a merge of the two height-0 peaks.
