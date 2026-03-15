@@ -32,9 +32,9 @@ pub(crate) fn bench_encode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
                             },
                             |data| {
                                 if conc > 1 {
-                                    S::encode(&config, data.as_slice(), &strategy).unwrap()
+                                    S::encode(b"", &config, data.as_slice(), &strategy).unwrap()
                                 } else {
-                                    S::encode(&config, data.as_slice(), &Sequential).unwrap()
+                                    S::encode(b"", &config, data.as_slice(), &Sequential).unwrap()
                                 }
                             },
                             BatchSize::SmallInput,
@@ -71,9 +71,9 @@ pub(crate) fn bench_decode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
                                     rng.fill_bytes(&mut data);
 
                                     let (commitment, mut shards) = if conc > 1 {
-                                        S::encode(&config, data.as_slice(), &strategy).unwrap()
+                                        S::encode(b"", &config, data.as_slice(), &strategy).unwrap()
                                     } else {
-                                        S::encode(&config, data.as_slice(), &Sequential).unwrap()
+                                        S::encode(b"", &config, data.as_slice(), &Sequential).unwrap()
                                     };
 
                                     let my_shard = shards.pop().unwrap();
@@ -85,7 +85,7 @@ pub(crate) fn bench_decode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
                                         .map(|&i| {
                                             let shard = opt_shards[i as usize].take().unwrap();
                                             let (_, _, weak_shard) =
-                                                S::weaken(&config, &commitment, i, shard).unwrap();
+                                                S::weaken(b"", &config, &commitment, i, shard).unwrap();
                                             (i, weak_shard)
                                         })
                                         .collect();
@@ -93,7 +93,7 @@ pub(crate) fn bench_decode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
                                     let my_index =
                                         config.minimum_shards.get() + config.extra_shards.get() - 1;
                                     let (checking_data, my_checked_shard, _) =
-                                        S::weaken(&config, &commitment, my_index, my_shard)
+                                        S::weaken(b"", &config, &commitment, my_index, my_shard)
                                             .unwrap();
 
                                     (commitment, checking_data, my_checked_shard, weak_shards)
