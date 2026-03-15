@@ -4,7 +4,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
+            Finalize, Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
         },
     },
     types::Participant,
@@ -43,8 +43,6 @@ pub struct Round<
 
     /// Whether we've already forwarded the leader's proposal to the voter.
     proposal_sent: bool,
-    /// Whether we've already forwarded the certified block to silent peers.
-    block_forwarded: bool,
 
     /// Cached certificates for this view.
     /// Once a certificate exists, we stop verifying votes of that type.
@@ -74,7 +72,6 @@ impl<
             verified_votes: VoteTracker::new(len),
 
             proposal_sent: false,
-            block_forwarded: false,
 
             notarization: None,
             nullification: None,
@@ -303,18 +300,9 @@ impl<
         Some(proposal)
     }
 
-    /// Returns the locally certified proposal eligible for forwarding.
-    ///
-    /// The local finalize vote is the batcher's signal that certification
-    /// succeeded. This is only emitted once per round, when we first enter the
-    /// next view after constructing that vote.
-    pub fn take_forwarding_proposal(&mut self, me: Participant) -> Option<Proposal<D>> {
-        if self.block_forwarded {
-            return None;
-        }
-        let proposal = self.pending_votes.finalize(me)?.proposal.clone();
-        self.block_forwarded = true;
-        Some(proposal)
+    /// Returns our locally constructed finalize vote for this round, if any.
+    pub fn local_finalize(&self, me: Participant) -> Option<&Finalize<S, D>> {
+        self.pending_votes.finalize(me)
     }
 
     pub fn ready_notarizes(&self) -> bool {
