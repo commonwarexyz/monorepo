@@ -218,6 +218,24 @@ where
         (!peers.is_empty()).then_some(peers)
     }
 
+    /// Selects forwarding targets for a certified proposal under the active policy.
+    fn forwarding_targets(
+        &self,
+        round: &Round<S, B, D, Re>,
+        proposal: &Proposal<D>,
+        next_leader: Participant,
+    ) -> Vec<Participant> {
+        match self.forwarding {
+            ForwardingPolicy::Disabled => Vec::new(),
+            ForwardingPolicy::Silent => round.missing_voters(proposal),
+            ForwardingPolicy::NextLeader => round
+                .missing_voters(proposal)
+                .into_iter()
+                .filter(|&participant| participant == next_leader)
+                .collect(),
+        }
+    }
+
     /// Forwards a proposal to the requested peers.
     async fn forward_proposal(&mut self, proposal: Proposal<D>, missing: Vec<Participant>) {
         let Some(peers) = self.resolve_peers(&missing) else {
@@ -298,7 +316,10 @@ where
                     let forward = if self.forwarding.is_enabled() {
                         new_current.previous().and_then(|view| {
                             let me = self.scheme.me()?;
-                            work.get_mut(&view)?.take_forwarding_target(me)
+                            let round = work.get_mut(&view)?;
+                            let proposal = round.take_forwarding_proposal(me)?;
+                            let participants = self.forwarding_targets(round, &proposal, leader);
+                            Some((proposal, participants))
                         })
                     } else {
                         None

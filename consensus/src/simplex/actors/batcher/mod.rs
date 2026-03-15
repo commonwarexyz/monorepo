@@ -813,6 +813,235 @@ mod tests {
         forward_emitted_on_view_advance_after_finalize(secp256r1::fixture);
     }
 
+    /// Test that `NextLeader` forwards only to the newly entered leader, and
+    /// only when that leader's matching vote was not observed locally.
+    fn next_leader_forwarding_respects_missing_vote<S, F>(mut fixture: F, leader_voted: bool)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let namespace = b"batcher_next_leader_forwarding".to_vec();
+        let epoch = Epoch::new(101);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let reporter_cfg = mocks::reporter::Config {
+                participants: schemes[0].participants().clone(),
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let me = participants[0].clone();
+            let relay = MockRelay::new();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                relay: relay.clone(),
+                strategy: Sequential,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                mailbox_size: 128,
+                forwarding: ForwardingPolicy::NextLeader,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            let (voter_sender, mut voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let mut participant_senders = Vec::new();
+            for (i, pk) in participants.iter().enumerate() {
+                if i == 0 {
+                    participant_senders.push(None);
+                    continue;
+                }
+                let (sender, _receiver) = oracle
+                    .control(pk.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(pk.clone(), me.clone(), link.clone())
+                    .await
+                    .unwrap();
+                participant_senders.push(Some(sender));
+            }
+
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            let view = View::new(1);
+            let next_leader = Participant::new(2);
+            batcher_mailbox
+                .update(view, Participant::new(1), View::zero())
+                .await;
+
+            let proposal = Proposal::new(
+                Round::new(epoch, view),
+                View::zero(),
+                Sha256::hash(b"next_leader_payload"),
+            );
+
+            let voter_indices: &[usize] = if leader_voted { &[1, 2, 3] } else { &[1, 3, 4] };
+            for &i in voter_indices {
+                let vote = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
+                if let Some(ref mut sender) = participant_senders[i] {
+                    sender
+                        .send(
+                            Recipients::One(me.clone()),
+                            Vote::Notarize(vote).encode(),
+                            true,
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+
+            let our_vote = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
+            batcher_mailbox.constructed(Vote::Notarize(our_vote)).await;
+
+            let mut saw_notarization = false;
+            loop {
+                let output = select! {
+                    output = voter_receiver.recv() => output,
+                    _ = context.sleep(Duration::from_millis(100)) => None,
+                };
+                let Some(output) = output else {
+                    break;
+                };
+                if matches!(
+                    output,
+                    voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view
+                ) {
+                    saw_notarization = true;
+                    break;
+                }
+            }
+            assert!(saw_notarization, "expected notarization");
+
+            {
+                let broadcasts = relay.broadcasts.lock();
+                assert!(
+                    broadcasts.is_empty(),
+                    "notarization alone should not trigger forwarding"
+                );
+            }
+
+            let our_finalize = Finalize::sign(&schemes[0], proposal.clone()).unwrap();
+            batcher_mailbox
+                .constructed(Vote::Finalize(our_finalize))
+                .await;
+            batcher_mailbox
+                .update(View::new(2), next_leader, View::zero())
+                .await;
+            context.sleep(Duration::from_millis(50)).await;
+
+            let broadcasts = relay.broadcasts.lock();
+            if leader_voted {
+                assert!(
+                    broadcasts.is_empty(),
+                    "next leader should not be forwarded to when their vote was observed"
+                );
+            } else {
+                assert_eq!(
+                    broadcasts.len(),
+                    1,
+                    "expected exactly one targeted broadcast"
+                );
+                let (ref digest, forwarded_round, ref peers) = broadcasts[0];
+                assert_eq!(*digest, proposal.payload);
+                assert_eq!(forwarded_round, proposal.round);
+                assert_eq!(peers, &vec![participants[2].clone()]);
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_next_leader_forwarding_targets_missing_next_leader() {
+        next_leader_forwarding_respects_missing_vote(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            false,
+        );
+        next_leader_forwarding_respects_missing_vote(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            false,
+        );
+        next_leader_forwarding_respects_missing_vote(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+            false,
+        );
+        next_leader_forwarding_respects_missing_vote(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+            false,
+        );
+        next_leader_forwarding_respects_missing_vote(bls12381_multisig::fixture::<MinPk, _>, false);
+        next_leader_forwarding_respects_missing_vote(
+            bls12381_multisig::fixture::<MinSig, _>,
+            false,
+        );
+        next_leader_forwarding_respects_missing_vote(ed25519::fixture, false);
+        next_leader_forwarding_respects_missing_vote(secp256r1::fixture, false);
+    }
+
+    #[test_traced]
+    fn test_next_leader_forwarding_skips_observed_next_leader() {
+        next_leader_forwarding_respects_missing_vote(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            true,
+        );
+        next_leader_forwarding_respects_missing_vote(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            true,
+        );
+        next_leader_forwarding_respects_missing_vote(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+            true,
+        );
+        next_leader_forwarding_respects_missing_vote(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+            true,
+        );
+        next_leader_forwarding_respects_missing_vote(bls12381_multisig::fixture::<MinPk, _>, true);
+        next_leader_forwarding_respects_missing_vote(bls12381_multisig::fixture::<MinSig, _>, true);
+        next_leader_forwarding_respects_missing_vote(ed25519::fixture, true);
+        next_leader_forwarding_respects_missing_vote(secp256r1::fixture, true);
+    }
+
     /// Test that a late notarization for a view we already skipped is not
     /// forwarded, because the certification window for that view has passed.
     fn late_notarization_not_forwarded_after_skipping_view<S, F>(mut fixture: F)

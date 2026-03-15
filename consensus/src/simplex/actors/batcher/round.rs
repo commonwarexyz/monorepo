@@ -303,21 +303,18 @@ impl<
         Some(proposal)
     }
 
-    /// Returns the locally certified proposal and peers missing it.
+    /// Returns the locally certified proposal eligible for forwarding.
     ///
-    /// This is only emitted once per round, when we first enter the next view
-    /// after constructing our own finalize vote for this proposal.
-    pub fn take_forwarding_target(
-        &mut self,
-        me: Participant,
-    ) -> Option<(Proposal<D>, Vec<Participant>)> {
+    /// The local finalize vote is the batcher's signal that certification
+    /// succeeded. This is only emitted once per round, when we first enter the
+    /// next view after constructing that vote.
+    pub fn take_forwarding_proposal(&mut self, me: Participant) -> Option<Proposal<D>> {
         if self.block_forwarded {
             return None;
         }
         let proposal = self.pending_votes.finalize(me)?.proposal.clone();
         self.block_forwarded = true;
-        let participants = self.missing_voters(&proposal);
-        Some((proposal, participants))
+        Some(proposal)
     }
 
     pub fn ready_notarizes(&self) -> bool {
