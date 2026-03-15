@@ -336,7 +336,7 @@ impl<D: Digest> Mmb<D> {
         }
 
         self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
-            Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
+            Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
             _ => e,
         })
     }

@@ -1,8 +1,56 @@
 //! Shared batch infrastructure for Merkle-family data structures.
 //!
-//! Provides the type-state machinery ([`State`], [`Dirty`], [`Clean`]), the [`Batch`] struct
-//! with its node resolution logic, and [`Changeset`]. Each Merkle family (MMR, MMB) builds on
-//! these to supply family-specific `add`, `update_leaf`, and `merkleize`.
+//! A [`Batch`] borrows a parent structure immutably and records mutations (appends and leaf
+//! updates) without modifying the parent. Multiple batches can coexist on the same parent,
+//! and batches can be stacked (Base <- A <- B <- ...) to arbitrary depth.
+//!
+//! # Lifecycle
+//!
+//! ```text
+//! Base ────borrow────> UnmerkleizedBatch  (accumulate mutations)
+//!                            |
+//!                       merkleize()       (family-specific)
+//!                            |
+//!                            v
+//!                      MerkleizedBatch    (has root, supports proofs)
+//!                            |
+//!                       finalize()
+//!                            |
+//!                            v
+//!                        Changeset        (owned delta, no borrow)
+//!                            |
+//!                      base.apply(cs)
+//!                            |
+//!                            v
+//!                          Base           (updated in place)
+//! ```
+//!
+//! # Type aliases
+//!
+//! - [`UnmerkleizedBatch`] -- mutable phase: add, update leaves.
+//! - [`MerkleizedBatch`]   -- immutable phase: root is computed, proofs available.
+//! - [`Changeset`]         -- owned delta that can be applied to the base.
+//!
+//! Each Merkle family (MMR, MMB) re-exports these with the family type parameter fixed and
+//! supplies family-specific `add`, `update_leaf`, and `merkleize`.
+//!
+//! # Example (MMR)
+//!
+//! ```ignore
+//! let mut hasher = StandardHasher::<Sha256>::new();
+//! let mut mmr = Mmr::new(&mut hasher);
+//!
+//! // Build a batch of mutations.
+//! let changeset = {
+//!     let mut batch = mmr.new_batch();
+//!     batch.add(&mut hasher, b"leaf-0");
+//!     batch.add(&mut hasher, b"leaf-1");
+//!     batch.merkleize(&mut hasher).finalize()
+//! };
+//!
+//! // Apply the changeset back to the base.
+//! mmr.apply(changeset).unwrap();
+//! ```
 
 use crate::merkle::{hasher::Hasher, Family, Position, Readable};
 use alloc::{

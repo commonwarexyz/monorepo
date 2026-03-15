@@ -342,7 +342,7 @@ impl<D: Digest> Mmr<D> {
         }
         // loc is valid so it won't overflow from + 1
         self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
-            Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
+            Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
             _ => e,
         })
     }

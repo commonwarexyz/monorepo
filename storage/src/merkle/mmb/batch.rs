@@ -261,7 +261,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>> Rea
             return Err(Error::LocationOverflow(loc));
         }
         self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
-            Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
+            Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
             _ => e,
         })
     }
