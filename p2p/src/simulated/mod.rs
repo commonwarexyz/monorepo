@@ -62,7 +62,7 @@
 //! use commonware_p2p::{Manager, simulated::{Config, Link, Network}};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
-//! use commonware_utils::NZU32;
+//! use commonware_utils::{NZU32, NZUsize};
 //! use std::time::Duration;
 //!
 //! // Generate peers
@@ -77,7 +77,7 @@
 //! let p2p_cfg = Config {
 //!     max_size: 1024 * 1024, // 1MB
 //!     disconnect_on_block: true,
-//!     tracked_peer_sets: Some(3),
+//!     tracked_peer_sets: Some(NZUsize!(3)),
 //! };
 //!
 //! // Rate limit quota (1000 messages per second per peer)
@@ -197,7 +197,7 @@ mod tests {
     use commonware_runtime::{
         count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{channel::mpsc, hostname, ordered, ordered::Map, NZU32};
+    use commonware_utils::{channel::mpsc, hostname, ordered, ordered::Map, NZUsize, NZU32};
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -591,7 +591,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: Some(NZUsize!(3)),
                 },
             );
             network.start();
@@ -2409,7 +2409,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: Some(NZUsize!(3)),
                 },
             );
             network.start();
@@ -2439,7 +2439,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: Some(NZUsize!(3)),
                 },
             );
             network.start();
@@ -2488,7 +2488,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: Some(NZUsize!(3)),
                 },
             );
             network.start();
@@ -2538,7 +2538,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(2), // Only track 2 peer sets
+                    tracked_peer_sets: Some(NZUsize!(2)), // Only track 2 peer sets
                 },
             );
             network.start();
@@ -2674,7 +2674,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(1),
+                    tracked_peer_sets: Some(NZUsize!(1)),
                 },
             );
             network.start();
@@ -2800,7 +2800,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(2),
+                    tracked_peer_sets: Some(NZUsize!(2)),
                 },
             );
             network.start();
@@ -2879,7 +2879,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: Some(NZUsize!(3)),
                 },
             );
             network.start();
@@ -2934,7 +2934,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(2),
+                    tracked_peer_sets: Some(NZUsize!(2)),
                 },
             );
             network.start();
@@ -3027,7 +3027,7 @@ mod tests {
             let cfg = Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -3110,7 +3110,7 @@ mod tests {
             let cfg = Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -3181,7 +3181,7 @@ mod tests {
             let cfg = Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context, cfg);
@@ -3272,7 +3272,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: Some(NZUsize!(3)),
                 },
             );
             network.start();
@@ -3318,7 +3318,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: Some(NZUsize!(3)),
                 },
             );
             network.start();

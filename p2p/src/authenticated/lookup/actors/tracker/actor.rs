@@ -68,7 +68,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     ) {
         // General initialization
         let directory_cfg = directory::Config {
-            max_sets: cfg.tracked_peer_sets,
+            max_sets: cfg.tracked_peer_sets.get(),
             peer_connection_cooldown: cfg.peer_connection_cooldown,
             allow_private_ips: cfg.allow_private_ips,
             allow_dns: cfg.allow_dns,
@@ -292,6 +292,7 @@ mod tests {
         deterministic::{self},
         Clock, Runner,
     };
+    use commonware_utils::NZUsize;
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
@@ -306,7 +307,7 @@ mod tests {
         (
             Config {
                 crypto,
-                tracked_peer_sets: 2,
+                tracked_peer_sets: NZUsize!(2),
                 peer_connection_cooldown: Duration::from_millis(200),
                 allow_private_ips: true,
                 allow_dns: true,
@@ -699,7 +700,7 @@ mod tests {
             let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
             let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
-            cfg.tracked_peer_sets = 1;
+            cfg.tracked_peer_sets = NZUsize!(1);
 
             let TestHarness {
                 mut mailbox,
@@ -911,36 +912,6 @@ mod tests {
     }
 
     #[test]
-    fn test_register_with_zero_tracked_sets_does_not_panic_when_set_is_immediately_evicted() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let (mut cfg, mut listener_receiver) = test_config(PrivateKey::from_seed(0), false);
-            cfg.tracked_peer_sets = 0;
-            let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg);
-
-            let pk = new_signer_and_pk(1).1;
-            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
-            let mut subscription = oracle.subscribe().await;
-
-            // Registering a set with max_sets=0 immediately evicts it. The actor
-            // should still notify subscribers using the inserted peer keys rather
-            // than panicking when the set is no longer present in the directory.
-            oracle
-                .track(0, [(pk.clone(), addr.into())].try_into().unwrap())
-                .await;
-            let (id, new, all) = subscription.recv().await.unwrap();
-            assert_eq!(id, 0);
-            assert_eq!(new, [pk.clone()].try_into().unwrap());
-            assert!(all.is_empty());
-
-            // The directory should report the set as evicted and the listener
-            // should observe no tracked IPs.
-            assert!(oracle.peer_set(0).await.is_none());
-            assert!(listener_receiver.recv().await.unwrap().is_empty());
-        });
-    }
-
-    #[test]
     fn test_live_external_connection_reconnects_when_peer_becomes_tracked_and_overwritten() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1033,7 +1004,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (mut cfg, mut listener_receiver) = test_config(PrivateKey::from_seed(0), false);
-            cfg.tracked_peer_sets = 1;
+            cfg.tracked_peer_sets = NZUsize!(1);
             let TestHarness {
                 mut mailbox,
                 mut oracle,

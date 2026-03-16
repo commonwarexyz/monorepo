@@ -1,7 +1,11 @@
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use commonware_utils::NZU32;
-use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
+use commonware_utils::{NZUsize, NZU32};
+use std::{
+    net::SocketAddr,
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 
 /// Configuration for the peer-to-peer instance.
 ///
@@ -90,7 +94,8 @@ pub struct Config<C: Signer> {
     /// been evicted and/or to communicate with peers in a future
     /// set (if we, for example, are trying to do a reshare of a threshold
     /// key).
-    pub tracked_peer_sets: usize,
+    ///
+    pub tracked_peer_sets: NonZeroUsize,
 
     /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
@@ -123,7 +128,7 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(64)),
             ping_frequency: Duration::from_secs(50),
             dial_frequency: Duration::from_secs(1),
-            tracked_peer_sets: 4,
+            tracked_peer_sets: NZUsize!(4),
             block_duration: Duration::from_hours(4),
         }
     }
@@ -154,7 +159,7 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(128)),
             ping_frequency: Duration::from_secs(5),
             dial_frequency: Duration::from_millis(500),
-            tracked_peer_sets: 4,
+            tracked_peer_sets: NZUsize!(4),
             block_duration: Duration::from_hours(1),
         }
     }
@@ -180,7 +185,7 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(256)),
             ping_frequency: Duration::from_secs(1),
             dial_frequency: Duration::from_millis(200),
-            tracked_peer_sets: 4,
+            tracked_peer_sets: NZUsize!(4),
             block_duration: Duration::from_mins(1),
         }
     }

@@ -33,6 +33,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -99,7 +100,7 @@ pub struct Config {
     /// tracked peer set will have their links removed and messages to them will be dropped.
     ///
     /// If [None], peer sets are not considered.
-    pub tracked_peer_sets: Option<usize>,
+    pub tracked_peer_sets: Option<NonZeroUsize>,
 }
 
 /// Implementation of a simulated network.
@@ -146,7 +147,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     external_peers: BTreeSet<P>,
 
     // Maximum number of peer sets to track
-    tracked_peer_sets: Option<usize>,
+    tracked_peer_sets: Option<NonZeroUsize>,
 
     // A map of peers blocking each other
     blocks: BTreeSet<(P, P)>,
@@ -294,7 +295,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.peer_sets.insert(id, peers.clone());
 
                 // Remove oldest peer set if we exceed the limit
-                while self.peer_sets.len() > tracked_peer_sets {
+                while self.peer_sets.len() > tracked_peer_sets.get() {
                     let (id, set) = self.peer_sets.pop_first().unwrap();
                     debug!(id, "removed oldest peer set");
 
@@ -1325,6 +1326,7 @@ mod tests {
     use crate::{AddressableManager, Manager, Provider, Receiver as _, Recipients, Sender as _};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic, Quota, Runner as _};
+    use commonware_utils::NZUsize;
     use futures::{FutureExt, StreamExt};
     use std::num::NonZeroU32;
 
@@ -1340,7 +1342,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1391,7 +1393,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1523,7 +1525,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1597,7 +1599,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1684,7 +1686,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1728,7 +1730,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1848,7 +1850,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(2),
+                tracked_peer_sets: Some(NZUsize!(2)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1964,7 +1966,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(2),
+                tracked_peer_sets: Some(NZUsize!(2)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -2052,7 +2054,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
-            tracked_peer_sets: Some(3),
+            tracked_peer_sets: Some(NZUsize!(3)),
         };
         let runner = deterministic::Runner::default();
 
@@ -2132,7 +2134,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
-            tracked_peer_sets: Some(3),
+            tracked_peer_sets: Some(NZUsize!(3)),
         };
         let runner = deterministic::Runner::default();
 
