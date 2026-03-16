@@ -167,8 +167,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///   live connection should be replaced immediately
     ///
     /// The caller should sever connections for `removed_peers` and
-    /// `changed_peers`. Peers that fall back to external registration after
-    /// leaving their last tracked set must reconnect under the external policy.
+    /// `changed_peers` since those connections were established to the old address
+    /// and must be replaced.
     ///
     /// Returns `None` if the peer set index is invalid (already exists or not monotonically increasing).
     pub fn add_set(&mut self, index: u64, peers: Map<C, Address>) -> Option<(Vec<C>, Vec<C>)> {
