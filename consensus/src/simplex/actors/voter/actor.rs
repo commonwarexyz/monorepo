@@ -820,16 +820,8 @@ impl<
             .state
             .leader_index(observed_view)
             .expect("leader not set");
-        let forwardable_proposal = observed_view
-            .previous()
-            .and_then(|view| self.state.forwardable_proposal(view));
         if let Some(reason) = batcher
-            .update(
-                observed_view,
-                leader,
-                self.state.last_finalized(),
-                forwardable_proposal,
-            )
+            .update(observed_view, leader, self.state.last_finalized(), None)
             .await
         {
             debug!(%observed_view, %leader, ?reason, "nullifying round");

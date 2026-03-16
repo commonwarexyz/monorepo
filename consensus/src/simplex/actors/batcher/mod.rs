@@ -1463,6 +1463,183 @@ mod tests {
         forward_emitted_for_network_notarization_on_view_advance(secp256r1::fixture);
     }
 
+    /// Regression: when forwarding a certificate-only proposal, the batcher
+    /// must not target itself even though no local matching vote was observed.
+    fn self_excluded_from_forward_targets<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum_size = quorum(n) as usize;
+        let namespace = b"batcher_self_excluded_forward_targets".to_vec();
+        let epoch = Epoch::new(444);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let reporter_cfg = mocks::reporter::Config {
+                participants: schemes[0].participants().clone(),
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+
+            let me = participants[0].clone();
+            let relay = MockRelay::new();
+            let batcher_cfg = Config {
+                scheme: schemes[0].clone(),
+                blocker: oracle.control(me.clone()),
+                reporter: reporter.clone(),
+                relay: relay.clone(),
+                strategy: Sequential,
+                activity_timeout: ViewDelta::new(10),
+                skip_timeout: ViewDelta::new(5),
+                epoch,
+                mailbox_size: 128,
+                forwarding: ForwardingPolicy::Silent,
+            };
+            let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
+
+            let (voter_sender, mut voter_receiver) =
+                mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
+            let voter_mailbox = voter::Mailbox::new(voter_sender);
+
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let link = Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            let injector_pk = PrivateKey::from_seed(3_000_000).public_key();
+            let (mut injector_sender, _injector_receiver) = oracle
+                .control(injector_pk.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(injector_pk.clone(), me.clone(), link)
+                .await
+                .unwrap();
+
+            batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
+
+            let view = View::new(1);
+            // Enter view 1 without constructing or receiving any matching votes.
+            // The batcher should learn this proposal only from the certificate below.
+            batcher_mailbox
+                .update(view, Participant::new(1), View::zero(), None)
+                .await;
+
+            // Build and inject a notarization from the network so the batcher
+            // sees a certificate-only proposal. Without the self-filter, it
+            // would treat every participant as missing, including itself.
+            let proposal = Proposal::new(
+                Round::new(epoch, view),
+                View::zero(),
+                Sha256::hash(b"certificate_only_payload"),
+            );
+            let notarization = build_notarization(&schemes, &proposal, quorum_size);
+            injector_sender
+                .send(
+                    Recipients::One(me.clone()),
+                    Certificate::Notarization(notarization).encode(),
+                    true,
+                )
+                .await
+                .unwrap();
+
+            let mut saw_notarization = false;
+            loop {
+                let output = select! {
+                    output = voter_receiver.recv() => output,
+                    _ = context.sleep(Duration::from_millis(100)) => None,
+                };
+                let Some(output) = output else {
+                    break;
+                };
+                if matches!(
+                    output,
+                    voter::Message::Verified(Certificate::Notarization(n), _) if n.view() == view
+                ) {
+                    saw_notarization = true;
+                    break;
+                }
+            }
+            assert!(
+                saw_notarization,
+                "expected notarization from certificate_receiver"
+            );
+
+            // Mark the previous view as forwardable and advance views. This
+            // exercises the forwarding path that resolves missing peers from
+            // the certificate-only proposal.
+            batcher_mailbox
+                .update(
+                    View::new(2),
+                    Participant::new(2),
+                    View::zero(),
+                    Some(proposal.clone()),
+                )
+                .await;
+            context.sleep(Duration::from_millis(50)).await;
+
+            // Only remote participants should be targeted once the previous
+            // view is marked forwardable.
+            let broadcasts = relay.broadcasts.lock();
+            assert_eq!(
+                broadcasts.len(),
+                1,
+                "expected exactly one targeted broadcast"
+            );
+            let (ref digest, forwarded_round, ref peers) = broadcasts[0];
+            assert_eq!(*digest, proposal.payload);
+            assert_eq!(forwarded_round, proposal.round);
+            assert_eq!(peers, &participants[1..].to_vec());
+            assert!(
+                !peers.contains(&participants[0]),
+                "batcher must not target itself when forwarding"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_self_excluded_from_forward_targets() {
+        self_excluded_from_forward_targets(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        self_excluded_from_forward_targets(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        self_excluded_from_forward_targets(bls12381_threshold_std::fixture::<MinPk, _>);
+        self_excluded_from_forward_targets(bls12381_threshold_std::fixture::<MinSig, _>);
+        self_excluded_from_forward_targets(bls12381_multisig::fixture::<MinPk, _>);
+        self_excluded_from_forward_targets(bls12381_multisig::fixture::<MinSig, _>);
+        self_excluded_from_forward_targets(ed25519::fixture);
+        self_excluded_from_forward_targets(secp256r1::fixture);
+    }
+
     /// When votes reach quorum and a duplicate network notarization arrives for
     /// the same view, only one forward should be emitted on the subsequent
     /// view transition.

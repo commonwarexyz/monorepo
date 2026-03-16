@@ -743,6 +743,7 @@ pub enum Error {
 - Use `///` for public items with clear descriptions
 - Include `# Examples` sections for public APIs
 - Document `# Safety` for any unsafe code usage
+- Place explanatory comments above the logical code block they describe; do not split a single consecutive sequence with inline comments between adjacent lines.
 - Only use characters that can be easily typed. For example, don't use em dashes (—) or arrows (→).
 - Do not describe trait implementations on the trait definition (e.g., "For production runtimes, this does X. For deterministic testing, this does Y."). These comments become stale as implementations change. Document what the trait does, not how specific implementations behave.
 
