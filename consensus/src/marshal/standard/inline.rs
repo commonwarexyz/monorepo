@@ -98,9 +98,7 @@ where
             );
             None
         },
-        result = block_rx => match result {
-            Ok(block) => Some(block),
-            Err(_) => {
+        result = block_rx => result.map_or_else(|_| {
                 debug!(
                     stage,
                     ?digest,
@@ -108,8 +106,7 @@ where
                     "skipping block wait"
                 );
                 None
-            }
-        },
+            }, Some),
     }
 }
 
