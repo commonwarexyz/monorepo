@@ -19,6 +19,7 @@ use commonware_sync::{
 };
 use commonware_utils::{
     channel::mpsc,
+    non_empty_range,
     sync::{AsyncRwLock, Mutex},
     DurationExt,
 };
@@ -171,7 +172,7 @@ where
         request_id: request.request_id,
         target: Target {
             root,
-            range: inactivity_floor..size,
+            range: non_empty_range!(inactivity_floor, size),
         },
     };
 
