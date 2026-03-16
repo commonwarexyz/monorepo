@@ -332,13 +332,16 @@ where
                     // recently, tell the voter to reduce the leader timeout to now
                     let timeout_reason = if Self::leader_nullified(&current, &work) {
                         // Leader already buffered a nullify for this now-current view
-                        // (allowed because we accept votes up to `current+1`).
+                        // (allowed because we accept votes up to `current+1`)
                         Some(TimeoutReason::LeaderNullify)
-                    } else if !am_leader && !self.is_active(&work, current.view, leader) {
+                    } else if am_leader {
+                        // If we are the leader, we should not timeout
+                        None
+                    } else if !self.is_active(&work, current.view, leader) {
+                        // If we are not the leader and the leader isn't active, we should timeout
                         Some(TimeoutReason::Inactivity)
                     } else {
-                        // If we are not the leader, we should timeout if we haven't
-                        // been active recently.
+                        // If the leader is active, we should not timeout
                         None
                     };
                     if timeout_reason.is_some() {
