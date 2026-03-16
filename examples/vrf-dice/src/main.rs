@@ -310,7 +310,7 @@ async fn ping() -> impl IntoResponse {
 async fn fallback() -> impl IntoResponse {
     Json(serde_json::json!({
         "error": "Not found",
-        "hint": "API endpoints: /api/register, /api/roll, /api/verify, /api/history, /api/info, /api/leaderboard, /api/proof/:round, /api/ping"
+        "hint": "API endpoints: /api/register, /api/roll, /api/verify, /api/history, /api/info, /api/leaderboard, /api/proof/{round}, /api/ping"
     }))
 }
 
@@ -343,7 +343,7 @@ async fn main() {
         .route("/api/history", get(get_history))
         .route("/api/info", get(get_info))
         .route("/api/leaderboard", get(get_leaderboard))
-        .route("/api/proof/:round", get(get_proof))
+        .route("/api/proof/{round}", get(get_proof))
         .route("/api/ping", get(ping))
         .fallback(fallback)
         .with_state(state);
