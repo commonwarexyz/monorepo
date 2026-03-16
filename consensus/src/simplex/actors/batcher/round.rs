@@ -41,7 +41,7 @@ pub struct Round<
     /// Only these votes are used for certificate construction.
     verified_votes: VoteTracker<S, D>,
 
-    /// Whether we've already forwarded the leader's proposal to the voter.
+    /// Whether we've already sent the leader's proposal to the voter.
     proposal_sent: bool,
 
     /// Cached certificates for this view.
