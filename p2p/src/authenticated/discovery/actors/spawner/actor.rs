@@ -33,7 +33,7 @@ pub struct Actor<
 > {
     context: ContextCell<E>,
 
-    mailbox_size: usize,
+    mailbox_size: NonZeroUsize,
     gossip_bit_vec_frequency: Duration,
     max_peer_set_size: NonZeroU64,
     peer_gossip_max_count: NonZeroUsize,
@@ -76,7 +76,7 @@ impl<
             "messages rate limited",
             rate_limited.clone(),
         );
-        let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
+        let (sender, receiver) = Mailbox::new(cfg.mailbox_size.get());
 
         (
             Self {

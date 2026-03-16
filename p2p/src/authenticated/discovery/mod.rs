@@ -259,7 +259,7 @@ mod tests {
         count_running_tasks, deterministic, tokio, BufferPooler, Clock, Handle, IoBuf, Metrics,
         Network as RNetwork, Quota, Resolver, Runner, Spawner,
     };
-    use commonware_utils::{channel::mpsc, hostname, ordered::Set, TryCollect, NZU32};
+    use commonware_utils::{channel::mpsc, hostname, ordered::Set, TryCollect, NZU32, NZUsize};
     use rand_core::{CryptoRngCore, RngCore};
     use std::{
         collections::HashSet,
@@ -2491,7 +2491,9 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(|context| async move {
             // Create router
-            let cfg = RouterConfig { mailbox_size: 10 };
+            let cfg = RouterConfig {
+                mailbox_size: NZUsize!(10),
+            };
             let (router, mut mailbox, messenger) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.clone(), cfg);
 

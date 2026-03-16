@@ -54,7 +54,7 @@ pub struct Config<C: Signer> {
     ///
     /// When there are more messages in the mailbox than this value, any actor
     /// sending a message will be blocked until the mailbox is processed.
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 
     /// Time into the future that a timestamp can be and still be considered valid.
     pub synchrony_bound: Duration,
@@ -145,7 +145,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: false,
             max_message_size,
-            mailbox_size: 1_000,
+            mailbox_size: NZUsize!(1_000),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
@@ -187,7 +187,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: true,
             max_message_size,
-            mailbox_size: 1_000,
+            mailbox_size: NZUsize!(1_000),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
@@ -222,7 +222,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: true,
             max_message_size,
-            mailbox_size: 1_000,
+            mailbox_size: NZUsize!(1_000),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),

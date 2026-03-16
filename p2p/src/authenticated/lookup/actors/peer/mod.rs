@@ -3,6 +3,7 @@
 use crate::authenticated::lookup::metrics;
 use commonware_codec::Error as CodecError;
 use prometheus_client::metrics::{counter::Counter, family::Family};
+use std::num::NonZeroUsize;
 use thiserror::Error;
 
 mod actor;
@@ -12,7 +13,7 @@ mod ingress;
 pub use ingress::Message;
 
 pub struct Config {
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
     pub ping_frequency: std::time::Duration,
     pub sent_messages: Family<metrics::Message, Counter>,
     pub received_messages: Family<metrics::Message, Counter>,
