@@ -316,8 +316,7 @@ where
                     forwardable_proposal,
                     response,
                 } => {
-                    let me = self.scheme.me();
-                    let am_leader = me.is_some_and(|me| me == leader);
+                    let am_leader = self.scheme.me().is_some_and(|me| me == leader);
                     current = Current {
                         view: new_current,
                         leader: Some(leader),
