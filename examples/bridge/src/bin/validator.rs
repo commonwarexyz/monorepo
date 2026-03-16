@@ -262,7 +262,7 @@ fn main() {
                 fetch_concurrent: 32,
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
-                forwarding: simplex::ForwardingPolicy::default(),
+                forwarding: simplex::ForwardingPolicy::Disabled,
             },
         );
 

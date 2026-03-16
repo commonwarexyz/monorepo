@@ -329,7 +329,7 @@ where
                 fetch_concurrent: 32,
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
-                forwarding: simplex::ForwardingPolicy::default(),
+                forwarding: simplex::ForwardingPolicy::Disabled,
             },
         );
 
