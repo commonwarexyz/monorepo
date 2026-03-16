@@ -150,12 +150,8 @@ where
                         recipients,
                         responder,
                     } => {
-                        // Track commitment (if not already tracked)
+                        // Compute request commitment
                         let commitment = request.commitment();
-                        let entry = self.tracked.entry(commitment).or_insert_with(|| {
-                            self.outstanding.inc();
-                            (HashSet::new(), HashSet::new())
-                        });
 
                         // Send the request to recipients
                         match req_tx
@@ -163,7 +159,14 @@ where
                             .await
                         {
                             Ok(recipients) => {
-                                entry.0.extend(recipients.iter().cloned());
+                                // Track commitment only if at least one recipient was selected.
+                                if !recipients.is_empty() {
+                                    let entry = self.tracked.entry(commitment).or_insert_with(|| {
+                                        self.outstanding.inc();
+                                        (HashSet::new(), HashSet::new())
+                                    });
+                                    entry.0.extend(recipients.iter().cloned());
+                                }
                                 responder.send_lossy(Ok(recipients));
                             }
                             Err(err) => {
