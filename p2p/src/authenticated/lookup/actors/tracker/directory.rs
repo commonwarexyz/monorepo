@@ -594,7 +594,10 @@ mod tests {
             // The peer remains external-only after leaving the tracked view.
             assert!(directory.peers.contains_key(&pk_1));
             assert_eq!(directory.peers.get(&pk_1).unwrap().ingress(), None);
-            assert_eq!(directory.peers.get(&pk_1).unwrap().egress_ip(), Some(source_ip));
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().egress_ip(),
+                Some(source_ip)
+            );
         });
     }
 
@@ -2236,7 +2239,10 @@ mod tests {
                 directory.peers.get(&pk_1).unwrap().ingress(),
                 Some(Ingress::Socket(addr_2))
             );
-            assert_eq!(directory.peers.get(&pk_1).unwrap().egress_ip(), Some(addr_2.ip()));
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().egress_ip(),
+                Some(addr_2.ip())
+            );
 
             // Once the tracked set is evicted, the original external fallback IP
             // still governs the peer.

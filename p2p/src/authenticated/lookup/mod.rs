@@ -2214,11 +2214,8 @@ mod tests {
             let server_cfg = Config::test(server_sk, server_addr, MAX_MESSAGE_SIZE);
             let (mut server_network, mut server_oracle) =
                 Network::new(context.with_label("server"), server_cfg);
-            let (mut server_sender, mut server_receiver) = server_network.register(
-                0,
-                Quota::per_second(NZU32!(100)),
-                DEFAULT_MESSAGE_BACKLOG,
-            );
+            let (mut server_sender, mut server_receiver) =
+                server_network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             server_network.start();
             server_oracle
                 .register_external(external_pk.clone(), external_addr.ip())

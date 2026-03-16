@@ -969,7 +969,11 @@ mod tests {
             let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
             mailbox.connect(external_pk.clone(), peer_mailbox);
             oracle
-                .overwrite([(external_pk.clone(), tracked_addr_b.into())].try_into().unwrap())
+                .overwrite(
+                    [(external_pk.clone(), tracked_addr_b.into())]
+                        .try_into()
+                        .unwrap(),
+                )
                 .await;
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(registered_ips.contains(&tracked_addr_b.ip()));
