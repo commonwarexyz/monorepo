@@ -141,12 +141,13 @@ async fn register_player(
         .unwrap_or_else(|| "Anonymous".to_string());
 
     const PLAYERS_CAP: usize = 1000;
-    inner.players.insert(pk_hex.clone(), (name.clone(), player_signer));
-    if inner.players.len() > PLAYERS_CAP {
-        if let Some(old_key) = inner.players.keys().next().cloned() {
-            inner.players.remove(&old_key);
-        }
+    if inner.players.len() >= PLAYERS_CAP {
+        return Json(serde_json::json!({
+            "error": "player_capacity_reached",
+            "message": "Player registry is full; please try again later."
+        }));
     }
+    inner.players.insert(pk_hex.clone(), (name.clone(), player_signer));
 
     Json(PlayerIdentity {
         public_key: pk_hex,
