@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    TryCollect, NZU32,
+    TryCollect, NZU32, NZUsize,
 };
 use rand::{seq::SliceRandom, Rng};
 use std::{
@@ -242,9 +242,9 @@ impl NetworkScheme for Discovery {
             MAX_MSG_SIZE,
         );
         // Override some settings for fuzzing environment
-        config.mailbox_size = 100; // Small mailbox to encourage backpressure
+        config.mailbox_size = NZUsize!(100); // Small mailbox to encourage backpressure
         config.allow_private_ips = true; // Required for localhost testing
-        config.tracked_peer_sets = peer.topo.tracked_peer_sets;
+        config.tracked_peer_sets = NZUsize!(peer.topo.tracked_peer_sets);
 
         // Create the network and oracle for controlling it
         let (mut network, mut oracle) =
@@ -313,7 +313,7 @@ impl NetworkScheme for Lookup {
             MAX_MSG_SIZE,
         );
         config.allow_private_ips = true; // Required for localhost testing
-        config.tracked_peer_sets = 2 * peer.topo.tracked_peer_sets;
+        config.tracked_peer_sets = NZUsize!(2 * peer.topo.tracked_peer_sets);
 
         // Create the network and oracle
         let (mut network, mut oracle) =

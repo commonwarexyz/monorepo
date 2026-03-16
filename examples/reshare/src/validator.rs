@@ -80,7 +80,7 @@ pub async fn run<S, L>(
             .collect::<Vec<_>>(),
         MAX_MESSAGE_SIZE,
     );
-    p2p_cfg.mailbox_size = MAILBOX_SIZE;
+    p2p_cfg.mailbox_size = NZUsize!(MAILBOX_SIZE);
 
     let (mut network, oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
 
