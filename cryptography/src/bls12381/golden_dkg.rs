@@ -20,7 +20,7 @@ use commonware_math::{
 use commonware_parallel::Strategy;
 use commonware_utils::{
     ordered::{Map, Quorum as _, Set},
-    Faults, Participant, NZU32,
+    Faults, Participant, TryCollect as _, NZU32,
 };
 pub use evrf::{PrivateKey, PublicKey};
 use rand_core::CryptoRngCore;
@@ -166,8 +166,82 @@ pub fn deal<M: Faults>(
     .sign(me))
 }
 
-pub fn observe(_logs: BTreeMap<PublicKey, DealerLog>) -> Result<Sharing<MinPk>, Error> {
-    todo!()
+fn select<M: Faults>(
+    rng: &mut impl CryptoRngCore,
+    info: &Info,
+    logs: BTreeMap<PublicKey, DealerLog>,
+    strategy: &impl Strategy,
+) -> Result<BTreeMap<PublicKey, Dealing>, Error> {
+    // We need at most a certain number of valid dealings, so we will only produce
+    // that number. Our strategy is to first check a batch of that size, and then,
+    // if any of those are invalid, to check all the remaining dealings, and use
+    // some of those to assemble the result. We don't just take the minimum number,
+    // to avoid pathological behavior where we check the remaining dealings one
+    // by one, because of strategically placed invalid dealings.
+    let required = info.required_commitments::<M>() as usize;
+    let (first_required, rest) = {
+        let mut head = logs.into_iter().collect::<Vec<_>>();
+        if head.len() < required {
+            return Err(Error::DkgFailed);
+        }
+        let tail = head.split_off(required);
+        (head, tail)
+    };
+    let mut checked = DealerLog::batch_check(rng, info, first_required, strategy);
+    let missing = required.saturating_sub(checked.len());
+    if missing > 0 {
+        let rest = DealerLog::batch_check(rng, info, rest, strategy);
+        if rest.len() < missing {
+            return Err(Error::DkgFailed);
+        }
+        checked.extend(rest.into_iter().take(missing));
+    }
+    // As a sanity check, make sure that we're emitting exactly what's needed.
+    assert_eq!(checked.len(), required);
+    Ok(checked)
+}
+
+pub fn observe<M: Faults>(
+    rng: &mut impl CryptoRngCore,
+    info: &Info,
+    logs: BTreeMap<PublicKey, DealerLog>,
+    strategy: &impl Strategy,
+) -> Result<Sharing<MinPk>, Error> {
+    let selected = select::<M>(rng, info, logs, strategy)?;
+
+    let public = if let Some(previous) = info.previous.as_ref() {
+        let dealers: Set<PublicKey> = selected
+            .keys()
+            .cloned()
+            .try_collect()
+            .expect("selected dealers are unique");
+        let weights = previous
+            .public()
+            .mode()
+            .subset_interpolator(previous.players(), &dealers)
+            .expect("the result of select should produce a valid subset");
+        let commitments: Map<PublicKey, Poly<G1>> = selected
+            .into_iter()
+            .map(|(dealer, dealing)| (dealer, dealing.poly))
+            .try_collect()
+            .expect("Map should have unique keys");
+        let public = weights
+            .interpolate(&commitments, strategy)
+            .expect("select checks that enough points have been provided");
+        if previous.public().public() != public.constant() {
+            return Err(Error::DkgFailed);
+        }
+        public
+    } else {
+        let mut public = Poly::zero();
+        for dealing in selected.values() {
+            public += &dealing.poly;
+        }
+        public
+    };
+
+    let n = info.players.len() as u32;
+    Ok(Sharing::new(info.mode, NZU32!(n), public))
 }
 
 pub fn play(_logs: BTreeMap<PublicKey, DealerLog>, _me: &PrivateKey) -> (Sharing<MinPk>, Share) {
