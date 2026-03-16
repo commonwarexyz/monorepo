@@ -762,8 +762,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         None
     }
 
-    /// Returns whether the remainder of `view`'s term is covered by nullification.
-    fn rest_of_term_nullified(&self, view: View) -> bool {
+    /// Returns whether `view` is covered by a prior-or-equal nullification in its term.
+    fn covered_by_term_nullification(&self, view: View) -> bool {
         let term_start = view.term_start(self.term_length);
         self.nullification_views
             .range(term_start..=view)
@@ -781,7 +781,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         let mut cursor = after.next();
         while cursor < before {
-            if !self.rest_of_term_nullified(cursor) {
+            if !self.covered_by_term_nullification(cursor) {
                 return Some(cursor);
             }
             cursor = cursor.next_term_start(self.term_length);
@@ -802,6 +802,17 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// no certified view below `view`, the parent is the genesis view and the
     /// genesis payload.
     fn find_parent(&self, view: View) -> Result<(View, D), View> {
+        if view != view.term_start(self.term_length) {
+            let parent = view
+                .previous()
+                .expect("non-genesis views must have a previous view");
+            return self
+                .is_certified(parent)
+                .copied()
+                .map(|payload| (parent, payload))
+                .ok_or(parent);
+        }
+
         // Find the highest certified view below `view`, or use genesis when none.
         let result = self
             .views
@@ -2663,6 +2674,132 @@ mod tests {
             assert_eq!(ctx.round.view(), child_view);
             assert_eq!(ctx.parent, (parent_view, parent_payload));
             assert_eq!(proposal, child_proposal);
+        });
+    }
+
+    #[test]
+    fn try_propose_requires_immediate_parent_within_term() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[2].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent_view = View::new(1);
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), parent_view),
+                GENESIS_VIEW,
+                Sha256Digest::from([93u8; 32]),
+            );
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
+            let (added, _) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(state.certified(parent_view, true).is_some());
+
+            let nullify_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), View::new(2)))
+                        .unwrap()
+                })
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
+                    .expect("nullification");
+            state.replay(&Artifact::Nullification(nullification));
+
+            assert!(state.enter_view(View::new(3)));
+            state.set_leader(View::new(3), None);
+            assert_eq!(state.leader_index(View::new(3)), Some(Participant::new(2)));
+            assert!(state.try_propose().is_none());
+        });
+    }
+
+    #[test]
+    fn try_propose_allows_cross_term_parent_at_term_start() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[3].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(1),
+                    activity_timeout: ViewDelta::new(20),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent_view = View::new(3);
+            let parent_payload = Sha256Digest::from([94u8; 32]);
+            let parent_proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), parent_view),
+                GENESIS_VIEW,
+                parent_payload,
+            );
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, parent_proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
+            let (added, _) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(state.certified(parent_view, true).is_some());
+
+            let nullify_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(1), View::new(4)))
+                        .unwrap()
+                })
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
+                    .expect("nullification");
+            assert!(state.add_nullification(nullification));
+
+            assert_eq!(state.current_view(), View::new(6));
+            state.set_leader(View::new(6), None);
+            assert_eq!(state.leader_index(View::new(6)), Some(Participant::new(3)));
+
+            let proposal = state
+                .try_propose()
+                .expect("term-start proposal should use prior-term certified parent");
+            assert_eq!(proposal.round.view(), View::new(6));
+            assert_eq!(proposal.parent, (parent_view, parent_payload));
         });
     }
 
