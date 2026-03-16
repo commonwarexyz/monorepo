@@ -347,13 +347,12 @@ where
                     response.send_lossy(timeout_reason);
 
                     // Forward the proposal, if enabled and we have something to forward
-                    if self.forwarding.is_enabled() {
-                        if let Some(proposal) = forwardable_proposal {
-                            debug_assert_eq!(proposal.view(), new_current.previous().unwrap());
-                            let round = work.entry(proposal.view()).or_insert_with(|| self.new_round());
-                            let participants = self.forwarding_targets(round, &proposal, leader);
-                            self.forward_proposal(proposal, participants).await;
-                        }
+                    if let Some(proposal) =
+                        forwardable_proposal.filter(|_| self.forwarding.is_enabled())
+                    {
+                        let round = work.entry(proposal.view()).or_insert_with(|| self.new_round());
+                        let participants = self.forwarding_targets(round, &proposal, leader);
+                        self.forward_proposal(proposal, participants).await;
                     }
 
                     // Setting leader may enable batch verification
