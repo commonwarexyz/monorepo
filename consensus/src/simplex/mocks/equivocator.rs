@@ -14,7 +14,7 @@ use commonware_codec::{Decode, Encode};
 use commonware_cryptography::{certificate, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
-use commonware_utils::ordered::Quorum;
+use commonware_utils::{ordered::Quorum, NZU64};
 use rand::{seq::IteratorRandom, Rng};
 use std::{collections::HashSet, sync::Arc};
 
@@ -46,7 +46,7 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
 {
     pub fn new(context: E, cfg: Config<S, L, H>) -> Self {
         // Build elector with participants
-        let elector = cfg.elector.build(cfg.scheme.participants());
+        let elector = cfg.elector.build(cfg.scheme.participants(), NZU64!(1));
 
         Self {
             context: ContextCell::new(context),

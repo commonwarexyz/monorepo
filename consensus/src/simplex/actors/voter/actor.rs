@@ -172,6 +172,7 @@ impl<
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
+                term_length: cfg.term_length,
             },
         );
         (
@@ -376,10 +377,7 @@ impl<
         if !retry {
             return;
         }
-        let past_view = view
-            .previous()
-            .expect("we should never be in the genesis view");
-        if let Some(certificate) = self.state.get_best_certificate(past_view) {
+        if let Some(certificate) = self.state.get_best_certificate() {
             self.broadcast_certificate(certificate_sender, certificate)
                 .await;
         }
@@ -993,7 +991,7 @@ impl<
                 match msg {
                     Message::Proposal(proposal) => {
                         view = proposal.view();
-                        if !self.state.is_interesting(view, false) {
+                        if !self.state.is_interesting_vote(view) {
                             trace!(%view, "proposal is not interesting");
                             continue;
                         }
@@ -1005,7 +1003,7 @@ impl<
                     Message::Verified(certificate, from_resolver) => {
                         // Certificates can come from future views (they advance our view)
                         view = certificate.view();
-                        if !self.state.is_interesting(view, true) {
+                        if !self.state.is_interesting_certificate(view) {
                             trace!(%view, "certificate is not interesting");
                             continue;
                         }
