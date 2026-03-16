@@ -207,9 +207,6 @@ async fn roll_dice(
     };
 
     inner.history.push(record.clone());
-    if inner.history.len() > 100 {
-        inner.history.remove(0);
-    }
 
     Json(record)
 }
@@ -273,7 +270,7 @@ async fn get_leaderboard(State(state): State<AppState>) -> impl IntoResponse {
         if r.game_mode == "dice" && r.dice_result == 6 {
             e.3 += 1;
         }
-        if r.game_mode == "coin" && r.dice_result == 0 {
+        if r.game_mode == "coin" && r.dice_result == 1 {
             e.4 += 1;
         }
         if r.game_mode == "lottery" && r.dice_result > e.5 {
