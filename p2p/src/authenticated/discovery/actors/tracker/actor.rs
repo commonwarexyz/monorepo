@@ -160,11 +160,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 if !self.directory.add_set(index, peers.clone()) {
                     return;
                 }
+                let peers = self.directory.get_set(&index).cloned().unwrap();
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
                     subscriber.send_lossy((index, peers.clone(), self.directory.tracked()))
                 });
+            }
+            Message::RegisterExternal { public_key } => {
+                self.directory.register_external(public_key);
             }
             Message::PeerSet { index, responder } => {
                 // Send the peer set at the given index.
@@ -208,6 +212,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Kill if peer is not authorized
                 if !self.directory.eligible(&public_key) {
                     peer.kill().await;
+                    return;
+                }
+
+                // External peers can request discovery gossip from us, but we never request it
+                // from them.
+                if self.directory.is_external(&public_key) {
                     return;
                 }
 
@@ -286,7 +296,7 @@ mod tests {
             },
             Mailbox,
         },
-        Ingress, Manager,
+        Ingress, Manager, Provider,
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
@@ -295,7 +305,7 @@ mod tests {
     };
     use commonware_runtime::{deterministic, Clock, Runner};
     use commonware_utils::{bitmap::BitMap, ordered::Set, TryCollect};
-    use futures::future::Either;
+    use futures::{future::Either, FutureExt};
     use std::{
         collections::HashSet,
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -850,6 +860,51 @@ mod tests {
 
             let reservation_after_release = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation_after_release.is_some());
+        });
+    }
+
+    #[test]
+    fn test_register_external_peer_connectable_but_not_tracked_or_dialable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg_initial);
+
+            let external_pk = new_signer_and_pk(1).1;
+            let tracked_pk = new_signer_and_pk(2).1;
+
+            oracle.register_external(external_pk.clone()).await;
+            let mut subscription = oracle.subscribe().await;
+            oracle
+                .track(0, [external_pk.clone(), tracked_pk.clone()].try_into().unwrap())
+                .await;
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 0);
+            assert_eq!(new, [tracked_pk.clone()].try_into().unwrap());
+            assert_eq!(all, [tracked_pk.clone()].try_into().unwrap());
+
+            assert!(mailbox.acceptable(external_pk.clone()).await);
+            let _reservation = mailbox.listen(external_pk.clone()).await.unwrap();
+            assert!(mailbox.connect(external_pk.clone(), false).await.is_some());
+
+            let dialable = mailbox.dialable().await;
+            assert!(
+                !dialable.peers.contains(&external_pk),
+                "external peers must never be dialed"
+            );
+
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            let _keepalive = peer_mailbox.clone();
+            mailbox.construct(external_pk, peer_mailbox);
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                peer_rx.recv().now_or_never().is_none(),
+                "external peers should not receive discovery gossip requests"
+            );
         });
     }
 

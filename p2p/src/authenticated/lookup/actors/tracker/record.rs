@@ -16,6 +16,9 @@ pub enum Address {
     /// Peer is the local node.
     Myself,
 
+    /// Peer may dial us but will never be dialed or tracked in peer sets.
+    External(IpAddr),
+
     /// Address is provided when peer is registered.
     Known(types::Address),
 }
@@ -85,6 +88,18 @@ impl Record {
         }
     }
 
+    /// Create a new record for an external peer.
+    pub const fn external(source_ip: IpAddr) -> Self {
+        Self {
+            address: Address::External(source_ip),
+            status: Status::Inert,
+            sets: 0,
+            persistent: true,
+            next_reservable_at: SystemTime::UNIX_EPOCH,
+            next_dial_at: SystemTime::UNIX_EPOCH,
+        }
+    }
+
     // ---------- Setters ----------
 
     /// Update the record with a new address.
@@ -92,7 +107,7 @@ impl Record {
     /// Returns `true` if the address was changed, `false` if unchanged or self.
     pub fn update(&mut self, addr: types::Address) -> bool {
         match &mut self.address {
-            Address::Myself => false,
+            Address::Myself | Address::External(_) => false,
             Address::Known(existing) => {
                 if *existing == addr {
                     return false;
@@ -164,6 +179,11 @@ impl Record {
         !matches!(self.address, Address::Myself)
     }
 
+    /// Returns `true` if this record is for an external peer.
+    pub const fn is_external(&self) -> bool {
+        matches!(self.address, Address::External(_))
+    }
+
     /// Returns the number of peer sets this peer is part of.
     pub const fn sets(&self) -> usize {
         self.sets
@@ -185,7 +205,7 @@ impl Record {
         }
         let ingress = match &self.address {
             Address::Known(addr) => addr.ingress(),
-            Address::Myself => return DialStatus::Unavailable,
+            Address::Myself | Address::External(_) => return DialStatus::Unavailable,
         };
         if !ingress.is_valid(allow_private_ips, allow_dns) {
             return DialStatus::Unavailable;
@@ -211,6 +231,7 @@ impl Record {
             return true;
         }
         match &self.address {
+            Address::External(expected_ip) => *expected_ip == source_ip,
             Address::Known(addr) => addr.egress_ip() == source_ip,
             Address::Myself => false,
         }
@@ -219,7 +240,7 @@ impl Record {
     /// Return the ingress address for dialing, if known.
     pub fn ingress(&self) -> Option<Ingress> {
         match &self.address {
-            Address::Myself => None,
+            Address::Myself | Address::External(_) => None,
             Address::Known(addr) => Some(addr.ingress()),
         }
     }
@@ -228,6 +249,7 @@ impl Record {
     pub const fn egress_ip(&self) -> Option<IpAddr> {
         match &self.address {
             Address::Myself => None,
+            Address::External(source_ip) => Some(*source_ip),
             Address::Known(addr) => Some(addr.egress_ip()),
         }
     }
@@ -245,7 +267,7 @@ impl Record {
     pub const fn eligible(&self) -> bool {
         match &self.address {
             Address::Myself => false,
-            Address::Known(_) => self.sets > 0 || self.persistent,
+            Address::External(_) | Address::Known(_) => self.sets > 0 || self.persistent,
         }
     }
 }
@@ -253,7 +275,10 @@ impl Record {
 mod tests {
     use super::*;
     use commonware_runtime::{deterministic, Runner};
-    use std::{net::SocketAddr, time::Duration};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        time::{Duration, SystemTime},
+    };
 
     fn test_socket() -> SocketAddr {
         SocketAddr::from(([54, 12, 1, 9], 8080))
@@ -275,6 +300,29 @@ mod tests {
         assert_eq!(record.status, Status::Inert);
         assert!(!record.deletable());
         assert!(!record.eligible());
+    }
+
+    #[test]
+    fn test_external_initial_state() {
+        let source_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+        let wrong_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+        let record = Record::external(source_ip);
+        assert!(matches!(record.address, Address::External(ip) if ip == source_ip));
+        assert_eq!(record.status, Status::Inert);
+        assert_eq!(record.sets, 0);
+        assert!(record.persistent);
+        assert!(record.ingress().is_none());
+        assert_eq!(record.egress_ip(), Some(source_ip));
+        assert!(record.is_blockable());
+        assert!(!record.deletable());
+        assert!(record.eligible());
+        assert!(record.acceptable(source_ip, false));
+        assert!(!record.acceptable(wrong_ip, false));
+        assert!(record.acceptable(wrong_ip, true));
+        assert!(matches!(
+            record.dialable(SystemTime::UNIX_EPOCH, true, true),
+            DialStatus::Unavailable
+        ));
     }
 
     #[test]

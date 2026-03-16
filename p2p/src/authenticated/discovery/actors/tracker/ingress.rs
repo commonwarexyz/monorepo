@@ -24,6 +24,9 @@ pub enum Message<C: PublicKey> {
     /// Register a peer set at a given index.
     Register { index: u64, peers: Set<C> },
 
+    /// Register an external peer that may dial us but will never be dialed.
+    RegisterExternal { public_key: C },
+
     // ---------- Used by peer set provider ----------
     /// Fetch the peer set at a given index.
     PeerSet {
@@ -283,6 +286,12 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 impl<C: PublicKey> crate::Manager for Oracle<C> {
     async fn track(&mut self, index: u64, peers: Set<Self::PublicKey>) {
         self.sender.0.send_lossy(Message::Register { index, peers });
+    }
+
+    async fn register_external(&mut self, peer: Self::PublicKey) {
+        self.sender
+            .0
+            .send_lossy(Message::RegisterExternal { public_key: peer });
     }
 }
 

@@ -208,6 +208,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
     }
 
+    /// Stores a persistent external peer that may dial us but will never be dialed.
+    pub fn register_external(&mut self, peer: C) {
+        match self.peers.entry(peer) {
+            std::collections::hash_map::Entry::Occupied(_) => {}
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                self.metrics.tracked.inc();
+                entry.insert(Record::external());
+            }
+        }
+    }
+
     /// Stores a new peer set.
     pub fn add_set(&mut self, index: u64, peers: OrderedSet<C>) -> bool {
         // Check if peer set already exists
@@ -223,6 +234,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 return false;
             }
         }
+
+        // Filter external peers out of tracked peer sets.
+        let peers: OrderedSet<C> = peers
+            .into_iter()
+            .filter(|peer| !self.peers.get(peer).is_some_and(Record::is_external))
+            .try_collect()
+            .expect("peer set remains unique after filtering");
 
         // Create and store new peer set
         let mut set = Set::new(peers.clone());
@@ -322,10 +340,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     pub fn tracked(&self) -> OrderedSet<C> {
         self.peers
             .iter()
-            .filter(|(_, r)| r.sets() > 0)
+            .filter(|(_, r)| r.sets() > 0 && !r.is_external())
             .map(|(k, _)| k.clone())
             .try_collect()
             .expect("HashMap keys are unique")
+    }
+
+    /// Returns `true` if the peer is registered as external-only.
+    pub fn is_external(&self, peer: &C) -> bool {
+        self.peers.get(peer).is_some_and(Record::is_external)
     }
 
     /// Returns the sharable information for a given peer.

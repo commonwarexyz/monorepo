@@ -142,6 +142,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Reference count for each peer (number of peer sets they belong to)
     peer_refs: BTreeMap<P, usize>,
 
+    // Peers that may send to and receive from us without belonging to tracked peer sets.
+    external_peers: BTreeSet<P>,
+
     // Maximum number of peer sets to track
     tracked_peer_sets: Option<usize>,
 
@@ -198,6 +201,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 peers: BTreeMap::new(),
                 peer_sets: BTreeMap::new(),
                 peer_refs: BTreeMap::new(),
+                external_peers: BTreeSet::new(),
                 blocks: BTreeSet::new(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
@@ -277,6 +281,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     }
                 }
 
+                // External peers are intentionally excluded from tracked peer sets.
+                let peers = Set::from_iter_dedup(
+                    peers.into_iter()
+                        .filter(|peer| !self.external_peers.contains(peer)),
+                );
+
                 // Create and store new peer set
                 for public_key in peers.iter() {
                     // Create peer if it doesn't exist
@@ -315,6 +325,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // Broadcast updated peer list to LimitedSender subscribers
                 self.broadcast_peer_list().await;
             }
+            ingress::Message::RegisterExternal { public_key } => {
+                self.external_peers.insert(public_key);
+                self.broadcast_peer_list().await;
+            }
             ingress::Message::Register {
                 channel,
                 public_key,
@@ -324,8 +338,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // If peer does not exist, then create it.
                 let (_, is_new) = self.ensure_peer_exists(&public_key).await;
 
-                // When not using peer sets, broadcast updated peer list to subscribers
-                if is_new && self.peer_sets.is_empty() {
+                // Broadcast when the connected peer set changes.
+                if is_new && (self.peer_sets.is_empty() || self.external_peers.contains(&public_key))
+                {
                     self.broadcast_peer_list().await;
                 }
 
@@ -358,10 +373,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
             ingress::Message::PeerSet { id, response } => {
                 if self.peer_sets.is_empty() {
-                    // Return all peers if no peer sets are registered.
+                    // Return all non-external peers if no peer sets are registered.
                     let _ = response.send(Some(
                         self.peers
                             .keys()
+                            .filter(|peer| !self.external_peers.contains(*peer))
                             .cloned()
                             .try_collect()
                             .expect("BTreeMap keys are unique"),
@@ -391,7 +407,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let (mut sender, receiver) = ring::channel(NZUsize!(1));
 
                 // Send current peer list immediately
-                let peer_list: Vec<P> = self.all_tracked_peers().into_iter().collect();
+                let peer_list: Vec<P> = self.all_recipients().into_iter().collect();
                 let _ = sender.send(peer_list).await;
 
                 // Store sender for future broadcasts
@@ -409,8 +425,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // If peer does not exist, then create it.
                 let (_, is_new) = self.ensure_peer_exists(&public_key).await;
 
-                // When not using peer sets, broadcast updated peer list to subscribers
-                if is_new && self.peer_sets.is_empty() {
+                // Broadcast when the connected peer set changes.
+                if is_new && (self.peer_sets.is_empty() || self.external_peers.contains(&public_key))
+                {
                     self.broadcast_peer_list().await;
                 }
 
@@ -511,7 +528,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
     async fn broadcast_peer_list(&mut self) {
-        let peer_list = self.all_tracked_peers().into_iter().collect::<Vec<_>>();
+        let peer_list = self.all_recipients().into_iter().collect::<Vec<_>>();
         let mut live_subscribers = Vec::with_capacity(self.peer_subscribers.len());
         for mut subscriber in self.peer_subscribers.drain(..) {
             if subscriber.send(peer_list.clone()).await.is_ok() {
@@ -530,6 +547,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         if self.peer_sets.is_empty() && self.tracked_peer_sets.is_none() {
             self.peers
                 .keys()
+                .filter(|peer| !self.external_peers.contains(*peer))
                 .cloned()
                 .try_collect()
                 .expect("BTreeMap keys are unique")
@@ -539,6 +557,29 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .cloned()
                 .try_collect()
                 .expect("BTreeMap keys are unique")
+        }
+    }
+
+    /// Get all peers that should receive `Recipients::All`.
+    fn all_recipients(&self) -> Set<P> {
+        if self.peer_sets.is_empty() {
+            self.peers
+                .keys()
+                .cloned()
+                .try_collect()
+                .expect("BTreeMap keys are unique")
+        } else {
+            Set::from_iter_dedup(
+                self.peer_refs
+                    .keys()
+                    .cloned()
+                    .chain(
+                        self.external_peers
+                            .iter()
+                            .filter(|peer| self.peers.contains_key(*peer))
+                            .cloned(),
+                    ),
+            )
         }
     }
 }
@@ -581,7 +622,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     fn handle_task(&mut self, task: Task<P>) {
         // If peer sets are enabled and we are not in one, ignore the message (we are disconnected from all)
         let (channel, origin, recipients, message, reply) = task;
-        if self.tracked_peer_sets.is_some() && !self.peer_refs.contains_key(&origin) {
+        if self.tracked_peer_sets.is_some()
+            && !self.peer_refs.contains_key(&origin)
+            && !self.external_peers.contains(&origin)
+        {
             warn!(
                 ?origin,
                 reason = "not in tracked peer set",
@@ -595,16 +639,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
         // Collect recipients
         let recipients = match recipients {
-            Recipients::All => {
-                // If peer sets have been registered, send only to tracked peers
-                // Otherwise, send to all registered peers (compatibility
-                // with tests that do not register peer sets.)
-                if self.peer_sets.is_empty() {
-                    self.peers.keys().cloned().collect()
-                } else {
-                    self.peer_refs.keys().cloned().collect()
-                }
-            }
+            Recipients::All => self.all_recipients().into_iter().collect(),
             Recipients::Some(keys) => keys,
             Recipients::One(key) => vec![key],
         };
@@ -620,7 +655,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
 
             // If tracking peer sets, ensure recipient and sender are in a tracked peer set
-            if self.tracked_peer_sets.is_some() && !self.peer_refs.contains_key(&recipient) {
+            if self.tracked_peer_sets.is_some()
+                && !self.peer_refs.contains_key(&recipient)
+                && !self.external_peers.contains(&recipient)
+            {
                 trace!(
                     ?origin,
                     ?recipient,
@@ -1691,6 +1729,104 @@ mod tests {
             assert_eq!(id, 11);
             assert_eq!(new, [pk4.clone()].try_into().unwrap());
             assert_eq!(all, [pk1, pk2, pk4].try_into().unwrap());
+        });
+    }
+
+    #[test]
+    fn test_external_peers_receive_all_and_are_excluded_from_peer_sets() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            let tracked_a = ed25519::PrivateKey::from_seed(40).public_key();
+            let tracked_b = ed25519::PrivateKey::from_seed(41).public_key();
+            let external = ed25519::PrivateKey::from_seed(42).public_key();
+
+            let mut manager = oracle.manager();
+            let mut subscription = manager.subscribe().await;
+            manager.register_external(external.clone()).await;
+            manager
+                .track(
+                    0,
+                    [tracked_a.clone(), tracked_b.clone(), external.clone()]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+
+            let peer_set = manager.peer_set(0).await.unwrap();
+            assert_eq!(peer_set, [tracked_a.clone(), tracked_b.clone()].try_into().unwrap());
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 0);
+            assert_eq!(new, [tracked_a.clone(), tracked_b.clone()].try_into().unwrap());
+            assert_eq!(all, [tracked_a.clone(), tracked_b.clone()].try_into().unwrap());
+
+            let (mut tracked_a_sender, _tracked_a_recv) = oracle
+                .control(tracked_a.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_tracked_b_sender, mut tracked_b_recv) = oracle
+                .control(tracked_b.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut external_sender, mut external_recv) = oracle
+                .control(external.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let link = ingress::Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(tracked_a.clone(), tracked_b.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(tracked_a.clone(), external.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(external.clone(), tracked_b.clone(), link)
+                .await
+                .unwrap();
+
+            let sent = tracked_a_sender
+                .send(Recipients::All, b"to_all", false)
+                .await
+                .unwrap();
+            assert_eq!(sent.len(), 2);
+            assert!(sent.contains(&tracked_b));
+            assert!(sent.contains(&external));
+
+            let (sender, payload) = tracked_b_recv.recv().await.unwrap();
+            assert_eq!(sender, tracked_a);
+            assert_eq!(payload, b"to_all");
+
+            let (sender, payload) = external_recv.recv().await.unwrap();
+            assert_eq!(sender, tracked_a);
+            assert_eq!(payload, b"to_all");
+
+            let sent = external_sender
+                .send(Recipients::One(tracked_b.clone()), b"from_external", false)
+                .await
+                .unwrap();
+            assert_eq!(sent, vec![tracked_b.clone()]);
+
+            let (sender, payload) = tracked_b_recv.recv().await.unwrap();
+            assert_eq!(sender, external);
+            assert_eq!(payload, b"from_external");
         });
     }
 

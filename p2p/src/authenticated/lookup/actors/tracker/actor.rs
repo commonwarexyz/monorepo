@@ -116,10 +116,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             },
             _ = self.directory.wait_for_unblock() => {
                 if self.directory.unblock_expired() {
-                    self.listener
-                        .0
-                        .send_lossy(self.directory.listenable())
-                        .await;
+                    self.listener.0.send_lossy(self.directory.listenable()).await;
                 }
             },
             Some(msg) = self.receiver.recv() else {
@@ -135,11 +132,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                // Identify peers that were added or had their addresses changed.
-                let peer_keys: Set<C::PublicKey> = peers.keys().clone();
                 let Some((deleted, changed)) = self.directory.add_set(index, peers) else {
                     return;
                 };
+                let peer_keys = self.directory.get_set(&index).cloned().unwrap();
 
                 // Kill connections for peers no longer in any tracked peer set.
                 for peer in deleted {
@@ -158,15 +154,19 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
 
                 // Send the updated listenable IPs to the listener.
-                self.listener
-                    .0
-                    .send_lossy(self.directory.listenable())
-                    .await;
+                self.listener.0.send_lossy(self.directory.listenable()).await;
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
                     subscriber.send_lossy((index, peer_keys.clone(), self.directory.tracked()))
                 });
+            }
+            Message::RegisterExternal {
+                public_key,
+                source_ip,
+            } => {
+                self.directory.register_external(public_key, source_ip);
+                self.listener.0.send_lossy(self.directory.listenable()).await;
             }
             Message::Overwrite { peers } => {
                 let mut any_changed = false;
@@ -185,10 +185,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Send the updated listenable IPs to the listener (if any changes occurred).
                 if any_changed {
-                    self.listener
-                        .0
-                        .send_lossy(self.directory.listenable())
-                        .await;
+                    self.listener.0.send_lossy(self.directory.listenable()).await;
                 }
             }
             Message::PeerSet { index, responder } => {
@@ -255,10 +252,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
 
                 // Send the updated listenable IPs to the listener.
-                self.listener
-                    .0
-                    .send_lossy(self.directory.listenable())
-                    .await;
+                self.listener.0.send_lossy(self.directory.listenable()).await;
             }
             Message::Release { metadata } => {
                 // Clear the peer handle if it exists
@@ -269,12 +263,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             }
         }
     }
+
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{authenticated::lookup::actors::peer, AddressableManager, Ingress};
+    use crate::{authenticated::lookup::actors::peer, AddressableManager, Ingress, Provider};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
@@ -780,6 +775,58 @@ mod tests {
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(!registered_ips.contains(&addr_1.ip()));
             assert!(registered_ips.contains(&addr_2.ip()));
+        });
+    }
+
+    #[test]
+    fn test_register_external_peer_connectable_but_not_tracked_or_dialable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (cfg, mut listener_receiver) = test_config(PrivateKey::from_seed(0), false);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let external_pk = new_signer_and_pk(1).1;
+            let tracked_pk = new_signer_and_pk(2).1;
+            let tracked_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
+            let external_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+
+            oracle.register_external(external_pk.clone(), external_ip).await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&external_ip));
+
+            let mut subscription = oracle.subscribe().await;
+            oracle
+                .track(
+                    0,
+                    [
+                        (external_pk.clone(), tracked_addr.into()),
+                        (tracked_pk.clone(), tracked_addr.into()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .await;
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 0);
+            assert_eq!(new, [tracked_pk.clone()].try_into().unwrap());
+            assert_eq!(all, [tracked_pk.clone()].try_into().unwrap());
+
+            assert!(mailbox.acceptable(external_pk.clone(), external_ip).await);
+            assert!(!mailbox.acceptable(external_pk.clone(), tracked_addr.ip()).await);
+            assert!(mailbox.listen(external_pk.clone()).await.is_some());
+            let dialable = mailbox.dialable().await;
+            assert!(
+                !dialable.peers.contains(&external_pk),
+                "external peers must never be dialed"
+            );
+
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&tracked_addr.ip()));
+            assert!(registered_ips.contains(&external_ip));
         });
     }
 

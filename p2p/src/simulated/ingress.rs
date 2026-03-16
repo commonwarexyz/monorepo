@@ -21,6 +21,9 @@ pub enum Message<P: PublicKey, E: Clock> {
         id: u64,
         peers: Set<P>,
     },
+    RegisterExternal {
+        public_key: P,
+    },
     PeerSet {
         id: u64,
         response: oneshot::Sender<Option<Set<P>>>,
@@ -68,6 +71,10 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
                 .debug_struct("Track")
                 .field("id", id)
                 .finish_non_exhaustive(),
+            Self::RegisterExternal { public_key } => f
+                .debug_struct("RegisterExternal")
+                .field("public_key", public_key)
+                .finish(),
             Self::PeerSet { id, .. } => f
                 .debug_struct("PeerSet")
                 .field("id", id)
@@ -247,6 +254,13 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         self.sender.0.send_lossy(Message::Track { id, peers });
     }
 
+    /// Register an external peer.
+    fn register_external(&self, public_key: P) {
+        self.sender
+            .0
+            .send_lossy(Message::RegisterExternal { public_key });
+    }
+
     /// Get the peers for a given id.
     async fn peer_set(&self, id: u64) -> Option<Set<P>> {
         self.sender
@@ -307,6 +321,10 @@ impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
     async fn track(&mut self, id: u64, peers: Set<Self::PublicKey>) {
         self.oracle.track(id, peers);
     }
+
+    async fn register_external(&mut self, peer: Self::PublicKey) {
+        self.oracle.register_external(peer);
+    }
 }
 
 /// Implementation of [crate::AddressableManager] for peers with [Address]es.
@@ -357,6 +375,10 @@ impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
 
     async fn overwrite(&mut self, _peers: Map<Self::PublicKey, Address>) {
         // We consider all addresses to be valid, so this is a no-op
+    }
+
+    async fn register_external(&mut self, peer: Self::PublicKey, _source_ip: std::net::IpAddr) {
+        self.oracle.register_external(peer);
     }
 }
 

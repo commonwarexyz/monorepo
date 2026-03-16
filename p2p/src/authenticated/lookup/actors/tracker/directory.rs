@@ -31,7 +31,7 @@ pub struct Config {
     /// Whether DNS-based ingress addresses are allowed.
     pub allow_dns: bool,
 
-    /// Whether to skip IP verification for incoming connections (allows unknown IPs).
+    /// Whether to skip IP verification for incoming connections.
     pub bypass_ip_check: bool,
 
     /// The maximum number of peer sets to track.
@@ -58,7 +58,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Whether DNS-based ingress addresses are allowed.
     allow_dns: bool,
 
-    /// Whether to skip IP verification for incoming connections (allows unknown IPs).
+    /// Whether to skip IP verification for incoming connections.
     bypass_ip_check: bool,
 
     /// Duration after which a blocked peer is allowed to reconnect.
@@ -143,6 +143,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .try_set(self.context.current().epoch_millis());
     }
 
+    /// Stores a persistent external peer that may dial us but will never be dialed.
+    pub fn register_external(&mut self, peer: C, source_ip: IpAddr) {
+        match self.peers.entry(peer) {
+            Entry::Occupied(_) => {}
+            Entry::Vacant(entry) => {
+                self.metrics.tracked.inc();
+                entry.insert(Record::external(source_ip));
+            }
+        }
+    }
+
     /// Stores a new peer set.
     ///
     /// Returns `Some((deleted_peers, changed_peers))` on success, where:
@@ -169,6 +180,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Create and store new peer set (all peers are tracked regardless of address validity)
+        let peers: Map<_, _> = peers
+            .into_iter()
+            .filter(|(peer, _)| !self.peers.get(peer).is_some_and(Record::is_external))
+            .try_collect()
+            .expect("peer set remains unique after filtering");
         let mut changed_peers = Vec::new();
         for (peer, addr) in &peers {
             let record = match self.peers.entry(peer.clone()) {
@@ -217,6 +233,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let Some(record) = self.peers.get_mut(peer) else {
             return false;
         };
+        if record.is_external() {
+            return false;
+        }
         record.update(address)
     }
 
@@ -285,7 +304,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     pub fn tracked(&self) -> Set<C> {
         self.peers
             .iter()
-            .filter(|(_, r)| r.sets() > 0)
+            .filter(|(_, r)| r.sets() > 0 && !r.is_external())
             .map(|(k, _)| k.clone())
             .try_collect()
             .expect("HashMap keys are unique")
@@ -351,7 +370,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
             .collect()
     }
-
     /// Unblock all peers whose block has expired.
     ///
     /// Returns `true` if any peers were unblocked.

@@ -20,7 +20,7 @@ stability_scope!(BETA {
         channel::mpsc,
         ordered::{Map, Set},
     };
-    use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
+    use std::{error::Error as StdError, fmt::Debug, future::Future, net::IpAddr, time::SystemTime};
 
     pub mod authenticated;
     pub mod types;
@@ -256,6 +256,12 @@ stability_scope!(BETA {
             id: u64,
             peers: Set<Self::PublicKey>,
         ) -> impl Future<Output = ()> + Send;
+
+        /// Register a peer that may dial us but will never be dialed or included in tracked peer sets.
+        fn register_external(
+            &mut self,
+            peer: Self::PublicKey,
+        ) -> impl Future<Output = ()> + Send;
     }
 
     /// Interface for managing peer set membership (where peer addresses are known).
@@ -281,6 +287,13 @@ stability_scope!(BETA {
         fn overwrite(
             &mut self,
             peers: Map<Self::PublicKey, Address>,
+        ) -> impl Future<Output = ()> + Send;
+
+        /// Register a peer that may dial us but will never be dialed or included in tracked peer sets.
+        fn register_external(
+            &mut self,
+            peer: Self::PublicKey,
+            source_ip: IpAddr,
         ) -> impl Future<Output = ()> + Send;
     }
 
