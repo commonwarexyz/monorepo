@@ -221,7 +221,7 @@ where
     }
 
     /// Selects forwarding targets for a certified proposal under the active policy.
-    fn forwarding_targets(
+    fn forward_targets(
         &self,
         round: &Round<S, B, D, Re>,
         proposal: &Proposal<D>,
@@ -351,7 +351,7 @@ where
                         forwardable_proposal.filter(|_| self.forwarding.is_enabled())
                     {
                         let round = work.entry(proposal.view()).or_insert_with(|| self.new_round());
-                        let participants = self.forwarding_targets(round, &proposal, leader);
+                        let participants = self.forward_targets(round, &proposal, leader);
                         self.forward_proposal(proposal, participants).await;
                     }
 
