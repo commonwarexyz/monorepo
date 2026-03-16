@@ -330,17 +330,20 @@ where
 
                     // If the leader nullified this view or has not been active
                     // recently, tell the voter to reduce the leader timeout to now
+                    #[allow(clippy::collapsible_else_if)]
                     let timeout_reason = if Self::leader_nullified(&current, &work) {
                         // Leader already buffered a nullify for this now-current view
                         // (allowed because we accept votes up to `current+1`)
                         Some(TimeoutReason::LeaderNullify)
-                    } else if am_leader {
-                        // If we are the leader, we should not timeout
-                        None
                     } else {
-                        // If we are not the leader and the leader isn't active, we should timeout
-                        (!self.is_active(&work, current.view, leader))
-                            .then_some(TimeoutReason::Inactivity)
+                        if am_leader {
+                            // If we are the leader, we should not timeout
+                            None
+                        } else {
+                            // If we are not the leader and the leader isn't active, we should timeout
+                            (!self.is_active(&work, current.view, leader))
+                                .then_some(TimeoutReason::Inactivity)
+                        }
                     };
                     if timeout_reason.is_some() {
                         current.timed_out = true;
