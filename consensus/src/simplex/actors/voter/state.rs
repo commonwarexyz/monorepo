@@ -722,7 +722,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         if is_success {
             self.enter_view(view.next());
-            self.set_leader(view.next(), Some(&notarization.certificate));
         } else {
             self.trigger_timeout(view, TimeoutReason::FailedCertification);
         }
@@ -914,6 +913,40 @@ mod tests {
 
     fn test_genesis() -> Sha256Digest {
         Sha256Digest::from([0u8; 32])
+    }
+
+    type TestState = State<deterministic::Context, ed25519::Scheme, RoundRobin, Sha256Digest>;
+
+    fn setup_state(
+        context: &mut deterministic::Context,
+        validators: usize,
+        epoch: u64,
+        activity_timeout: u64,
+        term_length: u64,
+    ) -> (Fixture<ed25519::Scheme>, TestState) {
+        let namespace = b"ns".to_vec();
+        let fixture = ed25519::fixture(
+            context,
+            &namespace,
+            validators.try_into().expect("validator count fits in u32"),
+        );
+        let state = State::new(
+            context.clone(),
+            Config {
+                scheme: fixture.verifier.clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(epoch),
+                activity_timeout: ViewDelta::new(activity_timeout),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+                term_length: std::num::NonZeroU64::new(term_length)
+                    .expect("term length must be non-zero"),
+            },
+        );
+        let mut state = state;
+        state.set_genesis(test_genesis());
+        (fixture, state)
     }
 
     #[test]
@@ -1592,22 +1625,12 @@ mod tests {
     fn parent_payload_errors_without_nullification() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let cfg = Config {
-                scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-                activity_timeout: ViewDelta::new(5),
-                term_length: NZU64!(1),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 5, 1);
 
             // Create parent proposal and certificate
             let parent_view = View::new(1);
@@ -1647,22 +1670,12 @@ mod tests {
     fn parent_payload_uses_term_skip_nullification_anchors() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let cfg = Config {
-                scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-                activity_timeout: ViewDelta::new(20),
-                term_length: NZU64!(5),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 20, 5);
 
             let parent_view = View::new(3);
             let parent_payload = Sha256Digest::from([42u8; 32]);
@@ -1708,22 +1721,12 @@ mod tests {
     fn parent_payload_reports_missing_term_anchor() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let cfg = Config {
-                scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-                activity_timeout: ViewDelta::new(20),
-                term_length: NZU64!(5),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 20, 5);
 
             let parent_view = View::new(3);
             let parent_proposal = Proposal::new(
@@ -1776,22 +1779,12 @@ mod tests {
     fn nullification_sets_entry_certificate() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let cfg = Config {
-                scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-                activity_timeout: ViewDelta::new(20),
-                term_length: NZU64!(5),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 20, 5);
 
             let view = View::new(1);
             let nullify_votes: Vec<_> = schemes
@@ -1820,22 +1813,12 @@ mod tests {
     fn entry_certificate_prioritizes_finalization_then_nullification_then_notarization() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let cfg = Config {
-                scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-                activity_timeout: ViewDelta::new(20),
-                term_length: NZU64!(1),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 20, 1);
 
             let view = View::new(1);
             let proposal = Proposal::new(
@@ -1892,22 +1875,12 @@ mod tests {
     fn parent_payload_returns_genesis_payload() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let cfg = Config {
-                scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-                activity_timeout: ViewDelta::new(5),
-                term_length: NZU64!(1),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 5, 1);
 
             // Add nullification certificate for view 1
             let nullify_votes: Vec<_> = schemes
@@ -1936,22 +1909,12 @@ mod tests {
     fn parent_payload_rejects_parent_before_finalized() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let cfg = Config {
-                scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(5),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 5, 1);
 
             // Add finalization
             let proposal_a = Proposal::new(
@@ -1989,22 +1952,12 @@ mod tests {
     fn parent_payload_rejects_intra_term_view_skip() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-            let cfg = Config {
-                scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(20),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(5),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 20, 5);
 
             // Certify view 1 so it can serve as a valid parent.
             let parent_view = View::new(1);
@@ -2399,23 +2352,12 @@ mod tests {
     fn nullification_keeps_notarization_as_certification_candidate() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-
-            let cfg = Config {
-                scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(10),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 10, 1);
 
             let view = View::new(2);
             let proposal = Proposal::new(
@@ -2455,23 +2397,12 @@ mod tests {
     fn nullification_does_not_abort_inflight_certification() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
-            let namespace = b"ns".to_vec();
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, &namespace, 4);
-
-            let cfg = Config {
-                scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
-                epoch: Epoch::new(1),
-                activity_timeout: ViewDelta::new(10),
-                leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
-            };
-            let mut state = State::new(context, cfg);
-            state.set_genesis(test_genesis());
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 1, 10, 1);
 
             let view = View::new(2);
             let proposal = Proposal::new(
