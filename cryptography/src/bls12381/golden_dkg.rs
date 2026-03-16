@@ -5,9 +5,9 @@ use crate::{
     bls12381::{
         golden_dkg::evrf::VrfCommitments,
         primitives::{
-            group::{Scalar, Share},
+            group::{Scalar, Share, G1},
             sharing::{Mode, Sharing},
-            variant::Variant,
+            variant::MinPk,
         },
     },
     transcript::Summary,
@@ -19,7 +19,7 @@ use commonware_utils::{
 };
 pub use evrf::{PrivateKey, PublicKey};
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, marker::PhantomData, num::NonZeroU32};
+use std::{collections::BTreeMap, num::NonZeroU32};
 
 pub enum Error {
     DkgFailed,
@@ -30,15 +30,15 @@ pub enum Error {
 
 /// The output of a successful DKG.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Output<V: Variant, P> {
+pub struct Output<P> {
     summary: Summary,
-    public: Sharing<V>,
+    public: Sharing<MinPk>,
     dealers: Set<P>,
     players: Set<P>,
     revealed: Set<P>,
 }
 
-impl<V: Variant, P: Ord> Output<V, P> {
+impl<P: Ord> Output<P> {
     /// Return the quorum, i.e. the number of players needed to reconstruct the key.
     pub fn quorum<M: Faults>(&self) -> u32 {
         self.players.quorum::<M>()
@@ -47,7 +47,7 @@ impl<V: Variant, P: Ord> Output<V, P> {
     /// Get the public polynomial associated with this output.
     ///
     /// This is useful for verifying partial signatures, with [`crate::bls12381::primitives::ops::threshold::verify_message`].
-    pub const fn public(&self) -> &Sharing<V> {
+    pub const fn public(&self) -> &Sharing<MinPk> {
         &self.public
     }
 
@@ -63,17 +63,17 @@ impl<V: Variant, P: Ord> Output<V, P> {
 }
 
 #[allow(dead_code)]
-pub struct Info<V: Variant> {
+pub struct Info {
     summary: Summary,
     round: u64,
-    previous: Option<Output<V, PublicKey>>,
+    previous: Option<Output<PublicKey>>,
     mode: Mode,
     dealers: Set<PublicKey>,
     players: Set<PublicKey>,
 }
 
 #[allow(dead_code)]
-impl<V: Variant> Info<V> {
+impl Info {
     fn player_index(&self, player: &PublicKey) -> Result<Participant, Error> {
         self.players.index(player).ok_or(Error::UnknownPlayer)
     }
@@ -129,12 +129,12 @@ impl<V: Variant> Info<V> {
     }
 }
 
-pub fn deal<V: Variant, M: Faults>(
+pub fn deal<M: Faults>(
     rng: &mut impl CryptoRngCore,
-    info: &Info<V>,
+    info: &Info,
     me: &PrivateKey,
     share: Option<Share>,
-) -> Result<SignedDealerLog<V>, Error> {
+) -> Result<SignedDealerLog, Error> {
     let me_pub = me.public();
 
     // Error early if this dealer shouldn't be a part of the DKG.
@@ -165,37 +165,35 @@ pub fn deal<V: Variant, M: Faults>(
     .sign(me))
 }
 
-pub fn observe<V: Variant>(_logs: BTreeMap<PublicKey, DealerLog<V>>) -> Result<Sharing<V>, Error> {
+pub fn observe(_logs: BTreeMap<PublicKey, DealerLog>) -> Result<Sharing<MinPk>, Error> {
     todo!()
 }
 
-pub fn play<V: Variant>(
-    _logs: BTreeMap<PublicKey, DealerLog<V>>,
+pub fn play(
+    _logs: BTreeMap<PublicKey, DealerLog>,
     _me: &PrivateKey,
-) -> (Sharing<V>, Share) {
+) -> (Sharing<MinPk>, Share) {
     todo!()
 }
 
-pub struct SignedDealerLog<V: Variant> {
-    p: PhantomData<V>,
-}
+pub struct SignedDealerLog {}
 
-impl<V: Variant> SignedDealerLog<V> {
-    pub fn identify(self) -> Option<(PublicKey, DealerLog<V>)> {
+impl SignedDealerLog {
+    pub fn identify(self) -> Option<(PublicKey, DealerLog)> {
         todo!()
     }
 }
 
 #[allow(dead_code)]
-pub struct DealerLog<V: Variant> {
+pub struct DealerLog {
     nonce: Summary,
-    poly: Poly<V::Public>,
+    poly: Poly<G1>,
     commitments: VrfCommitments,
     masked_shares: MaskedShares,
 }
 
 #[allow(dead_code)]
-impl<V: Variant> DealerLog<V> {
+impl DealerLog {
     #[allow(dead_code)]
     fn batch_check(
         _batch: impl IntoIterator<Item = (PublicKey, Self)>,
@@ -203,7 +201,7 @@ impl<V: Variant> DealerLog<V> {
         todo!()
     }
 
-    fn sign(self, _priv: &PrivateKey) -> SignedDealerLog<V> {
+    fn sign(self, _priv: &PrivateKey) -> SignedDealerLog {
         todo!()
     }
 }
@@ -214,8 +212,8 @@ struct MaskedShares {
 }
 
 impl MaskedShares {
-    fn reckon<V: Variant>(
-        info: &Info<V>,
+    fn reckon(
+        info: &Info,
         poly: &Poly<Scalar>,
         masks: Map<PublicKey, Scalar>,
     ) -> Result<Self, Error> {
