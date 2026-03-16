@@ -306,7 +306,7 @@ impl Record {
     }
 
     /// Return the egress IP for filtering, if known.
-    pub fn egress_ip(&self) -> Option<IpAddr> {
+    pub const fn egress_ip(&self) -> Option<IpAddr> {
         match &self.address {
             Address::Myself => None,
             Address::External(source_ip) => Some(*source_ip),

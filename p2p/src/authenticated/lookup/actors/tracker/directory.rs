@@ -145,7 +145,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Stores a persistent external fallback for a peer that may dial us when not currently tracked.
     pub fn register_external(&mut self, peer: C, source_ip: IpAddr) {
-        match self.peers.entry(peer.clone()) {
+        match self.peers.entry(peer) {
             Entry::Occupied(mut entry) => {
                 let record = entry.get_mut();
                 if record.is_myself() {
