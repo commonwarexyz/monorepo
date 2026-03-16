@@ -5,22 +5,28 @@ use crate::{
     bls12381::{
         golden_dkg::evrf::VrfCommitments,
         primitives::{
-            group::{Scalar, Share, G1},
+            group::{Scalar, Share, SmallScalar, G1},
             sharing::{Mode, Sharing},
             variant::MinPk,
         },
     },
     transcript::Summary,
 };
-use commonware_math::{algebra::Random as _, poly::Poly};
+use bytes::Bytes;
+use commonware_math::{
+    algebra::{Additive, CryptoGroup, Random, Space},
+    poly::Poly,
+};
+use commonware_parallel::Strategy;
 use commonware_utils::{
     ordered::{Map, Quorum as _, Set},
     Faults, Participant, NZU32,
 };
 pub use evrf::{PrivateKey, PublicKey};
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, num::NonZeroU32};
+use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU32};
 
+#[derive(Debug)]
 pub enum Error {
     DkgFailed,
     MissingDealerShare,
@@ -151,15 +157,10 @@ pub fn deal<M: Faults>(
     let poly = Poly::new_with_constant(&mut *rng, info.degree::<M>(), share);
 
     let nonce = Summary::random(&mut *rng);
-    let receivers = info.players.iter().filter(|p| *p != &me_pub).cloned();
-    let (masks, commitments) = me.vrf_batch_checked(&nonce, receivers);
+    let (masks, commitments) = me.vrf_batch_checked(&nonce, info.players.iter().cloned());
 
     Ok(DealerLog {
-        nonce,
-        // Evaluate this first, borrowing poly...
-        masked_shares: MaskedShares::reckon(info, &poly, masks)?,
-        // which gets move here.
-        poly: Poly::commit(poly),
+        dealing: Dealing::reckon(info, nonce, poly, masks)?,
         commitments,
     }
     .sign(me))
@@ -169,10 +170,7 @@ pub fn observe(_logs: BTreeMap<PublicKey, DealerLog>) -> Result<Sharing<MinPk>, 
     todo!()
 }
 
-pub fn play(
-    _logs: BTreeMap<PublicKey, DealerLog>,
-    _me: &PrivateKey,
-) -> (Sharing<MinPk>, Share) {
+pub fn play(_logs: BTreeMap<PublicKey, DealerLog>, _me: &PrivateKey) -> (Sharing<MinPk>, Share) {
     todo!()
 }
 
@@ -186,19 +184,43 @@ impl SignedDealerLog {
 
 #[allow(dead_code)]
 pub struct DealerLog {
-    nonce: Summary,
-    poly: Poly<G1>,
     commitments: VrfCommitments,
-    masked_shares: MaskedShares,
+    dealing: Dealing,
 }
 
 #[allow(dead_code)]
 impl DealerLog {
     #[allow(dead_code)]
     fn batch_check(
-        _batch: impl IntoIterator<Item = (PublicKey, Self)>,
-    ) -> Map<PublicKey, MaskedShares> {
-        todo!()
+        rng: &mut impl CryptoRngCore,
+        info: &Info,
+        batch: impl IntoIterator<Item = (PublicKey, Self)>,
+        strategy: &impl Strategy,
+    ) -> BTreeMap<PublicKey, Dealing> {
+        let (commitments, dealings) = batch
+            .into_iter()
+            .map(|(d, log)| {
+                (
+                    (
+                        d.clone(),
+                        Bytes::copy_from_slice(log.dealing.nonce.as_ref()),
+                        log.commitments,
+                    ),
+                    (d, log.dealing),
+                )
+            })
+            .collect::<(Vec<_>, Vec<_>)>();
+        let mask_commitments = VrfCommitments::check_batch(rng, commitments);
+        dealings
+            .into_iter()
+            .filter_map(|(d, dealing)| {
+                let mask_commitments = mask_commitments.get_value(&d)?;
+                if !dealing.check(rng, info, &d, mask_commitments, strategy) {
+                    return None;
+                }
+                Some((d, dealing))
+            })
+            .collect()
     }
 
     fn sign(self, _priv: &PrivateKey) -> SignedDealerLog {
@@ -206,21 +228,96 @@ impl DealerLog {
     }
 }
 
-struct MaskedShares {
-    #[allow(dead_code)]
-    inner: Map<PublicKey, Scalar>,
+struct Dealing {
+    nonce: Summary,
+    poly: Poly<G1>,
+    masked_shares: Map<PublicKey, Scalar>,
 }
 
-impl MaskedShares {
+impl Dealing {
     fn reckon(
         info: &Info,
-        poly: &Poly<Scalar>,
+        nonce: Summary,
+        poly: Poly<Scalar>,
         masks: Map<PublicKey, Scalar>,
     ) -> Result<Self, Error> {
         let mut inner = masks;
         for (player, mask) in inner.iter_pairs_mut() {
             *mask += &poly.eval(&info.player_scalar(player)?);
         }
-        Ok(Self { inner })
+        let poly = Poly::commit(poly);
+        Ok(Self {
+            nonce,
+            poly,
+            masked_shares: inner,
+        })
+    }
+
+    #[must_use]
+    fn check(
+        &self,
+        rng: &mut impl CryptoRngCore,
+        info: &Info,
+        dealer: &PublicKey,
+        mask_commitments: &Map<PublicKey, G1>,
+        strategy: &impl Strategy,
+    ) -> bool {
+        // An honest dealer will set, for each player i, the masked share to be:
+        //
+        //   z_i := m_i + f(x_i)
+        //
+        // we have M_i assumed to equal m_i * G, and F := f * G, so we can check:
+        //
+        //   z_i * G - M_i =? F(x_i)
+        //
+        // to batch this efficiently over multiple players, we can do:
+        //
+        //   <r_i, z_i * G - M_i> =? <r_i, F(x_i)>
+        //   <r_i, z_i> * G - <r_i, M_i> =? <r_i, F(x_i)>
+        //
+        // [`Poly`] has an efficient method for evaluating the right hand side,
+        // we can do an MSM for the M_i portion of the left hand side, and then
+        // just do one scalar multiplication for the z_i part.
+        //
+        // We'll also want to do some other boilerplate checks, like making sure
+        // all commitments are present, all shares are present, etc.
+        let len = info.players.len() - 1;
+        let (r, z, m, x) = {
+            let mut r = Vec::with_capacity(len);
+            let mut z = Vec::with_capacity(len);
+            let mut m = Vec::with_capacity(len);
+            let mut x = Vec::with_capacity(len);
+            for p in &info.players {
+                if p == dealer {
+                    continue;
+                }
+                r.push(SmallScalar::random(&mut *rng));
+                let Some(z_i) = self.masked_shares.get_value(p) else {
+                    return false;
+                };
+                z.push(z_i.clone());
+                let Some(m_i) = mask_commitments.get_value(p) else {
+                    return false;
+                };
+                m.push(*m_i);
+                x.push(info.player_scalar(p).expect("player scalar must exist"));
+            }
+            (r, z, m, x)
+        };
+        let lhs: G1 = {
+            let r_z = r.iter().zip(z).fold(Scalar::zero(), |mut acc, (r_i, z_i)| {
+                acc += &(Scalar::from(r_i.clone()) * &z_i);
+                acc
+            });
+            let r_m = G1::msm(&m, &r, strategy);
+            G1::generator() * &r_z - &r_m
+        };
+        let rhs: G1 = self.poly.lin_comb_eval(
+            r.into_iter()
+                .zip(x)
+                .map(|(r_i, x_i)| (Scalar::from(r_i), Cow::Owned(x_i))),
+            strategy,
+        );
+        lhs == rhs
     }
 }

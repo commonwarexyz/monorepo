@@ -2,7 +2,6 @@ use crate::bls12381::primitives::group::{Scalar, G1};
 use bytes::Bytes;
 use commonware_utils::ordered::Map;
 use rand_core::CryptoRngCore;
-use std::collections::BTreeMap;
 
 pub struct PrivateKey {}
 
@@ -73,7 +72,7 @@ impl VrfCommitments {
     /// A sender will only appear in the output if their output is correct.
     pub fn check_batch(
         _rng: &mut impl CryptoRngCore,
-        _outputs: BTreeMap<PublicKey, (Bytes, Self)>,
+        _outputs: impl IntoIterator<Item = (PublicKey, Bytes, Self)>,
     ) -> Map<PublicKey, Map<PublicKey, G1>> {
         todo!()
     }
