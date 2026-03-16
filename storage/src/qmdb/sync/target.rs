@@ -19,14 +19,13 @@ pub struct Target<D: Digest> {
 impl<D: Digest> Write for Target<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.root.write(buf);
-        self.range.start.write(buf);
-        self.range.end.write(buf);
+        self.range.write(buf);
     }
 }
 
 impl<D: Digest> EncodeSize for Target<D> {
     fn encode_size(&self) -> usize {
-        self.root.encode_size() + self.range.start.encode_size() + self.range.end.encode_size()
+        self.root.encode_size() + self.range.encode_size()
     }
 }
 
@@ -35,24 +34,20 @@ impl<D: Digest> Read for Target<D> {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let root = D::read(buf)?;
-        let start = Location::read(buf)?;
-        let end = Location::read(buf)?;
-        if start >= end {
+        let range = Range::<Location>::read(buf)?;
+        if range.is_empty() {
             return Err(CodecError::Invalid(
                 "storage::qmdb::sync::Target",
-                "lower_bound >= upper_bound",
+                "range must not be empty",
             ));
         }
-        if !start.is_valid() || !end.is_valid() {
+        if !range.start.is_valid() || !range.end.is_valid() {
             return Err(CodecError::Invalid(
                 "storage::qmdb::sync::Target",
                 "range bounds out of valid range",
             ));
         }
-        Ok(Self {
-            root,
-            range: start..end,
-        })
+        Ok(Self { root, range })
     }
 }
 
@@ -138,10 +133,37 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_target_read_invalid_bounds() {
+    #[should_panic(expected = "start must be <= end")]
+    fn test_sync_target_encode_invalid_bounds() {
         let target = Target {
             root: sha256::Digest::from([42; 32]),
             range: Location::new(100)..Location::new(50), // invalid: lower > upper
+        };
+
+        let mut buffer = Vec::new();
+        target.write(&mut buffer);
+    }
+
+    #[test]
+    fn test_sync_target_decode_invalid_bounds() {
+        // Manually encode root + two Locations to bypass the Range write panic
+        let mut buffer = Vec::new();
+        sha256::Digest::from([42; 32]).write(&mut buffer);
+        Location::new(100).write(&mut buffer); // start
+        Location::new(50).write(&mut buffer); // end (< start = invalid)
+
+        let mut cursor = Cursor::new(buffer);
+        assert!(matches!(
+            Target::<sha256::Digest>::read(&mut cursor),
+            Err(CodecError::Invalid("Range", "start must be <= end"))
+        ));
+    }
+
+    #[test]
+    fn test_sync_target_read_empty_range() {
+        let target = Target {
+            root: sha256::Digest::from([42; 32]),
+            range: Location::new(100)..Location::new(100),
         };
 
         let mut buffer = Vec::new();
@@ -150,7 +172,10 @@ mod tests {
         let mut cursor = Cursor::new(buffer);
         assert!(matches!(
             Target::<sha256::Digest>::read(&mut cursor),
-            Err(CodecError::Invalid(_, "lower_bound >= upper_bound"))
+            Err(CodecError::Invalid(
+                "storage::qmdb::sync::Target",
+                "range must not be empty"
+            ))
         ));
     }
 
