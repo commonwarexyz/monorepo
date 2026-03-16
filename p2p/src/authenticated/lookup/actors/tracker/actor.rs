@@ -166,11 +166,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 });
             }
             Message::Follow { peers } => {
+                // `follow` replaces the complete follower set. Any untracked peer
+                // that drops out of that set must reconnect under the new policy.
                 for peer in self.directory.follow(peers) {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
                     }
                 }
+
+                // Refresh the listener's admitted IP set so new inbound
+                // connections are checked against the latest follower policy.
                 self.listener
                     .0
                     .send_lossy(self.directory.listenable())
