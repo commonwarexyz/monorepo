@@ -7,7 +7,12 @@ license.workspace = true
 
 [features]
 default = [ "mocks" ]
-mocks = []
+mocks = [
+	"commonware-consensus/mocks",
+	"commonware-cryptography/mocks",
+	"commonware-p2p/mocks",
+	"commonware-resolver/mocks",
+]
 
 [package.metadata]
 cargo-fuzz = true
@@ -16,11 +21,11 @@ cargo-fuzz = true
 arbitrary = { workspace = true, features = ["derive"] }
 bytes.workspace = true
 commonware-codec.workspace = true
-commonware-consensus = { workspace = true, features = ["mocks", "arbitrary"] }
-commonware-cryptography = { workspace = true, features = ["mocks"] }
+commonware-consensus = { workspace = true, features = ["arbitrary"] }
+commonware-cryptography.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
-commonware-p2p = { workspace = true, features = ["mocks"] }
+commonware-p2p.workspace = true
 commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-runtime.workspace = true
