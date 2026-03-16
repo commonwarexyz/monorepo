@@ -31,6 +31,21 @@
 //! Any inbound connection attempts from an IP address that is not in the union of all registered
 //! peer sets will be rejected.
 //!
+//! ## External Peers
+//!
+//! [`AddressableManager::register_external`](crate::AddressableManager::register_external)
+//! allows a node to authorize an inbound-only peer by `(PublicKey, IpAddr)`.
+//! These peers:
+//!
+//! - may dial the node from the registered source IP
+//! - are never dialed by the node
+//! - are never inserted into tracked peer sets
+//! - are never returned by peer set queries or subscriptions
+//! - receive direct messages and messages sent to [`Recipients::All`](crate::Recipients::All)
+//!
+//! This is intended for simple, scoped clients that know which lookup node to dial out of band,
+//! but should not participate in the full peer-set management lifecycle.
+//!
 //! ## Messages
 //!
 //! Application-level data is exchanged using the `Data` message type. This structure contains:

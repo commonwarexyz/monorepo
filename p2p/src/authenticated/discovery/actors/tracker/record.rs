@@ -26,9 +26,6 @@ pub enum Address<C: PublicKey> {
     /// Can be upgraded to `Discovered`.
     Bootstrapper(Ingress),
 
-    /// Peer may dial us but will never be dialed or shared as part of discovery gossip.
-    External,
-
     /// Discovered this peer's address from other peers.
     ///
     /// The `usize` indicates the number of times dialing this record has failed.
@@ -112,18 +109,6 @@ impl<C: PublicKey> Record<C> {
         }
     }
 
-    /// Create a new record for an external peer.
-    pub const fn external() -> Self {
-        Self {
-            address: Address::External,
-            status: Status::Inert,
-            sets: 0,
-            persistent: true,
-            next_reservable_at: SystemTime::UNIX_EPOCH,
-            next_dial_at: SystemTime::UNIX_EPOCH,
-        }
-    }
-
     // ---------- Setters ----------
 
     /// Attempt to update the [Info] of a discovered peer.
@@ -131,7 +116,7 @@ impl<C: PublicKey> Record<C> {
     /// Returns true if the update was successful.
     pub fn update(&mut self, info: Info<C>) -> bool {
         match &self.address {
-            Address::Myself(_) | Address::External => false,
+            Address::Myself(_) => false,
             Address::Unknown | Address::Bootstrapper(_) => {
                 self.address = Address::Discovered(info, 0);
                 true
@@ -238,11 +223,6 @@ impl<C: PublicKey> Record<C> {
         !matches!(self.address, Address::Myself(_))
     }
 
-    /// Returns `true` if this record is for an external peer.
-    pub const fn is_external(&self) -> bool {
-        matches!(self.address, Address::External)
-    }
-
     /// Returns the number of peer sets this peer is part of.
     pub const fn sets(&self) -> usize {
         self.sets
@@ -292,7 +272,6 @@ impl<C: PublicKey> Record<C> {
             Address::Unknown => None,
             Address::Myself(info) => Some(&info.ingress),
             Address::Bootstrapper(ingress) => Some(ingress),
-            Address::External => None,
             Address::Discovered(info, _) => Some(&info.ingress),
         }
     }
@@ -304,7 +283,6 @@ impl<C: PublicKey> Record<C> {
             Address::Unknown => None,
             Address::Myself(info) => Some(info),
             Address::Bootstrapper(_) => None,
-            Address::External => None,
             Address::Discovered(info, _) => (self.status == Status::Active).then_some(info),
         }
         .cloned()
@@ -318,7 +296,7 @@ impl<C: PublicKey> Record<C> {
     ///   dial at least `min_fails` times.
     pub fn want(&self, min_fails: usize) -> bool {
         match self.address {
-            Address::Myself(_) | Address::External => false,
+            Address::Myself(_) => false,
             Address::Unknown | Address::Bootstrapper(_) => true,
             Address::Discovered(_, fails) => self.status != Status::Active && fails >= min_fails,
         }
@@ -337,10 +315,7 @@ impl<C: PublicKey> Record<C> {
     pub const fn eligible(&self) -> bool {
         match self.address {
             Address::Myself(_) => false,
-            Address::External
-            | Address::Bootstrapper(_)
-            | Address::Unknown
-            | Address::Discovered(_, _) => {
+            Address::Bootstrapper(_) | Address::Unknown | Address::Discovered(_, _) => {
                 self.sets > 0 || self.persistent
             }
         }
@@ -352,7 +327,7 @@ mod tests {
     use crate::authenticated::discovery::types;
     use commonware_cryptography::secp256r1::standard::{PrivateKey, PublicKey};
     use commonware_runtime::{deterministic, Runner};
-    use std::{net::SocketAddr, time::SystemTime};
+    use std::net::SocketAddr;
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -449,24 +424,6 @@ mod tests {
         assert!(record.eligible());
     }
 
-    #[test]
-    fn test_external_initial_state() {
-        let record = Record::<PublicKey>::external();
-        assert!(matches!(record.address, Address::External));
-        assert_eq!(record.status, Status::Inert);
-        assert_eq!(record.sets, 0);
-        assert!(record.persistent);
-        assert!(record.ingress().is_none());
-        assert!(record.sharable().is_none());
-        assert!(!record.want(0), "Should not request gossip from external peer");
-        assert!(!record.deletable());
-        assert!(record.eligible());
-        assert!(record.acceptable());
-        assert!(matches!(
-            record.dialable(SystemTime::UNIX_EPOCH, true, true),
-            DialStatus::Unavailable
-        ));
-    }
 
     #[test]
     fn test_unknown_to_discovered() {

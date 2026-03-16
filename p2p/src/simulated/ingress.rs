@@ -321,10 +321,6 @@ impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
     async fn track(&mut self, id: u64, peers: Set<Self::PublicKey>) {
         self.oracle.track(id, peers);
     }
-
-    async fn register_external(&mut self, peer: Self::PublicKey) {
-        self.oracle.register_external(peer);
-    }
 }
 
 /// Implementation of [crate::AddressableManager] for peers with [Address]es.

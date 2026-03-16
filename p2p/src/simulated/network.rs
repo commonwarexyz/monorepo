@@ -1333,7 +1333,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Manager, Provider, Receiver as _, Recipients, Sender as _};
+    use crate::{AddressableManager, Manager, Provider, Receiver as _, Recipients, Sender as _};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic, Quota, Runner as _};
     use futures::FutureExt;
@@ -1748,16 +1748,25 @@ mod tests {
             let tracked_a = ed25519::PrivateKey::from_seed(40).public_key();
             let tracked_b = ed25519::PrivateKey::from_seed(41).public_key();
             let external = ed25519::PrivateKey::from_seed(42).public_key();
+            let tracked_a_socket = SocketAddr::from(([1, 1, 1, 1], 1001));
+            let tracked_b_socket = SocketAddr::from(([2, 2, 2, 2], 1002));
+            let external_socket = SocketAddr::from(([3, 3, 3, 3], 1003));
 
-            let mut manager = oracle.manager();
+            let mut manager = oracle.socket_manager();
             let mut subscription = manager.subscribe().await;
-            manager.register_external(external.clone()).await;
+            manager
+                .register_external(external.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))
+                .await;
             manager
                 .track(
                     0,
-                    [tracked_a.clone(), tracked_b.clone(), external.clone()]
-                        .try_into()
-                        .unwrap(),
+                    [
+                        (tracked_a.clone(), tracked_a_socket.into()),
+                        (tracked_b.clone(), tracked_b_socket.into()),
+                        (external.clone(), external_socket.into()),
+                    ]
+                    .try_into()
+                    .unwrap(),
                 )
                 .await;
 
