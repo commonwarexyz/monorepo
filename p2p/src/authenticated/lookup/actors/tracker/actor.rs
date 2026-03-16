@@ -154,7 +154,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
 
                 // Send the updated listenable IPs to the listener.
-                self.listener.0.send_lossy(self.directory.listenable()).await;
+                self.listener
+                    .0
+                    .send_lossy(self.directory.listenable())
+                    .await;
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
@@ -166,7 +169,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 source_ip,
             } => {
                 self.directory.register_external(public_key, source_ip);
-                self.listener.0.send_lossy(self.directory.listenable()).await;
+                self.listener
+                    .0
+                    .send_lossy(self.directory.listenable())
+                    .await;
             }
             Message::Overwrite { peers } => {
                 let mut any_changed = false;
@@ -185,7 +191,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Send the updated listenable IPs to the listener (if any changes occurred).
                 if any_changed {
-                    self.listener.0.send_lossy(self.directory.listenable()).await;
+                    self.listener
+                        .0
+                        .send_lossy(self.directory.listenable())
+                        .await;
                 }
             }
             Message::PeerSet { index, responder } => {
@@ -252,7 +261,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
 
                 // Send the updated listenable IPs to the listener.
-                self.listener.0.send_lossy(self.directory.listenable()).await;
+                self.listener
+                    .0
+                    .send_lossy(self.directory.listenable())
+                    .await;
             }
             Message::Release { metadata } => {
                 // Clear the peer handle if it exists
@@ -263,7 +275,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             }
         }
     }
-
 }
 
 #[cfg(test)]
@@ -779,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn test_register_external_peer_connectable_but_not_tracked_or_dialable() {
+    fn test_register_external_peer_is_full_peer_while_tracked_and_external_when_untracked() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (cfg, mut listener_receiver) = test_config(PrivateKey::from_seed(0), false);
@@ -794,9 +805,22 @@ mod tests {
             let tracked_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
             let external_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
 
-            oracle.register_external(external_pk.clone(), external_ip).await;
+            oracle
+                .register_external(external_pk.clone(), external_ip)
+                .await;
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(registered_ips.contains(&external_ip));
+            assert!(mailbox.acceptable(external_pk.clone(), external_ip).await);
+            assert!(
+                !mailbox
+                    .acceptable(external_pk.clone(), tracked_addr.ip())
+                    .await
+            );
+            let dialable = mailbox.dialable().await;
+            assert!(
+                !dialable.peers.contains(&external_pk),
+                "external peers must not be dialed while untracked"
+            );
 
             let mut subscription = oracle.subscribe().await;
             oracle
@@ -812,17 +836,64 @@ mod tests {
                 .await;
             let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 0);
+            assert_eq!(
+                new,
+                [external_pk.clone(), tracked_pk.clone()]
+                    .try_into()
+                    .unwrap()
+            );
+            assert_eq!(
+                all,
+                [external_pk.clone(), tracked_pk.clone()]
+                    .try_into()
+                    .unwrap()
+            );
+
+            let dialable = mailbox.dialable().await;
+            assert!(dialable.peers.contains(&external_pk));
+            assert!(!mailbox.acceptable(external_pk.clone(), external_ip).await);
+            assert!(
+                mailbox
+                    .acceptable(external_pk.clone(), tracked_addr.ip())
+                    .await
+            );
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(
+                registered_ips.contains(&tracked_addr.ip())
+                    && !registered_ips.contains(&external_ip)
+            );
+
+            oracle
+                .track(
+                    1,
+                    [(tracked_pk.clone(), tracked_addr.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let _ = subscription.recv().await.unwrap();
+            let _ = listener_receiver.recv().await.unwrap();
+
+            oracle
+                .track(
+                    2,
+                    [(tracked_pk.clone(), tracked_addr.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 2);
             assert_eq!(new, [tracked_pk.clone()].try_into().unwrap());
             assert_eq!(all, [tracked_pk.clone()].try_into().unwrap());
 
-            assert!(mailbox.acceptable(external_pk.clone(), external_ip).await);
-            assert!(!mailbox.acceptable(external_pk.clone(), tracked_addr.ip()).await);
-            assert!(mailbox.listen(external_pk.clone()).await.is_some());
             let dialable = mailbox.dialable().await;
             assert!(
                 !dialable.peers.contains(&external_pk),
-                "external peers must never be dialed"
+                "external peers must stop being dialed once they fall back out of tracked sets"
             );
+            assert!(mailbox.acceptable(external_pk.clone(), external_ip).await);
+            assert!(!mailbox.acceptable(external_pk, tracked_addr.ip()).await);
 
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(registered_ips.contains(&tracked_addr.ip()));

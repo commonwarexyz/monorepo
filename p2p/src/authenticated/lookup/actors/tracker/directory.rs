@@ -143,12 +143,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .try_set(self.context.current().epoch_millis());
     }
 
-    /// Stores a persistent external peer that may dial us but will never be dialed.
+    /// Stores a persistent external fallback for a peer that may dial us when not currently tracked.
     pub fn register_external(&mut self, peer: C, source_ip: IpAddr) {
-        match self.peers.entry(peer) {
-            Entry::Occupied(_) => {}
+        match self.peers.entry(peer.clone()) {
+            Entry::Occupied(mut entry) => {
+                let record = entry.get_mut();
+                if record.is_myself() {
+                    return;
+                }
+                record.register_external(source_ip);
+            }
             Entry::Vacant(entry) => {
-                self.metrics.tracked.inc();
                 entry.insert(Record::external(source_ip));
             }
         }
@@ -180,11 +185,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         // Create and store new peer set (all peers are tracked regardless of address validity)
-        let peers: Map<_, _> = peers
-            .into_iter()
-            .filter(|(peer, _)| !self.peers.get(peer).is_some_and(Record::is_external))
-            .try_collect()
-            .expect("peer set remains unique after filtering");
         let mut changed_peers = Vec::new();
         for (peer, addr) in &peers {
             let record = match self.peers.entry(peer.clone()) {
@@ -195,11 +195,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                     }
                     entry
                 }
-                Entry::Vacant(entry) => {
-                    self.metrics.tracked.inc();
-                    entry.insert(Record::known(addr.clone()))
-                }
+                Entry::Vacant(entry) => entry.insert(Record::known(addr.clone())),
             };
+            if !record.is_myself() && record.sets() == 0 {
+                self.metrics.tracked.inc();
+            }
             record.increment();
         }
         self.sets.insert(index, peers.into_keys());
@@ -210,7 +210,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             let (index, set) = self.sets.pop_first().unwrap();
             debug!(index, "removed oldest peer set");
             set.into_iter().for_each(|peer| {
-                self.peers.get_mut(&peer).unwrap().decrement();
+                let record = self.peers.get_mut(&peer).unwrap();
+                record.decrement();
+                if !record.is_myself() && record.sets() == 0 {
+                    self.metrics.tracked.dec();
+                }
                 let deleted = self.delete_if_needed(&peer);
                 if deleted {
                     deleted_peers.push(peer);
@@ -233,7 +237,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let Some(record) = self.peers.get_mut(peer) else {
             return false;
         };
-        if record.is_external() {
+        if record.is_myself() || record.sets() == 0 {
             return false;
         }
         record.update(address)
@@ -304,7 +308,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     pub fn tracked(&self) -> Set<C> {
         self.peers
             .iter()
-            .filter(|(_, r)| r.sets() > 0 && !r.is_external())
+            .filter(|(_, r)| r.sets() > 0)
             .map(|(k, _)| k.clone())
             .try_collect()
             .expect("HashMap keys are unique")
@@ -451,7 +455,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // persists in PrioritySet even after the record is deleted. The metric
         // is decremented in unblock_expired when the block actually expires.
         self.peers.remove(peer);
-        self.metrics.tracked.dec();
         true
     }
 }

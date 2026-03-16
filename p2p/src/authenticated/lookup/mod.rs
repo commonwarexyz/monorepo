@@ -34,14 +34,18 @@
 //! ## External Peers
 //!
 //! [`AddressableManager::register_external`](crate::AddressableManager::register_external)
-//! allows a node to authorize an inbound-only peer by `(PublicKey, IpAddr)`.
-//! These peers:
+//! allows a node to register a fallback inbound-only peer by `(PublicKey, IpAddr)`.
+//! When that public key is not currently in any tracked peer set, the registered source IP is used
+//! to authorize inbound connections. These peers:
 //!
 //! - may dial the node from the registered source IP
-//! - are never dialed by the node
-//! - are never inserted into tracked peer sets
-//! - are never returned by peer set queries or subscriptions
+//! - are never dialed by the node while untracked
+//! - are not returned by peer set queries or subscriptions while untracked
 //! - receive direct messages and messages sent to [`Recipients::All`](crate::Recipients::All)
+//!
+//! If a later tracked peer set includes the same public key, normal tracked-peer semantics apply
+//! while it remains tracked. Once it leaves all tracked peer sets again, it falls back to the
+//! registered external behavior.
 //!
 //! This is intended for simple, scoped clients that know which lookup node to dial out of band,
 //! but should not participate in the full peer-set management lifecycle.

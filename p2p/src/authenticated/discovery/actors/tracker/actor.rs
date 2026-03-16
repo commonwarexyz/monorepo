@@ -160,7 +160,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 if !self.directory.add_set(index, peers.clone()) {
                     return;
                 }
-                let peers = self.directory.get_set(&index).cloned().unwrap();
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
@@ -853,7 +852,6 @@ mod tests {
             assert!(reservation_after_release.is_some());
         });
     }
-
 
     #[test]
     fn test_dialable_message() {

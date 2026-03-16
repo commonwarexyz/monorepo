@@ -23,7 +23,7 @@ pub enum Message<C: PublicKey> {
     /// Register a peer set at a given index.
     Register { index: u64, peers: Map<C, Address> },
 
-    /// Register an external peer that may dial us from a known source IP but will never be dialed.
+    /// Register an external fallback source IP for a peer that may dial us when not currently tracked.
     RegisterExternal { public_key: C, source_ip: IpAddr },
 
     /// Update addresses for multiple peers without creating a new peer set.

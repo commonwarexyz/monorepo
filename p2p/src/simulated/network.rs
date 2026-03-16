@@ -281,11 +281,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     }
                 }
 
-                // External peers are intentionally excluded from tracked peer sets.
-                let peers = Set::from_iter_dedup(
-                    peers.into_iter()
-                        .filter(|peer| !self.external_peers.contains(peer)),
-                );
+                let peers = Set::from_iter_dedup(peers);
 
                 // Create and store new peer set
                 for public_key in peers.iter() {
@@ -339,7 +335,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let (_, is_new) = self.ensure_peer_exists(&public_key).await;
 
                 // Broadcast when the connected peer set changes.
-                if is_new && (self.peer_sets.is_empty() || self.external_peers.contains(&public_key))
+                if is_new
+                    && (self.peer_sets.is_empty() || self.external_peers.contains(&public_key))
                 {
                     self.broadcast_peer_list().await;
                 }
@@ -426,7 +423,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let (_, is_new) = self.ensure_peer_exists(&public_key).await;
 
                 // Broadcast when the connected peer set changes.
-                if is_new && (self.peer_sets.is_empty() || self.external_peers.contains(&public_key))
+                if is_new
+                    && (self.peer_sets.is_empty() || self.external_peers.contains(&public_key))
                 {
                     self.broadcast_peer_list().await;
                 }
@@ -562,25 +560,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Get all peers that should receive `Recipients::All`.
     fn all_recipients(&self) -> Set<P> {
-        if self.peer_sets.is_empty() {
-            self.peers
-                .keys()
-                .cloned()
-                .try_collect()
-                .expect("BTreeMap keys are unique")
-        } else {
-            Set::from_iter_dedup(
-                self.peer_refs
-                    .keys()
-                    .cloned()
-                    .chain(
-                        self.external_peers
-                            .iter()
-                            .filter(|peer| self.peers.contains_key(*peer))
-                            .cloned(),
-                    ),
-            )
-        }
+        Set::from_iter_dedup(
+            self.all_tracked_peers().into_iter().chain(
+                self.external_peers
+                    .iter()
+                    .filter(|peer| {
+                        self.peers.contains_key(*peer) && !self.peer_refs.contains_key(*peer)
+                    })
+                    .cloned(),
+            ),
+        )
     }
 }
 
@@ -1336,7 +1325,7 @@ mod tests {
     use crate::{AddressableManager, Manager, Provider, Receiver as _, Recipients, Sender as _};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic, Quota, Runner as _};
-    use futures::FutureExt;
+    use futures::{FutureExt, StreamExt};
     use std::num::NonZeroU32;
 
     const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
@@ -1750,8 +1739,6 @@ mod tests {
             let external = ed25519::PrivateKey::from_seed(42).public_key();
             let tracked_a_socket = SocketAddr::from(([1, 1, 1, 1], 1001));
             let tracked_b_socket = SocketAddr::from(([2, 2, 2, 2], 1002));
-            let external_socket = SocketAddr::from(([3, 3, 3, 3], 1003));
-
             let mut manager = oracle.socket_manager();
             let mut subscription = manager.subscribe().await;
             manager
@@ -1763,7 +1750,6 @@ mod tests {
                     [
                         (tracked_a.clone(), tracked_a_socket.into()),
                         (tracked_b.clone(), tracked_b_socket.into()),
-                        (external.clone(), external_socket.into()),
                     ]
                     .try_into()
                     .unwrap(),
@@ -1771,11 +1757,20 @@ mod tests {
                 .await;
 
             let peer_set = manager.peer_set(0).await.unwrap();
-            assert_eq!(peer_set, [tracked_a.clone(), tracked_b.clone()].try_into().unwrap());
+            assert_eq!(
+                peer_set,
+                [tracked_a.clone(), tracked_b.clone()].try_into().unwrap()
+            );
             let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 0);
-            assert_eq!(new, [tracked_a.clone(), tracked_b.clone()].try_into().unwrap());
-            assert_eq!(all, [tracked_a.clone(), tracked_b.clone()].try_into().unwrap());
+            assert_eq!(
+                new,
+                [tracked_a.clone(), tracked_b.clone()].try_into().unwrap()
+            );
+            assert_eq!(
+                all,
+                [tracked_a.clone(), tracked_b.clone()].try_into().unwrap()
+            );
 
             let (mut tracked_a_sender, _tracked_a_recv) = oracle
                 .control(tracked_a.clone())
@@ -1836,6 +1831,165 @@ mod tests {
             let (sender, payload) = tracked_b_recv.recv().await.unwrap();
             assert_eq!(sender, external);
             assert_eq!(payload, b"from_external");
+        });
+    }
+
+    #[test]
+    fn test_external_peers_are_full_peers_while_tracked_and_fall_back_after_eviction() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(2),
+            };
+            let network_context = context.with_label("network");
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            let tracked = ed25519::PrivateKey::from_seed(50).public_key();
+            let external = ed25519::PrivateKey::from_seed(51).public_key();
+            let tracked_socket = SocketAddr::from(([4, 4, 4, 4], 1004));
+            let external_socket = SocketAddr::from(([5, 5, 5, 5], 1005));
+
+            let mut manager = oracle.socket_manager();
+            let mut subscription = manager.subscribe().await;
+            manager
+                .register_external(external.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))
+                .await;
+            manager
+                .track(
+                    0,
+                    [
+                        (tracked.clone(), tracked_socket.into()),
+                        (external.clone(), external_socket.into()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .await;
+
+            let peer_set = manager.peer_set(0).await.unwrap();
+            assert_eq!(
+                peer_set,
+                [tracked.clone(), external.clone()].try_into().unwrap()
+            );
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 0);
+            assert_eq!(new, [tracked.clone(), external.clone()].try_into().unwrap());
+            assert_eq!(all, [tracked.clone(), external.clone()].try_into().unwrap());
+
+            let (mut tracked_sender, _tracked_recv) = oracle
+                .control(tracked.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_external_sender, mut external_recv) = oracle
+                .control(external.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let link = ingress::Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(tracked.clone(), external.clone(), link)
+                .await
+                .unwrap();
+
+            let sent = tracked_sender
+                .send(Recipients::All, b"tracked", false)
+                .await
+                .unwrap();
+            assert_eq!(sent, vec![external.clone()]);
+            let (sender, payload) = external_recv.recv().await.unwrap();
+            assert_eq!(sender, tracked);
+            assert_eq!(payload, b"tracked");
+
+            manager
+                .track(
+                    1,
+                    [(tracked.clone(), tracked_socket.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let _ = subscription.recv().await.unwrap();
+            manager
+                .track(
+                    2,
+                    [(tracked.clone(), tracked_socket.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 2);
+            assert_eq!(new, [tracked.clone()].try_into().unwrap());
+            assert_eq!(all, [tracked.clone()].try_into().unwrap());
+
+            let sent = tracked_sender
+                .send(Recipients::All, b"fallback", false)
+                .await
+                .unwrap();
+            assert_eq!(sent, vec![external.clone()]);
+            let (sender, payload) = external_recv.recv().await.unwrap();
+            assert_eq!(sender, tracked);
+            assert_eq!(payload, b"fallback");
+        });
+    }
+
+    #[test]
+    fn test_connected_peer_subscription_excludes_untracked_non_external_peers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(2),
+            };
+            let network_context = context.with_label("network");
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            let mut connected = ConnectedPeerProvider::new(network.oracle_mailbox.clone());
+            network_context.spawn(|_| network.run());
+
+            let ordinary = ed25519::PrivateKey::from_seed(60).public_key();
+            let external = ed25519::PrivateKey::from_seed(61).public_key();
+
+            let mut receiver = connected.subscribe().await;
+            assert_eq!(
+                receiver.next().await.unwrap(),
+                Vec::<ed25519::PublicKey>::new()
+            );
+
+            let _ = oracle
+                .control(ordinary.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            assert_eq!(
+                receiver.next().await.unwrap(),
+                Vec::<ed25519::PublicKey>::new()
+            );
+
+            let _ = oracle
+                .control(external.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            assert_eq!(
+                receiver.next().await.unwrap(),
+                Vec::<ed25519::PublicKey>::new()
+            );
+
+            let mut manager = oracle.socket_manager();
+            manager
+                .register_external(external.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))
+                .await;
+            assert_eq!(receiver.next().await.unwrap(), vec![external]);
         });
     }
 

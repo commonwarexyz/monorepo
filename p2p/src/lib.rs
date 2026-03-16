@@ -283,7 +283,7 @@ stability_scope!(BETA {
             peers: Map<Self::PublicKey, Address>,
         ) -> impl Future<Output = ()> + Send;
 
-        /// Register a peer that may dial us but will never be dialed or included in tracked peer sets.
+        /// Register a peer that may dial us from a known source IP when it is not currently tracked.
         fn register_external(
             &mut self,
             peer: Self::PublicKey,

@@ -424,7 +424,6 @@ mod tests {
         assert!(record.eligible());
     }
 
-
     #[test]
     fn test_unknown_to_discovered() {
         let socket = test_socket();
