@@ -1741,6 +1741,9 @@ mod tests {
             let tracked_b_socket = SocketAddr::from(([2, 2, 2, 2], 1002));
             let mut manager = oracle.socket_manager();
             let mut subscription = manager.subscribe().await;
+
+            // Register one external peer and two tracked peers. Only the tracked
+            // peers should appear in peer-set queries and subscriptions.
             manager
                 .register_external(external.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))
                 .await;
@@ -1772,6 +1775,8 @@ mod tests {
                 [tracked_a.clone(), tracked_b.clone()].try_into().unwrap()
             );
 
+            // Connect all three peers and wire up links so we can exercise
+            // direct sends and Recipients::All delivery.
             let (mut tracked_a_sender, _tracked_a_recv) = oracle
                 .control(tracked_a.clone())
                 .register(0, TEST_QUOTA)
@@ -1806,6 +1811,7 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Recipients::All expands to tracked peers plus connected externals.
             let sent = tracked_a_sender
                 .send(Recipients::All, b"to_all", false)
                 .await
@@ -1822,6 +1828,7 @@ mod tests {
             assert_eq!(sender, tracked_a);
             assert_eq!(payload, b"to_all");
 
+            // External peers can also send directly to tracked peers.
             let sent = external_sender
                 .send(Recipients::One(tracked_b.clone()), b"from_external", false)
                 .await
@@ -1854,6 +1861,9 @@ mod tests {
 
             let mut manager = oracle.socket_manager();
             let mut subscription = manager.subscribe().await;
+
+            // Start with an external registration, then add the same peer to a
+            // tracked set so it behaves like a normal tracked peer.
             manager
                 .register_external(external.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))
                 .await;
@@ -1879,6 +1889,8 @@ mod tests {
             assert_eq!(new, [tracked.clone(), external.clone()].try_into().unwrap());
             assert_eq!(all, [tracked.clone(), external.clone()].try_into().unwrap());
 
+            // While tracked, Recipients::All should reach the peer through the
+            // tracked-peer expansion.
             let (mut tracked_sender, _tracked_recv) = oracle
                 .control(tracked.clone())
                 .register(0, TEST_QUOTA)
@@ -1909,6 +1921,9 @@ mod tests {
             assert_eq!(sender, tracked);
             assert_eq!(payload, b"tracked");
 
+            // Evict the set that tracked the external peer. It should disappear
+            // from tracked views but still receive Recipients::All as an external
+            // fallback peer.
             manager
                 .track(
                     1,
@@ -1965,6 +1980,8 @@ mod tests {
                 Vec::<ed25519::PublicKey>::new()
             );
 
+            // Ordinary connected peers are ignored until they are either tracked
+            // or explicitly registered as external.
             let _ = oracle
                 .control(ordinary.clone())
                 .register(0, TEST_QUOTA)
@@ -1985,6 +2002,8 @@ mod tests {
                 Vec::<ed25519::PublicKey>::new()
             );
 
+            // Once one peer is marked external, the connected-peer subscription
+            // exposes only that peer, not all untracked connections.
             let mut manager = oracle.socket_manager();
             manager
                 .register_external(external.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))

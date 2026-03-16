@@ -132,13 +132,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
-                let Some((deleted, changed)) = self.directory.add_set(index, peers) else {
+                let Some((removed, changed)) = self.directory.add_set(index, peers) else {
                     return;
                 };
                 let peer_keys = self.directory.get_set(&index).cloned().unwrap();
 
-                // Kill connections for peers no longer in any tracked peer set.
-                for peer in deleted {
+                // Kill connections for peers that left the tracked set view. If a
+                // peer has external fallback registration, it must reconnect under
+                // that fallback policy instead of keeping the tracked session alive.
+                for peer in removed {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
                     }
@@ -183,7 +185,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     }
                     any_changed = true;
 
-                    // Kill the existing connection since it was established to the old address.
+                    // Kill the existing connection since it was established to
+                    // the old tracked address.
                     if let Some(mut peer) = self.mailboxes.remove(&public_key) {
                         peer.kill().await;
                     }
@@ -805,6 +808,8 @@ mod tests {
             let tracked_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
             let external_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
 
+            // Register a fallback external peer. While it is untracked, only the
+            // external IP is acceptable and the peer must never be dialed.
             oracle
                 .register_external(external_pk.clone(), external_ip)
                 .await;
@@ -822,6 +827,8 @@ mod tests {
                 "external peers must not be dialed while untracked"
             );
 
+            // Add the same public key to a tracked set. At this point it becomes a
+            // full lookup peer and participates in peer-set subscriptions.
             let mut subscription = oracle.subscribe().await;
             oracle
                 .track(
@@ -863,6 +870,8 @@ mod tests {
                     && !registered_ips.contains(&external_ip)
             );
 
+            // Evict the peer from every tracked set. The peer should disappear from
+            // tracked views and fall back to external admission again.
             oracle
                 .track(
                     1,
@@ -898,6 +907,165 @@ mod tests {
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(registered_ips.contains(&tracked_addr.ip()));
             assert!(registered_ips.contains(&external_ip));
+        });
+    }
+
+    #[test]
+    fn test_live_external_connection_reconnects_when_peer_becomes_tracked_and_overwritten() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (cfg, mut listener_receiver) = test_config(PrivateKey::from_seed(0), false);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let external_pk = new_signer_and_pk(1).1;
+            let external_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+            let tracked_addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
+            let tracked_addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(7, 7, 7, 7)), 9002);
+
+            // Admit the peer through the external fallback and establish a live
+            // inbound session before the peer is tracked anywhere.
+            oracle
+                .register_external(external_pk.clone(), external_ip)
+                .await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&external_ip));
+
+            let reservation = mailbox.listen(external_pk.clone()).await;
+            assert!(reservation.is_some());
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            mailbox.connect(external_pk.clone(), peer_mailbox);
+
+            // Start tracking the same peer. Because the peer now has a tracked
+            // address, the existing external session must be replaced.
+            oracle
+                .track(
+                    0,
+                    [(external_pk.clone(), tracked_addr_a.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&tracked_addr_a.ip()));
+            assert!(!registered_ips.contains(&external_ip));
+            assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)));
+            drop(reservation);
+            context.sleep(Duration::from_millis(1_010)).await;
+            assert!(!mailbox.acceptable(external_pk.clone(), external_ip).await);
+            assert!(
+                mailbox
+                    .acceptable(external_pk.clone(), tracked_addr_a.ip())
+                    .await
+            );
+
+            // Re-establish the peer as a tracked connection, then overwrite the
+            // tracked address. This also forces a reconnect, matching main.
+            let reservation = mailbox.listen(external_pk.clone()).await;
+            assert!(reservation.is_some());
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            mailbox.connect(external_pk.clone(), peer_mailbox);
+            oracle
+                .overwrite([(external_pk.clone(), tracked_addr_b.into())].try_into().unwrap())
+                .await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&tracked_addr_b.ip()));
+            assert!(!registered_ips.contains(&tracked_addr_a.ip()));
+            assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)));
+
+            // Once that session is released, the latest tracked policy governs
+            // the next admission attempt.
+            drop(reservation);
+            context.sleep(Duration::from_millis(1_010)).await;
+            assert!(!mailbox.acceptable(external_pk.clone(), external_ip).await);
+            assert!(
+                !mailbox
+                    .acceptable(external_pk.clone(), tracked_addr_a.ip())
+                    .await
+            );
+            assert!(
+                mailbox
+                    .acceptable(external_pk.clone(), tracked_addr_b.ip())
+                    .await
+            );
+        });
+    }
+
+    #[test]
+    fn test_live_tracked_connection_reconnects_under_external_fallback_after_eviction() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (mut cfg, mut listener_receiver) = test_config(PrivateKey::from_seed(0), false);
+            cfg.tracked_peer_sets = 1;
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let external_pk = new_signer_and_pk(1).1;
+            let tracked_pk = new_signer_and_pk(2).1;
+            let tracked_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
+            let tracked_addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(7, 7, 7, 7)), 9002);
+            let external_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+
+            // Give the peer an external fallback, then add it to the only tracked
+            // set so it behaves like a normal lookup peer.
+            oracle
+                .register_external(external_pk.clone(), external_ip)
+                .await;
+            let _ = listener_receiver.recv().await.unwrap();
+            oracle
+                .track(
+                    0,
+                    [(external_pk.clone(), tracked_addr.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&tracked_addr.ip()));
+            assert!(!registered_ips.contains(&external_ip));
+
+            let reservation = mailbox.listen(external_pk.clone()).await;
+            assert!(reservation.is_some());
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            mailbox.connect(external_pk.clone(), peer_mailbox);
+
+            // Evict the tracked set. The live session is torn down immediately so
+            // the peer must reconnect under the external fallback policy.
+            oracle
+                .track(
+                    1,
+                    [(tracked_pk.clone(), tracked_addr_2.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&tracked_addr_2.ip()));
+            assert!(registered_ips.contains(&external_ip));
+            assert!(!registered_ips.contains(&tracked_addr.ip()));
+            assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)));
+
+            // After the tracked session is released, the peer is external-only
+            // again and must reconnect from the external IP.
+            drop(reservation);
+            context.sleep(Duration::from_millis(1_010)).await;
+            let dialable = mailbox.dialable().await;
+            assert!(
+                !dialable.peers.contains(&external_pk),
+                "external peers must not remain dialable after the fallback"
+            );
+            assert!(mailbox.acceptable(external_pk.clone(), external_ip).await);
+            assert!(
+                !mailbox
+                    .acceptable(external_pk.clone(), tracked_addr.ip())
+                    .await
+            );
         });
     }
 

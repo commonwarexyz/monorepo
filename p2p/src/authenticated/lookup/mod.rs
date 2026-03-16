@@ -47,6 +47,10 @@
 //! while it remains tracked. Once it leaves all tracked peer sets again, it falls back to the
 //! registered external behavior.
 //!
+//! When an external-backed peer leaves its last tracked set, any live connection is disconnected
+//! and the peer must reconnect under the external fallback policy. Tracked address updates also
+//! disconnect live sessions immediately, matching normal tracked-peer behavior.
+//!
 //! This is intended for simple, scoped clients that know which lookup node to dial out of band,
 //! but should not participate in the full peer-set management lifecycle.
 //!
@@ -2188,6 +2192,111 @@ mod tests {
             assert!(received0);
             let (sender, _) = receiver2.recv().await.unwrap();
             assert_eq!(sender, peer1.public_key());
+        });
+    }
+
+    #[test_traced]
+    fn test_external_peer_end_to_end_lookup_network() {
+        let base_port = 7_000;
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let server_sk = ed25519::PrivateKey::from_seed(0);
+            let server_pk = server_sk.public_key();
+            let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
+
+            let external_sk = ed25519::PrivateKey::from_seed(1);
+            let external_pk = external_sk.public_key();
+            let external_addr =
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port.saturating_add(1));
+
+            // Start the lookup node that will admit the external peer only by
+            // its public key and source IP.
+            let server_cfg = Config::test(server_sk, server_addr, MAX_MESSAGE_SIZE);
+            let (mut server_network, mut server_oracle) =
+                Network::new(context.with_label("server"), server_cfg);
+            let (mut server_sender, mut server_receiver) = server_network.register(
+                0,
+                Quota::per_second(NZU32!(100)),
+                DEFAULT_MESSAGE_BACKLOG,
+            );
+            server_network.start();
+            server_oracle
+                .register_external(external_pk.clone(), external_addr.ip())
+                .await;
+
+            // Start the external node with a normal tracked view of the server so
+            // it can dial the server through the full lookup/dialer stack.
+            let external_cfg = Config::test(external_sk, external_addr, MAX_MESSAGE_SIZE);
+            let (mut external_network, mut external_oracle) =
+                Network::new(context.with_label("external"), external_cfg);
+            let (mut external_sender, mut external_receiver) = external_network.register(
+                0,
+                Quota::per_second(NZU32!(100)),
+                DEFAULT_MESSAGE_BACKLOG,
+            );
+            external_network.start();
+            let external_peer_set: Map<_, _> = [
+                (server_pk.clone(), server_addr.into()),
+                (external_pk.clone(), external_addr.into()),
+            ]
+            .try_into()
+            .unwrap();
+            external_oracle.track(0, external_peer_set).await;
+
+            // Wait for the external node to complete the real listener/handshake
+            // path into the server, then verify server-side delivery.
+            loop {
+                let sent = external_sender
+                    .send(
+                        Recipients::One(server_pk.clone()),
+                        b"external_to_server".to_vec(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                if sent == vec![server_pk.clone()] {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+            let (sender, payload) = server_receiver.recv().await.unwrap();
+            assert_eq!(sender, external_pk);
+            assert_eq!(payload, b"external_to_server");
+
+            // Once connected, the server can target the external peer directly
+            // even though the peer is not in any tracked set on the server.
+            loop {
+                let sent = server_sender
+                    .send(
+                        Recipients::One(external_pk.clone()),
+                        b"server_to_external".to_vec(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                if sent == vec![external_pk.clone()] {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+            let (sender, payload) = external_receiver.recv().await.unwrap();
+            assert_eq!(sender, server_pk);
+            assert_eq!(payload, b"server_to_external");
+
+            // Recipients::All should also reach the connected external peer.
+            loop {
+                let sent = server_sender
+                    .send(Recipients::All, b"server_to_all".to_vec(), true)
+                    .await
+                    .unwrap();
+                if sent == vec![external_pk.clone()] {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+            let (sender, payload) = external_receiver.recv().await.unwrap();
+            assert_eq!(sender, server_pk);
+            assert_eq!(payload, b"server_to_all");
         });
     }
 }

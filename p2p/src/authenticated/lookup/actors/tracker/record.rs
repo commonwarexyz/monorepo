@@ -110,7 +110,8 @@ impl Record {
 
     /// Update the tracked address for this record.
     ///
-    /// Returns `true` if the tracked address changed, `false` otherwise.
+    /// Returns `true` if the tracked address changed and any live connection
+    /// should be replaced immediately.
     pub fn update(&mut self, addr: types::Address) -> bool {
         match &mut self.address {
             Address::Myself => false,
@@ -119,7 +120,7 @@ impl Record {
                     address: addr,
                     source_ip: *source_ip,
                 };
-                false
+                true
             }
             Address::Known(existing) => {
                 if *existing == addr {
@@ -374,6 +375,9 @@ mod tests {
     fn test_external_initial_state() {
         let source_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         let wrong_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+
+        // External-only records admit inbound connections from the configured
+        // source IP, but they are never dialable.
         let record = Record::external(source_ip);
         assert!(matches!(record.address, Address::External(ip) if ip == source_ip));
         assert_eq!(record.status, Status::Inert);
@@ -400,7 +404,9 @@ mod tests {
         let tracked_ip = tracked.egress_ip();
         let mut record = Record::external(source_ip);
 
-        assert!(!record.update(tracked.clone()));
+        // Registering a tracked address preserves the external fallback instead of
+        // replacing it.
+        assert!(record.update(tracked.clone()));
         assert!(matches!(
             record.address,
             Address::KnownExternal {
@@ -411,17 +417,46 @@ mod tests {
         assert!(record.ingress().is_none());
         assert_eq!(record.egress_ip(), Some(source_ip));
 
+        // While tracked, the record behaves like a normal lookup peer.
         record.increment();
         assert_eq!(record.ingress(), Some(tracked.ingress()));
         assert_eq!(record.egress_ip(), Some(tracked_ip));
         assert!(record.acceptable(tracked_ip, false));
         assert!(!record.acceptable(source_ip, false));
 
+        // Once the last tracked set is removed, the record falls back to the
+        // external admission IP without any extra cleanup.
         record.decrement();
         assert!(record.ingress().is_none());
         assert_eq!(record.egress_ip(), Some(source_ip));
         assert!(record.acceptable(source_ip, false));
         assert!(!record.acceptable(tracked_ip, false));
+    }
+
+    #[test]
+    fn test_known_external_updates_tracked_address_with_reconnect_signal() {
+        let source_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+        let tracked_a = test_address();
+        let tracked_b = types::Address::Symmetric(SocketAddr::from(([54, 12, 1, 10], 8081)));
+        let mut record = Record::external(source_ip);
+
+        // First tracked address registration records the tracked endpoint while
+        // preserving the external fallback and requests a reconnect.
+        assert!(record.update(tracked_a.clone()));
+        record.increment();
+        assert_eq!(record.ingress(), Some(tracked_a.ingress()));
+
+        // Updating the tracked endpoint for an external-backed peer also
+        // requests a reconnect, matching normal tracked-peer behavior.
+        assert!(record.update(tracked_b.clone()));
+        assert_eq!(record.ingress(), Some(tracked_b.ingress()));
+        assert_eq!(record.egress_ip(), Some(tracked_b.egress_ip()));
+
+        // If the peer becomes untracked again, the original external IP still
+        // governs future inbound admissions.
+        record.decrement();
+        assert_eq!(record.ingress(), None);
+        assert_eq!(record.egress_ip(), Some(source_ip));
     }
 
     #[test]

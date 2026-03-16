@@ -161,12 +161,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Stores a new peer set.
     ///
-    /// Returns `Some((deleted_peers, changed_peers))` on success, where:
-    /// - `deleted_peers`: peers removed due to max_sets eviction
-    /// - `changed_peers`: existing peers whose addresses were updated
+    /// Returns `Some((removed_peers, changed_peers))` on success, where:
+    /// - `removed_peers`: peers that are no longer part of any tracked peer set
+    /// - `changed_peers`: existing peers whose addresses were updated and whose
+    ///   live connection should be replaced immediately
     ///
-    /// The caller should sever connections for `changed_peers` since those
-    /// connections were established to the old address and must be replaced.
+    /// The caller should sever connections for `removed_peers` and
+    /// `changed_peers`. Peers that fall back to external registration after
+    /// leaving their last tracked set must reconnect under the external policy.
     ///
     /// Returns `None` if the peer set index is invalid (already exists or not monotonically increasing).
     pub fn add_set(&mut self, index: u64, peers: Map<C, Address>) -> Option<(Vec<C>, Vec<C>)> {
@@ -205,7 +207,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.sets.insert(index, peers.into_keys());
 
         // Remove oldest entries if necessary
-        let mut deleted_peers = Vec::new();
+        let mut removed_peers = Vec::new();
         while self.sets.len() > self.max_sets {
             let (index, set) = self.sets.pop_first().unwrap();
             debug!(index, "removed oldest peer set");
@@ -214,25 +216,21 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 record.decrement();
                 if !record.is_myself() && record.sets() == 0 {
                     self.metrics.tracked.dec();
+                    removed_peers.push(peer.clone());
                 }
-                let deleted = self.delete_if_needed(&peer);
-                if deleted {
-                    deleted_peers.push(peer);
-                }
+                let _ = self.delete_if_needed(&peer);
             });
         }
 
-        Some((deleted_peers, changed_peers))
+        Some((removed_peers, changed_peers))
     }
 
     /// Update a tracked peer's address.
     ///
-    /// Returns `true` if the peer exists and the address actually changed.
+    /// Returns `true` if the peer exists, is tracked, and its address actually changed.
+    ///
     /// The caller should sever any existing connection to this peer since it
     /// was established to the old address.
-    ///
-    /// Returns `false` if the peer is not tracked, is ourselves, or the
-    /// new address is identical to the existing one.
     pub fn overwrite(&mut self, peer: &C, address: Address) -> bool {
         let Some(record) = self.peers.get_mut(peer) else {
             return false;
@@ -514,7 +512,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let (deleted, _) = directory
+            let (removed, _) = directory
                 .add_set(
                     0,
                     [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
@@ -523,11 +521,11 @@ mod tests {
                 )
                 .unwrap();
             assert!(
-                deleted.is_empty(),
-                "No peers should be deleted on first set"
+                removed.is_empty(),
+                "No peers should be removed from the tracked view on first set"
             );
 
-            let (deleted, _) = directory
+            let (removed, _) = directory
                 .add_set(
                     1,
                     [(pk_2.clone(), addr(addr_2)), (pk_3.clone(), addr(addr_3))]
@@ -535,19 +533,68 @@ mod tests {
                         .unwrap(),
                 )
                 .unwrap();
-            assert_eq!(deleted.len(), 1, "One peer should be deleted");
-            assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");
+            assert_eq!(removed.len(), 1, "One peer should leave the tracked view");
+            assert!(removed.contains(&pk_1), "Removed peer should be pk_1");
 
-            let (deleted, _) = directory
+            let (removed, _) = directory
                 .add_set(2, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
-            assert_eq!(deleted.len(), 1, "One peer should be deleted");
-            assert!(deleted.contains(&pk_2), "Deleted peer should be pk_2");
+            assert_eq!(removed.len(), 1, "One peer should leave the tracked view");
+            assert!(removed.contains(&pk_2), "Removed peer should be pk_2");
 
-            let (deleted, _) = directory
+            let (removed, _) = directory
                 .add_set(3, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
-            assert!(deleted.is_empty(), "No peers should be deleted");
+            assert!(removed.is_empty(), "No peers should leave the tracked view");
+        });
+    }
+
+    #[test]
+    fn test_add_set_return_value_includes_external_fallback_peers_that_exit_tracking() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let source_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            // Track an external-backed peer so it behaves like a full tracked
+            // peer. This now reports the peer as changed because any live
+            // external session must reconnect under tracked semantics.
+            directory.register_external(pk_1.clone(), source_ip);
+            let (removed, changed) = directory
+                .add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap())
+                .unwrap();
+            assert!(removed.is_empty());
+            assert_eq!(changed, vec![pk_1.clone()]);
+
+            // Evict that set. The peer record persists as external fallback, but
+            // it must still be reported as leaving the tracked view.
+            let (removed, changed) = directory
+                .add_set(1, [(pk_2.clone(), addr(addr_2))].try_into().unwrap())
+                .unwrap();
+            assert_eq!(removed, vec![pk_1.clone()]);
+            assert!(changed.is_empty());
+
+            // The peer remains external-only after leaving the tracked view.
+            assert!(directory.peers.contains_key(&pk_1));
+            assert_eq!(directory.peers.get(&pk_1).unwrap().ingress(), None);
+            assert_eq!(directory.peers.get(&pk_1).unwrap().egress_ip(), Some(source_ip));
         });
     }
 
@@ -2154,6 +2201,55 @@ mod tests {
     }
 
     #[test]
+    fn test_overwrite_external_backed_peer_requires_reconnect() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let pk_2 = ed25519::PrivateKey::from_seed(2).public_key();
+        let source_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
+        let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10)), 1237);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            // Register an external fallback, then begin tracking the same peer.
+            directory.register_external(pk_1.clone(), source_ip);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // Overwriting the tracked address for an external-backed peer still
+            // requires a reconnect, matching normal tracked-peer behavior.
+            assert!(directory.overwrite(&pk_1, addr(addr_2)));
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(addr_2))
+            );
+            assert_eq!(directory.peers.get(&pk_1).unwrap().egress_ip(), Some(addr_2.ip()));
+
+            // Once the tracked set is evicted, the original external fallback IP
+            // still governs the peer.
+            directory.add_set(1, [(pk_2.clone(), addr(addr_3))].try_into().unwrap());
+            assert_eq!(directory.peers.get(&pk_1).unwrap().ingress(), None);
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().egress_ip(),
+                Some(source_ip)
+            );
+        });
+    }
+
+    #[test]
     fn test_overwrite_same_address() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
@@ -2176,14 +2272,14 @@ mod tests {
 
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
-            // First update with different address should succeed
+            // First update with different address should request a reconnect.
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
             assert!(directory.overwrite(&pk_1, addr(addr_2)));
 
-            // Update with same address should return false (no change)
+            // Updating to the same address is a no-op.
             assert!(!directory.overwrite(&pk_1, addr(addr_2)));
 
-            // Update with different address should succeed again
+            // Another tracked-address change again requires a reconnect.
             let addr_3 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10)), 1237);
             assert!(directory.overwrite(&pk_1, addr(addr_3)));
         });

@@ -284,6 +284,16 @@ stability_scope!(BETA {
         ) -> impl Future<Output = ()> + Send;
 
         /// Register a peer that may dial us from a known source IP when it is not currently tracked.
+        ///
+        /// This is a fallback admission rule, not tracked peer-set membership:
+        /// - the peer may connect from `source_ip` when it is absent from all tracked sets
+        /// - the peer is never dialed while it is untracked
+        /// - the peer is excluded from peer-set queries and subscriptions while it is untracked
+        /// - the peer still receives direct messages and messages sent to [`Recipients::All`](crate::Recipients::All)
+        ///
+        /// If a later tracked peer set includes the same public key, normal tracked-peer semantics
+        /// apply while it remains tracked. Entering or leaving tracked mode disconnects any live
+        /// session so the peer reconnects under the current policy.
         fn register_external(
             &mut self,
             peer: Self::PublicKey,
