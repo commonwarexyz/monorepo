@@ -228,6 +228,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Update a tracked peer's address.
     ///
     /// Returns `true` if the peer exists, is tracked, and its address actually changed.
+    /// Returns `false` if the peer does not exist, is not tracked, or its address did not change.
     ///
     /// The caller should sever any existing connection to this peer since it
     /// was established to the old address.
