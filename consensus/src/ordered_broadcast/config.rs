@@ -18,7 +18,7 @@ pub struct Config<
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Context<C::PublicKey>, Digest = D>,
-    R: Relay<Digest = D>,
+    R: Relay<Digest = D, PublicKey = C::PublicKey, Plan = ()>,
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     T: Strategy,
