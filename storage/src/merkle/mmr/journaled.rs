@@ -82,7 +82,7 @@ pub struct Config {
 /// Determines how to handle existing persistent data based on sync boundaries:
 /// - **Fresh Start**: Existing data < range start → discard and start fresh
 /// - **Prune and Reuse**: range contains existing data → prune and reuse
-/// - **Prune and Rewind**: existing data > range end → prune and rewind to range end
+/// - **Error**: existing data > range end
 pub struct SyncConfig<D: Digest> {
     /// Base MMR configuration (journal, metadata, etc.)
     pub config: Config,
