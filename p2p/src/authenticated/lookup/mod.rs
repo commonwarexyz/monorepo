@@ -2222,7 +2222,11 @@ mod tests {
                 server_network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             server_network.start();
             server_oracle
-                .follow([(follower_pk.clone(), follower_addr.ip())].try_into().unwrap())
+                .follow(
+                    [(follower_pk.clone(), follower_addr.ip())]
+                        .try_into()
+                        .unwrap(),
+                )
                 .await;
 
             // Start the follower node with a normal tracked view of the server so

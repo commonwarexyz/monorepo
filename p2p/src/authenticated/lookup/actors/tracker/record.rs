@@ -358,7 +358,10 @@ impl Record {
 
     /// Returns `true` if this record currently has follower fallback configured.
     pub const fn is_followed(&self) -> bool {
-        matches!(self.address, Address::Follower(_) | Address::KnownFollower { .. })
+        matches!(
+            self.address,
+            Address::Follower(_) | Address::KnownFollower { .. }
+        )
     }
 }
 #[cfg(test)]

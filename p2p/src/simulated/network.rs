@@ -544,12 +544,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// that don't use peer sets).
     fn all_tracked_peers(&self) -> Set<P> {
         if self.peer_sets.is_empty() && self.tracked_peer_sets.is_none() {
-                self.peers
-                    .keys()
-                    .filter(|peer| !self.follower_peers.contains(*peer))
-                    .cloned()
-                    .try_collect()
-                    .expect("BTreeMap keys are unique")
+            self.peers
+                .keys()
+                .filter(|peer| !self.follower_peers.contains(*peer))
+                .cloned()
+                .try_collect()
+                .expect("BTreeMap keys are unique")
         } else {
             self.peer_refs
                 .keys()
@@ -1747,9 +1747,11 @@ mod tests {
             // Follow one peer and track two others. Only the tracked
             // peers should appear in peer-set queries and subscriptions.
             manager
-                .follow([(follower.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))]
-                    .try_into()
-                    .unwrap())
+                .follow(
+                    [(follower.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))]
+                        .try_into()
+                        .unwrap(),
+                )
                 .await;
             manager
                 .track(
@@ -1869,9 +1871,11 @@ mod tests {
             // Start by following a peer, then add the same peer to a
             // tracked set so it behaves like a normal tracked peer.
             manager
-                .follow([(follower.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))]
-                    .try_into()
-                    .unwrap())
+                .follow(
+                    [(follower.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))]
+                        .try_into()
+                        .unwrap(),
+                )
                 .await;
             manager
                 .track(
@@ -2012,9 +2016,11 @@ mod tests {
             // exposes only that peer, not all untracked connections.
             let mut manager = oracle.socket_manager();
             manager
-                .follow([(follower.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))]
-                    .try_into()
-                    .unwrap())
+                .follow(
+                    [(follower.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))]
+                        .try_into()
+                        .unwrap(),
+                )
                 .await;
             assert_eq!(receiver.next().await.unwrap(), vec![follower.clone()]);
 
