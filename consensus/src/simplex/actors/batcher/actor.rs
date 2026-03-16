@@ -28,6 +28,7 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, mpsc},
     ordered::{Quorum, Set},
 };
+use core::num::NonZeroU64;
 use prometheus_client::metrics::{
     counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
 };
@@ -67,6 +68,7 @@ where
     skip_timeout: ViewDelta,
     forwarding: ForwardingPolicy,
     epoch: Epoch,
+    term_length: NonZeroU64,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -154,6 +156,7 @@ where
                 skip_timeout: cfg.skip_timeout,
                 forwarding: cfg.forwarding,
                 epoch: cfg.epoch,
+                term_length: cfg.term_length,
 
                 mailbox_receiver: receiver,
 
@@ -365,7 +368,14 @@ where
                 Message::Constructed(message) => {
                     // If the view isn't interesting, we can skip
                     let view = message.view();
-                    if !interesting(self.activity_timeout, finalized, current.view, view, false) {
+                    if !interesting(
+                        self.activity_timeout,
+                        finalized,
+                        current.view,
+                        view,
+                        false,
+                        self.term_length,
+                    ) {
                         continue;
                     }
 
@@ -407,7 +417,8 @@ where
                     finalized,
                     current.view,
                     view,
-                    true, // allow future
+                    true,
+                    self.term_length,
                 ) {
                     continue;
                 }
@@ -510,7 +521,14 @@ where
 
                 // If the view isn't interesting, we can skip
                 let view = message.view();
-                if !interesting(self.activity_timeout, finalized, current.view, view, false) {
+                if !interesting(
+                    self.activity_timeout,
+                    finalized,
+                    current.view,
+                    view,
+                    false,
+                    self.term_length,
+                ) {
                     continue;
                 }
                 self.record_activity(&sender, view);
@@ -651,7 +669,14 @@ where
 
                 // Drop any rounds that are no longer interesting
                 while work.first_key_value().is_some_and(|(&view, _)| {
-                    !interesting(self.activity_timeout, finalized, current.view, view, false)
+                    !interesting(
+                        self.activity_timeout,
+                        finalized,
+                        current.view,
+                        view,
+                        false,
+                        self.term_length,
+                    )
                 }) {
                     work.pop_first();
                 }

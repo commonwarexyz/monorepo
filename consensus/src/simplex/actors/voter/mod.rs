@@ -13,10 +13,11 @@ pub use actor::Actor;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::paged::CacheRef;
+use core::num::{NonZeroU64, NonZeroUsize};
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::Message;
-use std::{num::NonZeroUsize, time::Duration};
+use std::time::Duration;
 
 pub struct Config<
     S: Scheme,
@@ -41,6 +42,7 @@ pub struct Config<
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
     pub activity_timeout: ViewDelta,
+    pub term_length: NonZeroU64,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
     pub page_cache: CacheRef,
@@ -84,7 +86,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics, Quota, Runner,
     };
-    use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize, NZU16};
+    use commonware_utils::{channel::mpsc, sync::Mutex, NZUsize, NZU16, NZU64};
     use futures::FutureExt;
     use std::{
         num::{NonZeroU16, NonZeroU32},
@@ -208,6 +210,7 @@ mod tests {
             certification_timeout,
             timeout_retry,
             activity_timeout: ViewDelta::new(10),
+            term_length: NZU64!(1),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
             page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -358,6 +361,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -597,6 +601,7 @@ mod tests {
                 certification_timeout: Duration::from_millis(1000),
                 timeout_retry: Duration::from_millis(1000),
                 activity_timeout,
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1276,6 +1281,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1424,8 +1430,9 @@ mod tests {
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
             let elector_config = RoundRobin::<Sha256>::default();
-            let temp_elector: RoundRobinElector<S> =
-                elector_config.clone().build(schemes[0].participants());
+            let temp_elector: RoundRobinElector<S> = elector_config
+                .clone()
+                .build(schemes[0].participants(), NZU64!(1));
             let leader_idx = temp_elector.elect(view2_round, None);
             let leader = participants[usize::from(leader_idx)].clone();
 
@@ -1471,6 +1478,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1678,6 +1686,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1769,6 +1778,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1912,6 +1922,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
@@ -2339,6 +2350,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout,
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2560,6 +2572,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2772,6 +2785,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2952,6 +2966,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3321,6 +3336,7 @@ mod tests {
                 certification_timeout: Duration::from_millis(250),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3622,6 +3638,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3758,6 +3775,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3892,6 +3910,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4092,6 +4111,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4348,7 +4368,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(&participants.clone().try_into().unwrap());
+                .build(&participants.clone().try_into().unwrap(), NZU64!(1));
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -4477,7 +4497,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(&participants.clone().try_into().unwrap());
+                .build(&participants.clone().try_into().unwrap(), NZU64!(1));
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -4639,7 +4659,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(&participants.clone().try_into().unwrap());
+                .build(&participants.clone().try_into().unwrap(), NZU64!(1));
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -4972,6 +4992,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5085,6 +5106,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5992,7 +6014,7 @@ mod tests {
             let first_round = Round::new(Epoch::new(333), View::new(1));
             let leader_idx = elector
                 .clone()
-                .build(schemes[0].participants())
+                .build(schemes[0].participants(), NZU64!(1))
                 .elect(first_round, None);
             let leader = participants[usize::from(leader_idx)].clone();
 

@@ -33,6 +33,7 @@ use crate::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::ordered::Set;
+use core::num::NonZeroU64;
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
@@ -189,9 +190,9 @@ where
 {
     type Elector = ElectorState<C::Elector>;
 
-    fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector {
+    fn build(self, participants: &Set<S::PublicKey>, term_length: NonZeroU64) -> Self::Elector {
         ElectorState {
-            fallback: self.fallback.build(participants),
+            fallback: self.fallback.build(participants, term_length),
             round_leaders: self.round_leaders,
         }
     }
@@ -779,7 +780,7 @@ mod tests {
         types::Epoch,
     };
     use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
-    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded};
+    use commonware_utils::{ordered::Set, test_rng, test_rng_seeded, NZU64};
     use std::collections::HashSet;
 
     fn expected_single_round_transitions(n: usize) -> HashSet<(RoundScenario, Vec<usize>)> {
@@ -1339,10 +1340,12 @@ mod tests {
                 framework.participants,
             ),
             &participants,
+            NZU64!(1),
         );
         let fallback = <RoundRobin<Sha256> as ElectorConfig<ed25519::Scheme>>::build(
             RoundRobin::<Sha256>::default(),
             &participants,
+            NZU64!(1),
         );
 
         for (round_idx, round_scenario) in case.scenario.rounds().iter().enumerate() {
