@@ -132,14 +132,6 @@ async fn register_player(
     Json(req): Json<RegisterRequest>,
 ) -> impl IntoResponse {
     let mut inner = state.inner.lock().unwrap();
-    inner.next_player_seed += 1;
-    let player_signer = ed25519::PrivateKey::from_seed(inner.next_player_seed);
-    let pk_hex = hex_encode(&player_signer.public_key().encode().to_vec());
-    let short_id = pk_hex[..8].to_string();
-    let name = req
-        .player_name
-        .unwrap_or_else(|| "Anonymous".to_string());
-
     const PLAYERS_CAP: usize = 1000;
     if inner.players.len() >= PLAYERS_CAP {
         return Json(serde_json::json!({
@@ -147,6 +139,13 @@ async fn register_player(
             "message": "Player registry is full; please try again later."
         }));
     }
+    inner.next_player_seed += 1;
+    let player_signer = ed25519::PrivateKey::from_seed(inner.next_player_seed);
+    let pk_hex = hex_encode(&player_signer.public_key().encode().to_vec());
+    let short_id = pk_hex[..8].to_string();
+    let name = req
+        .player_name
+        .unwrap_or_else(|| "Anonymous".to_string());
     inner.players.insert(pk_hex.clone(), (name.clone(), player_signer));
 
     Json(PlayerIdentity {
