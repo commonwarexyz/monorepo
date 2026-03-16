@@ -364,20 +364,33 @@ impl<
     /// either for the same proposal already has the block and does not need
     /// it forwarded. Votes for a conflicting proposal are treated as missing
     /// because those peers still need the winning block forwarded.
+    pub fn is_missing_voter(&self, proposal: &Proposal<D>, participant: Participant) -> bool {
+        let has_notarize = self
+            .pending_votes
+            .notarize(participant)
+            .is_some_and(|vote| &vote.proposal == proposal);
+        let has_finalize = self
+            .pending_votes
+            .finalize(participant)
+            .is_some_and(|vote| &vote.proposal == proposal);
+        !has_notarize && !has_finalize
+    }
+
+    /// Returns participant indices whose matching vote for `proposal` was not
+    /// observed locally.
+    ///
+    /// Uses `pending_votes` rather than `verified_votes` because we only
+    /// verify the first quorum of votes. A peer whose matching vote arrived
+    /// after quorum but before the certificate is still tracked in pending.
+    ///
+    /// Both notarize and finalize votes are checked: a participant who sent
+    /// either for the same proposal already has the block and does not need
+    /// it forwarded. Votes for a conflicting proposal are treated as missing
+    /// because those peers still need the winning block forwarded.
     pub fn missing_voters(&self, proposal: &Proposal<D>) -> Vec<Participant> {
         (0..self.participants.len())
             .map(Participant::from_usize)
-            .filter(|&p| {
-                let has_notarize = self
-                    .pending_votes
-                    .notarize(p)
-                    .is_some_and(|vote| &vote.proposal == proposal);
-                let has_finalize = self
-                    .pending_votes
-                    .finalize(p)
-                    .is_some_and(|vote| &vote.proposal == proposal);
-                !has_notarize && !has_finalize
-            })
+            .filter(|&p| self.is_missing_voter(proposal, p))
             .collect()
     }
 

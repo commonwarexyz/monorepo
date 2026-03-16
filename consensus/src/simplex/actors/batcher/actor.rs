@@ -231,9 +231,9 @@ where
             ForwardingPolicy::Disabled => Vec::new(),
             ForwardingPolicy::Silent => round.missing_voters(proposal),
             ForwardingPolicy::NextLeader => round
-                .missing_voters(proposal)
+                .is_missing_voter(proposal, next_leader)
+                .then_some(next_leader)
                 .into_iter()
-                .filter(|&participant| participant == next_leader)
                 .collect(),
         }
     }
