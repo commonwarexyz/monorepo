@@ -373,10 +373,9 @@ impl<
             return false;
         }
 
-        !self
-            .pending_votes
+        self.pending_votes
             .finalize(participant)
-            .is_some_and(|vote| &vote.proposal == proposal)
+            .is_none_or(|vote| &vote.proposal != proposal)
     }
 
     /// Returns participant indices whose matching vote for `proposal` was not
