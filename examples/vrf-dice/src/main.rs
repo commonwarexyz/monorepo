@@ -140,9 +140,13 @@ async fn register_player(
         .player_name
         .unwrap_or_else(|| "Anonymous".to_string());
 
-    inner
-        .players
-        .insert(pk_hex.clone(), (name.clone(), player_signer));
+    const PLAYERS_CAP: usize = 1000;
+    inner.players.insert(pk_hex.clone(), (name.clone(), player_signer));
+    if inner.players.len() > PLAYERS_CAP {
+        if let Some(old_key) = inner.players.keys().next().cloned() {
+            inner.players.remove(&old_key);
+        }
+    }
 
     Json(PlayerIdentity {
         public_key: pk_hex,
