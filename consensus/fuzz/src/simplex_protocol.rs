@@ -114,7 +114,7 @@ pub struct SimplexCertificateMock;
 
 #[cfg(feature = "mocks")]
 impl Simplex for SimplexCertificateMock {
-    type Scheme = cert_mock::Scheme<Ed25519PublicKey>;
+    type Scheme = cert_mock::Scheme<Ed25519PublicKey, false>;
 
     type Elector = RoundRobin;
 
@@ -126,7 +126,7 @@ impl Simplex for SimplexCertificateMock {
         Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
-        let fixture = cert_mock::fixture(context, namespace, n);
+        let fixture = cert_mock::fixture_with::<false, true, true, _>(context, namespace, n);
         (fixture.participants, fixture.schemes)
     }
 }

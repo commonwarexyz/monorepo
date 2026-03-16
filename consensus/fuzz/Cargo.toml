@@ -231,3 +231,17 @@ path = "fuzz_targets/simplex_cert_mock_node_recovery.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "simplex_id"
+path = "fuzz_targets/simplex_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_mock_cert"
+path = "fuzz_targets/simplex_mock_cert.rs"
+test = false
+doc = false
+bench = false
