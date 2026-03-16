@@ -426,6 +426,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         }
         if journal_size <= *prune_pos && *prune_pos != 0 {
             journal.clear_to_size(*prune_pos).await?;
+            journal_size = Position::new(journal.size().await);
         }
 
         // Open the metadata.
@@ -2956,6 +2957,90 @@ mod tests {
 
             assert_eq!(sync_mmr.size(), valid_size);
             assert_eq!(sync_mmr.root(), valid_root);
+
+            sync_mmr.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: init_sync's "fresh start" path (journal data entirely before sync range)
+    /// calls clear_to_size which changes the journal size, but journal_size must be re-read
+    /// afterward. Without the re-read, nodes_to_pin and the mem_mmr are initialized with a
+    /// stale size, causing incorrect pinned nodes or init failure.
+    #[test_traced]
+    fn test_init_sync_fresh_start_updates_journal_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Build an MMR with 5 leaves (size 8), sync, drop.
+            let mut mmr = Mmr::init(
+                context.with_label("init"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap();
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                for i in 0..5 {
+                    batch.add(&mut hasher, &test_digest(i));
+                }
+                batch.merkleize(&mut hasher).finalize()
+            };
+            mmr.apply(changeset).unwrap();
+            mmr.sync().await.unwrap();
+            drop(mmr);
+
+            // Build a reference MMR to 100 leaves to get valid pinned nodes for the
+            // sync boundary.
+            let ref_cfg = Config {
+                journal_partition: "ref-journal".into(),
+                metadata_partition: "ref-metadata".into(),
+                items_per_blob: NZU64!(7),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let mut ref_mmr = Mmr::init(context.with_label("ref"), &mut hasher, ref_cfg)
+                .await
+                .unwrap();
+            let changeset = {
+                let mut batch = ref_mmr.new_batch();
+                for i in 0..100 {
+                    batch.add(&mut hasher, &test_digest(i));
+                }
+                batch.merkleize(&mut hasher).finalize()
+            };
+            ref_mmr.apply(changeset).unwrap();
+            let expected_size = ref_mmr.size();
+            let prune_pos = Position::try_from(Location::new(100)).unwrap();
+            let mut pinned = Vec::new();
+            for pos in nodes_to_pin(prune_pos) {
+                pinned.push(ref_mmr.get_node(pos).await.unwrap().unwrap());
+            }
+            ref_mmr.destroy().await.unwrap();
+
+            // init_sync with range starting beyond the existing data triggers the
+            // "fresh start" path (clear_to_size).
+            let sync_cfg = SyncConfig::<Digest> {
+                config: test_config(&context),
+                range: Location::new(100)..Location::new(200),
+                pinned_nodes: Some(pinned),
+            };
+            let mut sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &mut hasher)
+                .await
+                .unwrap();
+
+            // The MMR should have size matching the prune boundary position.
+            assert_eq!(sync_mmr.size(), expected_size);
+
+            // Should be able to add new elements without panic.
+            let changeset = {
+                let mut batch = sync_mmr.new_batch();
+                batch.add(&mut hasher, &test_digest(999));
+                batch.merkleize(&mut hasher).finalize()
+            };
+            sync_mmr.apply(changeset).unwrap();
 
             sync_mmr.destroy().await.unwrap();
         });
