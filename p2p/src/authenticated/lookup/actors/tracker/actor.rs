@@ -132,14 +132,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
+                // Identify peers that were added or had their addresses changed.
                 let peer_keys: Set<C::PublicKey> = peers.keys().clone();
                 let Some((removed, changed)) = self.directory.add_set(index, peers) else {
                     return;
                 };
 
-                // Kill connections for peers that left the tracked set view. If a
-                // peer has external fallback registration, it must reconnect under
-                // that fallback policy instead of keeping the tracked session alive.
+                // Kill connections for peers that left the tracked set view.
                 for peer in removed {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
