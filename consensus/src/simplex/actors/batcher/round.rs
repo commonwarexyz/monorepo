@@ -365,15 +365,18 @@ impl<
     /// it forwarded. Votes for a conflicting proposal are treated as missing
     /// because those peers still need the winning block forwarded.
     pub fn is_missing_voter(&self, proposal: &Proposal<D>, participant: Participant) -> bool {
-        let has_notarize = self
+        if self
             .pending_votes
             .notarize(participant)
-            .is_some_and(|vote| &vote.proposal == proposal);
-        let has_finalize = self
+            .is_some_and(|vote| &vote.proposal == proposal)
+        {
+            return false;
+        }
+
+        !self
             .pending_votes
             .finalize(participant)
-            .is_some_and(|vote| &vote.proposal == proposal);
-        !has_notarize && !has_finalize
+            .is_some_and(|vote| &vote.proposal == proposal)
     }
 
     /// Returns participant indices whose matching vote for `proposal` was not
