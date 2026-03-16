@@ -5,7 +5,7 @@ use crate::{
     bls12381::{
         golden_dkg::evrf::VrfCommitments,
         primitives::{
-            group::{Scalar, Share, SmallScalar, G1},
+            group::{Private, Scalar, Share, SmallScalar, G1},
             sharing::{Mode, Sharing},
             variant::MinPk,
         },
@@ -15,7 +15,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Space},
-    poly::Poly,
+    poly::{Interpolator, Poly},
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{
@@ -166,12 +166,47 @@ pub fn deal<M: Faults>(
     .sign(me))
 }
 
+struct Selection {
+    weights: Option<Interpolator<PublicKey, Scalar>>,
+    dealings: BTreeMap<PublicKey, Dealing>,
+}
+
+#[allow(dead_code)]
+impl Selection {
+    /// Recover the public polynomial from the selected dealings.
+    ///
+    /// With weights (reshare), this interpolates the commitment polynomials.
+    /// Without weights (fresh DKG), this sums them.
+    fn public_poly(&self, strategy: &impl Strategy) -> Poly<G1> {
+        self.weights.as_ref().map_or_else(
+            || {
+                let mut public = Poly::zero();
+                for dealing in self.dealings.values() {
+                    public += &dealing.poly;
+                }
+                public
+            },
+            |weights| {
+                let commitments: Map<PublicKey, Poly<G1>> = self
+                    .dealings
+                    .iter()
+                    .map(|(dealer, dealing)| (dealer.clone(), dealing.poly.clone()))
+                    .try_collect()
+                    .expect("Map should have unique keys");
+                weights
+                    .interpolate(&commitments, strategy)
+                    .expect("select checks that enough points have been provided")
+            },
+        )
+    }
+}
+
 fn select<M: Faults>(
     rng: &mut impl CryptoRngCore,
     info: &Info,
     logs: BTreeMap<PublicKey, DealerLog>,
     strategy: &impl Strategy,
-) -> Result<BTreeMap<PublicKey, Dealing>, Error> {
+) -> Result<Selection, Error> {
     // We need at most a certain number of valid dealings, so we will only produce
     // that number. Our strategy is to first check a batch of that size, and then,
     // if any of those are invalid, to check all the remaining dealings, and use
@@ -198,7 +233,23 @@ fn select<M: Faults>(
     }
     // As a sanity check, make sure that we're emitting exactly what's needed.
     assert_eq!(checked.len(), required);
-    Ok(checked)
+
+    let weights = info.previous.as_ref().map(|previous| {
+        let dealers: Set<PublicKey> = checked
+            .keys()
+            .cloned()
+            .try_collect()
+            .expect("selected dealers are unique");
+        previous
+            .public()
+            .mode()
+            .subset_interpolator(previous.players(), &dealers)
+            .expect("the result of select should produce a valid subset")
+    });
+    Ok(Selection {
+        weights,
+        dealings: checked,
+    })
 }
 
 pub fn observe<M: Faults>(
@@ -207,45 +258,62 @@ pub fn observe<M: Faults>(
     logs: BTreeMap<PublicKey, DealerLog>,
     strategy: &impl Strategy,
 ) -> Result<Sharing<MinPk>, Error> {
-    let selected = select::<M>(rng, info, logs, strategy)?;
-
-    let public = if let Some(previous) = info.previous.as_ref() {
-        let dealers: Set<PublicKey> = selected
-            .keys()
-            .cloned()
-            .try_collect()
-            .expect("selected dealers are unique");
-        let weights = previous
-            .public()
-            .mode()
-            .subset_interpolator(previous.players(), &dealers)
-            .expect("the result of select should produce a valid subset");
-        let commitments: Map<PublicKey, Poly<G1>> = selected
-            .into_iter()
-            .map(|(dealer, dealing)| (dealer, dealing.poly))
-            .try_collect()
-            .expect("Map should have unique keys");
-        let public = weights
-            .interpolate(&commitments, strategy)
-            .expect("select checks that enough points have been provided");
-        if previous.public().public() != public.constant() {
-            return Err(Error::DkgFailed);
-        }
-        public
-    } else {
-        let mut public = Poly::zero();
-        for dealing in selected.values() {
-            public += &dealing.poly;
-        }
-        public
-    };
-
+    let selection = select::<M>(rng, info, logs, strategy)?;
+    let public = selection.public_poly(strategy);
     let n = info.players.len() as u32;
     Ok(Sharing::new(info.mode, NZU32!(n), public))
 }
 
-pub fn play(_logs: BTreeMap<PublicKey, DealerLog>, _me: &PrivateKey) -> (Sharing<MinPk>, Share) {
-    todo!()
+pub fn play<M: Faults>(
+    rng: &mut impl CryptoRngCore,
+    info: &Info,
+    logs: BTreeMap<PublicKey, DealerLog>,
+    me: &PrivateKey,
+    strategy: &impl Strategy,
+) -> Result<(Sharing<MinPk>, Share), Error> {
+    let me_pub = me.public();
+    let my_index = info.player_index(&me_pub)?;
+
+    let selection = select::<M>(rng, info, logs, strategy)?;
+
+    // For each dealing, recover our share by unmasking.
+    let dealings: Map<PublicKey, Scalar> = selection
+        .dealings
+        .iter()
+        .map(|(dealer, dealing)| {
+            let mask = me.vrf(dealing.nonce.as_ref(), dealer);
+            let masked_share = dealing
+                .masked_shares
+                .get_value(&me_pub)
+                .expect("select checks that all players have shares");
+            (dealer.clone(), masked_share.clone() - &mask)
+        })
+        .try_collect()
+        .expect("selected dealers are unique");
+
+    // Recover the public polynomial.
+    let public = selection.public_poly(strategy);
+
+    // Interpolate (reshare) or sum (fresh) the per-dealer shares.
+    let private = selection.weights.map_or_else(
+        || {
+            let mut out = Scalar::zero();
+            for s in dealings.values() {
+                out += s;
+            }
+            out
+        },
+        |weights| {
+            weights
+                .interpolate(&dealings, strategy)
+                .expect("select ensures that we can recover")
+        },
+    );
+
+    let n = info.players.len() as u32;
+    let sharing = Sharing::new(info.mode, NZU32!(n), public);
+    let share = Share::new(my_index, Private::new(private));
+    Ok((sharing, share))
 }
 
 pub struct SignedDealerLog {}
@@ -336,6 +404,21 @@ impl Dealing {
         mask_commitments: &Map<PublicKey, G1>,
         strategy: &impl Strategy,
     ) -> bool {
+        // If this is a reshare, the constant of the dealing polynomial must match
+        // the dealer's share commitment from the previous round.
+        if let Some(previous) = info.previous.as_ref() {
+            let Some(expected) = previous
+                .players()
+                .index(dealer)
+                .and_then(|idx| previous.public().partial_public(idx).ok())
+            else {
+                return false;
+            };
+            if *self.poly.constant() != expected {
+                return false;
+            }
+        }
+
         // An honest dealer will set, for each player i, the masked share to be:
         //
         //   z_i := m_i + f(x_i)
