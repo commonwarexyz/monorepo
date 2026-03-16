@@ -132,10 +132,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
+                let peer_keys: Set<C::PublicKey> = peers.keys().clone();
                 let Some((removed, changed)) = self.directory.add_set(index, peers) else {
                     return;
                 };
-                let peer_keys = self.directory.get_set(&index).cloned().unwrap();
 
                 // Kill connections for peers that left the tracked set view. If a
                 // peer has external fallback registration, it must reconnect under
@@ -907,6 +907,36 @@ mod tests {
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(registered_ips.contains(&tracked_addr.ip()));
             assert!(registered_ips.contains(&external_ip));
+        });
+    }
+
+    #[test]
+    fn test_register_with_zero_tracked_sets_does_not_panic_when_set_is_immediately_evicted() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (mut cfg, mut listener_receiver) = test_config(PrivateKey::from_seed(0), false);
+            cfg.tracked_peer_sets = 0;
+            let TestHarness { mut oracle, .. } = setup_actor(context.clone(), cfg);
+
+            let pk = new_signer_and_pk(1).1;
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
+            let mut subscription = oracle.subscribe().await;
+
+            // Registering a set with max_sets=0 immediately evicts it. The actor
+            // should still notify subscribers using the inserted peer keys rather
+            // than panicking when the set is no longer present in the directory.
+            oracle
+                .track(0, [(pk.clone(), addr.into())].try_into().unwrap())
+                .await;
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 0);
+            assert_eq!(new, [pk.clone()].try_into().unwrap());
+            assert!(all.is_empty());
+
+            // The directory should report the set as evicted and the listener
+            // should observe no tracked IPs.
+            assert!(oracle.peer_set(0).await.is_none());
+            assert!(listener_receiver.recv().await.unwrap().is_empty());
         });
     }
 
