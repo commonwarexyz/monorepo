@@ -93,7 +93,7 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         block: V::Block,
     },
     /// A request to forward a block to a set of peers.
-    Forwarded {
+    Forward {
         /// The round in which the block was proposed.
         round: Round,
         /// The commitment of the block to forward.
@@ -320,14 +320,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 
     /// Forward a block to a set of peers.
-    pub async fn forwarded(
-        &self,
-        round: Round,
-        commitment: V::Commitment,
-        peers: Vec<S::PublicKey>,
-    ) {
+    pub async fn forward(&self, round: Round, commitment: V::Commitment, peers: Vec<S::PublicKey>) {
         self.sender
-            .send_lossy(Message::Forwarded {
+            .send_lossy(Message::Forward {
                 round,
                 commitment,
                 peers,

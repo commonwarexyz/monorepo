@@ -519,7 +519,7 @@ where
                             .await;
                         buffer.send(round, block, Recipients::All).await;
                     }
-                    Message::Forwarded {
+                    Message::Forward {
                         round,
                         commitment,
                         peers,

@@ -633,7 +633,7 @@ where
                 self.marshal.proposed(round, block).await;
             }
             Plan::Forward { round, peers } => {
-                self.marshal.forwarded(round, digest, peers).await;
+                self.marshal.forward(round, digest, peers).await;
             }
         }
     }

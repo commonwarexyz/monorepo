@@ -79,6 +79,40 @@ use tracing::{debug, warn};
 /// block, so `certify` can return immediately without re-subscribing to marshal.
 type AvailableBlocks<D> = Arc<Mutex<BTreeSet<(Round, D)>>>;
 
+/// Waits for a marshal block subscription while allowing consensus to cancel the work.
+async fn await_block_subscription<T, D>(
+    tx: &mut oneshot::Sender<bool>,
+    block_rx: oneshot::Receiver<T>,
+    digest: &D,
+    stage: &'static str,
+) -> Option<T>
+where
+    D: std::fmt::Debug + ?Sized,
+{
+    select! {
+        _ = tx.closed() => {
+            debug!(
+                stage,
+                reason = "consensus dropped receiver",
+                "skipping block wait"
+            );
+            None
+        },
+        result = block_rx => match result {
+            Ok(block) => Some(block),
+            Err(_) => {
+                debug!(
+                    stage,
+                    ?digest,
+                    reason = "failed to fetch block",
+                    "skipping block wait"
+                );
+                None
+            }
+        },
+    }
+}
+
 /// Standard marshal wrapper that verifies blocks inline in `verify`.
 ///
 /// # Ancestry Validation
@@ -333,25 +367,10 @@ where
                 let block_request = marshal
                     .subscribe_by_digest(Some(context.round), digest)
                     .await;
-                let block = select! {
-                    _ = tx.closed() => {
-                        debug!(
-                            reason = "consensus dropped receiver",
-                            "skipping verification"
-                        );
-                        return;
-                    },
-                    result = block_request => match result {
-                        Ok(block) => block,
-                        Err(_) => {
-                            debug!(
-                                ?digest,
-                                reason = "failed to fetch block for verification",
-                                "skipping verification"
-                            );
-                            return;
-                        }
-                    },
+                let Some(block) =
+                    await_block_subscription(&mut tx, block_request, &digest, "verification").await
+                else {
+                    return;
                 };
                 available_blocks.lock().insert((context.round, digest));
 
@@ -435,25 +454,11 @@ where
             .with_label("inline_certify")
             .with_attribute("round", round)
             .spawn(move |_| async move {
-                select! {
-                    _ = tx.closed() => {
-                        debug!(
-                            reason = "consensus dropped receiver",
-                            "skipping certification"
-                        );
-                    },
-                    result = block_rx => match result {
-                        Ok(_) => {
-                            tx.send_lossy(true);
-                        }
-                        Err(_) => {
-                            debug!(
-                                ?digest,
-                                reason = "failed to fetch block for certification",
-                                "skipping certification"
-                            );
-                        }
-                    },
+                if await_block_subscription(&mut tx, block_rx, &digest, "certification")
+                    .await
+                    .is_some()
+                {
+                    tx.send_lossy(true);
                 }
             });
 
@@ -495,7 +500,7 @@ where
                 self.marshal.proposed(round, block).await;
             }
             Plan::Forward { round, peers } => {
-                self.marshal.forwarded(round, digest, peers).await;
+                self.marshal.forward(round, digest, peers).await;
             }
         }
     }
@@ -514,8 +519,10 @@ where
 
     /// Forwards consensus activity to the wrapped application reporter.
     async fn report(&mut self, update: Self::Activity) {
-        if let Update::Tip(round, _, _) = &update {
-            self.available_blocks.lock().retain(|(r, _)| r > round);
+        if let Update::Tip(tip_round, _, _) = &update {
+            self.available_blocks
+                .lock()
+                .retain(|(round, _)| round > tip_round);
         }
         self.application.report(update).await
     }

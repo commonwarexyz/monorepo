@@ -201,6 +201,8 @@ where
         view: View,
         participant: Participant,
     ) -> bool {
+        // Until we have tracked `skip_timeout` views, everyone stays active so startup does not
+        // immediately skip leaders whose `latest_seen` entry is still at the default view.
         if work.len() < self.skip_timeout.get() as usize {
             return true;
         }
@@ -208,16 +210,14 @@ where
         view.get().saturating_sub(seen_view.get()) < self.skip_timeout.get()
     }
 
-    /// Resolves the public keys of `missing` participants for a targeted
-    /// block forward. Returns `None` when no peers need the block.
-    fn resolve_peers(&self, missing: &[Participant]) -> Option<Vec<S::PublicKey>> {
+    /// Maps `missing` participants to targeted forward recipients, excluding self.
+    fn forward_recipients(&self, missing: &[Participant]) -> Vec<S::PublicKey> {
         let me = self.scheme.me();
-        let peers: Vec<_> = missing
+        missing
             .iter()
             .filter(|&&p| Some(p) != me)
             .filter_map(|&p| self.participants.key(p).cloned())
-            .collect();
-        (!peers.is_empty()).then_some(peers)
+            .collect()
     }
 
     /// Selects forwarding targets for a certified proposal under the active policy.
@@ -240,9 +240,10 @@ where
 
     /// Forwards a proposal to the requested peers.
     async fn forward_proposal(&mut self, proposal: Proposal<D>, missing: Vec<Participant>) {
-        let Some(peers) = self.resolve_peers(&missing) else {
+        let peers = self.forward_recipients(&missing);
+        if peers.is_empty() {
             return;
-        };
+        }
         self.relay
             .broadcast(
                 proposal.payload,
