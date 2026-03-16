@@ -1986,7 +1986,9 @@ mod tests {
                 // Ensure every reporter observes finalization progress to at least the target view.
                 {
                     let finalizations = reporter.finalizations.lock();
-                    assert!(finalizations.keys().any(|view| *view >= required_containers));
+                    assert!(finalizations
+                        .keys()
+                        .any(|view| *view >= required_containers));
                 }
             }
 

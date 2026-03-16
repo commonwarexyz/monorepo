@@ -821,7 +821,7 @@ impl<
             .leader_index(observed_view)
             .expect("leader not set");
         if let Some(reason) = batcher
-            .update(observed_view, leader, self.state.last_finalized())
+            .update(observed_view, leader, self.state.last_finalized(), None)
             .await
         {
             debug!(%observed_view, %leader, ?reason, "nullifying round");
@@ -1077,10 +1077,21 @@ impl<
                         .leader_index(current_view)
                         .expect("leader not set");
 
+                    // If we skip a view, we don't worry about forwarding our latest certified proposal
+                    // because the network has already moved on
+                    let forwardable_proposal = current_view
+                        .previous()
+                        .and_then(|view| self.state.forwardable_proposal(view));
+
                     // If the leader nullified or is inactive, reduce leader
                     // timeout to now
                     if let Some(reason) = batcher
-                        .update(current_view, leader, self.state.last_finalized())
+                        .update(
+                            current_view,
+                            leader,
+                            self.state.last_finalized(),
+                            forwardable_proposal,
+                        )
                         .await
                     {
                         debug!(%current_view, %leader, ?reason, "nullifying round");

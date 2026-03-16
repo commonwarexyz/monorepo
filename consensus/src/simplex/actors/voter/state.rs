@@ -425,6 +425,15 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.views.get(&view).and_then(|round| round.finalization())
     }
 
+    /// Returns the proposal for `view` if it is eligible for forwarding.
+    pub fn forwardable_proposal(&self, view: View) -> Option<Proposal<D>> {
+        let round = self.views.get(&view)?;
+        if round.finalization().is_some() || round.is_certified() {
+            return round.proposal().cloned();
+        }
+        None
+    }
+
     /// Construct a nullification certificate once the round has quorum.
     pub fn broadcast_nullification(&mut self, view: View) -> Option<Nullification<S>> {
         self.views

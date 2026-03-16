@@ -12,28 +12,28 @@ use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use std::{num::NonZeroUsize, time::Duration};
 
-/// Controls whether and how the engine proactively forwards blocks to peers
-/// that did not vote in a notarization certificate.
+/// Controls whether and how the engine proactively forwards certified blocks
+/// when entering the next view.
 ///
 /// Forwarding is a best-effort liveness aid: when enabled, the batcher
-/// broadcasts immediately to all silent peers once a notarization is
-/// accepted or constructed.
-///
-/// While currently only two options are available, this type is reserved
-/// as an enum to allow for more sophisticated policies in the future.
+/// broadcasts only after we locally certify a proposal and enter the next
+/// view, avoiding sends for proposals that never pass certification.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum ForwardingPolicy {
-    /// Do nothing when notified of missing voters.
+    /// Do nothing when a certified proposal becomes eligible for forwarding.
     #[default]
     Disabled,
-    /// Forward the block to all participants that did not vote.
+    /// Forward the block to all participants that did not vote for the proposal.
     Silent,
+    /// Forward the block to the leader of the newly entered view if they did not
+    /// vote for the proposal certified in the previous view.
+    NextLeader,
 }
 
 impl ForwardingPolicy {
     /// Returns true if the policy is enabled.
     pub const fn is_enabled(&self) -> bool {
-        matches!(self, Self::Silent)
+        !matches!(self, Self::Disabled)
     }
 }
 
@@ -137,8 +137,8 @@ where
     /// Number of concurrent requests to make at once.
     pub fetch_concurrent: usize,
 
-    /// Policy for proactively forwarding blocks to peers that did not vote
-    /// in a notarization certificate.
+    /// Policy for proactively forwarding certified blocks when entering the
+    /// next view.
     pub forwarding: ForwardingPolicy,
 }
 
