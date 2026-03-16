@@ -18,6 +18,12 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// Escapes `\` and `|` in user-controlled VRF message fields so the pipe-delimited
+/// format is unambiguous and no two distinct inputs produce the same message.
+fn escape_vrf_field(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('|', "\\|")
+}
+
 #[derive(Clone)]
 struct AppState {
     inner: Arc<Mutex<InnerState>>,
@@ -173,13 +179,13 @@ async fn roll_dice(
             (String::new(), String::new(), String::new())
         };
 
-    let message_raw = serde_json::to_string(&serde_json::json!({
-        "round": round,
-        "player": player_name,
-        "seed": client_seed,
-        "mode": game_mode,
-    }))
-    .expect("VRF message serialization must succeed");
+    let message_raw = format!(
+        "round:{}|player:{}|seed:{}|mode:{}",
+        round,
+        escape_vrf_field(&player_name),
+        escape_vrf_field(&client_seed),
+        escape_vrf_field(&game_mode),
+    );
     let (sig_bytes, vrf_bytes, dice_result) =
         compute_vrf(&inner.signer, message_raw.as_bytes(), &game_mode);
 
@@ -215,13 +221,13 @@ async fn verify_proof(
     let inner = state.inner.lock().unwrap();
     let game_mode = req.game_mode.unwrap_or_else(|| "dice".to_string());
 
-    let message_raw = serde_json::to_string(&serde_json::json!({
-        "round": req.round,
-        "player": req.player_name,
-        "seed": req.client_seed,
-        "mode": game_mode,
-    }))
-    .expect("VRF message serialization must succeed");
+    let message_raw = format!(
+        "round:{}|player:{}|seed:{}|mode:{}",
+        req.round,
+        escape_vrf_field(&req.player_name),
+        escape_vrf_field(&req.client_seed),
+        escape_vrf_field(&game_mode),
+    );
     let (sig_bytes, vrf_bytes, dice_result) =
         compute_vrf(&inner.signer, message_raw.as_bytes(), &game_mode);
 
