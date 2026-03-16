@@ -562,7 +562,7 @@ mod tests {
         for i in 0u64..16 {
             let proof = mmb
                 .proof(&mut hasher, Location::new(i))
-                .unwrap_or_else(|e| panic!("loc={i}: {e}"));
+                .unwrap_or_else(|e| panic!("loc={i}: {e:?}"));
             assert!(
                 proof.verify_element_inclusion(
                     &mut hasher,
@@ -586,7 +586,7 @@ mod tests {
                     let range = Location::new(start)..Location::new(end);
                     let proof = mmb
                         .range_proof(&mut hasher, range.clone())
-                        .unwrap_or_else(|e| panic!("n={n}, range={start}..{end}: {e}"));
+                        .unwrap_or_else(|e| panic!("n={n}, range={start}..{end}: {e:?}"));
                     let elements: Vec<_> = (start..end).map(|i| i.to_be_bytes()).collect();
 
                     assert!(
@@ -685,7 +685,7 @@ mod tests {
         for loc in *mmb.bounds().start..*mmb.leaves() {
             let proof = mmb
                 .proof(&mut hasher, Location::new(loc))
-                .unwrap_or_else(|e| panic!("loc={loc}: {e}"));
+                .unwrap_or_else(|e| panic!("loc={loc}: {e:?}"));
             assert!(
                 proof.verify_element_inclusion(
                     &mut hasher,
