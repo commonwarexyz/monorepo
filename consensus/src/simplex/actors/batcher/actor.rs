@@ -337,12 +337,10 @@ where
                     } else if am_leader {
                         // If we are the leader, we should not timeout
                         None
-                    } else if !self.is_active(&work, current.view, leader) {
-                        // If we are not the leader and the leader isn't active, we should timeout
-                        Some(TimeoutReason::Inactivity)
                     } else {
-                        // If the leader is active, we should not timeout
-                        None
+                        // If we are not the leader and the leader isn't active, we should timeout
+                        (!self.is_active(&work, current.view, leader))
+                            .then_some(TimeoutReason::Inactivity)
                     };
                     if timeout_reason.is_some() {
                         current.timed_out = true;
