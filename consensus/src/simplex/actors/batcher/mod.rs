@@ -775,6 +775,8 @@ mod tests {
                 );
             }
 
+            // Advancing to the next view with this proposal marked
+            // forwardable should trigger exactly one targeted forward.
             batcher_mailbox
                 .update(
                     View::new(2),
@@ -785,6 +787,8 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(50)).await;
 
+            // Participants 0..3 voted for this proposal, so only participant 4
+            // should remain in the forwarding set.
             let broadcasts = relay.broadcasts.lock();
             assert_eq!(
                 broadcasts.len(),
@@ -926,6 +930,7 @@ mod tests {
                 Sha256::hash(b"next_leader_payload"),
             );
 
+            // Toggle whether the next leader appears in the observed vote set.
             let voter_indices: &[usize] = if leader_voted { &[1, 2, 3] } else { &[1, 3, 4] };
             for &i in voter_indices {
                 let vote = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
@@ -971,6 +976,8 @@ mod tests {
                 );
             }
 
+            // `NextLeader` forwarding should either target only participant 2
+            // or nobody, depending on whether that vote was observed above.
             batcher_mailbox
                 .update(
                     View::new(2),
@@ -1373,6 +1380,8 @@ mod tests {
             let our_vote = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
             batcher_mailbox.constructed(Vote::Notarize(our_vote)).await;
 
+            // The injected certificate completes notarization, but forwarding
+            // still waits for the next view to mark the proposal forwardable.
             let notarization = build_notarization(&schemes, &proposal, quorum_size);
             injector_sender
                 .send(
@@ -1413,6 +1422,8 @@ mod tests {
                 );
             }
 
+            // Only participants 3 and 4 missed a matching vote, so only they
+            // should be targeted after the view advance.
             batcher_mailbox
                 .update(
                     View::new(2),
@@ -1812,6 +1823,8 @@ mod tests {
                 );
             }
 
+            // The first update emits the forward. The second proves a later
+            // view change does not emit the same forward again.
             batcher_mailbox
                 .update(
                     View::new(2),
@@ -1990,6 +2003,8 @@ mod tests {
                     .unwrap();
             }
 
+            // Participants 3..5 vote for the leader proposal, so the batcher
+            // can still notarize it even though participant 2 equivocated.
             for i in 3..=5 {
                 let honest_vote = Notarize::sign(&schemes[i], proposal_a.clone()).unwrap();
                 if let Some(ref mut sender) = participant_senders[i] {
@@ -2046,11 +2061,15 @@ mod tests {
 
             let view3 = View::new(3);
             let leader3 = Participant::new(3);
+            // Mark the winning proposal forwardable on the next view so we can
+            // check which non-matching voters remain missing for it.
             batcher_mailbox
                 .update(view3, leader3, View::zero(), Some(proposal_a.clone()))
                 .await;
             context.sleep(Duration::from_millis(50)).await;
 
+            // Participant 2 voted for a conflicting proposal and participant 6
+            // only nullified, so both still need the leader proposal forwarded.
             let broadcasts = relay.broadcasts.lock();
             assert_eq!(
                 broadcasts.len(),
@@ -2250,6 +2269,9 @@ mod tests {
             }
 
             let view3 = View::new(3);
+            // Advance with the proposal marked forwardable. Participant 6
+            // already sent a finalize for it, so only participant 5 should
+            // still need the proposal.
             batcher_mailbox
                 .update(
                     view3,
