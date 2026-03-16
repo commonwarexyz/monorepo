@@ -82,7 +82,7 @@ pub struct Config {
 /// Determines how to handle existing persistent data based on sync boundaries:
 /// - **Fresh Start**: Existing data < range start → discard and start fresh
 /// - **Prune and Reuse**: range contains existing data → prune and reuse
-/// - **Prune and Rewind**: existing data > range end → prune and rewind to range end
+/// - **Error**: existing data > range end
 pub struct SyncConfig<D: Digest> {
     /// Base MMR configuration (journal, metadata, etc.)
     pub config: Config,
@@ -882,6 +882,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     }
 }
 
+/// The [`Readable`] implementation for the journaled MMR operates only on the in-memory
+/// portion of the MMR. After [`Mmr::sync`], nodes that have been flushed to the journal
+/// are no longer accessible through this interface. In particular, [`Readable::get_node`]
+/// returns `None` for flushed positions, and [`Readable::pruned_to_pos`] reflects the
+/// in-memory boundary (which may be tighter than the journal's prune boundary reported by
+/// [`Mmr::bounds`]). This means batch operations like `update_leaf` will correctly reject
+/// leaves that have been synced out of memory with [`Error::ElementPruned`].
 impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
     type Digest = D;
 
@@ -898,7 +905,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
     }
 
     fn pruned_to_pos(&self) -> Position {
-        self.inner.read().pruned_to_pos
+        self.inner.read().mem_mmr.pruned_to_pos()
     }
 }
 
@@ -2913,6 +2920,42 @@ mod tests {
             assert!(
                 matches!(result, Err(Error::StaleChangeset { .. })),
                 "expected StaleChangeset, got {result:?}"
+            );
+
+            mmr.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: update_leaf on a synced-out leaf must return ElementPruned, not panic.
+    /// Before the fix, Readable::pruned_to_pos returned the journal's prune boundary
+    /// (which could be 0), so the batch accepted the update. During merkleize, get_node
+    /// returned None for the synced-out sibling and hit an expect panic.
+    #[test_traced]
+    fn test_update_leaf_after_sync_returns_pruned() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(context.clone(), &mut hasher, test_config(&context))
+                .await
+                .unwrap();
+
+            // Add 50 elements and sync (flushes all nodes to journal, prunes mem_mmr).
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                for i in 0..50 {
+                    batch.add(&mut hasher, &test_digest(i));
+                }
+                batch.merkleize(&mut hasher).finalize()
+            };
+            mmr.apply(changeset).unwrap();
+            mmr.sync().await.unwrap();
+
+            // Attempt to update leaf 0 which has been synced out of memory.
+            let mut batch = mmr.new_batch();
+            let result = batch.update_leaf(&mut hasher, Location::new(0), b"updated");
+            assert!(
+                matches!(result, Err(Error::ElementPruned(_))),
+                "expected ElementPruned for synced-out leaf, got {result:?}"
             );
 
             mmr.destroy().await.unwrap();

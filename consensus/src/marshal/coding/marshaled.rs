@@ -95,7 +95,7 @@ use crate::{
         },
         core, Update,
     },
-    simplex::{scheme::Scheme, types::Context},
+    simplex::{scheme::Scheme, types::Context, Plan},
     types::{coding::Commitment, Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter, VerifyingApplication,
@@ -931,35 +931,40 @@ where
     ES: Epocher,
 {
     type Digest = Commitment;
+    type PublicKey = <Z::Scheme as CertificateScheme>::PublicKey;
+    type Plan = Plan<Self::PublicKey>;
 
-    /// Broadcasts a previously built block to the network.
-    ///
-    /// This uses the cached block from the last proposal operation. If no block was built or
-    /// the digest does not match the cached block, the broadcast is skipped with a warning.
-    async fn broadcast(&mut self, commitment: Self::Digest) {
-        let Some((round, block)) = self.last_built.lock().take() else {
-            warn!("missing block to broadcast");
-            return;
-        };
-
-        if block.commitment() != commitment {
-            warn!(
-                round = %round,
-                commitment = %block.commitment(),
-                height = %block.height(),
-                "skipping requested broadcast of block with mismatched commitment"
-            );
-            return;
+    async fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) {
+        match plan {
+            Plan::Propose => {
+                let Some((round, block)) = self.last_built.lock().take() else {
+                    warn!("missing block to broadcast");
+                    return;
+                };
+                if block.commitment() != commitment {
+                    warn!(
+                        round = %round,
+                        commitment = %block.commitment(),
+                        height = %block.height(),
+                        "skipping requested broadcast of block with mismatched commitment"
+                    );
+                    return;
+                }
+                debug!(
+                    round = %round,
+                    commitment = %block.commitment(),
+                    height = %block.height(),
+                    "requested broadcast of built block"
+                );
+                self.shards.proposed(round, block).await;
+            }
+            Plan::Forward { .. } => {
+                // Coding variant does not support targeted forwarding;
+                // peers reconstruct blocks from erasure-coded shards.
+                //
+                // TODO(#3389): Support checked data forwarding for PhasedScheme.
+            }
         }
-
-        debug!(
-            round = %round,
-            commitment = %block.commitment(),
-            height = %block.height(),
-            "requested broadcast of built block"
-        );
-
-        self.shards.proposed(round, block).await;
     }
 }
 

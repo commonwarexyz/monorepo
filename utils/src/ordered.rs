@@ -409,6 +409,14 @@ impl<K, V> Map<K, V> {
         self.keys.iter().zip(self.values.iter())
     }
 
+    /// Returns a zipped iterator over keys and mutable references to values.
+    ///
+    /// This is provided because the borrow checker does not let you combine
+    /// the other functions yourself.
+    pub fn iter_pairs_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.keys.iter().zip(self.values.iter_mut())
+    }
+
     /// Returns an iterator over the ordered keys.
     pub fn iter(&self) -> core::slice::Iter<'_, K> {
         self.keys.iter()

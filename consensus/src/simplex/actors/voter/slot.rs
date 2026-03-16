@@ -60,6 +60,11 @@ where
         self.status
     }
 
+    /// Returns whether the slot contains a concrete proposal and no equivocation.
+    pub fn has_unequivocated_proposal(&self) -> bool {
+        self.proposal.is_some() && self.status != Status::Equivocated
+    }
+
     pub const fn should_build(&self) -> bool {
         !self.requested_build && self.proposal.is_none()
     }
@@ -112,22 +117,17 @@ where
         if self.status == Status::Equivocated {
             return Change::Skipped;
         }
+
+        // Recovered certificates authenticate the proposal, but they do not
+        // automatically confer verification status (which may require ensuring
+        // additional data is available).
         match &self.proposal {
             None => {
                 self.proposal = Some(proposal.clone());
-                self.status = if recovered {
-                    Status::Verified
-                } else {
-                    Status::Unverified
-                };
+                self.status = Status::Unverified;
                 Change::New
             }
-            Some(existing) if existing == proposal => {
-                if recovered {
-                    self.status = Status::Verified;
-                }
-                Change::Unchanged
-            }
+            Some(existing) if existing == proposal => Change::Unchanged,
             Some(existing) => {
                 let mut dropped = existing.clone();
                 let mut retained = proposal.clone();
@@ -226,6 +226,10 @@ mod tests {
 
         assert!(matches!(slot.update(&proposal, false), Change::New));
         assert!(matches!(slot.update(&proposal, true), Change::Unchanged));
+        assert_eq!(slot.status(), Status::Unverified);
+
+        assert!(slot.mark_verified());
+        assert!(matches!(slot.update(&proposal, true), Change::Unchanged));
         assert_eq!(slot.status(), Status::Verified);
     }
 
@@ -262,14 +266,14 @@ mod tests {
 
         // Compromised node produces a certificate before our local propose returns.
         assert!(matches!(slot.update(&compromised, true), Change::New));
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Unverified);
         assert_eq!(slot.proposal(), Some(&compromised));
 
         // Once we finally finish proposing our honest payload, the slot should just
         // ignore it (the equivocation was already detected when the certificate
         // arrived).
         slot.built(honest);
-        assert_eq!(slot.status(), Status::Verified);
+        assert_eq!(slot.status(), Status::Unverified);
         assert_eq!(slot.proposal(), Some(&compromised));
     }
 
@@ -333,5 +337,28 @@ mod tests {
         ));
         assert!(matches!(slot.update(&proposal_b, true), Change::Skipped));
         assert_eq!(slot.status(), Status::Equivocated);
+    }
+
+    #[test]
+    fn has_unequivocated_proposal_allows_recovered_unverified_and_blocks_equivocation() {
+        let round = Rnd::new(Epoch::new(30), View::new(10));
+        let proposal_a = Proposal::new(round, View::new(9), Sha256Digest::from([21u8; 32]));
+        let proposal_b = Proposal::new(round, View::new(9), Sha256Digest::from([22u8; 32]));
+
+        // Empty slots should not report a usable proposal.
+        let mut slot = Slot::<Sha256Digest>::new();
+        assert!(!slot.has_unequivocated_proposal());
+
+        // Recovering a proposal from a certificate makes it available for finalize
+        // gating even before the follower-side verify path runs.
+        assert!(matches!(slot.update(&proposal_a, true), Change::New));
+        assert!(slot.has_unequivocated_proposal());
+
+        // A conflicting proposal immediately revokes that property.
+        assert!(matches!(
+            slot.update(&proposal_b, false),
+            Change::Equivocated { .. }
+        ));
+        assert!(!slot.has_unequivocated_proposal());
     }
 }
