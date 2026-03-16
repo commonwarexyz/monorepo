@@ -16,14 +16,14 @@ pub enum Address {
     /// Peer is the local node.
     Myself,
 
-    /// Peer may dial us from a registered source IP when not currently tracked.
-    External(IpAddr),
+    /// Peer may dial us from a followed source IP when not currently tracked.
+    Follower(IpAddr),
 
     /// Address is provided when peer is tracked in a peer set.
     Known(types::Address),
 
-    /// Peer is currently tracked, but also has an external fallback source IP.
-    KnownExternal {
+    /// Peer is currently tracked, but also has a follower fallback source IP.
+    KnownFollower {
         address: types::Address,
         source_ip: IpAddr,
     },
@@ -94,10 +94,10 @@ impl Record {
         }
     }
 
-    /// Create a new record for an external fallback peer.
-    pub const fn external(source_ip: IpAddr) -> Self {
+    /// Create a new record for a follower fallback peer.
+    pub const fn follower(source_ip: IpAddr) -> Self {
         Self {
-            address: Address::External(source_ip),
+            address: Address::Follower(source_ip),
             status: Status::Inert,
             sets: 0,
             persistent: true,
@@ -115,8 +115,8 @@ impl Record {
     pub fn update(&mut self, addr: types::Address) -> bool {
         match &mut self.address {
             Address::Myself => false,
-            Address::External(source_ip) => {
-                self.address = Address::KnownExternal {
+            Address::Follower(source_ip) => {
+                self.address = Address::KnownFollower {
                     address: addr,
                     source_ip: *source_ip,
                 };
@@ -129,7 +129,7 @@ impl Record {
                 *existing = addr;
                 true
             }
-            Address::KnownExternal { address, .. } => {
+            Address::KnownFollower { address, .. } => {
                 if *address == addr {
                     return false;
                 }
@@ -139,21 +139,37 @@ impl Record {
         }
     }
 
-    /// Register or update the external fallback source IP for this record.
-    pub fn register_external(&mut self, source_ip: IpAddr) {
+    /// Follow or update the follower fallback source IP for this record.
+    ///
+    /// Returns `true` when a live untracked connection should be replaced so
+    /// the peer reconnects under the latest follower policy.
+    pub fn follow(&mut self, source_ip: IpAddr) -> bool {
+        let reconnect = self.sets == 0 && self.egress_ip() != Some(source_ip);
         self.address = match &self.address {
             Address::Myself => Address::Myself,
-            Address::External(_) => Address::External(source_ip),
-            Address::Known(address) => Address::KnownExternal {
+            Address::Follower(_) => Address::Follower(source_ip),
+            Address::Known(address) => Address::KnownFollower {
                 address: address.clone(),
                 source_ip,
             },
-            Address::KnownExternal { address, .. } => Address::KnownExternal {
+            Address::KnownFollower { address, .. } => Address::KnownFollower {
                 address: address.clone(),
                 source_ip,
             },
         };
         self.persistent = true;
+        reconnect
+    }
+
+    /// Stop following this peer when it is not currently tracked.
+    pub fn unfollow(&mut self) {
+        self.address = match &self.address {
+            Address::Myself => Address::Myself,
+            Address::Follower(source_ip) => Address::Follower(*source_ip),
+            Address::Known(address) => Address::Known(address.clone()),
+            Address::KnownFollower { address, .. } => Address::Known(address.clone()),
+        };
+        self.persistent = false;
     }
 
     /// Increase the count of peer sets this peer is part of.
@@ -246,8 +262,8 @@ impl Record {
         }
         let ingress = match &self.address {
             Address::Known(addr) => addr.ingress(),
-            Address::KnownExternal { address, .. } => address.ingress(),
-            Address::Myself | Address::External(_) => return DialStatus::Unavailable,
+            Address::KnownFollower { address, .. } => address.ingress(),
+            Address::Myself | Address::Follower(_) => return DialStatus::Unavailable,
         };
         if !ingress.is_valid(allow_private_ips, allow_dns) {
             return DialStatus::Unavailable;
@@ -275,13 +291,13 @@ impl Record {
         if self.sets > 0 {
             match &self.address {
                 Address::Known(addr) => addr.egress_ip() == source_ip,
-                Address::KnownExternal { address, .. } => address.egress_ip() == source_ip,
-                Address::Myself | Address::External(_) => false,
+                Address::KnownFollower { address, .. } => address.egress_ip() == source_ip,
+                Address::Myself | Address::Follower(_) => false,
             }
         } else {
             match &self.address {
-                Address::External(expected_ip) => *expected_ip == source_ip,
-                Address::KnownExternal {
+                Address::Follower(expected_ip) => *expected_ip == source_ip,
+                Address::KnownFollower {
                     source_ip: expected_ip,
                     ..
                 } => *expected_ip == source_ip,
@@ -293,9 +309,9 @@ impl Record {
     /// Return the ingress address for dialing, if known.
     pub fn ingress(&self) -> Option<Ingress> {
         match &self.address {
-            Address::Myself | Address::External(_) => None,
+            Address::Myself | Address::Follower(_) => None,
             Address::Known(addr) => Some(addr.ingress()),
-            Address::KnownExternal { address, .. } => {
+            Address::KnownFollower { address, .. } => {
                 if self.sets > 0 {
                     Some(address.ingress())
                 } else {
@@ -309,9 +325,9 @@ impl Record {
     pub const fn egress_ip(&self) -> Option<IpAddr> {
         match &self.address {
             Address::Myself => None,
-            Address::External(source_ip) => Some(*source_ip),
+            Address::Follower(source_ip) => Some(*source_ip),
             Address::Known(addr) => Some(addr.egress_ip()),
-            Address::KnownExternal { address, source_ip } => {
+            Address::KnownFollower { address, source_ip } => {
                 if self.sets > 0 {
                     Some(address.egress_ip())
                 } else {
@@ -334,10 +350,15 @@ impl Record {
     pub const fn eligible(&self) -> bool {
         match &self.address {
             Address::Myself => false,
-            Address::External(_) | Address::Known(_) | Address::KnownExternal { .. } => {
+            Address::Follower(_) | Address::Known(_) | Address::KnownFollower { .. } => {
                 self.sets > 0 || self.persistent
             }
         }
+    }
+
+    /// Returns `true` if this record currently has follower fallback configured.
+    pub const fn is_followed(&self) -> bool {
+        matches!(self.address, Address::Follower(_) | Address::KnownFollower { .. })
     }
 }
 #[cfg(test)]
@@ -372,14 +393,14 @@ mod tests {
     }
 
     #[test]
-    fn test_external_initial_state() {
+    fn test_follower_initial_state() {
         let source_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         let wrong_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
 
-        // External-only records admit inbound connections from the configured
+        // Follower-only records admit inbound connections from the configured
         // source IP, but they are never dialable.
-        let record = Record::external(source_ip);
-        assert!(matches!(record.address, Address::External(ip) if ip == source_ip));
+        let record = Record::follower(source_ip);
+        assert!(matches!(record.address, Address::Follower(ip) if ip == source_ip));
         assert_eq!(record.status, Status::Inert);
         assert_eq!(record.sets, 0);
         assert!(record.persistent);
@@ -398,21 +419,21 @@ mod tests {
     }
 
     #[test]
-    fn test_external_record_uses_tracked_address_while_in_peer_set() {
+    fn test_follower_record_uses_tracked_address_while_in_peer_set() {
         let source_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         let tracked = test_address();
         let tracked_ip = tracked.egress_ip();
-        let mut record = Record::external(source_ip);
+        let mut record = Record::follower(source_ip);
 
-        // Registering a tracked address preserves the external fallback instead of
+        // Registering a tracked address preserves the follower fallback instead of
         // replacing it.
         assert!(record.update(tracked.clone()));
         assert!(matches!(
             record.address,
-            Address::KnownExternal {
+            Address::KnownFollower {
                 ref address,
-                source_ip: external_ip,
-            } if *address == tracked && external_ip == source_ip
+                source_ip: follower_ip,
+            } if *address == tracked && follower_ip == source_ip
         ));
         assert!(record.ingress().is_none());
         assert_eq!(record.egress_ip(), Some(source_ip));
@@ -425,7 +446,7 @@ mod tests {
         assert!(!record.acceptable(source_ip, false));
 
         // Once the last tracked set is removed, the record falls back to the
-        // external admission IP without any extra cleanup.
+        // follower admission IP without any extra cleanup.
         record.decrement();
         assert!(record.ingress().is_none());
         assert_eq!(record.egress_ip(), Some(source_ip));
@@ -434,25 +455,25 @@ mod tests {
     }
 
     #[test]
-    fn test_known_external_updates_tracked_address_with_reconnect_signal() {
+    fn test_known_follower_updates_tracked_address_with_reconnect_signal() {
         let source_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         let tracked_a = test_address();
         let tracked_b = types::Address::Symmetric(SocketAddr::from(([54, 12, 1, 10], 8081)));
-        let mut record = Record::external(source_ip);
+        let mut record = Record::follower(source_ip);
 
         // First tracked address registration records the tracked endpoint while
-        // preserving the external fallback and requests a reconnect.
+        // preserving the follower fallback and requests a reconnect.
         assert!(record.update(tracked_a.clone()));
         record.increment();
         assert_eq!(record.ingress(), Some(tracked_a.ingress()));
 
-        // Updating the tracked endpoint for an external-backed peer also
+        // Updating the tracked endpoint for a follower-backed peer also
         // requests a reconnect, matching normal tracked-peer behavior.
         assert!(record.update(tracked_b.clone()));
         assert_eq!(record.ingress(), Some(tracked_b.ingress()));
         assert_eq!(record.egress_ip(), Some(tracked_b.egress_ip()));
 
-        // If the peer becomes untracked again, the original external IP still
+        // If the peer becomes untracked again, the original follower IP still
         // governs future inbound admissions.
         record.decrement();
         assert_eq!(record.ingress(), None);

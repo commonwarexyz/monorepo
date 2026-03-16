@@ -21,8 +21,8 @@ pub enum Message<P: PublicKey, E: Clock> {
         id: u64,
         peers: Set<P>,
     },
-    RegisterExternal {
-        public_key: P,
+    Follow {
+        public_keys: Set<P>,
     },
     PeerSet {
         id: u64,
@@ -71,9 +71,9 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
                 .debug_struct("Track")
                 .field("id", id)
                 .finish_non_exhaustive(),
-            Self::RegisterExternal { public_key } => f
-                .debug_struct("RegisterExternal")
-                .field("public_key", public_key)
+            Self::Follow { public_keys } => f
+                .debug_struct("Follow")
+                .field("public_keys", public_keys)
                 .finish(),
             Self::PeerSet { id, .. } => f
                 .debug_struct("PeerSet")
@@ -254,11 +254,9 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         self.sender.0.send_lossy(Message::Track { id, peers });
     }
 
-    /// Register an external peer.
-    fn register_external(&self, public_key: P) {
-        self.sender
-            .0
-            .send_lossy(Message::RegisterExternal { public_key });
+    /// Replace the full followed peer set.
+    fn follow(&self, public_keys: Set<P>) {
+        self.sender.0.send_lossy(Message::Follow { public_keys });
     }
 
     /// Get the peers for a given id.
@@ -373,8 +371,8 @@ impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
         // We consider all addresses to be valid, so this is a no-op
     }
 
-    async fn register_external(&mut self, peer: Self::PublicKey, _source_ip: std::net::IpAddr) {
-        self.oracle.register_external(peer);
+    async fn follow(&mut self, peers: Map<Self::PublicKey, std::net::IpAddr>) {
+        self.oracle.follow(peers.into_keys());
     }
 }
 

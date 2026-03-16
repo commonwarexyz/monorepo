@@ -143,20 +143,65 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .try_set(self.context.current().epoch_millis());
     }
 
-    /// Stores a persistent external fallback for a peer that may dial us when not currently tracked.
-    pub fn register_external(&mut self, peer: C, source_ip: IpAddr) {
-        match self.peers.entry(peer) {
-            Entry::Occupied(mut entry) => {
-                let record = entry.get_mut();
-                if record.is_myself() {
-                    return;
+    /// Replace the complete follower fallback set.
+    ///
+    /// Returns peers whose live sessions must be disconnected because they no
+    /// longer match the current follower policy while untracked.
+    pub fn follow(&mut self, peers: Map<C, IpAddr>) -> Vec<C> {
+        let current_followers: Vec<C> = self
+            .peers
+            .iter()
+            .filter(|(_, record)| record.is_followed())
+            .map(|(peer, _)| peer.clone())
+            .collect();
+
+        let mut next_followers = HashSet::with_capacity(peers.len());
+        let mut disconnect = Vec::new();
+
+        for (peer, source_ip) in peers {
+            next_followers.insert(peer.clone());
+            match self.peers.entry(peer.clone()) {
+                Entry::Occupied(mut entry) => {
+                    let record = entry.get_mut();
+                    if record.is_myself() {
+                        continue;
+                    }
+                    if record.follow(source_ip) {
+                        disconnect.push(peer);
+                    }
                 }
-                record.register_external(source_ip);
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(Record::external(source_ip));
+                Entry::Vacant(entry) => {
+                    entry.insert(Record::follower(source_ip));
+                }
             }
         }
+
+        for peer in current_followers {
+            if next_followers.contains(&peer) {
+                continue;
+            }
+
+            let mut disconnect_peer = false;
+            let Some(record) = self.peers.get_mut(&peer) else {
+                continue;
+            };
+            if record.is_myself() {
+                continue;
+            }
+
+            if record.sets() == 0 {
+                disconnect_peer = true;
+            }
+            record.unfollow();
+            if disconnect_peer {
+                disconnect.push(peer.clone());
+            }
+            let _ = self.delete_if_needed(&peer);
+        }
+
+        disconnect.sort();
+        disconnect.dedup();
+        disconnect
     }
 
     /// Stores a new peer set.
@@ -551,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_set_return_value_includes_external_fallback_peers_that_exit_tracking() {
+    fn test_add_set_return_value_includes_follower_fallback_peers_that_exit_tracking() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -574,17 +619,17 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            // Track an external-backed peer so it behaves like a full tracked
+            // Follow a peer, then track it so it behaves like a full tracked
             // peer. This now reports the peer as changed because any live
-            // external session must reconnect under tracked semantics.
-            directory.register_external(pk_1.clone(), source_ip);
+            // follower session must reconnect under tracked semantics.
+            directory.follow([(pk_1.clone(), source_ip)].try_into().unwrap());
             let (removed, changed) = directory
                 .add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap())
                 .unwrap();
             assert!(removed.is_empty());
             assert_eq!(changed, vec![pk_1.clone()]);
 
-            // Evict that set. The peer record persists as external fallback, but
+            // Evict that set. The peer record persists as follower fallback, but
             // it must still be reported as leaving the tracked view.
             let (removed, changed) = directory
                 .add_set(1, [(pk_2.clone(), addr(addr_2))].try_into().unwrap())
@@ -592,7 +637,7 @@ mod tests {
             assert_eq!(removed, vec![pk_1.clone()]);
             assert!(changed.is_empty());
 
-            // The peer remains external-only after leaving the tracked view.
+            // The peer remains follower-only after leaving the tracked view.
             assert!(directory.peers.contains_key(&pk_1));
             assert_eq!(directory.peers.get(&pk_1).unwrap().ingress(), None);
             assert_eq!(
@@ -2205,7 +2250,7 @@ mod tests {
     }
 
     #[test]
-    fn test_overwrite_external_backed_peer_requires_reconnect() {
+    fn test_overwrite_follower_backed_peer_requires_reconnect() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -2229,11 +2274,11 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            // Register an external fallback, then begin tracking the same peer.
-            directory.register_external(pk_1.clone(), source_ip);
+            // Follow a peer, then begin tracking the same public key.
+            directory.follow([(pk_1.clone(), source_ip)].try_into().unwrap());
             directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
-            // Overwriting the tracked address for an external-backed peer still
+            // Overwriting the tracked address for a follower-backed peer still
             // requires a reconnect, matching normal tracked-peer behavior.
             assert!(directory.overwrite(&pk_1, addr(addr_2)));
             assert_eq!(
@@ -2245,7 +2290,7 @@ mod tests {
                 Some(addr_2.ip())
             );
 
-            // Once the tracked set is evicted, the original external fallback IP
+            // Once the tracked set is evicted, the original follower fallback IP
             // still governs the peer.
             directory.add_set(1, [(pk_2.clone(), addr(addr_3))].try_into().unwrap());
             assert_eq!(directory.peers.get(&pk_1).unwrap().ingress(), None);
