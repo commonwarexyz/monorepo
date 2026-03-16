@@ -918,6 +918,8 @@ mod tests {
 
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
+            // Enter view 1 under participant 1, then advance to participant 2
+            // as the next leader so the policy has a single candidate target.
             let view = View::new(1);
             let next_leader = Participant::new(2);
             batcher_mailbox
@@ -949,6 +951,8 @@ mod tests {
             let our_vote = Notarize::sign(&schemes[0], proposal.clone()).unwrap();
             batcher_mailbox.constructed(Vote::Notarize(our_vote)).await;
 
+            // Wait until the batcher has a notarization for the proposal. That
+            // alone should still not emit any targeted forward.
             let mut saw_notarization = false;
             loop {
                 let output = select! {
@@ -988,6 +992,8 @@ mod tests {
                 .await;
             context.sleep(Duration::from_millis(50)).await;
 
+            // If the next leader already voted for this proposal, there should
+            // be no forward. Otherwise the only target should be participant 2.
             let broadcasts = relay.broadcasts.lock();
             if leader_voted {
                 assert!(
@@ -1373,9 +1379,10 @@ mod tests {
 
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
+            // Enter view 1 without constructing or receiving any matching
+            // votes. The batcher should learn this proposal only from the
+            // certificate injected below.
             let view = View::new(1);
-            // Enter view 1 without constructing or receiving any matching votes.
-            // The batcher should learn this proposal only from the certificate below.
             batcher_mailbox
                 .update(view, Participant::new(1), View::zero(), None)
                 .await;
@@ -1398,6 +1405,8 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Wait until the batcher has recovered the notarization from the
+            // certificate path before advancing to the next view.
             let mut saw_notarization = false;
             loop {
                 let output = select! {
@@ -1662,10 +1671,10 @@ mod tests {
                 );
             }
 
-            let view3 = View::new(3);
-            let leader3 = Participant::new(3);
             // Mark the winning proposal forwardable on the next view so we can
             // check which non-matching voters remain missing for it.
+            let view3 = View::new(3);
+            let leader3 = Participant::new(3);
             batcher_mailbox
                 .update(view3, leader3, View::zero(), Some(proposal_a.clone()))
                 .await;
