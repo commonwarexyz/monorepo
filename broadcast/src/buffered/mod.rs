@@ -48,6 +48,7 @@ mod tests {
     use commonware_runtime::{
         count_running_tasks, deterministic, Clock, Error, IoBuf, Metrics, Quota, Runner,
     };
+    use commonware_utils::NZUsize;
     use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
     // Number of messages to cache per sender
@@ -88,7 +89,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(1),
+                tracked_peer_sets: Some(NZUsize!(1)),
             },
         );
         network.start();

@@ -84,7 +84,7 @@ mod tests {
         Blocker, Manager, Provider,
     };
     use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{non_empty_vec, NZU32};
+    use commonware_utils::{non_empty_vec, NZU32, NZUsize};
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;
@@ -137,7 +137,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             },
         );
         network.start();

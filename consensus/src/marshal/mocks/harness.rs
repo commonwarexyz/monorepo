@@ -112,7 +112,7 @@ pub fn make_raw_block(parent: D, height: Height, timestamp: u64) -> B {
 /// Setup network for tests.
 pub fn setup_network(
     context: deterministic::Context,
-    tracked_peer_sets: Option<usize>,
+    tracked_peer_sets: Option<NonZeroUsize>,
 ) -> Oracle<K, deterministic::Context> {
     let (network, oracle) = Network::new(
         context.with_label("network"),
@@ -1474,7 +1474,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             .with_timeout(Some(H::finalize_timeout())),
     );
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), Some(3));
+        let mut oracle = setup_network(context.clone(), Some(NZUsize!(3)));
         let Fixture {
             participants,
             schemes,
@@ -1802,7 +1802,7 @@ pub fn sync_height_floor<H: TestHarness>() {
             .with_timeout(Some(Duration::from_secs(300))),
     );
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), Some(3));
+        let mut oracle = setup_network(context.clone(), Some(NZUsize!(3)));
         let Fixture {
             participants,
             schemes,
@@ -2140,7 +2140,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
             .with_timeout(Some(Duration::from_secs(120))),
     );
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), Some(1));
+        let mut oracle = setup_network(context.clone(), Some(NZUsize!(1)));
         let Fixture {
             participants,
             schemes,
@@ -3098,7 +3098,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             .with_timeout(Some(Duration::from_secs(60))),
     );
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), Some(3));
+        let mut oracle = setup_network(context.clone(), Some(NZUsize!(3)));
         let Fixture {
             participants,
             schemes,

@@ -1700,7 +1700,7 @@ mod tests {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
                 let tracked_peer_sets = if self.num_non_participants > 0 {
-                    Some(1)
+                    Some(NZUsize!(1))
                 } else {
                     None
                 };
@@ -4627,7 +4627,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(1),
+                    tracked_peer_sets: Some(NZUsize!(1)),
                 },
             );
             network.start();
