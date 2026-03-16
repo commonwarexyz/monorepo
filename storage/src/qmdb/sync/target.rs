@@ -144,10 +144,7 @@ mod tests {
             Target::<sha256::Digest>::read(&mut cursor),
             Err(CodecError::Invalid("Range", "start must be <= end"))
         ));
-    }
 
-    #[test]
-    fn test_sync_target_read_empty_range() {
         // Manually encode a target with an empty range (start == end)
         let root = sha256::Digest::from([42; 32]);
         let mut buffer = Vec::new();
