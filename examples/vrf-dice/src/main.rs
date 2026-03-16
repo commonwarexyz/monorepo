@@ -173,10 +173,13 @@ async fn roll_dice(
             (String::new(), String::new(), String::new())
         };
 
-    let message_raw = format!(
-        "round:{}|player:{}|seed:{}|mode:{}",
-        round, player_name, client_seed, game_mode
-    );
+    let message_raw = serde_json::to_string(&serde_json::json!({
+        "round": round,
+        "player": player_name,
+        "seed": client_seed,
+        "mode": game_mode,
+    }))
+    .expect("VRF message serialization must succeed");
     let (sig_bytes, vrf_bytes, dice_result) =
         compute_vrf(&inner.signer, message_raw.as_bytes(), &game_mode);
 
@@ -212,10 +215,13 @@ async fn verify_proof(
     let inner = state.inner.lock().unwrap();
     let game_mode = req.game_mode.unwrap_or_else(|| "dice".to_string());
 
-    let message_raw = format!(
-        "round:{}|player:{}|seed:{}|mode:{}",
-        req.round, req.player_name, req.client_seed, game_mode
-    );
+    let message_raw = serde_json::to_string(&serde_json::json!({
+        "round": req.round,
+        "player": req.player_name,
+        "seed": req.client_seed,
+        "mode": game_mode,
+    }))
+    .expect("VRF message serialization must succeed");
     let (sig_bytes, vrf_bytes, dice_result) =
         compute_vrf(&inner.signer, message_raw.as_bytes(), &game_mode);
 
