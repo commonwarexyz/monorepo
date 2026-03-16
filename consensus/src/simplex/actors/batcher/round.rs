@@ -4,7 +4,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Finalize, Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
+            Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
         },
     },
     types::Participant,
@@ -298,11 +298,6 @@ impl<
             return None;
         }
         Some(proposal)
-    }
-
-    /// Returns our locally constructed finalize vote for this round, if any.
-    pub fn local_finalize(&self, me: Participant) -> Option<&Finalize<S, D>> {
-        self.pending_votes.finalize(me)
     }
 
     pub fn ready_notarizes(&self) -> bool {

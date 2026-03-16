@@ -395,6 +395,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -424,6 +425,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(101));
                         assert_eq!(finalized, View::new(100));
@@ -481,6 +483,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(301));
                         assert_eq!(finalized, View::new(300));
@@ -636,6 +639,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -673,6 +677,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(51));
                         assert_eq!(finalized, View::new(50));
@@ -767,6 +772,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(101));
                         assert_eq!(finalized, View::new(100));
@@ -857,6 +863,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -984,6 +991,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -1503,6 +1511,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -1530,6 +1539,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(2));
                         assert_eq!(finalized, View::new(1));
@@ -1709,6 +1719,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -1799,6 +1810,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(3));
                     assert_eq!(finalized, View::new(2));
@@ -2077,6 +2089,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -2184,6 +2197,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));

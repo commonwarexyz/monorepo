@@ -211,8 +211,10 @@ where
     /// Resolves the public keys of `missing` participants for a targeted
     /// block forward. Returns `None` when no peers need the block.
     fn resolve_peers(&self, missing: &[Participant]) -> Option<Vec<S::PublicKey>> {
+        let me = self.scheme.me();
         let peers: Vec<_> = missing
             .iter()
+            .filter(|&&p| Some(p) != me)
             .filter_map(|&p| self.participants.key(p).cloned())
             .collect();
         (!peers.is_empty()).then_some(peers)
@@ -311,6 +313,7 @@ where
                     current: new_current,
                     leader,
                     finalized: new_finalized,
+                    forwardable_proposal,
                     response,
                 } => {
                     let me = self.scheme.me();
@@ -343,19 +346,10 @@ where
                     }
                     response.send_lossy(timeout_reason);
                     if self.forwarding.is_enabled() {
-                        if let Some((proposal, participants)) =
-                            new_current.previous().and_then(|view| {
-                                let round = work.get_mut(&view)?;
-                                // Our local finalize vote is the signal that
-                                // certification succeeded for this round,
-                                // making its block eligible for forwarding on
-                                // next-view entry.
-                                let proposal = round.local_finalize(me?)?.proposal.clone();
-                                let participants =
-                                    self.forwarding_targets(round, &proposal, leader);
-                                Some((proposal, participants))
-                            })
-                        {
+                        if let Some(proposal) = forwardable_proposal {
+                            debug_assert_eq!(proposal.view(), new_current.previous().unwrap());
+                            let round = work.entry(proposal.view()).or_insert_with(|| self.new_round());
+                            let participants = self.forwarding_targets(round, &proposal, leader);
                             self.forward_proposal(proposal, participants).await;
                         }
                     }
