@@ -204,6 +204,10 @@ pub enum Error {
     InvalidPinnedNodes,
     /// Location exceeds the valid range.
     LocationOverflow(Location),
+    /// A non-leaf position was used where a leaf position was required.
+    NonLeaf(Position),
+    /// Position exceeds the valid range for this MMB family.
+    PositionOverflow(Position),
     /// Changeset was created against a different MMB state.
     StaleChangeset {
         /// The size the changeset was built against.
@@ -213,33 +217,12 @@ pub enum Error {
     },
 }
 
-impl core::fmt::Display for Error {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Empty => write!(f, "empty"),
-            Self::InvalidSize(size) => write!(f, "invalid size: {size}"),
-            Self::RangeOutOfBounds(loc) => {
-                write!(
-                    f,
-                    "range out of bounds: end location {loc} exceeds MMB size"
-                )
-            }
-            Self::LeafOutOfBounds(loc) => write!(f, "leaf location out of bounds: {loc}"),
-            Self::ElementPruned(pos) => write!(f, "element pruned: {pos}"),
-            Self::InvalidPinnedNodes => write!(f, "invalid pinned nodes"),
-            Self::LocationOverflow(loc) => write!(f, "location {loc} > MAX_LOCATION"),
-            Self::StaleChangeset { expected, actual } => {
-                write!(f, "stale changeset: expected size {expected}, got {actual}")
-            }
-        }
-    }
-}
-
 impl From<merkle::Error<Family>> for Error {
     fn from(e: merkle::Error<Family>) -> Self {
         match e {
             merkle::Error::LocationOverflow(loc) => Self::LocationOverflow(loc),
-            _ => panic!("unexpected merkle error: {e}"),
+            merkle::Error::NonLeaf(pos) => Self::NonLeaf(pos),
+            merkle::Error::PositionOverflow(pos) => Self::PositionOverflow(pos),
         }
     }
 }

@@ -595,14 +595,14 @@ mod tests {
             for loc_idx in 0..n {
                 let proof = mmb
                     .proof(&mut hasher, Location::new(loc_idx))
-                    .unwrap_or_else(|e| panic!("n={n}, loc={loc_idx}: build failed: {e}"));
+                    .unwrap_or_else(|e| panic!("n={n}, loc={loc_idx}: build failed: {e:?}"));
 
                 let elements = [loc_idx.to_be_bytes()];
                 let start_loc = Location::new(loc_idx);
 
                 let reconstructed = proof
                     .reconstruct_root(&mut hasher, &elements, start_loc)
-                    .unwrap_or_else(|e| panic!("n={n}, loc={loc_idx}: reconstruct failed: {e}"));
+                    .unwrap_or_else(|e| panic!("n={n}, loc={loc_idx}: reconstruct failed: {e:?}"));
                 assert_eq!(reconstructed, root, "n={n}, loc={loc_idx}: root mismatch");
             }
         }
@@ -628,7 +628,7 @@ mod tests {
                 }
                 let proof = mmb
                     .range_proof(&mut hasher, Location::new(start)..Location::new(end))
-                    .unwrap_or_else(|e| panic!("n={n}, range={start}..{end}: build failed: {e}"));
+                    .unwrap_or_else(|e| panic!("n={n}, range={start}..{end}: build failed: {e:?}"));
                 let elements: Vec<_> = (start..end).map(|i| i.to_be_bytes()).collect();
                 let start_loc = Location::new(start);
 
