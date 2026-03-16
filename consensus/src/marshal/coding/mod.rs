@@ -94,7 +94,7 @@ mod tests {
     use commonware_p2p::Manager;
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::{NZU16, NZUsize};
+    use commonware_utils::{NZUsize, NZU16};
     use std::time::Duration;
 
     #[test_group("slow")]

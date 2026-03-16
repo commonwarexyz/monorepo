@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    TryCollect, NZU32, NZUsize,
+    NZUsize, TryCollect, NZU32,
 };
 use rand::{seq::SliceRandom, Rng};
 use std::{

@@ -84,7 +84,7 @@ mod tests {
         Blocker, Manager, Provider,
     };
     use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{non_empty_vec, NZU32, NZUsize};
+    use commonware_utils::{non_empty_vec, NZUsize, NZU32};
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;
