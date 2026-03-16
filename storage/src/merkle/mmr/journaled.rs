@@ -401,19 +401,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             page_cache: cfg.config.page_cache.clone(),
         };
 
-        // Open the journal, handling existing data vs sync range.
-        assert!(!cfg.range.is_empty(), "range must not be empty");
+        // Open the journal, performing a rewind if necessary for crash recovery.
         let journal: Journal<E, D> =
             Journal::init(context.with_label("mmr_journal"), journal_cfg).await?;
-        let size = journal.size().await;
-
-        if size > *end_pos {
-            return Err(crate::journal::Error::ItemOutOfRange(size).into());
-        }
-        if size <= *prune_pos && *prune_pos != 0 {
-            journal.clear_to_size(*prune_pos).await?;
-        }
-
         let mut journal_size = Position::new(journal.size().await);
 
         // If a crash left the journal at an invalid MMR size (e.g., a leaf was written
@@ -427,6 +417,15 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             journal.rewind(*last_valid_size).await?;
             journal.sync().await?;
             journal_size = last_valid_size;
+        }
+
+        // Handle existing data vs sync range.
+        assert!(!cfg.range.is_empty(), "range must not be empty");
+        if journal_size > *end_pos {
+            return Err(crate::journal::Error::ItemOutOfRange(*journal_size).into());
+        }
+        if journal_size <= *prune_pos && *prune_pos != 0 {
+            journal.clear_to_size(*prune_pos).await?;
         }
 
         // Open the metadata.
