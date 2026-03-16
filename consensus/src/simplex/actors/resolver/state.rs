@@ -73,7 +73,9 @@ impl<S: Scheme, D: Digest> State<S, D> {
                     // The view and the rest of the term are considered nullified.
                     // Retain requests for views outside of this range.
                     let end = view.term_end(self.term_length);
-                    let predicate = move |v: &U64| !(view..=end).contains(&View::new(u64::from(v)));
+                    let start: U64 = view.into();
+                    let end: U64 = end.into();
+                    let predicate = move |v: &U64| !(v >= &start && v <= &end);
                     resolver.retain(predicate).await;
                 }
             }
