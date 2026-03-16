@@ -19,9 +19,9 @@ Server listens on `0.0.0.0:8080` (override with `PORT`). API only (no static UI)
 | POST | `/api/register` | Register a player (optional `player_name`). Returns `public_key`, `short_id`. |
 | POST | `/api/roll` | Roll dice / flip coin / lottery. Body: `player_name?`, `client_seed?`, `player_public_key?`, `game_mode?` (`dice`, `coin`, `lottery`). |
 | POST | `/api/verify` | Verify a past roll: `round`, `player_name`, `client_seed`, `claimed_proof`, `claimed_result`, `game_mode?`. |
-| GET | `/api/history` | Last 100 rolls. |
-| GET | `/api/info` | Server public key and stats. |
-| GET | `/api/leaderboard` | Per-player stats. |
+| GET | `/api/history` | Last 100 rolls (bounded; older rolls are evicted). |
+| GET | `/api/info` | Server public key and stats (`total_rolls` is all-time). |
+| GET | `/api/leaderboard` | Per-player stats over the last 100 rolls. |
 | GET | `/api/proof/:round` | Proof and record for a round. |
 | GET | `/api/ping` | Health check. |
 

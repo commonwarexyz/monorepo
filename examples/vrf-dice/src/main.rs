@@ -207,6 +207,10 @@ async fn roll_dice(
     };
 
     inner.history.push(record.clone());
+    const HISTORY_CAP: usize = 100;
+    if inner.history.len() > HISTORY_CAP {
+        inner.history.remove(0);
+    }
 
     Json(record)
 }
@@ -244,7 +248,9 @@ async fn verify_proof(
 
 async fn get_history(State(state): State<AppState>) -> impl IntoResponse {
     let inner = state.inner.lock().unwrap();
-    Json(inner.history.clone())
+    let len = inner.history.len();
+    let start = len.saturating_sub(100);
+    Json(inner.history[start..].to_vec())
 }
 
 async fn get_info(State(state): State<AppState>) -> impl IntoResponse {
