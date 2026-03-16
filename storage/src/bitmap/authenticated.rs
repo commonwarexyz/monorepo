@@ -13,7 +13,6 @@
 use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        batch::UnmerkleizedBatch,
         hasher::Hasher,
         iterator::nodes_to_pin,
         mem::{Config, Mmr, MIN_TO_PARALLELIZE},
@@ -559,7 +558,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         hasher: &mut impl Hasher<Digest = D>,
     ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
         // Add newly pushed complete chunks to the batch.
-        let mut batch = UnmerkleizedBatch::new(&self.mmr).with_pool(self.pool.clone());
+        let mut batch = self.mmr.new_batch().with_pool(self.pool.clone());
         let start = self.authenticated_len;
         let end = self.complete_chunks();
         for i in start..end {

@@ -4,11 +4,12 @@ use crate::mmr::{
     hasher::Hasher,
     iterator::{nodes_to_pin, PeakIterator},
     proof,
-    read::{BatchChainInfo, Readable},
+    read::Readable,
     Error, Location, Position, Proof,
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::Arc,
     vec::Vec,
 };
 use commonware_cryptography::Digest;
@@ -18,24 +19,6 @@ use core::ops::Range;
 #[cfg(feature = "std")]
 pub(crate) const MIN_TO_PARALLELIZE: usize = 20;
 
-/// Sealed trait for MMR state types.
-mod private {
-    pub trait Sealed {}
-}
-
-/// Trait for valid batch state types.
-pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {}
-
-/// Marker type for a batch whose root digest has been computed.
-#[derive(Clone, Copy, Debug)]
-pub struct Clean<D: Digest> {
-    /// The root digest of the MMR after this batch has been applied.
-    pub root: D,
-}
-
-impl<D: Digest> private::Sealed for Clean<D> {}
-impl<D: Digest> State<D> for Clean<D> {}
-
 /// Marker type for an unmerkleized batch (root digest not computed).
 #[derive(Clone, Debug, Default)]
 pub struct Dirty {
@@ -44,9 +27,6 @@ pub struct Dirty {
     /// This is a set of tuples of the form (node_pos, height).
     dirty_nodes: BTreeSet<(Position, u32)>,
 }
-
-impl private::Sealed for Dirty {}
-impl<D: Digest> State<D> for Dirty {}
 
 impl Dirty {
     /// Insert a dirty node. Returns true if newly inserted.
@@ -75,29 +55,13 @@ pub struct Config<D: Digest> {
     pub pinned_nodes: Vec<D>,
 }
 
-/// A basic MMR where all nodes are stored in-memory.
+/// The shared, reference-counted data behind an [`Mmr`].
 ///
-/// # Terminology
-///
-/// Nodes in this structure are either _retained_, _pruned_, or _pinned_. Retained nodes are nodes
-/// that have not yet been pruned, and have digests stored explicitly within the tree structure.
-/// Pruned nodes are those whose positions precede that of the _oldest retained_ node, for which no
-/// digests are maintained. Pinned nodes are nodes that would otherwise be pruned based on their
-/// position, but whose digests remain required for proof generation. The digests for pinned nodes
-/// are stored in an auxiliary map, and are at most O(log2(n)) in number.
-///
-/// # Max Capacity
-///
-/// The maximum number of elements that can be stored is usize::MAX (u32::MAX on 32-bit
-/// architectures).
-///
-/// # Mutation
-///
-/// The MMR is always merkleized (its root is always computed). Mutations go through the
-/// batch API: create an [`super::batch::UnmerkleizedBatch`] via [`Self::new_batch`],
-/// accumulate changes, then apply the resulting [`super::batch::Changeset`] via [`Self::apply`].
+/// Separated from [`Mmr`] so that `Mmr::clone()` is O(1) (Arc refcount bump).
+/// Mutation goes through `Arc::make_mut`, which is in-place when the refcount is 1
+/// and COW-copies otherwise.
 #[derive(Clone, Debug)]
-pub struct Mmr<D: Digest> {
+struct MmrInner<D: Digest> {
     /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
     /// starting from the from tallest tree to shortest.
     nodes: VecDeque<D>,
@@ -117,15 +81,63 @@ pub struct Mmr<D: Digest> {
     root: D,
 }
 
+/// A basic MMR where all nodes are stored in-memory.
+///
+/// # Terminology
+///
+/// Nodes in this structure are either _retained_, _pruned_, or _pinned_. Retained nodes are
+/// nodes that have not yet been pruned, and have digests stored explicitly within the tree
+/// structure. Pruned nodes are those whose positions precede that of the _oldest retained_ node,
+/// for which no digests are maintained. Pinned nodes are nodes that would otherwise be pruned
+/// based on their position, but whose digests remain required for proof generation. The digests
+/// for pinned nodes are stored in an auxiliary map, and are at most O(log2(n)) in number.
+///
+/// # Max Capacity
+///
+/// The maximum number of elements that can be stored is usize::MAX (u32::MAX on 32-bit
+/// architectures).
+///
+/// # Mutation
+///
+/// There is no direct mutation API. Instead, all changes go through the batch layer, which
+/// keeps the MMR always-merkleized (root always up to date):
+///
+/// ```text
+/// let mut batch = mmr.new_batch();                          // O(1), shares data via Arc
+/// batch.add(&mut hasher, &element);                         // append a leaf
+/// batch.update_leaf(&mut hasher, loc, &element)?;           // overwrite a leaf
+/// let merkleized = batch.merkleize(&mut hasher);            // compute root
+/// let changeset = merkleized.finalize();                    // extract owned delta
+/// mmr.apply(changeset)?;                                    // apply delta to MMR
+/// ```
+///
+/// Multiple batches can be forked from the same MMR (or from the same
+/// [`super::batch::MerkleizedBatch`]) for speculative execution. Each forked batch sees the same
+/// base state. Only one changeset may be applied back to the MMR; applying a second returns
+/// [`super::Error::StaleChangeset`].
+///
+/// Internally, the MMR's data is behind an [`Arc`] so that [`new_batch`](Self::new_batch)
+/// shares it with the batch without copying. Mutating methods ([`apply`](Self::apply),
+/// [`prune`](Self::prune), etc.) use `Arc::make_mut`: this is in-place when no outstanding
+/// batch or clone references the data, but triggers an O(N) copy-on-write (N = retained +
+/// pinned nodes) if any batch created by [`new_batch`](Self::new_batch) -- or any
+/// [`super::batch::MerkleizedBatch`] derived from it -- is still alive.
+#[derive(Clone, Debug)]
+pub struct Mmr<D: Digest> {
+    inner: Arc<MmrInner<D>>,
+}
+
 impl<D: Digest> Mmr<D> {
     /// Create a new, empty MMR.
     pub fn new(hasher: &mut impl Hasher<Digest = D>) -> Self {
         let root = hasher.root(Location::new(0), core::iter::empty::<&D>());
         Self {
-            nodes: VecDeque::new(),
-            pruned_to_pos: Position::new(0),
-            pinned_nodes: BTreeMap::new(),
-            root,
+            inner: Arc::new(MmrInner {
+                nodes: VecDeque::new(),
+                pruned_to_pos: Position::new(0),
+                pinned_nodes: BTreeMap::new(),
+                root,
+            }),
         }
     }
 
@@ -167,10 +179,12 @@ impl<D: Digest> Mmr<D> {
         let nodes = VecDeque::from(config.nodes);
         let root = Self::compute_root(hasher, &nodes, &pinned_nodes, pruned_to_pos);
         Ok(Self {
-            nodes,
-            pruned_to_pos,
-            pinned_nodes,
-            root,
+            inner: Arc::new(MmrInner {
+                nodes,
+                pruned_to_pos,
+                pinned_nodes,
+                root,
+            }),
         })
     }
 
@@ -200,11 +214,56 @@ impl<D: Digest> Mmr<D> {
         let nodes = VecDeque::from(nodes);
         let root = Self::compute_root(hasher, &nodes, &pinned_nodes, pruned_to_pos);
         Ok(Self {
-            nodes,
-            pruned_to_pos,
-            pinned_nodes,
-            root,
+            inner: Arc::new(MmrInner {
+                nodes,
+                pruned_to_pos,
+                pinned_nodes,
+                root,
+            }),
         })
+    }
+
+    /// Build a minimal, pruned MMR from a precomputed root and pinned peaks.
+    ///
+    /// The resulting MMR has no retained nodes -- only the O(log N) pinned peaks needed for proof
+    /// generation and the already-known root. This avoids rehashing (useful when no hasher is
+    /// available, e.g. inside `sync()`).
+    #[cfg(feature = "std")]
+    pub(crate) fn from_pruned(
+        root: D,
+        pruned_to_pos: Position,
+        pinned_nodes: BTreeMap<Position, D>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(MmrInner {
+                nodes: VecDeque::new(),
+                pruned_to_pos,
+                pinned_nodes,
+                root,
+            }),
+        }
+    }
+
+    /// Build a pruned MMR that retains nodes above the prune boundary.
+    ///
+    /// Like [`from_pruned`](Self::from_pruned) but also accepts retained nodes (stored in the
+    /// `nodes` deque). Used for the grafted MMR which has no disk fallback and must keep
+    /// unpruned nodes in memory.
+    #[cfg(feature = "std")]
+    pub(crate) fn from_pruned_with_retained(
+        root: D,
+        pruned_to_pos: Position,
+        pinned_nodes: BTreeMap<Position, D>,
+        retained_nodes: Vec<D>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(MmrInner {
+                nodes: VecDeque::from(retained_nodes),
+                pruned_to_pos,
+                pinned_nodes,
+                root,
+            }),
+        }
     }
 
     /// Compute the root digest from the current peaks.
@@ -238,7 +297,7 @@ impl<D: Digest> Mmr<D> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
-        Position::new(self.nodes.len() as u64 + *self.pruned_to_pos)
+        Position::new(self.inner.nodes.len() as u64 + *self.inner.pruned_to_pos)
     }
 
     /// Return the total number of leaves in the MMR.
@@ -249,7 +308,7 @@ impl<D: Digest> Mmr<D> {
     /// Returns [start, end) where `start` is the oldest retained leaf and `end` is the total leaf
     /// count.
     pub fn bounds(&self) -> Range<Location> {
-        Location::try_from(self.pruned_to_pos).expect("valid pruned_to_pos")..self.leaves()
+        Location::try_from(self.inner.pruned_to_pos).expect("valid pruned_to_pos")..self.leaves()
     }
 
     /// Return a new iterator over the peaks of the MMR.
@@ -259,7 +318,7 @@ impl<D: Digest> Mmr<D> {
 
     /// Return the position of the element given its index in the current nodes vector.
     fn index_to_pos(&self, index: usize) -> Position {
-        self.pruned_to_pos + (index as u64)
+        self.inner.pruned_to_pos + (index as u64)
     }
 
     /// Return the requested node if it is either retained or present in the pinned_nodes map, and
@@ -270,14 +329,15 @@ impl<D: Digest> Mmr<D> {
     /// Panics if the requested node does not exist for any reason such as the node is pruned or
     /// `pos` is out of bounds.
     pub(crate) fn get_node_unchecked(&self, pos: Position) -> &D {
-        if pos < self.pruned_to_pos {
+        if pos < self.inner.pruned_to_pos {
             return self
+                .inner
                 .pinned_nodes
                 .get(&pos)
                 .expect("requested node is pruned and not pinned");
         }
 
-        &self.nodes[self.pos_to_index(pos)]
+        &self.inner.nodes[self.pos_to_index(pos)]
     }
 
     /// Return the index of the element in the current nodes vector given its position in the MMR.
@@ -287,29 +347,29 @@ impl<D: Digest> Mmr<D> {
     /// Panics if `pos` precedes the oldest retained position.
     fn pos_to_index(&self, pos: Position) -> usize {
         assert!(
-            pos >= self.pruned_to_pos,
+            pos >= self.inner.pruned_to_pos,
             "pos precedes oldest retained position"
         );
-
-        *pos.checked_sub(*self.pruned_to_pos).unwrap() as usize
+        self.inner.pos_to_index(pos)
     }
 
     /// Utility used by stores that build on the mem MMR to pin extra nodes if needed. It's up to
     /// the caller to ensure that this set of pinned nodes is valid for their use case.
     #[cfg(any(feature = "std", test))]
     pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position, D>) {
+        let inner = Arc::make_mut(&mut self.inner);
         for (pos, node) in pinned_nodes.into_iter() {
-            self.pinned_nodes.insert(pos, node);
+            inner.pinned_nodes.insert(pos, node);
         }
     }
 
     /// Return the requested node or None if it is not stored in the MMR.
     pub fn get_node(&self, pos: Position) -> Option<D> {
-        if pos < self.pruned_to_pos {
-            return self.pinned_nodes.get(&pos).copied();
+        if pos < self.inner.pruned_to_pos {
+            return self.inner.pinned_nodes.get(&pos).copied();
         }
 
-        self.nodes.get(self.pos_to_index(pos)).copied()
+        self.inner.nodes.get(self.pos_to_index(pos)).copied()
     }
 
     /// Get the nodes (position + digest) that need to be pinned (those required for proof
@@ -332,7 +392,7 @@ impl<D: Digest> Mmr<D> {
             return Err(Error::LeafOutOfBounds(loc));
         }
         let pos = Position::try_from(loc)?;
-        if pos <= self.pruned_to_pos {
+        if pos <= self.inner.pruned_to_pos {
             return Ok(());
         }
         self.prune_to_pos(pos);
@@ -342,8 +402,8 @@ impl<D: Digest> Mmr<D> {
     /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
     /// forward.
     pub fn prune_all(&mut self) {
-        if !self.nodes.is_empty() {
-            let pos = self.index_to_pos(self.nodes.len());
+        if !self.inner.nodes.is_empty() {
+            let pos = self.index_to_pos(self.inner.nodes.len());
             self.prune_to_pos(pos);
         }
     }
@@ -351,29 +411,17 @@ impl<D: Digest> Mmr<D> {
     /// Position-based pruning. Assumes `pos` is the position of a leaf since the pruning boundary
     /// must be leaf aligned.
     fn prune_to_pos(&mut self, pos: Position) {
-        self.pinned_nodes = self.nodes_to_pin(pos);
+        let pinned = self.nodes_to_pin(pos);
         let retained_nodes = self.pos_to_index(pos);
-        self.nodes.drain(0..retained_nodes);
-        self.pruned_to_pos = pos;
-    }
-
-    /// Truncate the MMR to a smaller valid size, discarding all nodes beyond that size.
-    /// Recomputes the root after truncation.
-    ///
-    /// `new_size` must be a valid MMR size (i.e., `new_size.is_mmr_size()`) and must be
-    /// >= `pruned_to_pos`.
-    #[cfg(feature = "std")]
-    pub(crate) fn truncate(&mut self, new_size: Position, hasher: &mut impl Hasher<Digest = D>) {
-        debug_assert!(new_size.is_mmr_size());
-        debug_assert!(new_size >= self.pruned_to_pos);
-        let keep = (*new_size - *self.pruned_to_pos) as usize;
-        self.nodes.truncate(keep);
-        self.root = Self::compute_root(hasher, &self.nodes, &self.pinned_nodes, self.pruned_to_pos);
+        let inner = Arc::make_mut(&mut self.inner);
+        inner.pinned_nodes = pinned;
+        inner.nodes.drain(0..retained_nodes);
+        inner.pruned_to_pos = pos;
     }
 
     /// Get the root digest of the MMR.
-    pub const fn root(&self) -> &D {
-        &self.root
+    pub fn root(&self) -> &D {
+        &self.inner.root
     }
 
     /// Return an inclusion proof for the element at location `loc`.
@@ -428,12 +476,19 @@ impl<D: Digest> Mmr<D> {
     /// be pruned, but whose digests remain required for proof generation.
     #[cfg(test)]
     pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
-        self.pinned_nodes.clone()
+        self.inner.pinned_nodes.clone()
     }
 
     /// Create a new speculative batch with this MMR as its parent.
-    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<'_, D, Self> {
-        super::batch::UnmerkleizedBatch::new(self)
+    ///
+    /// This is O(1) -- it clones the inner `Arc`, not the MMR data. However, the
+    /// batch holds a shared reference to the MMR's data. If the batch (or any
+    /// [`super::batch::MerkleizedBatch`] derived from it) is still alive when
+    /// [`apply`](Self::apply) or another mutating method is called, the mutation
+    /// triggers an O(N) copy-on-write of the underlying data.
+    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<D> {
+        let base = super::batch::MerkleizedBatch::Base(self.clone());
+        super::batch::UnmerkleizedBatch::new(base)
     }
 
     /// Apply a changeset produced by [`super::batch::MerkleizedBatch::finalize`].
@@ -450,20 +505,29 @@ impl<D: Digest> Mmr<D> {
             });
         }
 
+        let inner = Arc::make_mut(&mut self.inner);
+
         // 1. Overwrite: write modified digests into surviving base nodes.
         for (pos, digest) in changeset.overwrites {
-            let index = self.pos_to_index(pos);
-            self.nodes[index] = digest;
+            let index = inner.pos_to_index(pos);
+            inner.nodes[index] = digest;
         }
 
         // 2. Append: push new nodes onto the end.
         for digest in changeset.appended {
-            self.nodes.push_back(digest);
+            inner.nodes.push_back(digest);
         }
 
         // 3. Root: set the pre-computed root from the batch.
-        self.root = changeset.root;
+        inner.root = changeset.root;
         Ok(())
+    }
+}
+
+impl<D: Digest> MmrInner<D> {
+    /// Return the index of the element in the current nodes vector given its position.
+    fn pos_to_index(&self, pos: Position) -> usize {
+        *pos.checked_sub(*self.pruned_to_pos).unwrap() as usize
     }
 }
 
@@ -483,18 +547,8 @@ impl<D: Digest> Readable for Mmr<D> {
     }
 
     fn pruned_to_pos(&self) -> Position {
-        self.pruned_to_pos
+        self.inner.pruned_to_pos
     }
-}
-
-impl<D: Digest> BatchChainInfo for Mmr<D> {
-    type Digest = D;
-
-    fn base_size(&self) -> Position {
-        self.size()
-    }
-
-    fn collect_overwrites(&self, _into: &mut BTreeMap<Position, D>) {}
 }
 
 #[cfg(test)]
@@ -594,32 +648,33 @@ mod tests {
             }
 
             // verify height=1 node digests
-            let digest2 = hasher.node_digest(Position::new(2), &mmr.nodes[0], &mmr.nodes[1]);
-            assert_eq!(mmr.nodes[2], digest2);
-            let digest5 = hasher.node_digest(Position::new(5), &mmr.nodes[3], &mmr.nodes[4]);
-            assert_eq!(mmr.nodes[5], digest5);
-            let digest9 = hasher.node_digest(Position::new(9), &mmr.nodes[7], &mmr.nodes[8]);
-            assert_eq!(mmr.nodes[9], digest9);
-            let digest12 = hasher.node_digest(Position::new(12), &mmr.nodes[10], &mmr.nodes[11]);
-            assert_eq!(mmr.nodes[12], digest12);
-            let digest17 = hasher.node_digest(Position::new(17), &mmr.nodes[15], &mmr.nodes[16]);
-            assert_eq!(mmr.nodes[17], digest17);
+            let nodes = &mmr.inner.nodes;
+            let digest2 = hasher.node_digest(Position::new(2), &nodes[0], &nodes[1]);
+            assert_eq!(nodes[2], digest2);
+            let digest5 = hasher.node_digest(Position::new(5), &nodes[3], &nodes[4]);
+            assert_eq!(nodes[5], digest5);
+            let digest9 = hasher.node_digest(Position::new(9), &nodes[7], &nodes[8]);
+            assert_eq!(nodes[9], digest9);
+            let digest12 = hasher.node_digest(Position::new(12), &nodes[10], &nodes[11]);
+            assert_eq!(nodes[12], digest12);
+            let digest17 = hasher.node_digest(Position::new(17), &nodes[15], &nodes[16]);
+            assert_eq!(nodes[17], digest17);
 
             // verify height=2 node digests
-            let digest6 = hasher.node_digest(Position::new(6), &mmr.nodes[2], &mmr.nodes[5]);
-            assert_eq!(mmr.nodes[6], digest6);
-            let digest13 = hasher.node_digest(Position::new(13), &mmr.nodes[9], &mmr.nodes[12]);
-            assert_eq!(mmr.nodes[13], digest13);
-            let digest17 = hasher.node_digest(Position::new(17), &mmr.nodes[15], &mmr.nodes[16]);
-            assert_eq!(mmr.nodes[17], digest17);
+            let digest6 = hasher.node_digest(Position::new(6), &nodes[2], &nodes[5]);
+            assert_eq!(nodes[6], digest6);
+            let digest13 = hasher.node_digest(Position::new(13), &nodes[9], &nodes[12]);
+            assert_eq!(nodes[13], digest13);
+            let digest17 = hasher.node_digest(Position::new(17), &nodes[15], &nodes[16]);
+            assert_eq!(nodes[17], digest17);
 
             // verify topmost digest
-            let digest14 = hasher.node_digest(Position::new(14), &mmr.nodes[6], &mmr.nodes[13]);
-            assert_eq!(mmr.nodes[14], digest14);
+            let digest14 = hasher.node_digest(Position::new(14), &nodes[6], &nodes[13]);
+            assert_eq!(nodes[14], digest14);
 
             // verify root
             let root = *mmr.root();
-            let peak_digests = [digest14, digest17, mmr.nodes[18]];
+            let peak_digests = [digest14, digest17, nodes[18]];
             let expected_root = hasher.root(Location::new(11), peak_digests.iter());
             assert_eq!(root, expected_root, "incorrect root");
 
@@ -666,7 +721,7 @@ mod tests {
             let digests = mmr.node_digests_to_pin(oldest_pos);
             let mmr_copy = Mmr::init(
                 Config {
-                    nodes: mmr.nodes.iter().copied().collect(),
+                    nodes: mmr.inner.nodes.iter().copied().collect(),
                     pruned_to: oldest_loc,
                     pinned_nodes: digests,
                 },

@@ -1,11 +1,8 @@
 //! Read-only trait for merkleized MMRs.
 //!
 //! [`Readable`] provides an interface for reading from a merkleized MMR.
-//!
-//! [`BatchChainInfo`] is used to walk chains of batches.
 
 use crate::mmr::{hasher::Hasher, iterator::PeakIterator, proof, Error, Location, Position, Proof};
-use alloc::collections::BTreeMap;
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -65,19 +62,4 @@ pub trait Readable: Send + Sync {
         let leaves = self.leaves();
         proof::build_range_proof(hasher, leaves, range, |pos| self.get_node(pos))
     }
-}
-
-/// Information needed to flatten a chain of batches into a single [`super::batch::Changeset`].
-pub trait BatchChainInfo: Send + Sync {
-    /// The digest type used by this MMR.
-    type Digest: Digest;
-
-    /// Number of nodes in the original MMR that the batch chain was forked
-    /// from. This is constant through the entire chain.
-    fn base_size(&self) -> Position;
-
-    /// Collect all overwrites that target nodes in the original MMR
-    /// (i.e. positions < `base_size()`), walking from the deepest
-    /// ancestor to the current batch. Later batches overwrite earlier ones.
-    fn collect_overwrites(&self, into: &mut BTreeMap<Position, Self::Digest>);
 }

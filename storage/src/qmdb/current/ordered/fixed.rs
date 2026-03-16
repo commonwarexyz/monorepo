@@ -103,6 +103,7 @@ pub mod test {
         qmdb::{
             any::ordered::Update,
             current::{
+                batch::BitmapRead,
                 proof::{OperationProof, RangeProof},
                 tests::{apply_random_ops, fixed_config},
             },
@@ -393,6 +394,10 @@ pub mod test {
                     .finalize();
                 db.apply_batch(finalized).await.unwrap();
             }
+
+            // Prune the database
+            let floor = db.any.inactivity_floor_loc;
+            db.prune(floor).await.unwrap();
 
             assert!(
                 db.status.pruned_chunks() > 0,

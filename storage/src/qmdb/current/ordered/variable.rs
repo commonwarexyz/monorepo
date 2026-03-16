@@ -116,6 +116,7 @@ mod test {
         qmdb::{
             any::ordered::variable::Operation,
             current::{
+                batch::BitmapRead,
                 ordered::{db::KeyValueProof, variable::Db},
                 proof::{OperationProof, RangeProof},
                 tests::{apply_random_ops, variable_config},

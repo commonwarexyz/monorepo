@@ -107,6 +107,7 @@ pub mod test {
         qmdb::{
             any::operation::update::Unordered as UnorderedUpdate,
             current::{
+                batch::BitmapRead,
                 proof::RangeProof,
                 tests::{apply_random_ops, fixed_config},
             },

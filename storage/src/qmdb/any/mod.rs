@@ -1294,10 +1294,10 @@ pub(crate) mod test {
             batch = batch.write(kc, Some(vc));
             let merkleized = batch.merkleize(None).await.unwrap();
 
-            assert_eq!(merkleized.get(&ka).await.unwrap(), Some(va2));
-            assert_eq!(merkleized.get(&kb).await.unwrap(), None);
-            assert_eq!(merkleized.get(&kc).await.unwrap(), Some(vc));
-            assert_eq!(merkleized.get(&kd).await.unwrap(), None);
+            assert_eq!(merkleized.get(&ka, &db).await.unwrap(), Some(va2));
+            assert_eq!(merkleized.get(&kb, &db).await.unwrap(), None);
+            assert_eq!(merkleized.get(&kc, &db).await.unwrap(), Some(vc));
+            assert_eq!(merkleized.get(&kd, &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1323,7 +1323,7 @@ pub(crate) mod test {
             let merkleized = batch.merkleize(None).await.unwrap();
 
             // Child reads parent's A.
-            let mut child = merkleized.new_batch();
+            let mut child = merkleized.new_batch(&db);
             assert_eq!(child.get(&ka).await.unwrap(), Some(val(0)));
 
             // Child overwrites A.
@@ -1362,13 +1362,13 @@ pub(crate) mod test {
             let mut parent = db.new_batch();
             parent = parent.write(ka, None);
             let parent_m = parent.merkleize(None).await.unwrap();
-            assert_eq!(parent_m.get(&ka).await.unwrap(), None);
+            assert_eq!(parent_m.get(&ka, &db).await.unwrap(), None);
 
             // Child re-creates A with a new value.
-            let mut child = parent_m.new_batch();
+            let mut child = parent_m.new_batch(&db);
             child = child.write(ka, Some(val(200)));
             let child_m = child.merkleize(None).await.unwrap();
-            assert_eq!(child_m.get(&ka).await.unwrap(), Some(val(200)));
+            assert_eq!(child_m.get(&ka, &db).await.unwrap(), Some(val(200)));
 
             // Apply and verify DB state.
             let finalized = child_m.finalize();
@@ -1475,22 +1475,28 @@ pub(crate) mod test {
             let parent_m = parent.merkleize(None).await.unwrap();
 
             // Child: overwrite key 1, add key 6.
-            let mut child = parent_m.new_batch();
+            let mut child = parent_m.new_batch(&db);
             child = child.write(key(1), Some(val(101)));
             child = child.write(key(6), Some(val(6)));
             let child_m = child.merkleize(None).await.unwrap();
 
             // Grandchild: delete key 2, add key 7.
-            let mut grandchild = child_m.new_batch();
+            let mut grandchild = child_m.new_batch(&db);
             grandchild = grandchild.write(key(2), None);
             grandchild = grandchild.write(key(7), Some(val(7)));
             let grandchild_m = grandchild.merkleize(None).await.unwrap();
 
             // Verify reads through the chain.
-            assert_eq!(grandchild_m.get(&key(0)).await.unwrap(), Some(val(100)));
-            assert_eq!(grandchild_m.get(&key(1)).await.unwrap(), Some(val(101)));
-            assert_eq!(grandchild_m.get(&key(2)).await.unwrap(), None);
-            assert_eq!(grandchild_m.get(&key(7)).await.unwrap(), Some(val(7)));
+            assert_eq!(
+                grandchild_m.get(&key(0), &db).await.unwrap(),
+                Some(val(100))
+            );
+            assert_eq!(
+                grandchild_m.get(&key(1), &db).await.unwrap(),
+                Some(val(101))
+            );
+            assert_eq!(grandchild_m.get(&key(2), &db).await.unwrap(), None);
+            assert_eq!(grandchild_m.get(&key(7), &db).await.unwrap(), Some(val(7)));
 
             // Finalize and apply.
             let finalized = grandchild_m.finalize();
@@ -1555,7 +1561,7 @@ pub(crate) mod test {
             }
             let parent_m = parent.merkleize(None).await.unwrap();
 
-            let mut child = parent_m.new_batch();
+            let mut child = parent_m.new_batch(&db_b);
             for (k, v) in &writes2 {
                 child = child.write(*k, *v);
             }
@@ -1716,7 +1722,7 @@ pub(crate) mod test {
             let parent_m = parent.merkleize(None).await.unwrap();
 
             // Child: update keys 20..30.
-            let mut child = parent_m.new_batch();
+            let mut child = parent_m.new_batch(&db);
             for i in 20..30 {
                 child = child.write(key(i), Some(val(i + 500)));
             }

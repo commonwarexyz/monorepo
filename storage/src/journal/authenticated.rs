@@ -11,14 +11,12 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
-        batch,
-        journaled::Mmr,
-        read::{BatchChainInfo, Readable},
-        Error as MmrError, Location, Position, Proof, StandardHasher,
+        batch, journaled::Mmr, read::Readable, Error as MmrError, Location, Position, Proof,
+        StandardHasher,
     },
     Persistable,
 };
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
@@ -37,32 +35,20 @@ pub enum Error {
     Journal(#[from] super::Error),
 }
 
-/// A chain of batches whose items can be collected in append order.
-pub trait BatchChain<Item> {
-    /// Collect the items from the deepest ancestor batch up to and including the current batch
-    /// in append order.
-    fn collect(&self, into: &mut Vec<Arc<Vec<Item>>>);
-}
-
-impl<E: Storage + Clock + Metrics, D: Digest, Item> BatchChain<Item> for Mmr<E, D> {
-    // Recursion base case.
-    fn collect(&self, _into: &mut Vec<Arc<Vec<Item>>>) {}
-}
-
 /// A speculative batch whose root digest has not yet been computed,
-/// in contrast to [MerkleizedBatch].
-pub struct UnmerkleizedBatch<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item> {
+/// in contrast to [`MerkleizedBatch`].
+pub struct UnmerkleizedBatch<H: Hasher, Item: Send + Sync> {
     // The inner batch of MMR leaf digests.
-    inner: batch::UnmerkleizedBatch<'a, H::Digest, P>,
+    inner: batch::UnmerkleizedBatch<H::Digest>,
     // The hasher to use for hashing the items.
     hasher: StandardHasher<H>,
-    // The items to append.
+    // The items to append from ancestor batches in the chain.
+    parent_items: Vec<Arc<Vec<Item>>>,
+    // The items to append from this batch.
     items: Vec<Item>,
 }
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Encode>
-    UnmerkleizedBatch<'a, H, P, Item>
-{
+impl<H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<H, Item> {
     /// Add an item to the batch.
     pub fn add(&mut self, item: Item) {
         let encoded = item.encode();
@@ -71,102 +57,109 @@ impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Encode>
     }
 
     /// Merkleize the batch, computing the root digest.
-    pub fn merkleize(mut self) -> MerkleizedBatch<'a, H, P, Item> {
-        MerkleizedBatch {
-            inner: self.inner.merkleize(&mut self.hasher),
-            items: Arc::new(self.items),
+    pub fn merkleize(mut self) -> MerkleizedBatch<H::Digest, Item> {
+        let mmr = self.inner.merkleize(&mut self.hasher);
+        let mut items = self.parent_items;
+        if !self.items.is_empty() {
+            items.push(Arc::new(self.items));
         }
+        MerkleizedBatch { inner: mmr, items }
     }
 }
 
-/// A speculative batch whose root digest has been computed,
-/// in contrast to [UnmerkleizedBatch].
-pub struct MerkleizedBatch<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item> {
-    // The inner batch of MMR leaf digests.
-    inner: batch::MerkleizedBatch<'a, H::Digest, P>,
-    // The items to append.
-    items: Arc<Vec<Item>>,
+/// A speculative batch whose root digest has been computed, in contrast to [`UnmerkleizedBatch`].
+///
+/// `Clone` is O(chain depth) in Arc clones (no data is deep-copied).
+#[derive(Clone, Debug)]
+pub struct MerkleizedBatch<D: Digest, Item: Send + Sync> {
+    /// The inner batch of MMR leaf digests.
+    inner: batch::MerkleizedBatch<D>,
+    /// The items to append.
+    pub(crate) items: Vec<Arc<Vec<Item>>>,
 }
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item> MerkleizedBatch<'a, H, P, Item> {
+impl<D: Digest, Item: Send + Sync> MerkleizedBatch<D, Item> {
     /// Return the root digest of the authenticated journal after this batch is applied.
-    pub fn root(&self) -> H::Digest {
+    pub fn root(&self) -> D {
         self.inner.root()
     }
-}
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Send + Sync> Readable
-    for MerkleizedBatch<'a, H, P, Item>
-{
-    type Digest = H::Digest;
-    fn size(&self) -> Position {
-        self.inner.size()
-    }
-    fn get_node(&self, pos: Position) -> Option<H::Digest> {
-        self.inner.get_node(pos)
-    }
-    fn root(&self) -> H::Digest {
-        self.inner.root()
-    }
-    fn pruned_to_pos(&self) -> Position {
-        self.inner.pruned_to_pos()
-    }
-}
-
-impl<
-        'a,
-        H: Hasher,
-        P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest>,
-        Item: Send + Sync,
-    > BatchChainInfo for MerkleizedBatch<'a, H, P, Item>
-{
-    type Digest = H::Digest;
-    fn base_size(&self) -> Position {
-        self.inner.base_size()
-    }
-    fn collect_overwrites(&self, into: &mut BTreeMap<Position, H::Digest>) {
-        self.inner.collect_overwrites(into);
-    }
-}
-
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest> + BatchChain<Item>, Item: Send + Sync>
-    BatchChain<Item> for MerkleizedBatch<'a, H, P, Item>
-{
-    fn collect(&self, into: &mut Vec<Arc<Vec<Item>>>) {
-        self.inner.parent().collect(into); // recurse to parent first
-        into.push(self.items.clone()); // Arc clone, not data clone
-    }
-}
-
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Send + Sync + Encode>
-    MerkleizedBatch<'a, H, P, Item>
-{
     /// Create a new speculative batch of operations with this batch as its parent.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, H, Self, Item> {
-        let inner = batch::UnmerkleizedBatch::new(self);
-        #[cfg(feature = "std")]
-        let inner = inner.with_pool(self.inner.pool());
+    pub fn new_batch<H: Hasher<Digest = D>>(&self) -> UnmerkleizedBatch<H, Item>
+    where
+        Item: Encode,
+    {
         UnmerkleizedBatch {
-            inner,
+            parent_items: self.items.clone(),
+            inner: self.inner.new_batch(),
             hasher: StandardHasher::new(),
             items: Vec::new(),
         }
     }
-}
 
-impl<'a, H: Hasher, P, Item: Send + Sync> MerkleizedBatch<'a, H, P, Item>
-where
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Item>,
-{
     /// Consume this batch, collecting the changes from its ancestors and itself into a
-    /// [Changeset] which can be applied to the journal.
-    pub fn finalize(self) -> Changeset<H::Digest, Item> {
-        let mut items = Vec::new();
-        self.collect(&mut items);
+    /// [`Changeset`] which can be applied to the journal.
+    pub fn finalize(self) -> Changeset<D, Item> {
         Changeset {
             changeset: self.inner.finalize(),
+            items: self.items,
+        }
+    }
+
+    /// Like [`Self::finalize`], but produces a [`Changeset`] relative to `current_base`,
+    /// skipping `items_to_skip` items from the front of the chain (already committed).
+    ///
+    /// Use this when an ancestor batch in the chain has already been committed, advancing
+    /// the journal's size past the original fork point. For example, given a chain
+    /// `journal -> A -> B`, after committing A: call `B.finalize_from(journal.mmr.size(),
+    /// A_item_count)` to produce a changeset containing only B's items and MMR delta.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `items_to_skip` exceeds the total number of items in the chain.
+    pub fn finalize_from(self, current_base: Position, items_to_skip: u64) -> Changeset<D, Item>
+    where
+        Item: Clone,
+    {
+        let mut remaining = items_to_skip as usize;
+        let mut items = Vec::with_capacity(self.items.len());
+        for seg in self.items {
+            if remaining >= seg.len() {
+                remaining -= seg.len();
+                continue;
+            }
+            if remaining > 0 {
+                items.push(Arc::new(seg[remaining..].to_vec()));
+                remaining = 0;
+            } else {
+                items.push(seg);
+            }
+        }
+        assert_eq!(remaining, 0, "items_to_skip exceeds total items in chain");
+        Changeset {
+            changeset: self.inner.finalize_from(current_base),
             items,
         }
+    }
+}
+
+impl<D: Digest, Item: Send + Sync> Readable for MerkleizedBatch<D, Item> {
+    type Digest = D;
+
+    fn size(&self) -> Position {
+        self.inner.size()
+    }
+
+    fn get_node(&self, pos: Position) -> Option<D> {
+        self.inner.get_node(pos)
+    }
+
+    fn root(&self) -> D {
+        self.inner.root()
+    }
+
+    fn pruned_to_pos(&self) -> Position {
+        self.inner.pruned_to_pos()
     }
 }
 
@@ -216,10 +209,20 @@ where
     }
 
     /// Create a speculative batch atop this journal.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, H, Mmr<E, H::Digest>, C::Item> {
-        UnmerkleizedBatch {
-            inner: self.mmr.new_batch(),
-            hasher: StandardHasher::new(),
+    pub fn new_batch(&self) -> UnmerkleizedBatch<H, C::Item>
+    where
+        C::Item: Encode,
+    {
+        self.to_batch().new_batch()
+    }
+
+    /// Create an owned [`MerkleizedBatch`] representing the current committed state.
+    ///
+    /// The batch has no items (the committed items are on disk, not in memory).
+    /// This is the starting point for building owned batch chains.
+    pub fn to_batch(&self) -> MerkleizedBatch<H::Digest, C::Item> {
+        MerkleizedBatch {
+            inner: self.mmr.to_batch(),
             items: Vec::new(),
         }
     }
@@ -1802,7 +1805,6 @@ mod tests {
             // Finalize batch 1 and apply.
             let expected_root = m1.root();
             let finalized = m1.finalize();
-            drop(m2); // release borrow on &journal
             journal.apply_batch(finalized).await.unwrap();
 
             // Journal should now match the applied batch's root.
@@ -1822,19 +1824,17 @@ mod tests {
             let op_a = create_operation(100);
             let op_b = create_operation(200);
 
-            // Build stacked batches in a block so intermediate borrows drop.
             let (expected_root, finalized) = {
                 let mut batch_a = journal.new_batch();
                 batch_a.add(op_a.clone());
                 let merkleized_a = batch_a.merkleize();
 
-                let mut batch_b = merkleized_a.new_batch();
+                let mut batch_b = merkleized_a.new_batch::<Sha256>();
                 batch_b.add(op_b.clone());
                 let merkleized_b = batch_b.merkleize();
 
                 let root = merkleized_b.root();
                 (root, merkleized_b.finalize())
-                // merkleized_a dropped here, releasing &journal.mmr
             };
 
             journal.apply_batch(finalized).await.unwrap();
@@ -1906,16 +1906,15 @@ mod tests {
                 batch.merkleize()
             };
             let child_a = {
-                let mut batch = parent.new_batch();
+                let mut batch = parent.new_batch::<Sha256>();
                 batch.add(create_operation(20));
                 batch.merkleize().finalize()
             };
             let child_b = {
-                let mut batch = parent.new_batch();
+                let mut batch = parent.new_batch::<Sha256>();
                 batch.add(create_operation(30));
                 batch.merkleize().finalize()
             };
-            drop(parent);
 
             // Apply child_a, then child_b should be stale.
             journal.apply_batch(child_a).await.unwrap();
@@ -1938,16 +1937,14 @@ mod tests {
 
             // Create parent, then child.
             let (parent_finalized, child_finalized) = {
-                let parent = {
-                    let mut batch = journal.new_batch();
-                    batch.add(create_operation(1));
-                    batch.merkleize()
-                };
-                let child = {
-                    let mut batch = parent.new_batch();
-                    batch.add(create_operation(2));
-                    batch.merkleize().finalize()
-                };
+                let mut batch = journal.new_batch();
+                batch.add(create_operation(1));
+                let parent = batch.merkleize();
+
+                let mut batch = parent.new_batch::<Sha256>();
+                batch.add(create_operation(2));
+                let child = batch.merkleize().finalize();
+
                 (parent.finalize(), child)
             };
 
@@ -1972,16 +1969,14 @@ mod tests {
 
             // Create parent, then child.
             let (parent_finalized, child_finalized) = {
-                let parent = {
-                    let mut batch = journal.new_batch();
-                    batch.add(create_operation(1));
-                    batch.merkleize()
-                };
-                let child = {
-                    let mut batch = parent.new_batch();
-                    batch.add(create_operation(2));
-                    batch.merkleize().finalize()
-                };
+                let mut batch = journal.new_batch();
+                batch.add(create_operation(1));
+                let parent = batch.merkleize();
+
+                let mut batch = parent.new_batch::<Sha256>();
+                batch.add(create_operation(2));
+                let child = batch.merkleize().finalize();
+
                 (parent.finalize(), child)
             };
 
@@ -1995,6 +1990,148 @@ mod tests {
                 ),
                 "expected StaleChangeset for parent after child applied, got {result:?}"
             );
+        });
+    }
+
+    /// finalize_from with items_to_skip=0 produces the same changeset as finalize.
+    #[test_traced("INFO")]
+    fn test_finalize_from_skip_zero() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let journal = create_journal_with_ops(context, "ff-skip0", 5).await;
+
+            let mut batch = journal.new_batch();
+            batch.add(create_operation(10));
+            batch.add(create_operation(11));
+            let merkleized = batch.merkleize();
+
+            let normal = merkleized.clone().finalize();
+            let from = merkleized.finalize_from(journal.mmr.size(), 0);
+
+            // Same root, same items.
+            assert_eq!(normal.changeset.root, from.changeset.root);
+            assert_eq!(normal.items.len(), from.items.len());
+            for (a, b) in normal.items.iter().zip(from.items.iter()) {
+                assert_eq!(a.as_ref(), b.as_ref());
+            }
+        });
+    }
+
+    /// finalize_from correctly skips items when an ancestor has been committed.
+    #[test_traced("INFO")]
+    fn test_finalize_from_skip_ancestor_items() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut journal = create_journal_with_ops(context, "ff-skip", 3).await;
+
+            // Parent: 2 items.
+            let parent = {
+                let mut batch = journal.new_batch();
+                batch.add(create_operation(10));
+                batch.add(create_operation(11));
+                batch.merkleize()
+            };
+
+            // Child: 3 more items.
+            let child = {
+                let mut batch = parent.new_batch::<Sha256>();
+                batch.add(create_operation(20));
+                batch.add(create_operation(21));
+                batch.add(create_operation(22));
+                batch.merkleize()
+            };
+
+            // Commit parent.
+            journal.apply_batch(parent.finalize()).await.unwrap();
+
+            // finalize_from on child, skipping the 2 parent items.
+            let changeset = child.finalize_from(journal.mmr.size(), 2);
+
+            // Should contain exactly the 3 child items.
+            let total_items: usize = changeset.items.iter().map(|s| s.len()).sum();
+            assert_eq!(total_items, 3);
+
+            // The changeset should be applicable.
+            journal.apply_batch(changeset).await.unwrap();
+
+            // Verify all items are present.
+            let (_, ops) = journal.proof(Location::new(3), NZU64!(5)).await.unwrap();
+            assert_eq!(ops.len(), 5);
+        });
+    }
+
+    /// finalize_from skips items that span across segment boundaries.
+    #[test_traced("INFO")]
+    fn test_finalize_from_cross_segment_skip() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut journal = create_journal_with_ops(context, "ff-cross", 2).await;
+
+            // Grandparent: 3 items (segment 1).
+            let grandparent = {
+                let mut batch = journal.new_batch();
+                batch.add(create_operation(3));
+                batch.add(create_operation(4));
+                batch.add(create_operation(5));
+                batch.merkleize()
+            };
+
+            // Parent: 2 items (segment 2).
+            let parent = {
+                let mut batch = grandparent.new_batch::<Sha256>();
+                batch.add(create_operation(6));
+                batch.add(create_operation(7));
+                batch.merkleize()
+            };
+
+            // Child: 1 item (segment 3).
+            let child = {
+                let mut batch = parent.new_batch::<Sha256>();
+                batch.add(create_operation(8));
+                batch.merkleize()
+            };
+
+            // Commit grandparent (3 items).
+            journal.apply_batch(grandparent.finalize()).await.unwrap();
+
+            // Commit parent via finalize_from, skipping grandparent's 3 items.
+            let changeset = parent.finalize_from(journal.mmr.size(), 3);
+            let parent_items: usize = changeset.items.iter().map(|s| s.len()).sum();
+            assert_eq!(parent_items, 2);
+            journal.apply_batch(changeset).await.unwrap();
+
+            // Commit child via finalize_from, skipping grandparent's 3 + parent's 2 = 5 items.
+            let changeset = child.finalize_from(journal.mmr.size(), 5);
+            let child_items: usize = changeset.items.iter().map(|s| s.len()).sum();
+            assert_eq!(child_items, 1);
+            journal.apply_batch(changeset).await.unwrap();
+
+            // All 8 items (2 base + 3 + 2 + 1) should be present.
+            let size = journal.size().await;
+            assert_eq!(*size, 8);
+
+            // Verify the actual items at each location.
+            let (_, ops) = journal.proof(Location::new(2), NZU64!(6)).await.unwrap();
+            for (i, op) in ops.iter().enumerate() {
+                assert_eq!(*op, create_operation((i + 3) as u8));
+            }
+        });
+    }
+
+    /// finalize_from panics when items_to_skip exceeds total items.
+    #[test_traced("INFO")]
+    #[should_panic(expected = "items_to_skip exceeds total items in chain")]
+    fn test_finalize_from_skip_too_many() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let journal = create_journal_with_ops(context, "ff-panic", 5).await;
+
+            let mut batch = journal.new_batch();
+            batch.add(create_operation(10));
+            let merkleized = batch.merkleize();
+
+            // items has 1 item, but we try to skip 5.
+            let _ = merkleized.finalize_from(journal.mmr.size(), 5);
         });
     }
 }

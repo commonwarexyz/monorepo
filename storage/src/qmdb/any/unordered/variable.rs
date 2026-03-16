@@ -526,14 +526,14 @@ pub(crate) mod test {
                 .unwrap();
 
             let child_a = parent
-                .new_batch()
+                .new_batch(&db)
                 .write(key3, Some(vec![30]))
                 .merkleize(None)
                 .await
                 .unwrap()
                 .finalize();
             let child_b = parent
-                .new_batch()
+                .new_batch(&db)
                 .write(key3, Some(vec![40]))
                 .merkleize(None)
                 .await
@@ -569,7 +569,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             let child = parent
-                .new_batch()
+                .new_batch(&db)
                 .write(key2, Some(vec![20]))
                 .merkleize(None)
                 .await
@@ -606,7 +606,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             let child = parent
-                .new_batch()
+                .new_batch(&db)
                 .write(key2, Some(vec![20]))
                 .merkleize(None)
                 .await
@@ -678,5 +678,460 @@ pub(crate) mod test {
         let batch = db.new_batch().write(key, Some(value));
         is_send(batch.merkleize(None));
         is_send(db.get_with_loc(&key));
+    }
+
+    /// Owned batch root matches the borrow-based batch root.
+    #[test_traced("WARN")]
+    fn test_owned_batch_root_matches() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            // Apply some initial data.
+            apply_ops(&mut db, create_test_ops(20)).await;
+            db.commit().await.unwrap();
+
+            // Build an owned batch from committed state.
+            let base = db.to_batch();
+
+            // Create a child batch via owned and via borrow-based API. Same ops.
+            let ops = create_test_ops_seeded(10, 99);
+
+            // Borrow-based path.
+            let borrow_root = {
+                let mut batch = db.new_batch();
+                for op in &ops {
+                    match op {
+                        unordered::Operation::Update(unordered::Update(k, v)) => {
+                            batch = batch.write(*k, Some(v.clone()));
+                        }
+                        unordered::Operation::Delete(k) => {
+                            batch = batch.write(*k, None);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                batch.merkleize(None).await.unwrap().root()
+            };
+
+            // Owned batch path.
+            let batch_root = {
+                let mut batch = base.new_batch(&db);
+                for op in &ops {
+                    match op {
+                        unordered::Operation::Update(unordered::Update(k, v)) => {
+                            batch = batch.write(*k, Some(v.clone()));
+                        }
+                        unordered::Operation::Delete(k) => {
+                            batch = batch.write(*k, None);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                let merkleized = batch.merkleize(None).await.unwrap();
+                merkleized.root()
+            };
+
+            assert_eq!(borrow_root, batch_root);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Owned batch changeset can be applied to the database.
+    #[test_traced("WARN")]
+    fn test_owned_batch_changeset_apply() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            // Apply initial data.
+            apply_ops(&mut db, create_test_ops(20)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_batch();
+
+            // Build a child batch via owned API, convert to changeset, and apply.
+            let key = Digest::random(&mut commonware_utils::test_rng_seeded(200));
+            let value = vec![42u8; 16];
+            let child_batch = {
+                let batch = base.new_batch(&db).write(key, Some(value.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Apply the batch's changeset.
+            let changeset = child_batch.finalize();
+            db.apply_batch(changeset).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Verify the key was written.
+            let fetched = db.get(&key).await.unwrap();
+            assert_eq!(fetched.unwrap(), value);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Batch chains: parent batch committed, child applied with finalize_from.
+    #[test_traced("WARN")]
+    fn test_owned_batch_chain_commit_parent_first() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            // Build initial data.
+            apply_ops(&mut db, create_test_ops(10)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_batch();
+
+            // Parent batch (via owned API).
+            let key_a = Digest::random(&mut commonware_utils::test_rng_seeded(300));
+            let val_a = vec![1u8; 10];
+            let parent_batch = {
+                let batch = base.new_batch(&db).write(key_a, Some(val_a.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Child batch (built on parent batch).
+            let key_b = Digest::random(&mut commonware_utils::test_rng_seeded(301));
+            let val_b = vec![2u8; 10];
+            let child_batch = {
+                let batch = parent_batch
+                    .new_batch(&db)
+                    .write(key_b, Some(val_b.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Commit parent first.
+            let parent_changeset = parent_batch.finalize();
+            db.apply_batch(parent_changeset).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Now commit child using finalize_from (relative to new DB size).
+            let current_db_size = *db.bounds().await.end;
+            let child_changeset = child_batch.finalize_from(current_db_size);
+            db.apply_batch(child_changeset).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Both keys should be readable.
+            assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
+            assert_eq!(db.get(&key_b).await.unwrap().unwrap(), val_b);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Multiple forks from the same batch.
+    #[test_traced("WARN")]
+    fn test_owned_batch_multiple_forks() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            apply_ops(&mut db, create_test_ops(10)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_batch();
+
+            // Fork A.
+            let key_a = Digest::random(&mut commonware_utils::test_rng_seeded(400));
+            let fork_a = {
+                let batch = base.new_batch(&db).write(key_a, Some(vec![10u8; 8]));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Fork B (different key, same parent).
+            let key_b = Digest::random(&mut commonware_utils::test_rng_seeded(401));
+            let fork_b = {
+                let batch = base.new_batch(&db).write(key_b, Some(vec![20u8; 8]));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Roots differ.
+            assert_ne!(fork_a.root(), fork_b.root());
+
+            // Apply fork A.
+            db.apply_batch(fork_a.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            assert_eq!(db.get(&key_a).await.unwrap().unwrap(), vec![10u8; 8]);
+            assert!(db.get(&key_b).await.unwrap().is_none());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Batches can be stored in a homogeneous collection.
+    #[test_traced("WARN")]
+    fn test_owned_batch_homogeneous_collection() {
+        use crate::qmdb::any::batch::MerkleizedBatch;
+        use commonware_cryptography::sha256;
+        use std::collections::HashMap;
+
+        type Snap = MerkleizedBatch<sha256::Digest, super::Update<Digest, Vec<u8>>>;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            apply_ops(&mut db, create_test_ops(10)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_batch();
+
+            // Build several batches at different depths and store them by root.
+            let mut collection: HashMap<sha256::Digest, Snap> = HashMap::new();
+
+            // Depth 1.
+            let batch1 = {
+                let key = Digest::random(&mut commonware_utils::test_rng_seeded(500));
+                let batch = base.new_batch(&db).write(key, Some(vec![1u8; 8]));
+                batch.merkleize(None).await.unwrap()
+            };
+            collection.insert(batch1.root(), batch1);
+
+            // Depth 2 (retrieve batch1 from collection, build child).
+            let batch1_root = *collection.keys().next().unwrap();
+            let batch1_ref = collection.get(&batch1_root).unwrap();
+            let batch2 = {
+                let key = Digest::random(&mut commonware_utils::test_rng_seeded(501));
+                let batch = batch1_ref.new_batch(&db).write(key, Some(vec![2u8; 8]));
+                batch.merkleize(None).await.unwrap()
+            };
+            collection.insert(batch2.root(), batch2);
+
+            // All batches in the same HashMap -- type erasure works.
+            assert_eq!(collection.len(), 2);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Batch chains: parent inserts key, child deletes it.
+    #[test_traced("WARN")]
+    fn test_owned_batch_chain_delete_after_ancestor_insert() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            apply_ops(&mut db, create_test_ops(5)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_batch();
+
+            // Parent batch: insert key_x.
+            let key_x = Digest::random(&mut commonware_utils::test_rng_seeded(700));
+            let val_a = vec![10u8; 8];
+            let parent_batch = {
+                let batch = base.new_batch(&db).write(key_x, Some(val_a.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Child batch: delete key_x.
+            let child_batch = {
+                let batch = parent_batch.new_batch(&db).write(key_x, None);
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Commit parent.
+            let parent_changeset = parent_batch.finalize();
+            db.apply_batch(parent_changeset).await.unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
+
+            // Commit child using finalize_from.
+            let current_db_size = *db.bounds().await.end;
+            let child_changeset = child_batch.finalize_from(current_db_size);
+            db.apply_batch(child_changeset).await.unwrap();
+            db.commit().await.unwrap();
+
+            // key_x should be deleted.
+            assert!(db.get(&key_x).await.unwrap().is_none());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Batch chains: parent and child both modify the same key.
+    #[test_traced("WARN")]
+    fn test_owned_batch_chain_overlapping_keys() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            // Build initial data.
+            apply_ops(&mut db, create_test_ops(5)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_batch();
+
+            // Parent batch: insert key_x with value_a.
+            let key_x = Digest::random(&mut commonware_utils::test_rng_seeded(600));
+            let val_a = vec![10u8; 8];
+            let parent_batch = {
+                let batch = base.new_batch(&db).write(key_x, Some(val_a.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Child batch: update key_x to value_b (overlapping key).
+            let val_b = vec![20u8; 8];
+            let child_batch = {
+                let batch = parent_batch
+                    .new_batch(&db)
+                    .write(key_x, Some(val_b.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Commit parent first.
+            let parent_changeset = parent_batch.finalize();
+            db.apply_batch(parent_changeset).await.unwrap();
+            db.commit().await.unwrap();
+
+            // key_x should have parent's value.
+            assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
+
+            // Now commit child using finalize_from.
+            let current_db_size = *db.bounds().await.end;
+            let child_changeset = child_batch.finalize_from(current_db_size);
+            db.apply_batch(child_changeset).await.unwrap();
+            db.commit().await.unwrap();
+
+            // key_x should now have child's value.
+            assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_b);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Three-deep batch chain: grandparent -> parent -> child.
+    /// Commit each layer sequentially using `finalize_from`.
+    #[test_traced("WARN")]
+    fn test_owned_batch_chain_three_deep() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            apply_ops(&mut db, create_test_ops(10)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_batch();
+
+            // Grandparent: insert key_a.
+            let key_a = Digest::random(&mut commonware_utils::test_rng_seeded(900));
+            let val_a = vec![1u8; 10];
+            let grandparent_batch = {
+                let batch = base.new_batch(&db).write(key_a, Some(val_a.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Parent: insert key_b.
+            let key_b = Digest::random(&mut commonware_utils::test_rng_seeded(901));
+            let val_b = vec![2u8; 10];
+            let parent_batch = {
+                let batch = grandparent_batch
+                    .new_batch(&db)
+                    .write(key_b, Some(val_b.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Child: insert key_c.
+            let key_c = Digest::random(&mut commonware_utils::test_rng_seeded(902));
+            let val_c = vec![3u8; 10];
+            let child_batch = {
+                let batch = parent_batch
+                    .new_batch(&db)
+                    .write(key_c, Some(val_c.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Commit grandparent.
+            db.apply_batch(grandparent_batch.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
+
+            // Commit parent via finalize_from.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(parent_batch.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.get(&key_b).await.unwrap().unwrap(), val_b);
+
+            // Commit child via finalize_from.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(child_batch.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.get(&key_c).await.unwrap().unwrap(), val_c);
+
+            // All three keys readable.
+            assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
+            assert_eq!(db.get(&key_b).await.unwrap().unwrap(), val_b);
+            assert_eq!(db.get(&key_c).await.unwrap().unwrap(), val_c);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Three-deep chain where each layer touches the same key.
+    #[test_traced("WARN")]
+    fn test_owned_batch_chain_three_deep_overlapping_key() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            apply_ops(&mut db, create_test_ops(5)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_batch();
+            let key_x = Digest::random(&mut commonware_utils::test_rng_seeded(910));
+
+            // Grandparent: insert key_x = val_a.
+            let val_a = vec![10u8; 8];
+            let grandparent_batch = {
+                let batch = base.new_batch(&db).write(key_x, Some(val_a.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Parent: update key_x = val_b.
+            let val_b = vec![20u8; 8];
+            let parent_batch = {
+                let batch = grandparent_batch
+                    .new_batch(&db)
+                    .write(key_x, Some(val_b.clone()));
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Child: delete key_x.
+            let child_batch = {
+                let batch = parent_batch.new_batch(&db).write(key_x, None);
+                batch.merkleize(None).await.unwrap()
+            };
+
+            // Commit grandparent.
+            db.apply_batch(grandparent_batch.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
+
+            // Commit parent via finalize_from.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(parent_batch.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_b);
+
+            // Commit child via finalize_from.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(child_batch.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+            assert!(db.get(&key_x).await.unwrap().is_none());
+
+            db.destroy().await.unwrap();
+        });
     }
 }
