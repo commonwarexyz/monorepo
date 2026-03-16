@@ -133,7 +133,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_target_read_invalid_bounds() {
+    #[should_panic(expected = "start must be <= end")]
+    fn test_sync_target_encode_invalid_bounds() {
         let target = Target {
             root: sha256::Digest::from([42; 32]),
             range: Location::new(100)..Location::new(50), // invalid: lower > upper
@@ -141,6 +142,15 @@ mod tests {
 
         let mut buffer = Vec::new();
         target.write(&mut buffer);
+    }
+
+    #[test]
+    fn test_sync_target_decode_invalid_bounds() {
+        // Manually encode root + two Locations to bypass the Range write panic
+        let mut buffer = Vec::new();
+        sha256::Digest::from([42; 32]).write(&mut buffer);
+        Location::new(100).write(&mut buffer); // start
+        Location::new(50).write(&mut buffer); // end (< start = invalid)
 
         let mut cursor = Cursor::new(buffer);
         assert!(matches!(

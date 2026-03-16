@@ -5,9 +5,13 @@ use crate::{EncodeSize, Error, FixedSize, Read, Write};
 use bytes::{Buf, BufMut};
 use core::ops::{Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};
 
-impl<T: Write> Write for Range<T> {
+impl<T: Write + PartialOrd> Write for Range<T> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
+        assert!(
+            self.start.partial_cmp(&self.end).is_some_and(|o| o.is_le()),
+            "start must be <= end"
+        );
         self.start.write(buf);
         self.end.write(buf);
     }
@@ -27,16 +31,22 @@ impl<T: Read + PartialOrd> Read for Range<T> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let start = T::read_cfg(buf, cfg)?;
         let end = T::read_cfg(buf, cfg)?;
-        if start > end {
+        if !start.partial_cmp(&end).is_some_and(|o| o.is_le()) {
             return Err(Error::Invalid("Range", "start must be <= end"));
         }
         Ok(start..end)
     }
 }
 
-impl<T: Write> Write for RangeInclusive<T> {
+impl<T: Write + PartialOrd> Write for RangeInclusive<T> {
     #[inline]
     fn write(&self, buf: &mut impl BufMut) {
+        assert!(
+            self.start()
+                .partial_cmp(self.end())
+                .is_some_and(|o| o.is_le()),
+            "start must be <= end"
+        );
         self.start().write(buf);
         self.end().write(buf);
     }
@@ -56,7 +66,7 @@ impl<T: Read + PartialOrd> Read for RangeInclusive<T> {
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
         let start = T::read_cfg(buf, cfg)?;
         let end = T::read_cfg(buf, cfg)?;
-        if start > end {
+        if !start.partial_cmp(&end).is_some_and(|o| o.is_le()) {
             return Err(Error::Invalid("RangeInclusive", "start must be <= end"));
         }
         Ok(start..=end)
@@ -213,24 +223,42 @@ mod tests {
     }
 
     #[test]
-    fn test_range_invalid() {
+    #[should_panic(expected = "start must be <= end")]
+    fn test_range_encode_invalid() {
         let range = Range {
             start: 20u32,
             end: 10u32,
         };
-        let encoded = range.encode();
+        let _ = range.encode();
+    }
+
+    #[test]
+    fn test_range_decode_invalid() {
+        // Manually encode start=20, end=10 to bypass the write panic
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&20u32.to_be_bytes());
+        buf.extend_from_slice(&10u32.to_be_bytes());
         assert!(matches!(
-            Range::<u32>::decode(encoded),
+            Range::<u32>::decode(bytes::Bytes::from(buf)),
             Err(crate::Error::Invalid("Range", "start must be <= end"))
         ));
     }
 
     #[test]
-    fn test_range_inclusive_invalid() {
+    #[should_panic(expected = "start must be <= end")]
+    fn test_range_inclusive_encode_invalid() {
         let range = RangeInclusive::new(20u32, 10u32);
-        let encoded = range.encode();
+        let _ = range.encode();
+    }
+
+    #[test]
+    fn test_range_inclusive_decode_invalid() {
+        // Manually encode start=20, end=10 to bypass the write panic
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&20u32.to_be_bytes());
+        buf.extend_from_slice(&10u32.to_be_bytes());
         assert!(matches!(
-            RangeInclusive::<u32>::decode(encoded),
+            RangeInclusive::<u32>::decode(bytes::Bytes::from(buf)),
             Err(crate::Error::Invalid(
                 "RangeInclusive",
                 "start must be <= end"
