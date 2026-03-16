@@ -20,10 +20,9 @@
 //! usage with block types that implement [`crate::Block`] but not
 //! [`crate::CertifiableBlock`].
 //!
-//! Because verification is completed inline, the default
-//! [`CertifiableAutomaton::certify`] behavior (always `true`) is sufficient: no
-//! additional deferred verification state must be awaited at certify time.
-//! `certify` only waits for block availability in marshal.
+//! Because verification is completed inline, `certify` must only wait for data
+//! availability in marshal. No additional deferred verification state needs to
+//! be awaited at certify time.
 //!
 //! # Usage
 //!

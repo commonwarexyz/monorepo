@@ -18,10 +18,9 @@ use std::{num::NonZeroUsize, time::Duration};
 /// Forwarding is a best-effort liveness aid: when enabled, the batcher
 /// broadcasts only after we locally certify a proposal and enter the next
 /// view, avoiding sends for proposals that never pass certification.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub enum ForwardingPolicy {
     /// Do nothing when a certified proposal becomes eligible for forwarding.
-    #[default]
     Disabled,
     /// Forward the block to all participants that did not vote for the proposal.
     Silent,

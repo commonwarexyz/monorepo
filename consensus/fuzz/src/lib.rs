@@ -402,7 +402,7 @@ where
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
-        forwarding: ForwardingPolicy::default(),
+        forwarding: ForwardingPolicy::Disabled,
     };
     let engine = Engine::new(context.with_label("engine"), engine_cfg);
     engine.start(pending, recovered, resolver);
@@ -636,7 +636,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
-                forwarding: ForwardingPolicy::default(),
+                forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);
             engine.start(

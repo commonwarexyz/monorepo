@@ -423,8 +423,9 @@ where
                         }
 
                         // Store and forward to voter
-                        let round = work.entry(view).or_insert_with(|| self.new_round());
-                        round.set_notarization(notarization.clone());
+                        work.entry(view)
+                            .or_insert_with(|| self.new_round())
+                            .set_notarization(notarization.clone());
                         voter
                             .recovered(Certificate::Notarization(notarization))
                             .await;
