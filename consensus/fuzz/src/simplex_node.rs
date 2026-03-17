@@ -1116,7 +1116,7 @@ where
             // the notarize/finalize path or force the nullification path, but never both.
             match self.choose_progress_branch() {
                 ProgressBranch::NullifyCertificate => {
-                    if !self.schemes.is_empty() {
+                    if self.schemes.len() >= BYZANTINE_COUNT {
                         self.send_nullification_certificate_for_view(0, view).await;
                     } else {
                         for signer_idx in 0..self.schemes.len() {
@@ -1130,7 +1130,7 @@ where
                     }
                 }
                 ProgressBranch::NotarizationCertificateAndFinalizationCertificate => {
-                    if !self.schemes.is_empty() {
+                    if self.schemes.len() >= BYZANTINE_COUNT {
                         self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
                             .await;
                         self.send_finalization_certificate_for_proposal(0, proposal.clone())
@@ -1145,7 +1145,7 @@ where
                     }
                 }
                 ProgressBranch::NotarizationCertificateAndFinalizeVotes => {
-                    if !self.schemes.is_empty() {
+                    if self.schemes.len() >= BYZANTINE_COUNT {
                         self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
                             .await;
                     } else {
@@ -1164,7 +1164,7 @@ where
                         self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
                             .await;
                     }
-                    if !self.schemes.is_empty() {
+                    if self.schemes.len() >= BYZANTINE_COUNT {
                         self.send_finalization_certificate_for_proposal(0, proposal.clone())
                             .await;
                     } else {
