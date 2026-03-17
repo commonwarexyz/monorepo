@@ -90,6 +90,86 @@ pub struct WithoutRecovery;
 
 pub struct WithRecovery;
 
+#[derive(Clone, Copy)]
+enum ProgressBranch {
+    NullifyCertificate,
+    NullifyVotes,
+    NotarizationCertificateAndFinalizationCertificate,
+    NotarizationCertificateAndFinalizeVotes,
+    NotarizeVotesAndFinalizationCertificate,
+    NotarizeVotesAndFinalizeVotes,
+}
+
+#[derive(Clone, Copy)]
+enum RequestedCertificateMode {
+    Notarization,
+    Finalization,
+    Nullification,
+    ValidFallback,
+}
+
+#[derive(Clone, Copy)]
+enum ValidCertificateKind {
+    Notarization,
+    Finalization,
+    Nullification,
+}
+
+#[derive(Clone, Copy)]
+enum EpochFlavor {
+    Current,
+    WrongEpoch,
+}
+
+#[derive(Clone, Copy)]
+enum ResolverResponseBranch {
+    DefaultResponse,
+    Certificate,
+    MutatedCertificate,
+}
+
+#[derive(Clone, Copy)]
+enum VotePreference {
+    PreferHonest,
+    ByzantineOnly,
+}
+
+#[derive(Clone, Copy)]
+enum NotarizeVotePolicy {
+    Valid,
+    Malformed,
+    WrongEpoch,
+}
+
+#[derive(Clone, Copy)]
+enum BroadcastAndNotarizeBranch {
+    TryValidPath,
+    FuzzedPath,
+}
+
+#[derive(Clone, Copy)]
+enum NotarizationCertificateBranch {
+    Normal,
+    Malformed,
+    WrongEpochNullification,
+    InvalidNotarization,
+}
+
+#[derive(Clone, Copy)]
+enum NullificationCertificateBranch {
+    Normal,
+    TriggerLocalFloor,
+    Malformed,
+    WrongEpoch,
+    InvalidNullification,
+}
+
+#[derive(Clone, Copy)]
+enum FinalizationCertificateBranch {
+    Normal,
+    InvalidFinalization,
+}
+
 struct NodeDriver<S>
 where
     S: SimplexScheme<Sha256Digest>,
@@ -192,6 +272,106 @@ where
         let honest_idx = self.byzantine_participants.len();
         let leader_idx = (crate::EPOCH.wrapping_add(view) as usize) % participant_count;
         leader_idx == honest_idx
+    }
+
+    fn choose_progress_branch(&mut self) -> ProgressBranch {
+        match self.context.gen_range(0..100u8) {
+            0..=9 => ProgressBranch::NullifyCertificate,
+            10..=19 => ProgressBranch::NullifyVotes,
+            20..=39 => ProgressBranch::NotarizationCertificateAndFinalizationCertificate,
+            40..=59 => ProgressBranch::NotarizationCertificateAndFinalizeVotes,
+            60..=79 => ProgressBranch::NotarizeVotesAndFinalizationCertificate,
+            80..=99 => ProgressBranch::NotarizeVotesAndFinalizeVotes,
+            _ => unreachable!(),
+        }
+    }
+
+    fn choose_requested_certificate_mode(&mut self) -> RequestedCertificateMode {
+        match self.context.gen_range(0..=3u8) {
+            0 => RequestedCertificateMode::Notarization,
+            1 => RequestedCertificateMode::Finalization,
+            2 => RequestedCertificateMode::Nullification,
+            _ => RequestedCertificateMode::ValidFallback,
+        }
+    }
+
+    fn choose_valid_certificate_kind(&mut self) -> ValidCertificateKind {
+        match self.context.gen_range(0..3usize) {
+            0 => ValidCertificateKind::Notarization,
+            1 => ValidCertificateKind::Finalization,
+            _ => ValidCertificateKind::Nullification,
+        }
+    }
+
+    fn choose_epoch_flavor(&mut self) -> EpochFlavor {
+        match self.context.gen_range(0..100u8) {
+            0..=79 => EpochFlavor::Current,
+            80..=99 => EpochFlavor::WrongEpoch,
+            _ => unreachable!(),
+        }
+    }
+
+    fn choose_resolver_response_branch(&mut self) -> ResolverResponseBranch {
+        match self.context.gen_range(0..100u8) {
+            0..=63 => ResolverResponseBranch::Certificate,
+            64..=79 => ResolverResponseBranch::MutatedCertificate,
+            80..=99 => ResolverResponseBranch::DefaultResponse,
+            _ => unreachable!(),
+        }
+    }
+
+    fn choose_vote_preference(&mut self) -> VotePreference {
+        match self.context.gen_range(0..2u8) {
+            0 => VotePreference::PreferHonest,
+            1 => VotePreference::ByzantineOnly,
+            _ => unreachable!(),
+        }
+    }
+
+    fn choose_notarize_vote_policy(&mut self) -> NotarizeVotePolicy {
+        match self.context.gen_range(0..100u8) {
+            0..=93 => NotarizeVotePolicy::Valid,
+            94..=96 => NotarizeVotePolicy::Malformed,
+            97..=99 => NotarizeVotePolicy::WrongEpoch,
+            _ => unreachable!(),
+        }
+    }
+
+    fn choose_broadcast_and_notarize_branch(&mut self) -> BroadcastAndNotarizeBranch {
+        match self.context.gen_range(0..100u8) {
+            0..=2 => BroadcastAndNotarizeBranch::TryValidPath,
+            3..=99 => BroadcastAndNotarizeBranch::FuzzedPath,
+            _ => unreachable!(),
+        }
+    }
+
+    fn choose_notarization_certificate_branch(&mut self) -> NotarizationCertificateBranch {
+        match self.context.gen_range(0..100u8) {
+            0..=89 => NotarizationCertificateBranch::Normal,
+            90..=93 => NotarizationCertificateBranch::Malformed,
+            94..=96 => NotarizationCertificateBranch::WrongEpochNullification,
+            97..=99 => NotarizationCertificateBranch::InvalidNotarization,
+            _ => unreachable!(),
+        }
+    }
+
+    fn choose_nullification_certificate_branch(&mut self) -> NullificationCertificateBranch {
+        match self.context.gen_range(0..100u8) {
+            0..=86 => NullificationCertificateBranch::Normal,
+            87..=89 => NullificationCertificateBranch::TriggerLocalFloor,
+            90..=93 => NullificationCertificateBranch::Malformed,
+            94..=96 => NullificationCertificateBranch::WrongEpoch,
+            97..=99 => NullificationCertificateBranch::InvalidNullification,
+            _ => unreachable!(),
+        }
+    }
+
+    fn choose_finalization_certificate_branch(&mut self) -> FinalizationCertificateBranch {
+        match self.context.gen_range(0..100u8) {
+            0..=95 => FinalizationCertificateBranch::Normal,
+            96..=99 => FinalizationCertificateBranch::InvalidFinalization,
+            _ => unreachable!(),
+        }
     }
 
     // Picks a proposal for the next fuzz event. It may reuse a recent proposal
@@ -413,38 +593,44 @@ where
         let wrong_epoch = Epoch::new(crate::EPOCH.saturating_add(1));
         let base = self.get_or_build_proposal_for_view(view);
 
-        match self.context.gen_range(0..=3u8) {
-            0 => {
-                let cert = if self.context.gen_bool(0.8) {
-                    self.build_notarization_from_byz(&base, &BYZANTINE_IDS)?
-                } else {
-                    let wrong = Proposal::new(
-                        Round::new(wrong_epoch, base.view()),
-                        base.parent,
-                        base.payload,
-                    );
-                    self.build_notarization_from_byz(&wrong, &BYZANTINE_IDS)?
+        match self.choose_requested_certificate_mode() {
+            RequestedCertificateMode::Notarization => {
+                let cert = match self.choose_epoch_flavor() {
+                    EpochFlavor::Current => {
+                        self.build_notarization_from_byz(&base, &BYZANTINE_IDS)?
+                    }
+                    EpochFlavor::WrongEpoch => {
+                        let wrong = Proposal::new(
+                            Round::new(wrong_epoch, base.view()),
+                            base.parent,
+                            base.payload,
+                        );
+                        self.build_notarization_from_byz(&wrong, &BYZANTINE_IDS)?
+                    }
                 };
                 Some(Certificate::Notarization(cert))
             }
-            1 => {
+            RequestedCertificateMode::Finalization => {
                 let proposal = self.strategy.proposal_with_parent_view(
                     &self.strategy.proposal_with_view(&base, view),
                     view.saturating_sub(1),
                 );
-                let cert = if self.context.gen_bool(0.8) {
-                    self.build_finalization_from_byz(&proposal, &BYZANTINE_IDS)?
-                } else {
-                    let wrong = Proposal::new(
-                        Round::new(wrong_epoch, proposal.view()),
-                        proposal.parent,
-                        proposal.payload,
-                    );
-                    self.build_finalization_from_byz(&wrong, &BYZANTINE_IDS)?
+                let cert = match self.choose_epoch_flavor() {
+                    EpochFlavor::Current => {
+                        self.build_finalization_from_byz(&proposal, &BYZANTINE_IDS)?
+                    }
+                    EpochFlavor::WrongEpoch => {
+                        let wrong = Proposal::new(
+                            Round::new(wrong_epoch, proposal.view()),
+                            proposal.parent,
+                            proposal.payload,
+                        );
+                        self.build_finalization_from_byz(&wrong, &BYZANTINE_IDS)?
+                    }
                 };
                 Some(Certificate::Finalization(cert))
             }
-            2 => {
+            RequestedCertificateMode::Nullification => {
                 let view = self.strategy.mutate_nullify_view(
                     &mut self.context,
                     view,
@@ -452,25 +638,23 @@ where
                     self.last_notarized_view,
                     self.last_nullified_view,
                 );
-                let round = if self.context.gen_bool(0.8) {
-                    Round::new(Epoch::new(crate::EPOCH), View::new(view))
-                } else {
-                    Round::new(wrong_epoch, View::new(view.max(1)))
+                let round = match self.choose_epoch_flavor() {
+                    EpochFlavor::Current => Round::new(Epoch::new(crate::EPOCH), View::new(view)),
+                    EpochFlavor::WrongEpoch => Round::new(wrong_epoch, View::new(view.max(1))),
                 };
                 let cert = self.build_nullification_from_byz(round, &BYZANTINE_IDS)?;
                 Some(Certificate::Nullification(cert))
             }
-            // Default: valid responses.
-            _ => match self.context.gen_range(0..3usize) {
-                0 => {
+            RequestedCertificateMode::ValidFallback => match self.choose_valid_certificate_kind() {
+                ValidCertificateKind::Notarization => {
                     let cert = self.build_notarization_from_byz(&base, &BYZANTINE_IDS)?;
                     Some(Certificate::Notarization(cert))
                 }
-                1 => {
+                ValidCertificateKind::Finalization => {
                     let cert = self.build_finalization_from_byz(&base, &BYZANTINE_IDS)?;
                     Some(Certificate::Finalization(cert))
                 }
-                _ => {
+                ValidCertificateKind::Nullification => {
                     let round = Round::new(Epoch::new(crate::EPOCH), View::new(base.view().get()));
                     let cert = self.build_nullification_from_byz(round, &BYZANTINE_IDS)?;
                     Some(Certificate::Nullification(cert))
@@ -529,20 +713,25 @@ where
             .strategy
             .mutate_resolver_bytes(&mut self.context, &bytes);
         let response = if let Some((id, requested_view)) = Self::decode_resolver_request(&bytes) {
-            if self.context.gen_bool(0.8) {
-                if let Some(certificate) = self.certificate_for_requested_view(requested_view) {
-                    let mut cert_bytes = certificate.encode().to_vec();
-                    if self.context.gen_bool(0.2) {
-                        cert_bytes = self
-                            .strategy
-                            .mutate_certificate_bytes(&mut self.context, &cert_bytes);
+            match self.choose_resolver_response_branch() {
+                ResolverResponseBranch::DefaultResponse => default_response,
+                ResolverResponseBranch::Certificate => {
+                    if let Some(certificate) = self.certificate_for_requested_view(requested_view) {
+                        Self::encode_resolver_response(id, certificate.encode().to_vec())
+                    } else {
+                        default_response
                     }
-                    Self::encode_resolver_response(id, cert_bytes)
-                } else {
-                    default_response
                 }
-            } else {
-                default_response
+                ResolverResponseBranch::MutatedCertificate => {
+                    if let Some(certificate) = self.certificate_for_requested_view(requested_view) {
+                        let cert_bytes = self
+                            .strategy
+                            .mutate_certificate_bytes(&mut self.context, &certificate.encode());
+                        Self::encode_resolver_response(id, cert_bytes)
+                    } else {
+                        default_response
+                    }
+                }
             }
         } else {
             default_response
@@ -686,32 +875,31 @@ where
         signer_idx: usize,
         proposal: Proposal<Sha256Digest>,
     ) {
-        match self.context.gen_range(0..100u8) {
-            // normal notarize vote
-            0..=93 => {
+        match self.choose_notarize_vote_policy() {
+            NotarizeVotePolicy::Valid => {
                 self.send_notarize_vote_for_proposal(signer_idx, proposal)
                     .await;
             }
-            // malformed vote bytes
-            94..=96 => {
+            NotarizeVotePolicy::Malformed => {
                 self.send_malformed_vote(signer_idx).await;
             }
-            // validly encoded notarize with wrong epoch
-            97..=99 => {
+            NotarizeVotePolicy::WrongEpoch => {
                 self.send_wrong_epoch_notarize_vote_for_proposal(signer_idx, proposal)
                     .await;
             }
-            _ => unreachable!(),
         }
     }
 
     async fn send_broadcast_and_notarize(&mut self, signer_idx: usize) {
         // create a valid verify path so the honest node can complete peer verification
         // and perform `verify` flow.
-        if self.context.gen_range(0..100u8) < 3
-            && self.send_valid_broadcast_and_notarize(signer_idx).await
-        {
-            return;
+        match self.choose_broadcast_and_notarize_branch() {
+            BroadcastAndNotarizeBranch::TryValidPath => {
+                if self.send_valid_broadcast_and_notarize(signer_idx).await {
+                    return;
+                }
+            }
+            BroadcastAndNotarizeBranch::FuzzedPath => {}
         }
 
         let proposal = self.select_event_proposal();
@@ -926,30 +1114,70 @@ where
         for (view, proposal) in notarized {
             // Intuition: once the honest node notarizes a proposal, either help it complete
             // the notarize/finalize path or force the nullification path, but never both.
-            if !self.schemes.is_empty() && self.context.gen_bool(0.2) {
-                if self.context.gen_bool(0.5) {
-                    self.send_nullification_certificate_for_view(0, view).await;
-                } else {
+            match self.choose_progress_branch() {
+                ProgressBranch::NullifyCertificate => {
+                    if !self.schemes.is_empty() {
+                        self.send_nullification_certificate_for_view(0, view).await;
+                    } else {
+                        for signer_idx in 0..self.schemes.len() {
+                            self.send_nullify_vote_for_view(signer_idx, view).await;
+                        }
+                    }
+                }
+                ProgressBranch::NullifyVotes => {
                     for signer_idx in 0..self.schemes.len() {
                         self.send_nullify_vote_for_view(signer_idx, view).await;
                     }
                 }
-            } else {
-                if !self.schemes.is_empty() && self.context.gen_bool(0.5) {
-                    self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
-                        .await;
-                } else {
+                ProgressBranch::NotarizationCertificateAndFinalizationCertificate => {
+                    if !self.schemes.is_empty() {
+                        self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
+                            .await;
+                        self.send_finalization_certificate_for_proposal(0, proposal.clone())
+                            .await;
+                    } else {
+                        for signer_idx in 0..self.schemes.len() {
+                            self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
+                                .await;
+                            self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
+                                .await;
+                        }
+                    }
+                }
+                ProgressBranch::NotarizationCertificateAndFinalizeVotes => {
+                    if !self.schemes.is_empty() {
+                        self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
+                            .await;
+                    } else {
+                        for signer_idx in 0..self.schemes.len() {
+                            self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
+                                .await;
+                        }
+                    }
+                    for signer_idx in 0..self.schemes.len() {
+                        self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
+                            .await;
+                    }
+                }
+                ProgressBranch::NotarizeVotesAndFinalizationCertificate => {
                     for signer_idx in 0..self.schemes.len() {
                         self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
                             .await;
                     }
+                    if !self.schemes.is_empty() {
+                        self.send_finalization_certificate_for_proposal(0, proposal.clone())
+                            .await;
+                    } else {
+                        for signer_idx in 0..self.schemes.len() {
+                            self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
+                                .await;
+                        }
+                    }
                 }
-
-                if !self.schemes.is_empty() && self.context.gen_bool(0.5) {
-                    self.send_finalization_certificate_for_proposal(0, proposal.clone())
-                        .await;
-                } else {
+                ProgressBranch::NotarizeVotesAndFinalizeVotes => {
                     for signer_idx in 0..self.schemes.len() {
+                        self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
+                            .await;
                         self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
                             .await;
                     }
@@ -987,11 +1215,11 @@ where
 
     async fn send_notarization_certificate(&mut self, signer_idx: usize) {
         let proposal = self.select_event_proposal();
-        let prefer_honest_vote = self.context.gen_bool(0.5);
+        let prefer_honest_vote =
+            matches!(self.choose_vote_preference(), VotePreference::PreferHonest);
 
-        match self.context.gen_range(0..100u8) {
-            // normal notarization (the primary path)
-            0..=89 => {
+        match self.choose_notarization_certificate_branch() {
+            NotarizationCertificateBranch::Normal => {
                 self.send_notarization_certificate_for_proposal(
                     signer_idx,
                     proposal,
@@ -999,20 +1227,16 @@ where
                 )
                 .await;
             }
-            // malformed bytes on the wire
-            90..=93 => {
+            NotarizationCertificateBranch::Malformed => {
                 self.send_malformed_certificate(signer_idx).await;
             }
-            // wrong epoch nullification
-            94..=96 => {
+            NotarizationCertificateBranch::WrongEpochNullification => {
                 self.send_wrong_epoch_nullification_certificate(signer_idx)
                     .await;
             }
-            // structurally valid but cryptographically invalid notarization
-            97..=99 => {
+            NotarizationCertificateBranch::InvalidNotarization => {
                 self.send_invalid_notarization_certificate(signer_idx).await;
             }
-            _ => unreachable!(),
         }
     }
 
@@ -1075,31 +1299,25 @@ where
             self.last_nullified_view,
         );
 
-        match self.context.gen_range(0..100u8) {
-            // normal nullification
-            0..=86 => {
+        match self.choose_nullification_certificate_branch() {
+            NullificationCertificateBranch::Normal => {
                 self.send_nullification_certificate_for_view(signer_idx, view)
                     .await;
             }
-            // drive local nullification assembly to hit floor-broadcast path
-            87..=89 => {
+            NullificationCertificateBranch::TriggerLocalFloor => {
                 self.try_trigger_local_nullification_floor().await;
             }
-            // malformed bytes
-            90..=93 => {
+            NullificationCertificateBranch::Malformed => {
                 self.send_malformed_certificate(signer_idx).await;
             }
-            // wrong epoch nullification
-            94..=96 => {
+            NullificationCertificateBranch::WrongEpoch => {
                 self.send_wrong_epoch_nullification_certificate(signer_idx)
                     .await;
             }
-            // structurally valid but cryptographically invalid nullification
-            97..=99 => {
+            NullificationCertificateBranch::InvalidNullification => {
                 self.send_invalid_nullification_certificate(signer_idx)
                     .await;
             }
-            _ => unreachable!(),
         }
     }
 
@@ -1120,7 +1338,8 @@ where
                 .await;
         }
 
-        let prefer_honest_vote = self.context.gen_bool(0.5);
+        let prefer_honest_vote =
+            matches!(self.choose_vote_preference(), VotePreference::PreferHonest);
         let cert = self.finalization_with_optional_honest_vote(&proposal, prefer_honest_vote);
 
         let Some((certificate, _)) = cert else {
@@ -1186,17 +1405,14 @@ where
     async fn send_finalization_certificate(&mut self, signer_idx: usize) {
         let proposal = self.select_event_proposal();
 
-        match self.context.gen_range(0..100u8) {
-            // normal finalization
-            0..=95 => {
+        match self.choose_finalization_certificate_branch() {
+            FinalizationCertificateBranch::Normal => {
                 self.send_finalization_certificate_for_proposal(signer_idx, proposal)
                     .await;
             }
-            // malformed bytes
-            96..=99 => {
+            FinalizationCertificateBranch::InvalidFinalization => {
                 self.send_invalid_finalization_certificate(signer_idx).await;
             }
-            _ => unreachable!(),
         }
     }
 }
