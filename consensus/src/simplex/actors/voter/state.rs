@@ -514,7 +514,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     ///
     /// When `term_length` is 1 every view is its own term, so this is
     /// equivalent to the per-view rule already enforced by
-    /// [`Round::construct_finalize`] (which checks `broadcast_nullify`).
+    /// `Round::can_construct_finalize` (which checks `broadcast_nullify`).
     pub fn construct_finalize(&mut self, view: View) -> Option<Finalize<S, D>> {
         // We don't need to finalize views that are already finalized.
         if view <= self.last_finalized {
@@ -533,13 +533,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             return None;
         }
 
-        let Some(round) = self.views.get(&view) else {
-            return None;
-        };
+        let round = self.views.get(&view)?;
         let indirectly_notarized = self.indirectly_notarized_views.contains(&view);
         if !self.is_notarized(view)
             || !round.can_construct_finalize()
-            || (!round.is_certified() && !(indirectly_notarized && round.is_verified()))
+            || !(round.is_certified() || indirectly_notarized && round.is_verified())
         {
             return None;
         }
@@ -581,7 +579,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Returns the proposal for `view` if it is eligible for forwarding.
     pub fn forwardable_proposal(&self, view: View) -> Option<Proposal<D>> {
         let round = self.views.get(&view)?;
-        if round.finalization().is_some() || round.notarization().is_some() || round.is_certified() {
+        if round.finalization().is_some() || round.notarization().is_some() || round.is_certified()
+        {
             return round.proposal().cloned();
         }
         None
@@ -653,7 +652,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Attempt to propose a new block.
     pub fn try_propose(&mut self) -> Option<Context<D, S::PublicKey>> {
-        for view in self.views.range(self.view..).map(|(&view, _)| view).collect::<Vec<_>>() {
+        for view in self
+            .views
+            .range(self.view..)
+            .map(|(&view, _)| view)
+            .collect::<Vec<_>>()
+        {
             if view == GENESIS_VIEW {
                 continue;
             }
@@ -705,8 +709,17 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// ask us to fetch junk).
     #[allow(clippy::type_complexity)]
     pub fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
-        for view in self.views.range(self.view..).map(|(&view, _)| view).collect::<Vec<_>>() {
-            let Some((leader, proposal)) = self.views.get(&view).and_then(|round| round.should_verify()) else {
+        for view in self
+            .views
+            .range(self.view..)
+            .map(|(&view, _)| view)
+            .collect::<Vec<_>>()
+        {
+            let Some((leader, proposal)) = self
+                .views
+                .get(&view)
+                .and_then(|round| round.should_verify())
+            else {
                 continue;
             };
             let parent_payload = match self.parent_payload(&proposal) {
@@ -784,7 +797,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             round.clear_deadlines();
         } else {
             let now = self.context.current();
-            let (_, is_first_timeout) = round.set_timeout_reason(TimeoutReason::FailedCertification);
+            let (_, is_first_timeout) =
+                round.set_timeout_reason(TimeoutReason::FailedCertification);
             if is_first_timeout {
                 round.set_deadlines(now, now);
             }
@@ -1251,7 +1265,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1317,7 +1331,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1375,7 +1389,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1419,7 +1433,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1481,7 +1495,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1536,7 +1550,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1599,7 +1613,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1666,7 +1680,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1725,7 +1739,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1799,7 +1813,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -2029,7 +2043,7 @@ mod tests {
                 parent_payload,
             );
             state.create_round(View::new(1));
-            assert!(state.proposed(parent.clone()));
+            assert!(state.proposed(parent));
             assert!(state.construct_notarize(View::new(1)).is_some());
 
             let child = Proposal::new(
@@ -2039,7 +2053,9 @@ mod tests {
             );
             assert!(state.set_proposal(View::new(2), child.clone()));
 
-            let (ctx, proposal) = state.try_verify().expect("child should verify optimistically");
+            let (ctx, proposal) = state
+                .try_verify()
+                .expect("child should verify optimistically");
             assert_eq!(ctx.round.view(), View::new(2));
             assert_eq!(ctx.parent, (View::new(1), parent_payload));
             assert_eq!(proposal, child);
@@ -2125,8 +2141,11 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([96u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), second.clone()));
-            assert!(state.try_verify().is_some(), "depth=1 should allow one optimistic hop");
+            assert!(state.set_proposal(View::new(2), second));
+            assert!(
+                state.try_verify().is_some(),
+                "depth=1 should allow one optimistic hop"
+            );
             assert!(state.verified(View::new(2)));
             assert!(state.construct_notarize(View::new(2)).is_some());
 
@@ -2136,7 +2155,10 @@ mod tests {
                 Sha256Digest::from([97u8; 32]),
             );
             assert!(state.set_proposal(View::new(3), third));
-            assert!(state.try_verify().is_none(), "depth=1 should block a second optimistic hop");
+            assert!(
+                state.try_verify().is_none(),
+                "depth=1 should block a second optimistic hop"
+            );
         });
     }
 
@@ -2170,8 +2192,9 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([101u8; 32]),
             );
+            let ancestor_finalize = ancestor.clone();
             state.create_round(View::new(1));
-            assert!(state.proposed(ancestor.clone()));
+            assert!(state.proposed(ancestor));
             assert!(state.construct_notarize(View::new(1)).is_some());
 
             let descendant = Proposal::new(
@@ -2195,7 +2218,7 @@ mod tests {
             let round = state.views.get(&View::new(1)).expect("ancestor round");
             assert!(round.proposal().is_some());
             assert!(round.is_verified());
-            assert!(Finalize::sign(&schemes[1], ancestor.clone()).is_some());
+            assert!(Finalize::sign(&schemes[1], ancestor_finalize).is_some());
 
             assert!(state.construct_finalize(View::new(1)).is_some());
         });
@@ -2674,7 +2697,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -2898,7 +2921,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -2970,7 +2993,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3178,7 +3201,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_secs(30),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -3260,7 +3283,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3306,7 +3329,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(5),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3351,7 +3374,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(3),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3424,7 +3447,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3468,7 +3491,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(5),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3525,7 +3548,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(5),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3605,7 +3628,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(5),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
 
             // Helper that prepares a certified notarization at view 2.
@@ -3683,7 +3706,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(3),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3754,7 +3777,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(3),
-                    optimistic_validation_depth: 0,
+                optimistic_validation_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
