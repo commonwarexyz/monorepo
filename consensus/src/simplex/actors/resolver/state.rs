@@ -193,15 +193,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     /// Inform the [Resolver] of any missing nullifications.
     async fn fetch(&mut self, resolver: &mut impl Resolver<Key = U64>) {
-        // Request nullifications at each term-start view between the floor
-        // and the current view. The cursor only visits term-start views
-        // because a nullification at a term-start covers the entire term.
-        // A mid-term nullification (stored at its actual view) does NOT
-        // cover earlier views in the same term, so a point lookup at the
-        // term-start key is the correct check here. This differs from
-        // `get`, which uses a range lookup because callers ask about a
-        // specific view and any nullification at or before it in the term
-        // suffices.
+        // Check each required term anchor directly. Unlike `get`, advancing
+        // the floor needs the exact nullifications for those boundaries.
         let mut requests = Vec::with_capacity(self.fetch_concurrent);
         let mut cursor = self.floor_view().next();
         while cursor < self.current_view && requests.len() < self.fetch_concurrent {
