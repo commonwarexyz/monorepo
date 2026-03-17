@@ -393,7 +393,9 @@ pub(crate) fn interesting(
     if !allow_unbounded_future && pending > current {
         let next = current.next();
         let next_term_start = current.next_term_start(term_length);
-        if pending != next && pending != next_term_start {
+        let same_term_future = term_length.get() > 1
+            && pending.term_start(term_length) == current.term_start(term_length);
+        if pending != next && pending != next_term_start && !same_term_future {
             return false;
         }
     }

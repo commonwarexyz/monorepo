@@ -672,11 +672,12 @@ impl<
         view: View,
         resolved: Resolved,
     ) {
+        let timeout = self.state.should_timeout_nullify(view);
         self.try_broadcast_notarize(batcher, vote_sender, view)
             .await;
         self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
             .await;
-        self.try_broadcast_nullify(batcher, vote_sender, view, false)
+        self.try_broadcast_nullify(batcher, vote_sender, view, timeout)
             .await;
         self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
             .await;
