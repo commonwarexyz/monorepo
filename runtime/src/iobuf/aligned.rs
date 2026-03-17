@@ -793,17 +793,16 @@ mod tests {
         assert!(empty_bytes.is_empty());
 
         // Cover immutable debug/view/slice paths on the aligned wrapper.
-        let aligned = aligned_mut.into_aligned();
+        let mut aligned = aligned_mut.into_aligned();
         let aligned_debug = format!("{aligned:?}");
         assert!(aligned_debug.contains("AlignedBuf"));
         assert_eq!(aligned.as_ptr(), aligned.as_ref().as_ptr());
         assert_eq!(aligned.as_ref(), b"wxyz");
-        assert_eq!(aligned.clone().slice(..2).unwrap().as_ref(), b"wx");
-        assert_eq!(aligned.clone().slice(1..).unwrap().as_ref(), b"xyz");
-        assert_eq!(aligned.clone().slice(1..=2).unwrap().as_ref(), b"xy");
+        assert_eq!(aligned.slice(..2).unwrap().as_ref(), b"wx");
+        assert_eq!(aligned.slice(1..).unwrap().as_ref(), b"xyz");
+        assert_eq!(aligned.slice(1..=2).unwrap().as_ref(), b"xy");
         assert_eq!(
             aligned
-                .clone()
                 .slice((Bound::Included(1), Bound::Excluded(3)))
                 .unwrap()
                 .as_ref(),
@@ -815,12 +814,11 @@ mod tests {
         assert_eq!(split_prefix.as_ref(), b"wx");
         assert_eq!(split.as_ref(), b"yz");
 
-        let mut drained = aligned.clone();
-        let head = Buf::copy_to_bytes(&mut drained, 1);
+        let head = Buf::copy_to_bytes(&mut aligned, 1);
         assert_eq!(head.as_ref(), b"w");
-        let tail = Buf::copy_to_bytes(&mut drained, 3);
+        let tail = Buf::copy_to_bytes(&mut aligned, 3);
         assert_eq!(tail.as_ref(), b"xyz");
-        assert_eq!(Buf::remaining(&drained), 0);
+        assert_eq!(Buf::remaining(&aligned), 0);
 
         // Unique aligned owners can recover mutability without copying.
         let mut unique_source = AlignedBufMut::new(AlignedBuffer::new(8, page));

@@ -3764,7 +3764,7 @@ mod tests {
 
         aligned_mut.clear();
         assert!(aligned_mut.is_empty());
-        aligned_mut.put_slice(&*ARRAY);
+        aligned_mut.put_slice(ARRAY);
         assert!(aligned_mut == ARRAY);
 
         // Full aligned drains should use the owner-transfer path, including len == 0 first.
