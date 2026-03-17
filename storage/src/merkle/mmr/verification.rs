@@ -50,7 +50,7 @@ impl<D: Digest> ProofStore<D> {
         root: &D,
     ) -> Result<Self, Error>
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         let digests =
@@ -84,7 +84,7 @@ impl<D: Digest> ProofStore<D> {
     /// The sub-range's fold prefix accumulator is derived from the stored fold accumulator
     /// (covering the original proof's fold prefix peaks) plus any additional peaks that are
     /// individually available in the store (original range peaks now preceding the sub-range).
-    pub fn range_proof<H: Hasher<Family = Family, Digest = D>>(
+    pub fn range_proof<H: Hasher<Family, Digest = D>>(
         &self,
         hasher: &H,
         range: Range<Location>,
@@ -163,7 +163,7 @@ impl<D: Digest> ProofStore<D> {
 /// Returns [Error::Empty] if the requested range is empty
 pub async fn range_proof<
     D: Digest,
-    H: Hasher<Family = Family, Digest = D>,
+    H: Hasher<Family, Digest = D>,
     S: Storage<Digest = D>,
 >(
     hasher: &H,
@@ -185,7 +185,7 @@ pub async fn range_proof<
 /// Returns [Error::Empty] if the requested range is empty
 pub async fn historical_range_proof<
     D: Digest,
-    H: Hasher<Family = Family, Digest = D>,
+    H: Hasher<Family, Digest = D>,
     S: Storage<Digest = D>,
 >(
     hasher: &H,

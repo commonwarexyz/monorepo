@@ -34,7 +34,7 @@ impl<D: Digest> Proof<Family, D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
     {
         self.verify_range_inclusion(hasher, &[element], loc, root)
     }
@@ -49,7 +49,7 @@ impl<D: Digest> Proof<Family, D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         match self.reconstruct_root(hasher, elements, start_loc) {
@@ -73,7 +73,7 @@ impl<D: Digest> Proof<Family, D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         if elements.is_empty() {
@@ -153,7 +153,7 @@ impl<D: Digest> Proof<Family, D> {
         start_loc: Location,
     ) -> Result<D, ReconstructionError>
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         if elements.is_empty() {
@@ -392,7 +392,7 @@ pub(crate) fn build_range_proof<D, H>(
 ) -> Result<Proof<Family, D>, Error>
 where
     D: Digest,
-    H: Hasher<Family = Family, Digest = D>,
+    H: Hasher<Family, Digest = D>,
 {
     let bp = blueprint(leaves, range)?;
 
@@ -436,7 +436,7 @@ fn reconstruct_peak_from_range<'a, D, H, E, S>(
 ) -> Result<D, ReconstructionError>
 where
     D: Digest,
-    H: Hasher<Family = Family, Digest = D>,
+    H: Hasher<Family, Digest = D>,
     E: Iterator,
     E::Item: AsRef<[u8]>,
     S: Iterator<Item = &'a D>,
@@ -499,7 +499,7 @@ mod tests {
     use commonware_cryptography::Sha256;
 
     type D = <Sha256 as commonware_cryptography::Hasher>::Digest;
-    type H = Standard<Family, Sha256>;
+    type H = Standard<Sha256>;
 
     /// Build an in-memory MMB with `n` elements (element i = i.to_be_bytes()).
     fn make_mmb(n: u64) -> (H, Mmb<D>) {
@@ -844,11 +844,9 @@ mod tests {
             let root = *mmb.root();
 
             let loc = n - 1;
-            let bp =
-                blueprint(leaves, Location::new(loc)..Location::new(n)).unwrap();
+            let bp = blueprint(leaves, Location::new(loc)..Location::new(n)).unwrap();
 
-            let total_digests =
-                usize::from(!bp.fold_prefix.is_empty()) + bp.fetch_nodes.len();
+            let total_digests = usize::from(!bp.fold_prefix.is_empty()) + bp.fetch_nodes.len();
             assert!(
                 total_digests <= 2,
                 "n={n}: expected <= 2 digests, got {total_digests} \
@@ -858,9 +856,7 @@ mod tests {
             );
 
             // Verify the proof actually works.
-            let proof = mmb
-                .proof(&mut hasher, Location::new(loc))
-                .unwrap();
+            let proof = mmb.proof(&mut hasher, Location::new(loc)).unwrap();
             assert!(
                 proof.verify_element_inclusion(
                     &mut hasher,

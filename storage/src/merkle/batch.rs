@@ -213,7 +213,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
 
     /// Compute digests for all dirty internal nodes, using the pool for parallelism when
     /// available and beneficial. Uses [`Family::children`] to locate each node's children.
-    pub fn merkleize_dirty(&mut self, hasher: &mut impl Hasher<Family = F, Digest = D>) {
+    pub fn merkleize_dirty(&mut self, hasher: &mut impl Hasher<F, Digest = D>) {
         let dirty = self.state.take_sorted_by_height();
 
         #[cfg(feature = "std")]
@@ -235,7 +235,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
     /// Compute digests for dirty internal nodes, bottom-up by height.
     fn merkleize_serial(
         &mut self,
-        hasher: &mut impl Hasher<Family = F, Digest = D>,
+        hasher: &mut impl Hasher<F, Digest = D>,
         dirty: &[(Position<F>, u32)],
     ) {
         for &(pos, height) in dirty {
@@ -252,7 +252,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
     #[cfg(feature = "std")]
     fn merkleize_parallel(
         &mut self,
-        hasher: &mut impl Hasher<Family = F, Digest = D>,
+        hasher: &mut impl Hasher<F, Digest = D>,
         pool: &ThreadPool,
         dirty: &[(Position<F>, u32)],
     ) {
@@ -285,7 +285,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
     #[cfg(feature = "std")]
     fn compute_height_parallel(
         &mut self,
-        hasher: &mut impl Hasher<Family = F, Digest = D>,
+        hasher: &mut impl Hasher<F, Digest = D>,
         pool: &ThreadPool,
         same_height: &[Position<F>],
         height: u32,

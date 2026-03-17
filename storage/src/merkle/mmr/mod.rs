@@ -204,7 +204,7 @@ pub type Position = merkle::Position<Family>;
 /// A leaf index or leaf count in an MMR.
 pub type Location = merkle::Location<Family>;
 
-pub type StandardHasher<H> = merkle::hasher::Standard<Family, H>;
+pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 
 /// Errors that can occur when interacting with an MMR.
 #[derive(Error, Debug)]

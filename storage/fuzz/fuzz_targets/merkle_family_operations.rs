@@ -33,7 +33,7 @@ trait FuzzMerkle: Sized {
 
     const NAME: &'static str;
 
-    fn new(hasher: &mut Standard<Self::Family, Sha256>) -> Self;
+    fn new(hasher: &mut Standard<Sha256>) -> Self;
     fn size(&self) -> merkle::Position<Self::Family>;
     fn leaves(&self) -> merkle::Location<Self::Family>;
     fn retained_bounds(&self) -> Range<merkle::Location<Self::Family>>;
@@ -41,18 +41,18 @@ trait FuzzMerkle: Sized {
     fn root(&self) -> Digest;
     fn add(
         &mut self,
-        hasher: &mut Standard<Self::Family, Sha256>,
+        hasher: &mut Standard<Sha256>,
         data: &[u8],
     ) -> merkle::Location<Self::Family>;
     fn update_leaf(
         &mut self,
-        hasher: &mut Standard<Self::Family, Sha256>,
+        hasher: &mut Standard<Sha256>,
         loc: merkle::Location<Self::Family>,
         data: &[u8],
     ) -> Result<(), Self::Error>;
     fn verify_element_proof(
         &self,
-        hasher: &mut Standard<Self::Family, Sha256>,
+        hasher: &mut Standard<Sha256>,
         loc: merkle::Location<Self::Family>,
         element: &[u8],
     ) -> Result<bool, Self::Error>;
@@ -66,7 +66,7 @@ impl FuzzMerkle for Mmr<Digest> {
 
     const NAME: &'static str = "mmr";
 
-    fn new(hasher: &mut Standard<Self::Family, Sha256>) -> Self {
+    fn new(hasher: &mut Standard<Sha256>) -> Self {
         Self::new(hasher)
     }
 
@@ -92,7 +92,7 @@ impl FuzzMerkle for Mmr<Digest> {
 
     fn add(
         &mut self,
-        hasher: &mut Standard<Self::Family, Sha256>,
+        hasher: &mut Standard<Sha256>,
         data: &[u8],
     ) -> merkle::Location<Self::Family> {
         let (loc, changeset) = {
@@ -106,7 +106,7 @@ impl FuzzMerkle for Mmr<Digest> {
 
     fn update_leaf(
         &mut self,
-        hasher: &mut Standard<Self::Family, Sha256>,
+        hasher: &mut Standard<Sha256>,
         loc: merkle::Location<Self::Family>,
         data: &[u8],
     ) -> Result<(), Self::Error> {
@@ -118,7 +118,7 @@ impl FuzzMerkle for Mmr<Digest> {
 
     fn verify_element_proof(
         &self,
-        hasher: &mut Standard<Self::Family, Sha256>,
+        hasher: &mut Standard<Sha256>,
         loc: merkle::Location<Self::Family>,
         element: &[u8],
     ) -> Result<bool, Self::Error> {
@@ -142,7 +142,7 @@ impl FuzzMerkle for Mmb<Digest> {
 
     const NAME: &'static str = "mmb";
 
-    fn new(hasher: &mut Standard<Self::Family, Sha256>) -> Self {
+    fn new(hasher: &mut Standard<Sha256>) -> Self {
         Self::new(hasher)
     }
 
@@ -168,7 +168,7 @@ impl FuzzMerkle for Mmb<Digest> {
 
     fn add(
         &mut self,
-        hasher: &mut Standard<Self::Family, Sha256>,
+        hasher: &mut Standard<Sha256>,
         data: &[u8],
     ) -> merkle::Location<Self::Family> {
         let (loc, changeset) = {
@@ -182,7 +182,7 @@ impl FuzzMerkle for Mmb<Digest> {
 
     fn update_leaf(
         &mut self,
-        hasher: &mut Standard<Self::Family, Sha256>,
+        hasher: &mut Standard<Sha256>,
         loc: merkle::Location<Self::Family>,
         data: &[u8],
     ) -> Result<(), Self::Error> {
@@ -194,7 +194,7 @@ impl FuzzMerkle for Mmb<Digest> {
 
     fn verify_element_proof(
         &self,
-        hasher: &mut Standard<Self::Family, Sha256>,
+        hasher: &mut Standard<Sha256>,
         loc: merkle::Location<Self::Family>,
         element: &[u8],
     ) -> Result<bool, Self::Error> {
@@ -278,7 +278,7 @@ fn fuzz_family<T: FuzzMerkle>(operations: &[MerkleOperation]) {
     let runner = deterministic::Runner::default();
 
     runner.start(|_context| async move {
-        let mut hasher = Standard::<T::Family, Sha256>::new();
+        let mut hasher = Standard::<Sha256>::new();
         let mut merkle = T::new(&mut hasher);
         let mut reference = ReferenceMerkle::<T::Family>::new();
 

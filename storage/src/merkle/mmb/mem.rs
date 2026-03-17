@@ -56,7 +56,7 @@ pub struct Mmb<D: Digest> {
 
 impl<D: Digest> Mmb<D> {
     /// Create a new, empty MMB.
-    pub fn new(hasher: &mut impl Hasher<Family = Family, Digest = D>) -> Self {
+    pub fn new(hasher: &mut impl Hasher<Family, Digest = D>) -> Self {
         let root = hasher.root(Location::new(0), core::iter::empty::<&D>());
         Self {
             nodes: VecDeque::new(),
@@ -77,7 +77,7 @@ impl<D: Digest> Mmb<D> {
     /// Returns [Error::InvalidSize] if the MMB size is invalid.
     pub fn init(
         config: Config<D>,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
     ) -> Result<Self, Error> {
         let pruned_to_pos = Position::try_from(config.pruned_to)?;
 
@@ -120,7 +120,7 @@ impl<D: Digest> Mmb<D> {
     ///
     /// Returns [Error::LocationOverflow] if `pruned_to` exceeds [crate::merkle::Family::MAX_LOCATION].
     pub fn from_components(
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         nodes: Vec<D>,
         pruned_to: Location,
         pinned_nodes: Vec<D>,
@@ -137,7 +137,7 @@ impl<D: Digest> Mmb<D> {
 
     /// Compute the root digest from the current peaks.
     fn compute_root(
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         leaves: Location,
         nodes: &VecDeque<D>,
         pinned_nodes: &BTreeMap<Position, D>,
@@ -328,7 +328,7 @@ impl<D: Digest> Mmb<D> {
     /// Returns [Error::ElementPruned] if a required node is missing.
     pub fn proof(
         &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         loc: Location,
     ) -> Result<Proof<Family, D>, Error> {
         if !loc.is_valid() {
@@ -351,7 +351,7 @@ impl<D: Digest> Mmb<D> {
     /// Returns [Error::ElementPruned] if a required node is missing.
     pub fn range_proof(
         &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         range: Range<Location>,
     ) -> Result<Proof<Family, D>, Error> {
         proof::build_range_proof(hasher, self.leaves, range, |pos| self.get_node(pos))
@@ -395,7 +395,7 @@ impl<D: Digest> crate::merkle::Readable for Mmb<D> {
 
     fn proof(
         &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         loc: Location,
     ) -> Result<Proof<Family, D>, Error> {
         self.proof(hasher, loc)
@@ -403,7 +403,7 @@ impl<D: Digest> crate::merkle::Readable for Mmb<D> {
 
     fn range_proof(
         &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         range: Range<Location>,
     ) -> Result<Proof<Family, D>, Error> {
         self.range_proof(hasher, range)
@@ -423,11 +423,11 @@ impl<D: Digest> BatchChainInfo<Family> for Mmb<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::{hasher::Standard, mmb::Family, Readable as _};
+    use crate::merkle::{hasher::Standard, Readable as _};
     use commonware_cryptography::Sha256;
 
     type D = <Sha256 as commonware_cryptography::Hasher>::Digest;
-    type H = Standard<Family, Sha256>;
+    type H = Standard<Sha256>;
 
     fn build_mmb(n: u64) -> (H, Mmb<D>) {
         let mut hasher = H::new();

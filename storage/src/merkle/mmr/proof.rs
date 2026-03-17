@@ -38,7 +38,7 @@ impl<D: Digest> Proof<Family, D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
     {
         self.verify_range_inclusion(hasher, &[element], loc, root)
     }
@@ -54,7 +54,7 @@ impl<D: Digest> Proof<Family, D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         match self.reconstruct_root(hasher, elements, start_loc) {
@@ -78,7 +78,7 @@ impl<D: Digest> Proof<Family, D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         // Empty proof is valid for an empty MMR
@@ -169,7 +169,7 @@ impl<D: Digest> Proof<Family, D> {
         root: &D,
     ) -> Result<Vec<(Position, D)>, Error>
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         let mut collected_digests = Vec::new();
@@ -207,7 +207,7 @@ impl<D: Digest> Proof<Family, D> {
         root: &D,
     ) -> bool
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         // Verify the proof and extract all node digests used in the reconstruction.
@@ -286,7 +286,7 @@ impl<D: Digest> Proof<Family, D> {
         start_loc: Location,
     ) -> Result<D, ReconstructionError>
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         self.reconstruct_root_impl(hasher, elements, start_loc, None)
@@ -305,7 +305,7 @@ impl<D: Digest> Proof<Family, D> {
         mut collected_digests: Option<&mut Vec<(Position, D)>>,
     ) -> Result<D, ReconstructionError>
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         if elements.is_empty() {
@@ -538,7 +538,7 @@ pub(crate) fn build_range_proof<D, H>(
 ) -> Result<Proof<Family, D>, Error>
 where
     D: Digest,
-    H: Hasher<Family = Family, Digest = D>,
+    H: Hasher<Family, Digest = D>,
 {
     let bp = blueprint(leaves, range)?;
 
@@ -620,7 +620,7 @@ fn peak_digest_from_range<D, H, E>(
 ) -> Result<D, ReconstructionError>
 where
     D: Digest,
-    H: Hasher<Family = Family, Digest = D>,
+    H: Hasher<Family, Digest = D>,
     E: Iterator<Item: AsRef<[u8]>>,
 {
     assert_ne!(range_info.two_h, 0);

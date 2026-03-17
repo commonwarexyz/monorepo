@@ -197,7 +197,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(
         context: E,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         cfg: Config,
     ) -> Result<Self, Error> {
         let journal_cfg = JConfig {
@@ -388,7 +388,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<D>,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
     ) -> Result<Self, crate::qmdb::Error> {
         let prune_pos = Position::try_from(cfg.range.start)?;
         let end_pos = Position::try_from(cfg.range.end)?;
@@ -656,7 +656,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     ///   pruned.
     pub async fn historical_proof(
         &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         leaves: Location,
         loc: Location,
     ) -> Result<Proof<D>, Error> {
@@ -682,7 +682,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// - Returns [Error::Empty] if the range is empty.
     pub async fn historical_range_proof(
         &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         leaves: Location,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
@@ -703,7 +703,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// - Returns [Error::Empty] if the range is empty.
     pub async fn proof(
         &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         loc: Location,
     ) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
@@ -726,7 +726,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// - Returns [Error::Empty] if the range is empty.
     pub async fn range_proof(
         &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
         self.historical_range_proof(hasher, self.leaves(), range)
@@ -830,7 +830,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     pub(crate) async fn rewind(
         &mut self,
         leaves_to_remove: usize,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
     ) -> Result<(), Error> {
         if leaves_to_remove == 0 {
             return Ok(());
@@ -928,7 +928,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
 
     fn proof(
         &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         loc: Location,
     ) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
@@ -945,7 +945,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
 
     fn range_proof(
         &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         range: core::ops::Range<Location>,
     ) -> Result<Proof<D>, Error> {
         proof::build_range_proof(hasher, self.leaves(), range, |pos| {
@@ -980,7 +980,7 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage for Mmr<E, D> {
 mod tests {
     use super::*;
     use crate::{
-        merkle::{hasher::Hasher as _, LocationRangeExt as _},
+        merkle::LocationRangeExt as _,
         mmr::{conformance::build_test_mmr, mem, Location, StandardHasher as Standard},
     };
     use commonware_cryptography::{
