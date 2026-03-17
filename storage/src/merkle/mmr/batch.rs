@@ -40,12 +40,11 @@
 //! let mut mmr = Mmr::new(&mut hasher);
 //!
 //! // Build a batch of mutations.
-//! let changeset = {
-//!     let mut batch = UnmerkleizedBatch::new(&mmr);
-//!     batch.add(&mut hasher, b"leaf-0");
-//!     batch.add(&mut hasher, b"leaf-1");
-//!     batch.merkleize(&mut hasher).finalize()
-//! };
+//! let changeset = UnmerkleizedBatch::new(&mmr)
+//!     .add(&mut hasher, b"leaf-0")
+//!     .add(&mut hasher, b"leaf-1")
+//!     .merkleize(&mut hasher)
+//!     .finalize();
 //!
 //! // Apply the changeset back to the base MMR.
 //! mmr.apply(changeset).unwrap();
