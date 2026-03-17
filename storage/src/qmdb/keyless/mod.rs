@@ -19,11 +19,11 @@
 //! let _ = parent.append(value_a);
 //! let parent = parent.merkleize(None);
 //!
-//! let mut child_a = parent.new_batch(&db);
+//! let mut child_a = parent.new_batch();
 //! let _ = child_a.append(value_b);
 //! let child_a = child_a.merkleize(None);
 //!
-//! let mut child_b = parent.new_batch(&db);
+//! let mut child_b = parent.new_batch();
 //! let _ = child_b.append(value_c);
 //! let child_b = child_b.merkleize(None);
 //!
@@ -282,7 +282,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<'_, E, V, H> {
+    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<H, V> {
         let journal_size = *self.last_commit_loc + 1;
         batch::UnmerkleizedBatch::new(self, journal_size)
     }
@@ -1186,7 +1186,7 @@ mod test {
             let mut batch = db.new_batch();
             for (i, loc) in base_locs.iter().enumerate() {
                 assert_eq!(
-                    batch.get(*loc).await.unwrap(),
+                    batch.get(*loc, &db).await.unwrap(),
                     Some(base_vals[i].clone()),
                     "base DB value at loc {loc} mismatch"
                 );
@@ -1195,11 +1195,11 @@ mod test {
             // Pending append is visible.
             let new_val = vec![99u8; 16];
             let new_loc = batch.append(new_val.clone());
-            assert_eq!(batch.get(new_loc).await.unwrap(), Some(new_val));
+            assert_eq!(batch.get(new_loc, &db).await.unwrap(), Some(new_val));
 
             // Location past the end returns None.
             let beyond = Location::new(*new_loc + 1);
-            assert_eq!(batch.get(beyond).await.unwrap(), None);
+            assert_eq!(batch.get(beyond, &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1221,16 +1221,16 @@ mod test {
             let parent_m = parent.merkleize(None);
 
             // Child reads v1 from parent chain.
-            let mut child = parent_m.new_batch(&db);
-            assert_eq!(child.get(loc1).await.unwrap(), Some(v1));
+            let mut child = parent_m.new_batch::<Sha256>();
+            assert_eq!(child.get(loc1, &db).await.unwrap(), Some(v1));
 
             // Child appends v2.
             let loc2 = child.append(v2.clone());
-            assert_eq!(child.get(loc2).await.unwrap(), Some(v2));
+            assert_eq!(child.get(loc2, &db).await.unwrap(), Some(v2));
 
             // Nonexistent location.
             let nonexistent = Location::new(9999);
-            assert_eq!(child.get(nonexistent).await.unwrap(), None);
+            assert_eq!(child.get(nonexistent, &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1366,7 +1366,7 @@ mod test {
             let parent_root = parent_m.root();
 
             // Child batch built on top of parent.
-            let mut child = parent_m.new_batch(&db);
+            let mut child = parent_m.new_batch::<Sha256>();
             let loc2 = child.append(v2.clone());
             let loc3 = child.append(v3.clone());
             let child_m = child.merkleize(None);
@@ -1543,7 +1543,7 @@ mod test {
 
             // Child batch appends v2.
             let v2 = vec![2u8; 16];
-            let mut child = parent_m.new_batch(&db);
+            let mut child = parent_m.new_batch::<Sha256>();
             let loc2 = child.append(v2.clone());
             let child_m = child.merkleize(None);
 
@@ -1676,12 +1676,12 @@ mod test {
 
             // Fork two children from the same parent.
             let child_a = {
-                let mut batch = parent_m.new_batch(&db);
+                let mut batch = parent_m.new_batch::<Sha256>();
                 batch.append(vec![2]);
                 batch.merkleize(None).finalize()
             };
             let child_b = {
-                let mut batch = parent_m.new_batch(&db);
+                let mut batch = parent_m.new_batch::<Sha256>();
                 batch.append(vec![3]);
                 batch.merkleize(None).finalize()
             };
@@ -1712,7 +1712,7 @@ mod test {
             let parent_m = parent.merkleize(None);
 
             // Child batch.
-            let mut child = parent_m.new_batch(&db);
+            let mut child = parent_m.new_batch::<Sha256>();
             child.append(vec![2]);
             let child_changeset = child.merkleize(None).finalize();
 
@@ -1745,7 +1745,7 @@ mod test {
             let parent_m = parent.merkleize(None);
 
             // Child batch built on parent.
-            let mut child = parent_m.new_batch(&db);
+            let mut child = parent_m.new_batch::<Sha256>();
             let child_loc = child.append(vec![2]);
             let child_m = child.merkleize(None);
 
@@ -1779,7 +1779,7 @@ mod test {
 
             // Child batch. Finalize both before applying either so the
             // borrow on `db` through `parent_m` is released.
-            let mut child = parent_m.new_batch(&db);
+            let mut child = parent_m.new_batch::<Sha256>();
             child.append(vec![2]);
             let child_changeset = child.merkleize(None).finalize();
             let parent_changeset = parent_m.finalize();
@@ -1818,7 +1818,7 @@ mod test {
             assert_eq!(snapshot.root(), db.root());
 
             // Chain a child from the snapshot, apply it.
-            let mut child_batch = snapshot.new_batch(&db);
+            let mut child_batch = snapshot.new_batch::<Sha256>();
             let loc2 = child_batch.append(vec![20]);
             let child = child_batch.merkleize(None);
             db.apply_batch(child.finalize()).await.unwrap();

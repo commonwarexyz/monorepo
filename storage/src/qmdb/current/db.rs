@@ -192,10 +192,9 @@ where
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
-    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<'_, E, C, I, H, U, N> {
+    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<H, U, N> {
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
-            self,
             Vec::new(),
             Vec::new(),
             self.grafted_snapshot(),

@@ -293,20 +293,14 @@ impl<D: Digest, R: Readable<Digest = D>, S: MmrStorage<Digest = D>> MmrStorage
 ///
 /// Wraps a [`any::batch::UnmerkleizedBatch`] and adds bitmap and grafted MMR parent state
 /// needed to compute the current layer during [`merkleize`](Self::merkleize).
-pub struct UnmerkleizedBatch<'a, E, C, I, H, U, const N: usize>
+pub struct UnmerkleizedBatch<H, U, const N: usize>
 where
-    E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
 {
     /// The inner any-layer batch that handles mutations, journal, and floor raise.
-    inner: any::batch::UnmerkleizedBatch<'a, E, C, I, H, U>,
-
-    /// The committed current-layer DB (for bitmap and grafted MMR access).
-    current_db: &'a super::db::Db<E, C, I, H, U, N>,
+    inner: any::batch::UnmerkleizedBatch<H, U>,
 
     /// Bitmap pushes accumulated by prior batches in the chain.
     base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
@@ -367,18 +361,14 @@ pub struct Changeset<K, D: Digest, Item: Send, const N: usize> {
     pub(super) canonical_root: D,
 }
 
-impl<'a, E, C, I, H, U, const N: usize> UnmerkleizedBatch<'a, E, C, I, H, U, N>
+impl<H, U, const N: usize> UnmerkleizedBatch<H, U, N>
 where
-    E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
 {
     pub(super) const fn new(
-        inner: any::batch::UnmerkleizedBatch<'a, E, C, I, H, U>,
-        current_db: &'a super::db::Db<E, C, I, H, U, N>,
+        inner: any::batch::UnmerkleizedBatch<H, U>,
         base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
         base_bitmap_clears: Vec<Arc<Vec<Location>>>,
         grafted_parent: mmr::batch::MerkleizedBatch<H::Digest>,
@@ -386,7 +376,6 @@ where
     ) -> Self {
         Self {
             inner,
-            current_db,
             base_bitmap_pushes,
             base_bitmap_clears,
             grafted_parent,
@@ -405,41 +394,53 @@ where
 }
 
 // Unordered get + merkleize.
-impl<'a, E, K, V, C, I, H, const N: usize>
-    UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, N>
+impl<K, V, H, const N: usize> UnmerkleizedBatch<H, update::Unordered<K, V>, N>
 where
-    E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<update::Unordered<K, V>>>,
-    I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
     Operation<update::Unordered<K, V>>: Codec,
 {
     /// Read through: mutations -> base diff -> committed DB.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
-        self.inner.get(key).await
+    pub async fn get<E, C, I>(
+        &self,
+        key: &K,
+        db: &super::db::Db<E, C, I, H, update::Unordered<K, V>, N>,
+    ) -> Result<Option<V::Value>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location> + 'static,
+    {
+        self.inner.get(key, &db.any).await
     }
 
     /// Resolve mutations into operations, merkleize, and return a
     /// [`MerkleizedBatch`].
-    pub async fn merkleize(
+    pub async fn merkleize<E, C, I>(
         self,
         metadata: Option<V::Value>,
-    ) -> Result<MerkleizedBatch<H::Digest, update::Unordered<K, V>, N>, Error> {
+        db: &super::db::Db<E, C, I, H, update::Unordered<K, V>, N>,
+    ) -> Result<MerkleizedBatch<H::Digest, update::Unordered<K, V>, N>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location> + 'static,
+    {
         let Self {
             inner,
-            current_db,
             base_bitmap_pushes,
             base_bitmap_clears,
             grafted_parent,
             bitmap_parent,
         } = self;
         let scan = BitmapScan::new(&bitmap_parent);
-        let inner = inner.merkleize_with_floor_scan(metadata, scan).await?;
+        let inner = inner
+            .merkleize_with_floor_scan(metadata, scan, &db.any)
+            .await?;
         compute_current_layer(
             inner,
-            current_db,
+            db,
             base_bitmap_pushes,
             base_bitmap_clears,
             &grafted_parent,
@@ -450,41 +451,53 @@ where
 }
 
 // Ordered get + merkleize.
-impl<'a, E, K, V, C, I, H, const N: usize>
-    UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, N>
+impl<K, V, H, const N: usize> UnmerkleizedBatch<H, update::Ordered<K, V>, N>
 where
-    E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<update::Ordered<K, V>>>,
-    I: crate::index::Ordered<Value = Location> + 'static,
     H: Hasher,
     Operation<update::Ordered<K, V>>: Codec,
 {
     /// Read through: mutations -> base diff -> committed DB.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
-        self.inner.get(key).await
+    pub async fn get<E, C, I>(
+        &self,
+        key: &K,
+        db: &super::db::Db<E, C, I, H, update::Ordered<K, V>, N>,
+    ) -> Result<Option<V::Value>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location> + 'static,
+    {
+        self.inner.get(key, &db.any).await
     }
 
     /// Resolve mutations into operations, merkleize, and return a
     /// [`MerkleizedBatch`].
-    pub async fn merkleize(
+    pub async fn merkleize<E, C, I>(
         self,
         metadata: Option<V::Value>,
-    ) -> Result<MerkleizedBatch<H::Digest, update::Ordered<K, V>, N>, Error> {
+        db: &super::db::Db<E, C, I, H, update::Ordered<K, V>, N>,
+    ) -> Result<MerkleizedBatch<H::Digest, update::Ordered<K, V>, N>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location> + 'static,
+    {
         let Self {
             inner,
-            current_db,
             base_bitmap_pushes,
             base_bitmap_clears,
             grafted_parent,
             bitmap_parent,
         } = self;
         let scan = BitmapScan::new(&bitmap_parent);
-        let inner = inner.merkleize_with_floor_scan(metadata, scan).await?;
+        let inner = inner
+            .merkleize_with_floor_scan(metadata, scan, &db.any)
+            .await?;
         compute_current_layer(
             inner,
-            current_db,
+            db,
             base_bitmap_pushes,
             base_bitmap_clears,
             &grafted_parent,
@@ -867,22 +880,15 @@ where
     Operation<U>: Codec,
 {
     /// Create a new speculative batch of operations with this batch as its parent.
-    pub fn new_batch<'a, E, C, I, H>(
-        &'a self,
-        db: &'a super::db::Db<E, C, I, H, U, N>,
-    ) -> UnmerkleizedBatch<'a, E, C, I, H, U, N>
+    pub fn new_batch<H>(&self) -> UnmerkleizedBatch<H, U, N>
     where
-        E: Storage + Clock + Metrics,
-        C: Contiguous<Item = Operation<U>>,
-        I: UnorderedIndex<Value = Location>,
         H: Hasher<Digest = D>,
     {
         let pushes = self.bitmap_pushes.clone();
         let clears = self.bitmap_clears.clone();
 
         UnmerkleizedBatch::new(
-            self.inner.new_batch::<E, C, I, H>(&db.any),
-            db,
+            self.inner.new_batch::<H>(),
             pushes,
             clears,
             self.grafted.clone(),
@@ -1039,15 +1045,17 @@ mod trait_impls {
 
     type CurrentDb<E, C, I, H, U, const N: usize> = crate::qmdb::current::db::Db<E, C, I, H, U, N>;
 
-    impl<'a, E, K, V, C, I, H, const N: usize> UnmerkleizedBatchTrait
-        for UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, N>
+    impl<K, V, H, E, C, I, const N: usize>
+        UnmerkleizedBatchTrait<CurrentDb<E, C, I, H, update::Unordered<K, V>, N>>
+        for UnmerkleizedBatch<H, update::Unordered<K, V>, N>
     where
-        E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location> + 'static,
         H: Hasher,
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Unordered<K, V>>>
+            + Persistable<Error = crate::journal::Error>,
+        I: UnorderedIndex<Value = Location> + 'static,
         Operation<update::Unordered<K, V>>: Codec,
     {
         type K = K;
@@ -1056,26 +1064,29 @@ mod trait_impls {
         type Merkleized = MerkleizedBatch<H::Digest, update::Unordered<K, V>, N>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
-            UnmerkleizedBatch::write(self, key, value)
+            Self::write(self, key, value)
         }
 
         fn merkleize(
             self,
             metadata: Option<V::Value>,
+            db: &CurrentDb<E, C, I, H, update::Unordered<K, V>, N>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error>> {
-            self.merkleize(metadata)
+            self.merkleize(metadata, db)
         }
     }
 
-    impl<'a, E, K, V, C, I, H, const N: usize> UnmerkleizedBatchTrait
-        for UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, N>
+    impl<K, V, H, E, C, I, const N: usize>
+        UnmerkleizedBatchTrait<CurrentDb<E, C, I, H, update::Ordered<K, V>, N>>
+        for UnmerkleizedBatch<H, update::Ordered<K, V>, N>
     where
-        E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
-        I: crate::index::Ordered<Value = Location> + 'static,
         H: Hasher,
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Ordered<K, V>>>
+            + Persistable<Error = crate::journal::Error>,
+        I: crate::index::Ordered<Value = Location> + 'static,
         Operation<update::Ordered<K, V>>: Codec,
     {
         type K = K;
@@ -1084,14 +1095,15 @@ mod trait_impls {
         type Merkleized = MerkleizedBatch<H::Digest, update::Ordered<K, V>, N>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
-            UnmerkleizedBatch::write(self, key, value)
+            Self::write(self, key, value)
         }
 
         fn merkleize(
             self,
             metadata: Option<V::Value>,
+            db: &CurrentDb<E, C, I, H, update::Ordered<K, V>, N>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error>> {
-            self.merkleize(metadata)
+            self.merkleize(metadata, db)
         }
     }
 
@@ -1127,12 +1139,9 @@ mod trait_impls {
         type K = K;
         type V = V::Value;
         type Changeset = Changeset<K, H::Digest, Operation<update::Unordered<K, V>>, N>;
-        type Batch<'a>
-            = UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, N>
-        where
-            Self: 'a;
+        type Batch = UnmerkleizedBatch<H, update::Unordered<K, V>, N>;
 
-        fn new_batch(&self) -> Self::Batch<'_> {
+        fn new_batch(&self) -> Self::Batch {
             self.new_batch()
         }
 
@@ -1159,12 +1168,9 @@ mod trait_impls {
         type K = K;
         type V = V::Value;
         type Changeset = Changeset<K, H::Digest, Operation<update::Ordered<K, V>>, N>;
-        type Batch<'a>
-            = UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, N>
-        where
-            Self: 'a;
+        type Batch = UnmerkleizedBatch<H, update::Ordered<K, V>, N>;
 
-        fn new_batch(&self) -> Self::Batch<'_> {
+        fn new_batch(&self) -> Self::Batch {
             self.new_batch()
         }
 

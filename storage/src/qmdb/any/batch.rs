@@ -117,21 +117,14 @@ pub(crate) enum SnapshotDiff<K> {
 /// A speculative batch of operations whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
 ///
-/// Borrows `&Db` for reads during the build phase. Consuming [`UnmerkleizedBatch::merkleize`]
-/// (or its ordered/unordered variants) produces an owned [`MerkleizedBatch`] and releases the
-/// borrow.
-pub struct UnmerkleizedBatch<'a, E, C, I, H, U>
+/// Methods that need the committed DB (e.g. `get`, `merkleize`) accept it as a
+/// parameter, so the batch is lifetime-free and can be stored independently of the DB.
+pub struct UnmerkleizedBatch<H, U>
 where
-    E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
 {
-    /// The committed DB this batch is built on top of.
-    db: &'a Db<E, C, I, H, U>,
-
     /// Authenticated journal batch for computing the speculative MMR root.
     journal_batch: authenticated::UnmerkleizedBatch<H, Operation<U>>,
 
@@ -216,16 +209,12 @@ pub struct Changeset<K, D: Digest, Item: Send> {
 /// mutations from the resolution/merkleization machinery. Helpers that need
 /// access to the base diff, DB snapshot, or operation chain are methods on this
 /// struct, eliminating parameter threading.
-struct Merkleizer<'a, E, C, I, H, U>
+struct Merkleizer<H, U>
 where
-    E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
 {
-    db: &'a Db<E, C, I, H, U>,
     journal_batch: authenticated::UnmerkleizedBatch<H, Operation<U>>,
     base_diff: Arc<BTreeMap<U::Key, DiffEntry<U::Value>>>,
     base_operations: Vec<Arc<Vec<Operation<U>>>>,
@@ -235,12 +224,9 @@ where
     base_active_keys: usize,
 }
 
-impl<'a, E, C, I, H, U> Merkleizer<'a, E, C, I, H, U>
+impl<H, U> Merkleizer<H, U>
 where
-    E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
 {
@@ -254,11 +240,17 @@ where
     /// ```
     ///
     /// For top-level batches, the parent chain is empty, so db_size == base.
-    async fn read_op(
+    async fn read_op<E, C, I>(
         &self,
         loc: Location,
         current_ops: &[Operation<U>],
-    ) -> Result<Operation<U>, Error> {
+        db: &Db<E, C, I, H, U>,
+    ) -> Result<Operation<U>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location>,
+    {
         let loc_val = *loc;
 
         if loc_val >= self.base_size {
@@ -276,7 +268,7 @@ where
             unreachable!("location within parent chain range but not found in segments");
         } else {
             // Base DB's journal (on-disk async read).
-            let reader = self.db.log.reader().await;
+            let reader = db.log.reader().await;
             Ok(reader.read(loc_val).await?)
         }
     }
@@ -286,14 +278,20 @@ where
     /// For each mutation key, checks the base diff first (returning the
     /// uncommitted location for Active entries, skipping Deleted entries), then
     /// falls back to the base DB snapshot.
-    fn gather_existing_locations(
+    fn gather_existing_locations<E, C, I>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
-    ) -> Vec<Location> {
+        db: &Db<E, C, I, H, U>,
+    ) -> Vec<Location>
+    where
+        E: Storage + Clock + Metrics,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location>,
+    {
         let mut locations = Vec::new();
         if self.base_diff.is_empty() {
             for key in mutations.keys() {
-                locations.extend(self.db.snapshot.get(key).copied());
+                locations.extend(db.snapshot.get(key).copied());
             }
         } else {
             for key in mutations.keys() {
@@ -303,7 +301,7 @@ where
                     }
                     continue;
                 }
-                locations.extend(self.db.snapshot.get(key).copied());
+                locations.extend(db.snapshot.get(key).copied());
             }
         }
         locations.sort();
@@ -312,16 +310,22 @@ where
     }
 
     /// Check if the operation at `loc` for `key` is still active.
-    fn is_active_at(
+    fn is_active_at<E, C, I>(
         &self,
         key: &U::Key,
         loc: Location,
         batch_diff: &BTreeMap<U::Key, DiffEntry<U::Value>>,
-    ) -> bool {
+        db: &Db<E, C, I, H, U>,
+    ) -> bool
+    where
+        E: Storage + Clock + Metrics,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location>,
+    {
         if let Some(entry) = batch_diff.get(key).or_else(|| self.base_diff.get(key)) {
             return entry.loc() == Some(loc);
         }
-        self.db.snapshot.get(key).any(|&l| l == loc)
+        db.snapshot.get(key).any(|&l| l == loc)
     }
 
     /// Extract keys that were deleted by a parent batch but are being
@@ -352,26 +356,32 @@ where
     /// allowing implementations to skip locations known to be inactive without reading them.
     /// Returns `true` if an active op was found and moved, `false` if the floor reached
     /// `fixed_tip`.
-    async fn advance_floor_once<S: FloorScan>(
+    async fn advance_floor_once<E, C, I, S: FloorScan>(
         &self,
         floor: &mut Location,
         fixed_tip: u64,
         ops: &mut Vec<Operation<U>>,
         diff: &mut BTreeMap<U::Key, DiffEntry<U::Value>>,
         scan: &mut S,
-    ) -> Result<bool, Error> {
+        db: &Db<E, C, I, H, U>,
+    ) -> Result<bool, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location>,
+    {
         loop {
             let Some(candidate) = scan.next_candidate(*floor, fixed_tip) else {
                 return Ok(false);
             };
             *floor = Location::new(*candidate + 1);
 
-            let op = self.read_op(candidate, ops).await?;
+            let op = self.read_op(candidate, ops, db).await?;
             let Some(key) = op.key().cloned() else {
                 continue; // skip CommitFloor and other non-keyed ops
             };
 
-            if self.is_active_at(&key, candidate, diff) {
+            if self.is_active_at(&key, candidate, diff, db) {
                 let new_loc = Location::new(self.base_size + ops.len() as u64);
                 let base_old_loc = diff
                     .get(&key)
@@ -394,7 +404,8 @@ where
 
     /// Shared final phases of merkleization: floor raise, CommitFloor, journal
     /// merkleize, diff merge, and `MerkleizedBatch` construction.
-    async fn finish<S: FloorScan>(
+    #[allow(clippy::too_many_arguments)]
+    async fn finish<E, C, I, S: FloorScan>(
         mut self,
         mut ops: Vec<Operation<U>>,
         mut diff: BTreeMap<U::Key, DiffEntry<U::Value>>,
@@ -402,7 +413,13 @@ where
         user_steps: u64,
         metadata: Option<U::Value>,
         mut scan: S,
-    ) -> Result<MerkleizedBatch<H::Digest, U>, Error> {
+        db: &Db<E, C, I, H, U>,
+    ) -> Result<MerkleizedBatch<H::Digest, U>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location>,
+    {
         // Floor raise.
         // Steps = user_steps + 1 (+1 for previous commit becoming inactive).
         let total_steps = user_steps + 1;
@@ -416,7 +433,7 @@ where
             let fixed_tip = self.base_size + ops.len() as u64;
             for _ in 0..total_steps {
                 if !self
-                    .advance_floor_once(&mut floor, fixed_tip, &mut ops, &mut diff, &mut scan)
+                    .advance_floor_once(&mut floor, fixed_tip, &mut ops, &mut diff, &mut scan, db)
                     .await?
                 {
                     break;
@@ -463,12 +480,9 @@ where
     }
 }
 
-impl<'a, E, C, I, H, U> UnmerkleizedBatch<'a, E, C, I, H, U>
+impl<H, U> UnmerkleizedBatch<H, U>
 where
-    E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
 {
@@ -483,16 +497,10 @@ where
 
     /// Split into pending mutations and the merkleization machinery.
     #[allow(clippy::type_complexity)]
-    fn into_parts(
-        self,
-    ) -> (
-        BTreeMap<U::Key, Option<U::Value>>,
-        Merkleizer<'a, E, C, I, H, U>,
-    ) {
+    fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<H, U>) {
         (
             self.mutations,
             Merkleizer {
-                db: self.db,
                 journal_batch: self.journal_batch,
                 base_diff: self.base_diff,
                 base_operations: self.base_operations,
@@ -506,59 +514,74 @@ where
 }
 
 // Generic get() for both ordered and unordered UnmerkleizedBatch.
-impl<'a, E, C, I, H, U> UnmerkleizedBatch<'a, E, C, I, H, U>
+impl<H, U> UnmerkleizedBatch<H, U>
 where
-    E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
     Operation<U>: Codec,
 {
     /// Read through: mutations -> base diff -> committed DB.
-    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error> {
+    pub async fn get<E, C, I>(
+        &self,
+        key: &U::Key,
+        db: &Db<E, C, I, H, U>,
+    ) -> Result<Option<U::Value>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location> + 'static,
+    {
         if let Some(value) = self.mutations.get(key) {
             return Ok(value.clone());
         }
         if let Some(entry) = self.base_diff.get(key) {
             return Ok(entry.value().cloned());
         }
-        self.db.get(key).await
+        db.get(key).await
     }
 }
 
 // Unordered-specific methods.
-impl<'a, E, K, V, C, I, H> UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>>
+impl<K, V, H> UnmerkleizedBatch<H, update::Unordered<K, V>>
 where
-    E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<update::Unordered<K, V>>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<update::Unordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
-    pub async fn merkleize(
+    pub async fn merkleize<E, C, I>(
         self,
         metadata: Option<V::Value>,
-    ) -> Result<MerkleizedBatch<H::Digest, update::Unordered<K, V>>, Error> {
-        self.merkleize_with_floor_scan(metadata, SequentialScan)
+        db: &Db<E, C, I, H, update::Unordered<K, V>>,
+    ) -> Result<MerkleizedBatch<H::Digest, update::Unordered<K, V>>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location>,
+    {
+        self.merkleize_with_floor_scan(metadata, SequentialScan, db)
             .await
     }
 
     /// Like [`merkleize`](Self::merkleize) but accepts a custom [`FloorScan`]
     /// to accelerate floor raising.
-    pub(crate) async fn merkleize_with_floor_scan<S: FloorScan>(
+    pub(crate) async fn merkleize_with_floor_scan<E, C, I, S: FloorScan>(
         self,
         metadata: Option<V::Value>,
         scan: S,
-    ) -> Result<MerkleizedBatch<H::Digest, update::Unordered<K, V>>, Error> {
+        db: &Db<E, C, I, H, update::Unordered<K, V>>,
+    ) -> Result<MerkleizedBatch<H::Digest, update::Unordered<K, V>>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location>,
+    {
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O, parallelized).
-        let locations = m.gather_existing_locations(&mutations);
-        let futures = locations.iter().map(|&loc| m.read_op(loc, &[]));
+        let locations = m.gather_existing_locations(&mutations, db);
+        let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
         let results = try_join_all(futures).await?;
 
         // Generate user mutation operations.
@@ -641,45 +664,54 @@ where
         }
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan)
+        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan, db)
             .await
     }
 }
 
 // Ordered-specific methods.
-impl<'a, E, K, V, C, I, H> UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>>
+impl<K, V, H> UnmerkleizedBatch<H, update::Ordered<K, V>>
 where
-    E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<update::Ordered<K, V>>>,
-    I: OrderedIndex<Value = Location>,
     H: Hasher,
     Operation<update::Ordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
-    pub async fn merkleize(
+    pub async fn merkleize<E, C, I>(
         self,
         metadata: Option<V::Value>,
-    ) -> Result<MerkleizedBatch<H::Digest, update::Ordered<K, V>>, Error> {
-        self.merkleize_with_floor_scan(metadata, SequentialScan)
+        db: &Db<E, C, I, H, update::Ordered<K, V>>,
+    ) -> Result<MerkleizedBatch<H::Digest, update::Ordered<K, V>>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location>,
+    {
+        self.merkleize_with_floor_scan(metadata, SequentialScan, db)
             .await
     }
 
     /// Like [`merkleize`](Self::merkleize) but accepts a custom [`FloorScan`]
     /// to accelerate floor raising.
-    pub(crate) async fn merkleize_with_floor_scan<S: FloorScan>(
+    pub(crate) async fn merkleize_with_floor_scan<E, C, I, S: FloorScan>(
         self,
         metadata: Option<V::Value>,
         scan: S,
-    ) -> Result<MerkleizedBatch<H::Digest, update::Ordered<K, V>>, Error> {
+        db: &Db<E, C, I, H, update::Ordered<K, V>>,
+    ) -> Result<MerkleizedBatch<H::Digest, update::Ordered<K, V>>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location>,
+    {
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O).
-        let locations = m.gather_existing_locations(&mutations);
+        let locations = m.gather_existing_locations(&mutations, db);
 
         // Read and unwrap Update operations (snapshot only references Updates).
-        let futures = locations.iter().map(|&loc| m.read_op(loc, &[]));
+        let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
         let update_results: Vec<_> = try_join_all(futures)
             .await?
             .into_iter()
@@ -742,7 +774,7 @@ where
         // Look up prev_translated_key for created/deleted keys.
         let mut prev_locations = Vec::new();
         for key in deleted.keys().chain(created.keys()) {
-            let Some((iter, _)) = m.db.snapshot.prev_translated_key(key) else {
+            let Some((iter, _)) = db.snapshot.prev_translated_key(key) else {
                 continue;
             };
             prev_locations.extend(iter.copied());
@@ -751,7 +783,7 @@ where
         prev_locations.dedup();
 
         let prev_results = {
-            let reader = m.db.log.reader().await;
+            let reader = db.log.reader().await;
             let futures = prev_locations.iter().map(|loc| reader.read(**loc));
             try_join_all(futures).await?
         };
@@ -774,7 +806,7 @@ where
                 continue;
             }
             if let DiffEntry::Active { value, loc, .. } = entry {
-                let op: Operation<update::Ordered<K, V>> = m.read_op(*loc, &[]).await?;
+                let op: Operation<update::Ordered<K, V>> = m.read_op(*loc, &[], db).await?;
                 let data = match op {
                     Operation::Update(data) => data,
                     _ => unreachable!("base diff Active should reference Update op"),
@@ -903,7 +935,7 @@ where
         }
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan)
+        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan, db)
             .await
     }
 }
@@ -923,18 +955,11 @@ where
     Operation<U>: Codec,
 {
     /// Create a new speculative batch of operations with this batch as its parent.
-    pub fn new_batch<'a, E, C, I, H>(
-        &'a self,
-        db: &'a Db<E, C, I, H, U>,
-    ) -> UnmerkleizedBatch<'a, E, C, I, H, U>
+    pub fn new_batch<H>(&self) -> UnmerkleizedBatch<H, U>
     where
-        E: Storage + Clock + Metrics,
-        C: Contiguous<Item = Operation<U>>,
-        I: UnorderedIndex<Value = Location>,
         H: Hasher<Digest = D>,
     {
         UnmerkleizedBatch {
-            db,
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::clone(&self.diff),
@@ -1146,11 +1171,10 @@ where
     Operation<U>: Codec,
 {
     /// Create a new speculative batch of operations with this database as its parent.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, E, C, I, H, U> {
+    pub fn new_batch(&self) -> UnmerkleizedBatch<H, U> {
         // The DB is always committed, so journal size = last_commit_loc + 1.
         let journal_size = *self.last_commit_loc + 1;
         UnmerkleizedBatch {
-            db: self,
             journal_batch: self.log.to_batch().new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::new(BTreeMap::new()),
@@ -1277,15 +1301,15 @@ mod trait_impls {
     };
     use std::future::Future;
 
-    impl<'a, E, K, V, C, I, H> UnmerkleizedBatchTrait
-        for UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>>
+    impl<K, V, H, E, C, I> UnmerkleizedBatchTrait<Db<E, C, I, H, update::Unordered<K, V>>>
+        for UnmerkleizedBatch<H, update::Unordered<K, V>>
     where
-        E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
+        H: Hasher,
+        E: Storage + Clock + Metrics,
         C: Mutable<Item = Operation<update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location>,
-        H: Hasher,
         Operation<update::Unordered<K, V>>: Codec,
     {
         type K = K;
@@ -1301,22 +1325,21 @@ mod trait_impls {
         fn merkleize(
             self,
             metadata: Option<V::Value>,
+            db: &Db<E, C, I, H, update::Unordered<K, V>>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error>> {
-            // Delegates to the inherent async method (inherent methods have
-            // priority over trait methods in Rust's method resolution).
-            self.merkleize(metadata)
+            self.merkleize(metadata, db)
         }
     }
 
-    impl<'a, E, K, V, C, I, H> UnmerkleizedBatchTrait
-        for UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>>
+    impl<K, V, H, E, C, I> UnmerkleizedBatchTrait<Db<E, C, I, H, update::Ordered<K, V>>>
+        for UnmerkleizedBatch<H, update::Ordered<K, V>>
     where
-        E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
+        H: Hasher,
+        E: Storage + Clock + Metrics,
         C: Mutable<Item = Operation<update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location>,
-        H: Hasher,
         Operation<update::Ordered<K, V>>: Codec,
     {
         type K = K;
@@ -1332,8 +1355,9 @@ mod trait_impls {
         fn merkleize(
             self,
             metadata: Option<V::Value>,
+            db: &Db<E, C, I, H, update::Ordered<K, V>>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error>> {
-            self.merkleize(metadata)
+            self.merkleize(metadata, db)
         }
     }
 
@@ -1368,12 +1392,9 @@ mod trait_impls {
         type K = K;
         type V = V::Value;
         type Changeset = Changeset<K, H::Digest, Operation<update::Unordered<K, V>>>;
-        type Batch<'a>
-            = UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>>
-        where
-            Self: 'a;
+        type Batch = UnmerkleizedBatch<H, update::Unordered<K, V>>;
 
-        fn new_batch(&self) -> Self::Batch<'_> {
+        fn new_batch(&self) -> Self::Batch {
             self.new_batch()
         }
 
@@ -1399,12 +1420,9 @@ mod trait_impls {
         type K = K;
         type V = V::Value;
         type Changeset = Changeset<K, H::Digest, Operation<update::Ordered<K, V>>>;
-        type Batch<'a>
-            = UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>>
-        where
-            Self: 'a;
+        type Batch = UnmerkleizedBatch<H, update::Ordered<K, V>>;
 
-        fn new_batch(&self) -> Self::Batch<'_> {
+        fn new_batch(&self) -> Self::Batch {
             self.new_batch()
         }
 

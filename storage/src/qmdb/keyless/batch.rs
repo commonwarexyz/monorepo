@@ -13,18 +13,12 @@ use std::sync::Arc;
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
 ///
-/// Borrows `&Keyless` for reads during the build phase. Consuming
-/// [`UnmerkleizedBatch::merkleize`] produces an owned [`MerkleizedBatch`] and releases the
-/// borrow.
-pub struct UnmerkleizedBatch<'a, E, V, H>
+/// Consuming [`UnmerkleizedBatch::merkleize`] produces an owned [`MerkleizedBatch`].
+pub struct UnmerkleizedBatch<H, V>
 where
-    E: Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
 {
-    /// The committed DB this batch is built on top of.
-    keyless: &'a Keyless<E, V, H>,
-
     /// Authenticated journal batch for computing the speculative MMR root.
     journal_batch: authenticated::UnmerkleizedBatch<H, Operation<V>>,
 
@@ -67,16 +61,17 @@ pub struct Changeset<D: Digest, V: VariableValue> {
     pub(super) db_size: u64,
 }
 
-impl<'a, E, V, H> UnmerkleizedBatch<'a, E, V, H>
+impl<H, V> UnmerkleizedBatch<H, V>
 where
-    E: Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
 {
     /// Create a batch from a committed DB (no parent chain).
-    pub(super) fn new(keyless: &'a Keyless<E, V, H>, journal_size: u64) -> Self {
+    pub(super) fn new<E>(keyless: &Keyless<E, V, H>, journal_size: u64) -> Self
+    where
+        E: Storage + Clock + Metrics,
+    {
         Self {
-            keyless,
             journal_batch: keyless.journal.to_batch().new_batch::<H>(),
             appends: Vec::new(),
             base_operations: Vec::new(),
@@ -96,7 +91,10 @@ where
     /// Read a value at `loc`.
     ///
     /// Reads from pending appends, parent chain, or base DB.
-    pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
+    pub async fn get<E>(&self, loc: Location, db: &Keyless<E, V, H>) -> Result<Option<V>, Error>
+    where
+        E: Storage + Clock + Metrics,
+    {
         let loc_val = *loc;
         let parent_ops_len: u64 = self.base_operations.iter().map(|s| s.len() as u64).sum();
         let db_journal_size = self.base_size - parent_ops_len;
@@ -118,7 +116,7 @@ where
         }
 
         // Fall through to base DB.
-        self.keyless.get(loc).await
+        db.get(loc).await
     }
 
     /// Resolve appends into operations, merkleize, and return a [`MerkleizedBatch`].
@@ -181,13 +179,11 @@ impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
     }
 
     /// Create a new speculative batch of operations with this batch as its parent.
-    pub fn new_batch<'a, E, H>(&'a self, db: &'a Keyless<E, V, H>) -> UnmerkleizedBatch<'a, E, V, H>
+    pub fn new_batch<H>(&self) -> UnmerkleizedBatch<H, V>
     where
-        E: Storage + Clock + Metrics,
         H: Hasher<Digest = D>,
     {
         UnmerkleizedBatch {
-            keyless: db,
             journal_batch: self.journal_batch.new_batch::<H>(),
             appends: Vec::new(),
             base_operations: self.journal_batch.items.clone(),

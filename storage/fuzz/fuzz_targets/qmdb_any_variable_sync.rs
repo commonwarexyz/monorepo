@@ -189,7 +189,7 @@ fn fuzz(input: FuzzInput) {
                             batch = batch.write(k, v);
                         }
                         batch
-                            .merkleize(metadata_bytes.clone())
+                            .merkleize(metadata_bytes.clone(), &db)
                             .await
                             .unwrap()
                             .finalize()
@@ -222,7 +222,7 @@ fn fuzz(input: FuzzInput) {
                         for (k, v) in pending_writes.drain(..) {
                             batch = batch.write(k, v);
                         }
-                        batch.merkleize(None).await.unwrap().finalize()
+                        batch.merkleize(None, &db).await.unwrap().finalize()
                     };
                     db.apply_batch(finalized)
                         .await
@@ -250,7 +250,7 @@ fn fuzz(input: FuzzInput) {
                         for (k, v) in pending_writes.drain(..) {
                             batch = batch.write(k, v);
                         }
-                        batch.merkleize(None).await.unwrap().finalize()
+                        batch.merkleize(None, &db).await.unwrap().finalize()
                     };
                     db.apply_batch(finalized)
                         .await
@@ -285,7 +285,7 @@ fn fuzz(input: FuzzInput) {
                         for (k, v) in pending_writes.drain(..) {
                             batch = batch.write(k, v);
                         }
-                        batch.merkleize(None).await.unwrap().finalize()
+                        batch.merkleize(None, &db).await.unwrap().finalize()
                     };
                     db.apply_batch(finalized)
                         .await
@@ -309,7 +309,7 @@ fn fuzz(input: FuzzInput) {
                         for (k, v) in pending_writes.drain(..) {
                             batch = batch.write(k, v);
                         }
-                        batch.merkleize(None).await.unwrap().finalize()
+                        batch.merkleize(None, &db).await.unwrap().finalize()
                     };
                     db.apply_batch(finalized)
                         .await
@@ -344,7 +344,7 @@ fn fuzz(input: FuzzInput) {
             for (k, v) in pending_writes.drain(..) {
                 batch = batch.write(k, v);
             }
-            batch.merkleize(None).await.unwrap().finalize()
+            batch.merkleize(None, &db).await.unwrap().finalize()
         };
         db.apply_batch(finalized)
             .await

@@ -28,20 +28,14 @@ pub(crate) enum SnapshotDiff<K> {
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
 ///
-/// Borrows `&Immutable` for reads during the build phase. Consuming
-/// [`UnmerkleizedBatch::merkleize`] produces an owned [`MerkleizedBatch`] and releases the
-/// borrow.
-pub struct UnmerkleizedBatch<'a, E, K, V, H, T>
+/// Consuming [`UnmerkleizedBatch::merkleize`] produces an owned [`MerkleizedBatch`].
+/// Methods that need the committed DB (e.g. [`get`](Self::get)) accept it as a parameter.
+pub struct UnmerkleizedBatch<H, K, V>
 where
-    E: RStorage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     H: CHasher,
-    T: Translator,
 {
-    /// The committed DB this batch is built on top of.
-    immutable: &'a Immutable<E, K, V, H, T>,
-
     /// Authenticated journal batch for computing the speculative MMR root.
     journal_batch: authenticated::UnmerkleizedBatch<H, Operation<K, V>>,
 
@@ -90,18 +84,19 @@ pub struct Changeset<K: Array, D: Digest, V: VariableValue> {
     pub(super) db_size: u64,
 }
 
-impl<'a, E, K, V, H, T> UnmerkleizedBatch<'a, E, K, V, H, T>
+impl<H, K, V> UnmerkleizedBatch<H, K, V>
 where
-    E: RStorage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     H: CHasher,
-    T: Translator,
 {
     /// Create a batch from a committed DB (no parent chain).
-    pub(super) fn new(immutable: &'a Immutable<E, K, V, H, T>, journal_size: u64) -> Self {
+    pub(super) fn new<E, T>(immutable: &Immutable<E, K, V, H, T>, journal_size: u64) -> Self
+    where
+        E: RStorage + Clock + Metrics,
+        T: Translator,
+    {
         Self {
-            immutable,
             journal_batch: immutable.journal.to_batch().new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::new(BTreeMap::new()),
@@ -120,7 +115,15 @@ where
     }
 
     /// Read through: mutations -> base diff -> committed DB.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+    pub async fn get<E, T>(
+        &self,
+        key: &K,
+        db: &Immutable<E, K, V, H, T>,
+    ) -> Result<Option<V>, Error>
+    where
+        E: RStorage + Clock + Metrics,
+        T: Translator,
+    {
         // Check this batch's pending mutations.
         if let Some(value) = self.mutations.get(key) {
             return Ok(Some(value.clone()));
@@ -130,7 +133,7 @@ where
             return Ok(Some(entry.value.clone()));
         }
         // Fall through to base DB.
-        self.immutable.get(key).await
+        db.get(key).await
     }
 
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
@@ -199,17 +202,11 @@ impl<D: Digest, K: Array, V: VariableValue> MerkleizedBatch<D, K, V> {
     }
 
     /// Create a new speculative batch of operations with this batch as its parent.
-    pub fn new_batch<'a, E, H, T>(
-        &'a self,
-        db: &'a Immutable<E, K, V, H, T>,
-    ) -> UnmerkleizedBatch<'a, E, K, V, H, T>
+    pub fn new_batch<H>(&self) -> UnmerkleizedBatch<H, K, V>
     where
-        E: RStorage + Clock + Metrics,
         H: CHasher<Digest = D>,
-        T: Translator,
     {
         UnmerkleizedBatch {
-            immutable: db,
             journal_batch: self.journal.new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::clone(&self.diff),

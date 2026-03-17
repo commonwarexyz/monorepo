@@ -165,7 +165,7 @@ where
             let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize];
             batch = batch.write(k, Some(v));
         }
-        let finalized = batch.merkleize(None).await.unwrap().finalize();
+        let finalized = batch.merkleize(None, db).await.unwrap().finalize();
         db.apply_batch(finalized).await.unwrap();
     }
 
@@ -181,12 +181,12 @@ where
             let v = vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 24) + 20) as usize];
             batch = batch.write(rand_key, Some(v));
             if rng.next_u32() % commit_frequency == 0 {
-                let finalized = batch.merkleize(None).await.unwrap().finalize();
+                let finalized = batch.merkleize(None, db).await.unwrap().finalize();
                 db.apply_batch(finalized).await.unwrap();
                 batch = db.new_batch();
             }
         }
-        let finalized = batch.merkleize(None).await.unwrap().finalize();
+        let finalized = batch.merkleize(None, db).await.unwrap().finalize();
         db.apply_batch(finalized).await.unwrap();
     }
 }

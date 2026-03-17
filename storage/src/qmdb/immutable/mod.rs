@@ -19,11 +19,11 @@
 //!     .set(key_a, value_a)
 //!     .merkleize(None);
 //!
-//! let child_a = parent.new_batch(&db)
+//! let child_a = parent.new_batch::<Sha256>()
 //!     .set(key_b, value_b)
 //!     .merkleize(None);
 //!
-//! let child_b = parent.new_batch(&db)
+//! let child_b = parent.new_batch::<Sha256>()
 //!     .set(key_c, value_c)
 //!     .merkleize(None);
 //!
@@ -376,7 +376,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<'_, E, K, V, H, T> {
+    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<H, K, V> {
         let journal_size = *self.last_commit_loc + 1;
         batch::UnmerkleizedBatch::new(self, journal_size)
     }
@@ -906,17 +906,17 @@ pub(super) mod test {
 
             // batch.get(&A) should return DB value.
             let mut batch = db.new_batch();
-            assert_eq!(batch.get(&key_a).await.unwrap(), Some(val_a));
+            assert_eq!(batch.get(&key_a, &db).await.unwrap(), Some(val_a));
 
             // Set B in batch, batch.get(&B) returns the value.
             let key_b = Sha256::hash(&1u64.to_be_bytes());
             let val_b = vec![2u8; 8];
             batch = batch.set(key_b, val_b.clone());
-            assert_eq!(batch.get(&key_b).await.unwrap(), Some(val_b));
+            assert_eq!(batch.get(&key_b, &db).await.unwrap(), Some(val_b));
 
             // Nonexistent key.
             let key_c = Sha256::hash(&2u64.to_be_bytes());
-            assert_eq!(batch.get(&key_c).await.unwrap(), None);
+            assert_eq!(batch.get(&key_c, &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -940,18 +940,18 @@ pub(super) mod test {
             let parent_m = parent.merkleize(None);
 
             // Child reads parent's A.
-            let mut child = parent_m.new_batch(&db);
-            assert_eq!(child.get(&key_a).await.unwrap(), Some(val_a));
+            let mut child = parent_m.new_batch::<Sha256>();
+            assert_eq!(child.get(&key_a, &db).await.unwrap(), Some(val_a));
 
             // Child sets B.
             let key_b = Sha256::hash(&1u64.to_be_bytes());
             let val_b = vec![20u8; 8];
             child = child.set(key_b, val_b.clone());
-            assert_eq!(child.get(&key_b).await.unwrap(), Some(val_b));
+            assert_eq!(child.get(&key_b, &db).await.unwrap(), Some(val_b));
 
             // Nonexistent key.
             let key_c = Sha256::hash(&2u64.to_be_bytes());
-            assert_eq!(child.get(&key_c).await.unwrap(), None);
+            assert_eq!(child.get(&key_c, &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -986,7 +986,7 @@ pub(super) mod test {
             let parent_m = parent.merkleize(None);
 
             // Child batch: set keys 5..10.
-            let mut child = parent_m.new_batch(&db);
+            let mut child = parent_m.new_batch::<Sha256>();
             for (k, v) in &kvs_second {
                 child = child.set(*k, v.clone());
             }
@@ -1229,7 +1229,7 @@ pub(super) mod test {
             // Child batch sets key C.
             let key_c = Sha256::hash(&2u64.to_be_bytes());
             let val_c = vec![2u8; 16];
-            let mut child = parent_m.new_batch(&db);
+            let mut child = parent_m.new_batch::<Sha256>();
             child = child.set(key_c, val_c.clone());
             let child_m = child.merkleize(None);
 
@@ -1311,11 +1311,11 @@ pub(super) mod test {
             let parent_m = parent.merkleize(None);
 
             // Child overrides same key.
-            let mut child = parent_m.new_batch(&db);
+            let mut child = parent_m.new_batch::<Sha256>();
             child = child.set(key, val_child.clone());
 
             // Child's pending mutation wins over parent diff.
-            assert_eq!(child.get(&key).await.unwrap(), Some(val_child.clone()));
+            assert_eq!(child.get(&key, &db).await.unwrap(), Some(val_child.clone()));
 
             let child_m = child.merkleize(None);
 
@@ -1477,12 +1477,12 @@ pub(super) mod test {
 
             // Fork two children from the same parent.
             let child_a = {
-                let mut batch = parent_m.new_batch(&db);
+                let mut batch = parent_m.new_batch::<Sha256>();
                 batch = batch.set(key2, vec![2]);
                 batch.merkleize(None).finalize()
             };
             let child_b = {
-                let mut batch = parent_m.new_batch(&db);
+                let mut batch = parent_m.new_batch::<Sha256>();
                 batch = batch.set(key3, vec![3]);
                 batch.merkleize(None).finalize()
             };
@@ -1516,7 +1516,7 @@ pub(super) mod test {
             let parent_m = parent.merkleize(None);
 
             // Child batch.
-            let mut child = parent_m.new_batch(&db);
+            let mut child = parent_m.new_batch::<Sha256>();
             child = child.set(key2, vec![2]);
             let child_changeset = child.merkleize(None).finalize();
 
@@ -1552,7 +1552,7 @@ pub(super) mod test {
             let parent_m = parent.merkleize(None);
 
             // Child batch built on parent.
-            let mut child = parent_m.new_batch(&db);
+            let mut child = parent_m.new_batch::<Sha256>();
             child = child.set(key2, vec![2]);
             let child_m = child.merkleize(None);
 
@@ -1589,7 +1589,7 @@ pub(super) mod test {
 
             // Child batch. Finalize both before applying either so the
             // borrow on `db` through `parent_m` is released.
-            let mut child = parent_m.new_batch(&db);
+            let mut child = parent_m.new_batch::<Sha256>();
             child = child.set(key2, vec![2]);
             let child_changeset = child.merkleize(None).finalize();
             let parent_changeset = parent_m.finalize();
@@ -1630,7 +1630,10 @@ pub(super) mod test {
 
             // Chain a child from the snapshot, apply it.
             let key2 = Sha256::hash(&[2]);
-            let child = snapshot.new_batch(&db).set(key2, vec![20]).merkleize(None);
+            let child = snapshot
+                .new_batch::<Sha256>()
+                .set(key2, vec![20])
+                .merkleize(None);
             db.apply_batch(child.finalize()).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));

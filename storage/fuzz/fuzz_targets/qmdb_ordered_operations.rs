@@ -76,7 +76,7 @@ async fn commit_pending(
         for (k, v) in pending_writes.drain(..) {
             batch = batch.write(k, v);
         }
-        batch.merkleize(None).await.unwrap().finalize()
+        batch.merkleize(None, db).await.unwrap().finalize()
     };
     db.apply_batch(finalized)
         .await
@@ -279,7 +279,7 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+        let finalized = db.new_batch().merkleize(None, &db).await.unwrap().finalize();
         db.apply_batch(finalized)
             .await
             .expect("final commit should not fail");

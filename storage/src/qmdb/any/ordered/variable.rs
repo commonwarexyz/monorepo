@@ -266,7 +266,7 @@ pub(crate) mod test {
                 }
             }
         }
-        let finalized = batch.merkleize(None).await.unwrap().finalize();
+        let finalized = batch.merkleize(None, db).await.unwrap().finalize();
         db.apply_batch(finalized).await.unwrap();
     }
 
@@ -327,7 +327,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), Some(val))
                 .write(key3.clone(), Some(val))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -341,7 +341,7 @@ pub(crate) mod test {
             let finalized = db
                 .new_batch()
                 .write(key2.clone(), Some(val))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -381,7 +381,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), Some(val1))
                 .write(key3.clone(), Some(val3))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -391,7 +391,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), None)
                 .write(key2.clone(), Some(val2))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -412,7 +412,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), Some(val1))
                 .write(key3.clone(), Some(val3))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -422,7 +422,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key2.clone(), Some(val2))
                 .write(key3.clone(), None)
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -467,8 +467,8 @@ pub(crate) mod test {
             let key_a = Digest::random(&mut test_rng_seeded(800));
             let val_a = vec![1u8; 10];
             let parent_batch = {
-                let batch = base.new_batch(&db).write(key_a, Some(val_a.clone()));
-                batch.merkleize(None).await.unwrap()
+                let batch = base.new_batch::<Sha256>().write(key_a, Some(val_a.clone()));
+                batch.merkleize(None, &db).await.unwrap()
             };
 
             // Child batch: insert key_b.
@@ -476,9 +476,9 @@ pub(crate) mod test {
             let val_b = vec![2u8; 10];
             let child_batch = {
                 let batch = parent_batch
-                    .new_batch(&db)
+                    .new_batch::<Sha256>()
                     .write(key_b, Some(val_b.clone()));
-                batch.merkleize(None).await.unwrap()
+                batch.merkleize(None, &db).await.unwrap()
             };
 
             // Commit parent.
@@ -517,13 +517,13 @@ pub(crate) mod test {
             let key_x = Digest::random(&mut test_rng_seeded(810));
             let val_x = vec![10u8; 8];
             let parent_batch = {
-                let batch = base.new_batch(&db).write(key_x, Some(val_x.clone()));
-                batch.merkleize(None).await.unwrap()
+                let batch = base.new_batch::<Sha256>().write(key_x, Some(val_x.clone()));
+                batch.merkleize(None, &db).await.unwrap()
             };
 
             let child_batch = {
-                let batch = parent_batch.new_batch(&db).write(key_x, None);
-                batch.merkleize(None).await.unwrap()
+                let batch = parent_batch.new_batch::<Sha256>().write(key_x, None);
+                batch.merkleize(None, &db).await.unwrap()
             };
 
             // Commit parent.
@@ -561,16 +561,16 @@ pub(crate) mod test {
             let key_x = Digest::random(&mut test_rng_seeded(820));
             let val_a = vec![10u8; 8];
             let parent_batch = {
-                let batch = base.new_batch(&db).write(key_x, Some(val_a.clone()));
-                batch.merkleize(None).await.unwrap()
+                let batch = base.new_batch::<Sha256>().write(key_x, Some(val_a.clone()));
+                batch.merkleize(None, &db).await.unwrap()
             };
 
             let val_b = vec![20u8; 8];
             let child_batch = {
                 let batch = parent_batch
-                    .new_batch(&db)
+                    .new_batch::<Sha256>()
                     .write(key_x, Some(val_b.clone()));
-                batch.merkleize(None).await.unwrap()
+                batch.merkleize(None, &db).await.unwrap()
             };
 
             // Commit parent.

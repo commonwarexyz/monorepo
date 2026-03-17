@@ -52,7 +52,7 @@ async fn commit_pending(
         for (k, v) in pending_writes.drain(..) {
             batch = batch.write(k, v);
         }
-        batch.merkleize(metadata).await.unwrap().finalize()
+        batch.merkleize(metadata, db).await.unwrap().finalize()
     };
     db.apply_batch(finalized)
         .await
