@@ -366,4 +366,97 @@ mod tests {
         // Batch verify should fail
         assert!(!batch_verify(&ct, &decrypted, hid, &pk, &mut rng));
     }
+
+    #[test]
+    #[ignore]
+    fn bench_decrypt_vs_verify() {
+        use std::time::Instant;
+
+        let n = 1 << 4;
+        let iters = 3;
+        let h = G2::generator();
+
+        println!(
+            "\n{:>10} {:>10} {:>10} {:>10} | {:>10} {:>8}",
+            "batch", "fk22(ms)", "pair(ms)", "dec(ms)", "verify(ms)", "ratio"
+        );
+        println!("{}", "-".repeat(70));
+
+        for lg in 13..=16 {
+            let batch_size = 1 << lg;
+            let mut rng = test_rng();
+            let tx_domain = Domain::new(batch_size);
+
+            let mut dealer = Dealer::new(batch_size, n, n / 2 - 1, &mut rng);
+            let (crs, pk, sk_shares) = dealer.setup(&mut rng);
+
+            let secret_keys: Vec<SecretKey> = sk_shares
+                .iter()
+                .map(|sk| SecretKey::new(sk.clone()))
+                .collect();
+
+            let hid = G1::generator() * &Scalar::random(&mut rng);
+
+            let ct: Vec<Ciphertext> = (0..batch_size)
+                .map(|i| {
+                    let mut m = [0u8; 32];
+                    m[0] = i as u8;
+                    encrypt(m, tx_domain.element(i), hid, &pk, &mut rng)
+                })
+                .collect();
+
+            let mut partial_decryptions: BTreeMap<usize, G1> = BTreeMap::new();
+            for i in 0..n / 2 {
+                let partial = secret_keys[i].partial_decrypt(&ct, hid, &crs);
+                partial_decryptions.insert(i + 1, partial);
+            }
+            let sigma = aggregate_partial_decryptions(&partial_decryptions);
+
+            // Warmup
+            let decrypted = decrypt_all(sigma, &ct, &crs);
+            assert!(batch_verify(&ct, &decrypted, hid, &pk, &mut rng));
+
+            // Time decrypt_all with breakdown
+            let mut fk22_total = 0.0f64;
+            let mut pair_total = 0.0f64;
+            for _ in 0..iters {
+                let fevals: Vec<Scalar> =
+                    (0..batch_size).map(|i| compute_tg(&ct[i].gs)).collect();
+
+                let start = Instant::now();
+                let fcoeffs = tx_domain.ifft(&fevals);
+                let pi = open_all_values(&crs.y, &fcoeffs, &tx_domain);
+                fk22_total += start.elapsed().as_secs_f64() * 1000.0;
+
+                let start = Instant::now();
+                for i in 0..batch_size {
+                    let p = GT::multi_pairing(&[(pi[i], ct[i].ct2), (sigma, ct[i].ct3)]);
+                    let h_p = *blake3::hash(&p.as_slice()).as_bytes();
+                    let key: [u8; 32] =
+                        xor(&ct[i].ct1, &h_p).as_slice().try_into().unwrap();
+                    let msg: [u8; 32] =
+                        xor(&ct[i].ct4, &hash_hm(&key)).as_slice().try_into().unwrap();
+                    let alpha = hash_hr(&key, &msg);
+                    assert_eq!(ct[i].ct3, h * &alpha);
+                    std::hint::black_box((&key, &msg));
+                }
+                pair_total += start.elapsed().as_secs_f64() * 1000.0;
+            }
+            let fk22_ms = fk22_total / iters as f64;
+            let pair_ms = pair_total / iters as f64;
+            let decrypt_ms = fk22_ms + pair_ms;
+
+            // Time batch_verify
+            let start = Instant::now();
+            for _ in 0..iters {
+                let _ = batch_verify(&ct, &decrypted, hid, &pk, &mut rng);
+            }
+            let verify_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+            println!(
+                "{:>10} {:>10.2} {:>10.2} {:>10.2} | {:>10.2} {:>8.2}x",
+                batch_size, fk22_ms, pair_ms, decrypt_ms, verify_ms, decrypt_ms / verify_ms
+            );
+        }
+    }
 }
