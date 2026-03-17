@@ -378,6 +378,7 @@ pub(crate) fn interesting(
     pending: View,
     allow_unbounded_future: bool,
     term_length: NonZeroU64,
+    optimistic_validation_depth: u64,
 ) -> bool {
     // If the view is genesis, skip it, genesis doesn't have votes
     if pending.is_zero() {
@@ -394,7 +395,9 @@ pub(crate) fn interesting(
         let next = current.next();
         let next_term_start = current.next_term_start(term_length);
         let same_term_future = term_length.get() > 1
-            && pending.term_start(term_length) == current.term_start(term_length);
+            && optimistic_validation_depth > 0
+            && pending.term_start(term_length) == current.term_start(term_length)
+            && pending.get() <= current.get().saturating_add(optimistic_validation_depth);
         if pending != next && pending != next_term_start && !same_term_future {
             return false;
         }
@@ -498,6 +501,7 @@ mod tests {
             View::zero(),
             false,
             term_length,
+            0,
         ));
 
         // Below min_active
@@ -508,6 +512,7 @@ mod tests {
             View::new(5),
             false,
             term_length,
+            0,
         ));
 
         // At min_active boundary
@@ -518,6 +523,7 @@ mod tests {
             View::new(10),
             false,
             term_length,
+            0,
         ));
 
         // strict mode allows only current.next and current.next_term_start above current
@@ -528,6 +534,7 @@ mod tests {
             View::new(26),
             false,
             term_length,
+            0,
         ));
         assert!(interesting(
             activity_timeout,
@@ -536,6 +543,7 @@ mod tests {
             View::new(31),
             false,
             term_length,
+            0,
         ));
         assert!(!interesting(
             activity_timeout,
@@ -544,6 +552,7 @@ mod tests {
             View::new(27),
             false,
             term_length,
+            0,
         ));
         assert!(!interesting(
             activity_timeout,
@@ -552,6 +561,7 @@ mod tests {
             View::new(34),
             false,
             term_length,
+            0,
         ));
 
         // unbounded future still respects lower bound
@@ -562,6 +572,7 @@ mod tests {
             View::new(9),
             true,
             term_length,
+            0,
         ));
         assert!(interesting(
             activity_timeout,
@@ -570,6 +581,7 @@ mod tests {
             View::new(10_000),
             true,
             term_length,
+            0,
         ));
     }
 
@@ -796,6 +808,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1069,6 +1082,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1241,6 +1255,7 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: 4,
                         term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1435,6 +1450,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1557,6 +1573,7 @@ mod tests {
                 skip_timeout,
                 fetch_concurrent: 4,
                 term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1703,6 +1720,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1953,6 +1971,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2136,6 +2155,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2355,6 +2375,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2570,6 +2591,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2840,6 +2862,7 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: 4,
                         term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3038,6 +3061,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3221,6 +3245,7 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: 4,
                         term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3400,6 +3425,7 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: 4,
                         term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3492,6 +3518,7 @@ mod tests {
                 skip_timeout,
                 fetch_concurrent: 4,
                 term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3728,6 +3755,7 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: 4,
                         term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3899,6 +3927,7 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: 4,
                         term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4084,6 +4113,7 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: 4,
                         term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4238,6 +4268,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4419,6 +4450,7 @@ mod tests {
                 skip_timeout: ViewDelta::new(2),
                 fetch_concurrent: 4,
                 term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4648,6 +4680,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5006,6 +5039,7 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: 4,
                         term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5229,6 +5263,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5382,6 +5417,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length,
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5480,6 +5516,7 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: 4,
                     term_length,
+                    optimistic_validation_depth: 0,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6005,6 +6042,7 @@ mod tests {
                             skip_timeout,
                             fetch_concurrent: 4,
                             term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6075,6 +6113,7 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: 4,
                         term_length: NZU64!(1),
+                    optimistic_validation_depth: 0,
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),

@@ -145,6 +145,12 @@ where
     /// of a term, participants skip the rest of the term.
     pub term_length: NonZeroU64,
 
+    /// Maximum number of optimistic intra-term views to verify beyond the last
+    /// directly notarized view.
+    ///
+    /// A value of `0` disables optimistic validation entirely.
+    pub optimistic_validation_depth: u64,
+
     /// Policy for proactively forwarding certified blocks when entering the
     /// next view.
     pub forwarding: ForwardingPolicy,
