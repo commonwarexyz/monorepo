@@ -1,10 +1,9 @@
-//! Waiter identity and lifecycle state for io_uring in-flight operations.
+//! Waiter identity and lifecycle state for io_uring in-flight requests.
 //!
-//! This module manages waiter IDs and waiter lifecycle transitions.
-//! It is the source of truth for in-flight operation completion state.
+//! This module manages waiter IDs and request lifecycle transitions.
+//! It is the source of truth for in-flight request completion state.
 
-use super::{OpBuffer, OpFd, OpIovecs, Tick, UserData};
-use commonware_utils::channel::oneshot;
+use super::{request::ActiveRequest, Tick, UserData};
 use tracing::warn;
 
 /// Stable waiter identity packed into SQE/CQE `user_data`.
@@ -84,76 +83,37 @@ impl WaiterId {
     ///
     /// The returned waiter id always has the cancel-tag bit stripped. The
     /// boolean reports whether that bit was set in the input value.
-    const fn from_user_data(user_data: UserData) -> (Self, bool) {
+    pub const fn from_user_data(user_data: UserData) -> (Self, bool) {
         let is_cancel = (user_data & Self::CANCEL_TAG) != 0;
         (Self(user_data & !Self::CANCEL_TAG), is_cancel)
     }
 }
 
-/// Lifecycle state of an in-flight waiter across operation and cancellation handling.
+/// Lifecycle state of an in-flight request.
 #[derive(Clone, Copy, Debug)]
-enum WaiterState {
-    /// Operation is active in the ring.
+pub enum WaiterState {
+    /// Request is active in the ring.
     Active {
-        /// Absolute wheel tick by which the operation must complete.
+        /// Absolute wheel tick by which the request must complete.
         ///
         /// If completion has not been observed by this tick, cancellation is
-        /// requested. `None` means this waiter has no timeout deadline.
+        /// requested. `None` means this request has no timeout deadline.
         target_tick: Option<Tick>,
     },
     /// Cancellation was requested and cancel SQE was submitted.
     CancelRequested,
 }
 
-/// State for one in-flight operation.
-///
-/// Holds the sender used for completion delivery and resources that must remain alive
-/// until CQE delivery.
+/// State for one in-flight logical request.
 struct Waiter {
     /// Stable identity of this waiter slot instance.
     id: WaiterId,
-    /// The oneshot sender used to deliver the operation result and buffer back to the
-    /// caller.
-    sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
-    /// Waiter completion state.
     state: WaiterState,
-    /// The buffer associated with this operation, if any.
-    buffer: Option<OpBuffer>,
-    /// The file descriptor associated with this operation, if any. Used to keep the file
-    /// descriptor alive and prevent reuse while the operation is in-flight.
-    ///
-    /// NOTE: This field is never read since it only exists to keep the FD alive until
-    /// operation completion, hence the allow dead code.
-    #[allow(dead_code)]
-    fd: Option<OpFd>,
-    /// The iovec array associated with this operation, if any. Used to keep iovec
-    /// storage alive and prevent use-after-free while the operation is in-flight.
-    ///
-    /// NOTE: This field is never read since it only exists to keep iovecs alive until
-    /// operation completion, hence the allow dead code.
-    #[allow(dead_code)]
-    iovecs: Option<OpIovecs>,
+    /// The active request state machine.
+    request: ActiveRequest,
 }
 
-/// Waiter resources and metadata returned when a waiter reaches terminal state.
-pub struct CompletedWaiter {
-    /// Sender used to deliver completion back to the original caller.
-    pub sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
-    /// Buffer to return to the caller.
-    pub buffer: Option<OpBuffer>,
-    /// Operation result code.
-    pub result: i32,
-    /// True when completion happened through cancellation handling.
-    pub cancelled: bool,
-    /// Scheduled deadline tick, when known.
-    ///
-    /// `None` means there is no deadline to remove from timeout tracking (either no
-    /// deadline was set, or completion was observed after cancellation had already
-    /// been requested).
-    pub target_tick: Option<Tick>,
-}
-
-/// Tracks in-flight operations and the state needed to complete them.
+/// Tracks in-flight logical requests and the state needed to complete them.
 pub struct Waiters {
     /// Waiters indexed by slot index.
     ///
@@ -166,8 +126,8 @@ pub struct Waiters {
 }
 
 impl Waiters {
-    /// Create an empty waiter set that can track at most `capacity` in-flight operations
-    /// at once.
+    /// Create an empty waiter set that can track at most `capacity` in-flight
+    /// requests at once.
     pub fn new(capacity: usize) -> Self {
         let mut entries = Vec::with_capacity(capacity);
         entries.resize_with(capacity, || None);
@@ -195,17 +155,10 @@ impl Waiters {
         self.len == 0
     }
 
-    /// Insert a waiter and return its assigned id.
+    /// Insert a request and return its assigned id.
     ///
     /// Panics if no free slot is available.
-    pub fn insert(
-        &mut self,
-        sender: oneshot::Sender<(i32, Option<OpBuffer>)>,
-        buffer: Option<OpBuffer>,
-        fd: Option<OpFd>,
-        iovecs: Option<OpIovecs>,
-        target_tick: Option<Tick>,
-    ) -> WaiterId {
+    pub fn insert(&mut self, request: ActiveRequest, target_tick: Option<Tick>) -> WaiterId {
         let id = self
             .free
             .pop()
@@ -213,11 +166,8 @@ impl Waiters {
         let index = id.index() as usize;
         let replaced = self.entries[index].replace(Waiter {
             id,
-            sender,
             state: WaiterState::Active { target_tick },
-            buffer,
-            fd,
-            iovecs,
+            request,
         });
         assert!(replaced.is_none(), "free slot should not contain waiter");
         self.len += 1;
@@ -226,43 +176,46 @@ impl Waiters {
 
     /// Request cancellation for an active waiter.
     ///
-    /// Returns cancellation `user_data` when the waiter exists and is active.
-    /// Returns `None` when the waiter id is stale, not present, or already
-    /// cancel-requested.
-    ///
-    /// Panics if `waiter_id` encodes a slot index outside this waiters set capacity.
-    pub fn cancel(&mut self, waiter_id: WaiterId) -> Option<UserData> {
-        let index = waiter_id.index() as usize;
-        let waiter = self.entries[index].as_mut()?;
-        if waiter.id != waiter_id {
-            return None;
+    /// Returns `true` when the waiter was successfully transitioned to
+    /// cancel-requested. Returns `false` when the waiter id is stale, not
+    /// present, or already cancel-requested.
+    pub fn cancel(&mut self, waiter_id: WaiterId) -> bool {
+        let Some(slot) = self.entries.get_mut(waiter_id.index() as usize) else {
+            return false;
+        };
+        let Some(slot) = slot.as_mut() else {
+            return false;
+        };
+        if slot.id != waiter_id {
+            return false;
         }
-        match waiter.state {
+        match slot.state {
             WaiterState::Active { .. } => {
-                waiter.state = WaiterState::CancelRequested;
-                Some(waiter_id.cancel_user_data())
+                slot.state = WaiterState::CancelRequested;
+                true
             }
-            WaiterState::CancelRequested => None,
+            WaiterState::CancelRequested => false,
         }
     }
 
-    /// Process one completion to waiter state.
+    /// Get mutable access to a request slot by user_data.
     ///
-    /// Returns a completed waiter when this completion reaches terminal state for
-    /// the waiter id, otherwise returns `None`.
+    /// Process one CQE for a waiter.
     ///
-    /// `None` includes stale waiter ids (for example, the slot was reused with a
-    /// newer generation).
+    /// Returns the request, its state, and waiter id if the slot is occupied
+    /// and the generation matches.
     ///
-    /// Panics if `user_data` decodes to a slot index outside this waiters set
-    /// capacity.
-    pub fn on_completion(&mut self, user_data: UserData, result: i32) -> Option<CompletedWaiter> {
+    /// Cancel CQEs are handled internally and always return `None`.
+    pub fn on_cqe(
+        &mut self,
+        user_data: UserData,
+        result: i32,
+    ) -> Option<(&mut ActiveRequest, WaiterState, WaiterId)> {
         let (waiter_id, is_cancel) = WaiterId::from_user_data(user_data);
         let index = waiter_id.index() as usize;
 
-        let waiter = self.entries[index].as_mut()?;
-        if waiter.id != waiter_id {
-            // Slot was reused, this CQE belongs to an older waiter generation.
+        let slot = self.entries[index].as_mut()?;
+        if slot.id != waiter_id {
             return None;
         }
 
@@ -285,45 +238,71 @@ impl Waiters {
             return None;
         }
 
-        let (cancelled, target_tick) = match waiter.state {
-            WaiterState::Active { target_tick } => (false, target_tick),
-            WaiterState::CancelRequested => (true, None),
-        };
+        let state = slot.state;
+        Some((&mut slot.request, state, waiter_id))
+    }
 
-        let Waiter {
-            id, sender, buffer, ..
-        } = self.entries[index].take().expect("missing waiter");
+    /// Get mutable access to a request by waiter id.
+    ///
+    /// Used by the loop to build SQEs for requests that are already in the
+    /// waiter table (e.g., from the ready queue).
+    pub fn get_mut(&mut self, waiter_id: WaiterId) -> Option<(&mut ActiveRequest, WaiterState)> {
+        let index = waiter_id.index() as usize;
+        let slot = self.entries[index].as_mut()?;
+        if slot.id != waiter_id {
+            return None;
+        }
+        Some((&mut slot.request, slot.state))
+    }
 
-        self.free.push(id.next_generation());
+    /// Remove a completed request slot by waiter id.
+    ///
+    /// Returns the `ActiveRequest` so the caller can finish it. The slot is
+    /// freed and its generation incremented for reuse.
+    ///
+    /// Returns `None` if the slot is empty or the generation doesn't match.
+    pub fn remove(&mut self, waiter_id: WaiterId) -> Option<ActiveRequest> {
+        let index = waiter_id.index() as usize;
+        let slot = self.entries[index].as_ref()?;
+        if slot.id != waiter_id {
+            return None;
+        }
+        let slot = self.entries[index].take().expect("missing waiter");
+        self.free.push(slot.id.next_generation());
         self.len -= 1;
-
-        Some(CompletedWaiter {
-            sender,
-            buffer,
-            result,
-            cancelled,
-            target_tick,
-        })
+        Some(slot.request)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iobuf::{IoBuf, IoBufs};
+    use crate::iouring::request::{ActiveRequest, Request, SyncRequest};
+    use commonware_utils::channel::oneshot;
     use std::{
-        os::unix::net::UnixStream,
+        os::fd::{FromRawFd, IntoRawFd},
         panic::{catch_unwind, AssertUnwindSafe},
         sync::Arc,
     };
 
+    fn make_sync_request() -> (ActiveRequest, oneshot::Receiver<std::io::Result<()>>) {
+        let (sock_left, _sock_right) =
+            std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
+        // SAFETY: sock_left is a valid fd that we own.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        let (tx, rx) = oneshot::channel();
+        let request = ActiveRequest::from_request(Request::Sync(SyncRequest {
+            file: Arc::new(file),
+            sender: tx,
+        }));
+        (request, rx)
+    }
+
     #[test]
     fn test_waiter_id_encoding_and_generation_wrap() {
-        // Generation bits are masked to the representable range.
         let wrapped = WaiterId::new(7, (WaiterId::GENERATION_MASK as u32).wrapping_add(5));
         assert_eq!(wrapped.generation(), 4);
 
-        // Generation wraps after reaching the max encoded value.
         let max = WaiterId::new(7, WaiterId::GENERATION_MASK as u32);
         assert_eq!(max.next_generation().generation(), 0);
 
@@ -331,7 +310,6 @@ mod tests {
         assert_eq!(waiter_id.index(), 7);
         assert_eq!(waiter_id.generation(), 3);
 
-        // Encoding/decoding must preserve id and tag semantics.
         let (decoded_op, is_cancel_op) = WaiterId::from_user_data(waiter_id.user_data());
         assert_eq!(decoded_op, waiter_id);
         assert!(!is_cancel_op);
@@ -348,68 +326,37 @@ mod tests {
         assert_eq!(waiters.len(), 0);
         assert!(waiters.is_empty());
 
-        let (tx0, _rx0) = oneshot::channel();
-        let (tx1, _rx1) = oneshot::channel();
-        let id0 = waiters.insert(tx0, Some(IoBuf::from(b"hello").into()), None, None, Some(5));
-        let id1 = waiters.insert(tx1, Some(IoBuf::from(b"world").into()), None, None, Some(9));
+        let (req0, _rx0) = make_sync_request();
+        let (req1, _rx1) = make_sync_request();
+        let id0 = waiters.insert(req0, Some(5));
+        let id1 = waiters.insert(req1, Some(9));
         assert_eq!((id0.index(), id1.index()), (0, 1));
         assert_eq!(waiters.len(), 2);
 
         // Completion for a stale generation must be ignored.
         let stale = WaiterId::new(id1.index(), id1.generation().wrapping_add(1));
-        assert!(waiters.on_completion(stale.user_data(), 0).is_none());
+        assert!(waiters.on_cqe(stale.user_data(), 0).is_none());
 
-        let completed1 = waiters
-            .on_completion(id1.user_data(), 7)
-            .expect("missing waiter completion");
-        assert_eq!(completed1.result, 7);
-        assert!(!completed1.cancelled);
-        assert_eq!(completed1.target_tick, Some(9));
-        assert!(matches!(
-            completed1.buffer.as_ref(),
-            Some(OpBuffer::Write(buf)) if buf.as_ref() == b"world"
-        ));
+        // Complete id1.
+        let result = waiters.on_cqe(id1.user_data(), 0);
+        assert!(result.is_some());
+        let request = waiters.remove(id1);
+        assert!(request.is_some());
         assert_eq!(waiters.len(), 1);
 
         // Next allocation reuses the freed slot with incremented generation.
-        let (tx2, _rx2) = oneshot::channel();
-        let id2 = waiters.insert(tx2, None, None, None, Some(11));
+        let (req2, _rx2) = make_sync_request();
+        let id2 = waiters.insert(req2, Some(11));
         assert_eq!(id2.index(), id1.index());
         assert_eq!(
             id2.generation(),
             id1.generation().wrapping_add(1) & (WaiterId::GENERATION_MASK as u32)
         );
 
-        let _ = waiters.on_completion(id0.user_data(), 1);
-        let _ = waiters.on_completion(id2.user_data(), 2);
-
-        // Cover vectored buffers plus fd/iovec keepalive storage.
-        let (tx3, _rx3) = oneshot::channel();
-        let vectored = IoBufs::from(vec![IoBuf::from(b"ab"), IoBuf::from(b"cd")]);
-        let iovecs = OpIovecs::new(
-            vec![libc::iovec {
-                iov_base: std::ptr::null_mut(),
-                iov_len: 0,
-            }]
-            .into_boxed_slice(),
-        );
-        assert!(!iovecs.as_ptr().is_null());
-        let (sock_left, _sock_right) =
-            UnixStream::pair().expect("failed to create unix socket pair");
-        let id3 = waiters.insert(
-            tx3,
-            Some(vectored.into()),
-            Some(OpFd::Fd(Arc::new(sock_left.into()))),
-            Some(iovecs),
-            None,
-        );
-        let completed3 = waiters
-            .on_completion(id3.user_data(), 9)
-            .expect("missing vectored completion");
-        assert!(matches!(
-            completed3.buffer,
-            Some(OpBuffer::WriteVectored(_))
-        ));
+        let _ = waiters.on_cqe(id0.user_data(), 0);
+        let _ = waiters.remove(id0);
+        let _ = waiters.on_cqe(id2.user_data(), 0);
+        let _ = waiters.remove(id2);
         assert!(waiters.is_empty());
     }
 
@@ -417,32 +364,35 @@ mod tests {
     fn test_waiters_cancel_paths() {
         let mut waiters = Waiters::new(3);
 
-        let (tx, _rx) = oneshot::channel();
-        let waiter_id = waiters.insert(tx, None, None, None, Some(2));
+        let (req, _rx) = make_sync_request();
+        let waiter_id = waiters.insert(req, Some(2));
 
         let stale = WaiterId::new(waiter_id.index(), waiter_id.generation().wrapping_add(1));
-        assert!(waiters.cancel(stale).is_none());
+        assert!(!waiters.cancel(stale));
 
-        let cancel = waiters
-            .cancel(waiter_id)
-            .expect("cancel should transition active waiter");
-        assert_eq!(cancel, waiter_id.cancel_user_data());
+        assert!(
+            waiters.cancel(waiter_id),
+            "cancel should transition active waiter"
+        );
 
-        // Cancel CQE does not complete the waiter. The op CQE delivers the result.
-        assert!(waiters.on_completion(cancel, -libc::ECANCELED).is_none());
-        let completed = waiters
-            .on_completion(waiter_id.user_data(), 123)
-            .expect("missing completion");
-        assert_eq!(completed.result, 123);
-        assert!(completed.cancelled);
-        assert_eq!(completed.target_tick, None);
+        // Cancel CQE does not complete the waiter.
+        assert!(waiters
+            .on_cqe(waiter_id.cancel_user_data(), -libc::ECANCELED)
+            .is_none());
+
+        // Op CQE completes the waiter.
+        let result = waiters.on_cqe(waiter_id.user_data(), 0);
+        assert!(result.is_some());
+        let (_, state, _) = result.unwrap();
+        assert!(matches!(state, WaiterState::CancelRequested));
+        let _ = waiters.remove(waiter_id);
         assert!(waiters.is_empty());
 
         // Late cancel CQE for the already-completed waiter should be ignored.
         assert!(waiters
-            .on_completion(waiter_id.cancel_user_data(), -libc::ECANCELED)
+            .on_cqe(waiter_id.cancel_user_data(), -libc::ECANCELED)
             .is_none());
-        assert!(waiters.on_completion(0, 1).is_none());
+        assert!(waiters.on_cqe(0, 1).is_none());
     }
 
     #[test]
@@ -450,29 +400,29 @@ mod tests {
         let mut waiters = Waiters::new(2);
 
         // Inserting beyond configured capacity should panic.
-        let (tx0, _rx0) = oneshot::channel();
-        let (tx1, _rx1) = oneshot::channel();
-        let _ = waiters.insert(tx0, None, None, None, None);
-        let _ = waiters.insert(tx1, None, None, None, None);
+        let (req0, _rx0) = make_sync_request();
+        let (req1, _rx1) = make_sync_request();
+        let _ = waiters.insert(req0, None);
+        let _ = waiters.insert(req1, None);
         let insert_overflow = catch_unwind(AssertUnwindSafe(|| {
-            let (tx2, _rx2) = oneshot::channel();
-            let _ = waiters.insert(tx2, None, None, None, None);
+            let (req2, _rx2) = make_sync_request();
+            let _ = waiters.insert(req2, None);
         }));
         assert!(insert_overflow.is_err());
 
         // Cancellation is allowed even when no deadline is tracked.
         let mut waiters = Waiters::new(2);
-        let (tx, _rx) = oneshot::channel();
-        let no_deadline = waiters.insert(tx, None, None, None, None);
-        let cancel = waiters
-            .cancel(no_deadline)
-            .expect("cancel should support active waiter without deadline");
-        assert_eq!(cancel, no_deadline.cancel_user_data());
+        let (req, _rx) = make_sync_request();
+        let no_deadline = waiters.insert(req, None);
+        assert!(
+            waiters.cancel(no_deadline),
+            "cancel should support active waiter without deadline"
+        );
 
         // Repeated cancel on the same waiter must be ignored.
-        let (tx, _rx) = oneshot::channel();
-        let active = waiters.insert(tx, None, None, None, Some(3));
-        let _ = waiters.cancel(active);
-        assert!(waiters.cancel(active).is_none());
+        let (req, _rx) = make_sync_request();
+        let active = waiters.insert(req, Some(3));
+        assert!(waiters.cancel(active));
+        assert!(!waiters.cancel(active));
     }
 }

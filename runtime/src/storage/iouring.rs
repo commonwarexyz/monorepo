@@ -3,14 +3,14 @@
 //!
 //! ## Architecture
 //!
-//! I/O operations are sent via a [commonware_utils::channel::mpsc] channel to a dedicated io_uring event loop
-//! running in another thread. Operation results are returned via a [commonware_utils::channel::oneshot] channel.
+//! I/O operations are sent as high-level [Request][crate::iouring::IoUringRequest]s via a
+//! [commonware_utils::channel::mpsc] channel to a dedicated io_uring event loop running in another
+//! thread. Operation results are returned via typed [commonware_utils::channel::oneshot] channels.
 //!
 //! ## Memory Safety
 //!
-//! We pass to the kernel, via io_uring, a pointer to the buffer being read from/written into.
-//! Therefore, we ensure that the memory location is valid for the duration of the operation.
-//! That is, it doesn't move or go out of scope until the operation completes.
+//! Buffers and file descriptors are owned by the active request state machine inside the io_uring
+//! loop, ensuring that the memory location is valid for the duration of the operation.
 //!
 //! ## Feature Flag
 //!
@@ -23,25 +23,19 @@
 
 use super::Header;
 use crate::{
-    iouring::{self, should_retry, OpBuffer, OpFd, OpIovecs},
-    utils, Buf, BufferPool, Error, IoBuf, IoBufs, IoBufsMut,
+    iouring::{self, IoUringRequest, ReadAtRequest, SyncRequest, WriteAtRequest},
+    utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_utils::{channel::oneshot, from_hex, hex};
-use io_uring::{opcode, types::Fd};
 use prometheus_client::registry::Registry;
 use std::{
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
     ops::RangeInclusive,
-    os::fd::AsRawFd,
     path::{Path, PathBuf},
     sync::Arc,
 };
-
-/// Cap iovec batch size: larger iovecs reduce syscall count but increase
-/// per-write kernel setup overhead.
-const IOVEC_BATCH_SIZE: usize = 32;
 
 /// Syncs a directory to ensure directory entry changes are durable.
 /// On Unix, directory metadata (file creation/deletion) must be explicitly fsynced.
@@ -275,149 +269,6 @@ impl Blob {
             pool,
         }
     }
-
-    fn as_raw_fd(&self) -> Fd {
-        Fd(self.file.as_raw_fd())
-    }
-
-    async fn write_single_at(&self, mut offset: u64, mut buf: IoBuf) -> Result<(), Error> {
-        let mut bytes_written = 0;
-        let buf_len = buf.len();
-        while bytes_written < buf_len {
-            // Figure out how much is left to write and where to write from.
-            //
-            // SAFETY: IoBuf wraps Bytes which has stable memory addresses.
-            // `bytes_written` is always < `buf_len` due to the loop condition, so
-            // `add(bytes_written)` stays within bounds and `buf_len - bytes_written`
-            // correctly represents the remaining valid bytes.
-            let ptr = unsafe { buf.as_ptr().add(bytes_written) };
-            let remaining_len = buf_len - bytes_written;
-
-            // Create an operation to do the write
-            let op = opcode::Write::new(self.as_raw_fd(), ptr, remaining_len as _)
-                .offset(offset as _)
-                .build();
-
-            // Submit the operation
-            let (sender, receiver) = oneshot::channel();
-            self.io_submitter
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: Some(OpBuffer::Write(buf)),
-                    fd: Some(OpFd::File(self.file.clone())),
-                    iovecs: None,
-                    deadline: None,
-                })
-                .await
-                .map_err(|_| Error::WriteFailed)?;
-
-            // Wait for the result
-            let (return_value, return_buf) = receiver.await.map_err(|_| Error::WriteFailed)?;
-            buf = match return_buf {
-                Some(OpBuffer::Write(b)) => b,
-                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
-            };
-            if should_retry(return_value) {
-                continue;
-            }
-
-            // A negative or zero return value indicates an error.
-            let op_bytes_written: usize =
-                return_value.try_into().map_err(|_| Error::WriteFailed)?;
-            if op_bytes_written == 0 {
-                return Err(Error::WriteFailed);
-            }
-
-            bytes_written += op_bytes_written;
-            offset += op_bytes_written as u64;
-        }
-
-        Ok(())
-    }
-
-    async fn write_vectored_at(&self, mut offset: u64, mut bufs: IoBufs) -> Result<(), Error> {
-        while bufs.has_remaining() {
-            let (iovecs, iovecs_len) = {
-                // Figure out how much is left to write and where to write from.
-                //
-                // Use one pre-initialized `libc::iovec` array as scratch space and
-                // view it as `IoSlice` to fill via `chunks_vectored`, since
-                // `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                let max_iovecs = bufs.chunk_count().min(IOVEC_BATCH_SIZE);
-                assert!(
-                    max_iovecs > 0,
-                    "chunk_count should be > 0 if bufs.has_remaining() is true"
-                );
-                let mut iovecs: Box<[libc::iovec]> = std::iter::repeat_n(
-                    libc::iovec {
-                        iov_base: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
-                        iov_len: 0,
-                    },
-                    max_iovecs,
-                )
-                .collect();
-
-                // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                // `raw_iovecs` is initialized with valid empty entries, so `io_slices`
-                // starts in a valid state for `chunks_vectored` to overwrite.
-                let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
-                        iovecs.len(),
-                    )
-                };
-                let io_slices_len = bufs.chunks_vectored(io_slices);
-                assert!(
-                    io_slices_len > 0,
-                    "chunks_vectored should produce at least one slice when bufs has remaining"
-                );
-
-                (OpIovecs::new(iovecs), io_slices_len)
-            };
-
-            // Create an operation to do the write
-            let op = opcode::Writev::new(self.as_raw_fd(), iovecs.as_ptr(), iovecs_len as _)
-                .offset(offset as _)
-                .build();
-
-            // Submit the operation
-            let (sender, receiver) = oneshot::channel();
-            self.io_submitter
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: Some(OpBuffer::WriteVectored(bufs)),
-                    fd: Some(OpFd::File(self.file.clone())),
-                    iovecs: Some(iovecs),
-                    deadline: None,
-                })
-                .await
-                .map_err(|_| Error::WriteFailed)?;
-
-            // Wait for the result
-            let (return_value, return_bufs) = receiver.await.map_err(|_| Error::WriteFailed)?;
-            bufs = match return_bufs {
-                Some(OpBuffer::WriteVectored(b)) => b,
-                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
-            };
-            if should_retry(return_value) {
-                continue;
-            }
-
-            // A negative or zero return value indicates an error.
-            let op_bytes_written: usize =
-                return_value.try_into().map_err(|_| Error::WriteFailed)?;
-            if op_bytes_written == 0 {
-                return Err(Error::WriteFailed);
-            }
-
-            bufs.advance(op_bytes_written);
-            offset += op_bytes_written as u64;
-        }
-
-        Ok(())
-    }
 }
 
 impl crate::Blob for Blob {
@@ -437,7 +288,7 @@ impl crate::Blob for Blob {
 
         // For single buffers, read directly into them (zero-copy).
         // For multi-chunk buffers, use a temporary and copy to preserve the input structure.
-        let (mut io_buf, original_bufs) = if input_bufs.is_single() {
+        let (io_buf, original_bufs) = if input_bufs.is_single() {
             (input_bufs.coalesce(), None)
         } else {
             // SAFETY: `len` bytes are filled via io_uring read loop below.
@@ -445,65 +296,33 @@ impl crate::Blob for Blob {
             (tmp, Some(input_bufs))
         };
 
-        let mut bytes_read = 0;
         let offset = offset
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
-        while bytes_read < len {
-            // Figure out how much is left to read and where to read into.
-            //
-            // SAFETY: IoBufMut wraps BytesMut which has stable memory addresses.
-            // `bytes_read` is always < `len` due to the loop condition, so
-            // `add(bytes_read)` stays within bounds and `len - bytes_read`
-            // correctly represents the remaining valid bytes.
-            let ptr = unsafe { io_buf.as_mut_ptr().add(bytes_read) };
-            let remaining_len = len - bytes_read;
-            let offset = offset + bytes_read as u64;
 
-            // Create an operation to do the read
-            let op = opcode::Read::new(self.as_raw_fd(), ptr, remaining_len as _)
-                .offset(offset as _)
-                .build();
-
-            // Submit the operation
-            let (sender, receiver) = oneshot::channel();
-            self.io_submitter
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: Some(OpBuffer::Read(io_buf)),
-                    fd: Some(OpFd::File(self.file.clone())),
-                    iovecs: None,
-                    deadline: None,
-                })
-                .await
-                .map_err(|_| Error::ReadFailed)?;
-
-            // Wait for the result
-            let (return_value, return_buf) = receiver.await.map_err(|_| Error::ReadFailed)?;
-            io_buf = match return_buf {
-                Some(OpBuffer::Read(b)) => b,
-                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
-            };
-            if should_retry(return_value) {
-                continue;
-            }
-
-            // A non-positive return value indicates an error.
-            let op_bytes_read: usize = return_value.try_into().map_err(|_| Error::ReadFailed)?;
-            if op_bytes_read == 0 {
-                // A return value of 0 indicates EOF, which shouldn't happen because we
-                // aren't done reading into `buf`. See `man pread`.
-                return Err(Error::BlobInsufficientLength);
-            }
-            bytes_read += op_bytes_read;
+        // Zero-length reads succeed trivially without submitting to the ring.
+        if len == 0 {
+            return Ok(original_bufs.unwrap_or_else(|| io_buf.into()));
         }
 
-        // Return the same buffer structure as input
+        let (tx, rx) = oneshot::channel();
+        self.io_submitter
+            .send(IoUringRequest::ReadAt(ReadAtRequest {
+                file: self.file.clone(),
+                offset,
+                len,
+                buf: io_buf,
+                sender: tx,
+            }))
+            .await
+            .map_err(|_| Error::ReadFailed)?;
+
+        let (io_buf, result) = rx.await.map_err(|_| Error::ReadFailed)?;
+        result?;
+
         match original_bufs {
             None => Ok(io_buf.into()),
             Some(mut bufs) => {
-                // Copy from temporary buffer to the original multi-chunk buffers.
                 bufs.copy_from_slice(io_buf.as_ref());
                 Ok(bufs)
             }
@@ -516,10 +335,22 @@ impl crate::Blob for Blob {
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
 
-        match bufs.try_into_single() {
-            Ok(buf) => self.write_single_at(offset, buf).await,
-            Err(bufs) => self.write_vectored_at(offset, bufs).await,
+        if !bufs.has_remaining() {
+            return Ok(());
         }
+
+        let (tx, rx) = oneshot::channel();
+        self.io_submitter
+            .send(IoUringRequest::WriteAt(WriteAtRequest {
+                file: self.file.clone(),
+                offset,
+                bufs,
+                sender: tx,
+            }))
+            .await
+            .map_err(|_| Error::WriteFailed)?;
+
+        rx.await.map_err(|_| Error::WriteFailed)?
     }
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
@@ -533,53 +364,30 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        loop {
-            // Create an operation to do the sync
-            let op = opcode::Fsync::new(self.as_raw_fd()).build();
-
-            // Submit the operation
-            let (sender, receiver) = oneshot::channel();
-            self.io_submitter
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: None,
-                    fd: Some(OpFd::File(self.file.clone())),
-                    iovecs: None,
-                    deadline: None,
-                })
-                .await
-                .map_err(|_| {
-                    Error::BlobSyncFailed(
-                        self.partition.clone(),
-                        hex(&self.name),
-                        IoError::other("failed to send work"),
-                    )
-                })?;
-
-            // Wait for the result
-            let (return_value, _) = receiver.await.map_err(|_| {
+        let (tx, rx) = oneshot::channel();
+        self.io_submitter
+            .send(IoUringRequest::Sync(SyncRequest {
+                file: self.file.clone(),
+                sender: tx,
+            }))
+            .await
+            .map_err(|_| {
                 Error::BlobSyncFailed(
                     self.partition.clone(),
                     hex(&self.name),
-                    IoError::other("failed to read result"),
+                    IoError::other("failed to send work"),
                 )
             })?;
-            if should_retry(return_value) {
-                continue;
-            }
 
-            // If the return value is negative, it indicates an error.
-            if return_value < 0 {
-                return Err(Error::BlobSyncFailed(
-                    self.partition.clone(),
-                    hex(&self.name),
-                    IoError::other(format!("error code: {return_value}")),
-                ));
-            }
+        let result = rx.await.map_err(|_| {
+            Error::BlobSyncFailed(
+                self.partition.clone(),
+                hex(&self.name),
+                IoError::other("failed to read result"),
+            )
+        })?;
 
-            return Ok(());
-        }
+        result.map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
     }
 }
 
@@ -731,6 +539,29 @@ mod tests {
             matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
         );
 
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_vectored_write_partial_progress() {
+        let (storage, storage_directory) = create_test_storage();
+
+        let (blob, _) = storage.open("partition", b"vectest").await.unwrap();
+        blob.resize(200).await.unwrap();
+
+        // Write multiple buffers in one vectored call.
+        let mut bufs = crate::IoBufs::default();
+        bufs.append(crate::IoBuf::from(vec![0xAAu8; 80]));
+        bufs.append(crate::IoBuf::from(vec![0xBBu8; 80]));
+        blob.write_at(0, bufs).await.unwrap();
+        blob.sync().await.unwrap();
+
+        // Read back and verify.
+        let data = blob.read_at(0, 160).await.unwrap().coalesce();
+        assert_eq!(&data.as_ref()[..80], &[0xAAu8; 80]);
+        assert_eq!(&data.as_ref()[80..], &[0xBBu8; 80]);
+
+        drop(blob);
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 }

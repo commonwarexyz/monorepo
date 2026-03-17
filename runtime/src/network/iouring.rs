@@ -3,16 +3,16 @@
 //!
 //! ## Architecture
 //!
-//! Network operations are sent via a [commonware_utils::channel::mpsc] channel to a dedicated io_uring event
-//! loop running in a separate thread. Operation results are returned via a [commonware_utils::channel::oneshot]
-//! channel. This implementation uses two separate io_uring instances: one for send operations and
+//! Network operations are sent as high-level [Request][crate::iouring::IoUringRequest]s via a
+//! [commonware_utils::channel::mpsc] channel to a dedicated io_uring event loop running in a
+//! separate thread. Operation results are returned via typed [commonware_utils::channel::oneshot]
+//! channels. This implementation uses two separate io_uring instances: one for send operations and
 //! one for receive operations.
 //!
 //! ## Memory Safety
 //!
-//! We pass to the kernel, via io_uring, a pointer to the buffer being read from/written into.
-//! Therefore, we ensure that the memory location is valid for the duration of the operation.
-//! That is, it doesn't move or go out of scope until the operation completes.
+//! Buffers and file descriptors are owned by the active request state machine inside the io_uring
+//! loop, ensuring that the memory location is valid for the duration of the operation.
 //!
 //! ## Feature Flag
 //!
@@ -24,15 +24,14 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use crate::{
-    iouring::{self, should_retry, OpBuffer, OpFd, OpIovecs},
-    utils, Buf, BufferPool, Error, IoBuf, IoBufMut, IoBufs,
+    iouring::{self, IoUringRequest, RecvRequest, SendRequest},
+    utils, Buf, BufferPool, Error, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::oneshot;
-use io_uring::{opcode, types::Fd};
 use prometheus_client::registry::Registry;
 use std::{
     net::SocketAddr,
-    os::fd::{AsRawFd, OwnedFd},
+    os::fd::OwnedFd,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -41,10 +40,6 @@ use tracing::warn;
 
 /// Default read buffer size (64 KB).
 const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
-
-/// Cap iovec batch size: larger iovecs reduce syscall count but increase
-/// per-write kernel setup overhead.
-const IOVEC_BATCH_SIZE: usize = 32;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -62,7 +57,7 @@ pub struct Config {
     ///
     /// This is a network-level policy and is independent from io_uring loop
     /// tuning. At startup, the loop timeout horizon is raised as needed so this
-    /// value is never clamped by `iouring_config.max_op_timeout`.
+    /// value is never clamped by `iouring_config.max_request_timeout`.
     pub read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     ///
@@ -81,7 +76,7 @@ impl Default for Config {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
-            read_write_timeout: iouring_config.max_op_timeout,
+            read_write_timeout: iouring_config.max_request_timeout,
             iouring_config,
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
             thread_stack_size: utils::thread::system_thread_stack_size(),
@@ -128,9 +123,9 @@ impl Network {
         // dedicated thread, which guarantees that the same thread that creates
         // the ring is the only thread submitting work to it.
         cfg.iouring_config.single_issuer = true;
-        cfg.iouring_config.max_op_timeout = cfg
+        cfg.iouring_config.max_request_timeout = cfg
             .iouring_config
-            .max_op_timeout
+            .max_request_timeout
             .max(cfg.read_write_timeout);
 
         // Create an io_uring instance to handle send operations.
@@ -318,167 +313,29 @@ impl Sink {
             timeout,
         }
     }
-
-    fn as_raw_fd(&self) -> Fd {
-        Fd(self.fd.as_raw_fd())
-    }
-
-    async fn send_single(&self, mut buf: IoBuf) -> Result<(), Error> {
-        let mut bytes_sent = 0;
-        let buf_len = buf.len();
-        let deadline = Instant::now() + self.timeout;
-
-        while bytes_sent < buf_len {
-            // Figure out how much is left to send and where to send from.
-            //
-            // SAFETY: `buf` is an `IoBuf` guaranteeing the memory won't move.
-            // `bytes_sent` is always < `buf_len` due to the loop condition, so
-            // `add(bytes_sent)` stays within bounds and `buf_len - bytes_sent`
-            // correctly represents the remaining valid bytes.
-            let ptr = unsafe { buf.as_ptr().add(bytes_sent) };
-            let remaining_len = buf_len - bytes_sent;
-
-            // Create the io_uring send operation
-            let op = opcode::Send::new(self.as_raw_fd(), ptr, remaining_len as u32).build();
-
-            // Submit the operation to the io_uring event loop
-            let (sender, receiver) = oneshot::channel();
-            self.submitter
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: Some(OpBuffer::Write(buf)),
-                    fd: Some(OpFd::Fd(self.fd.clone())),
-                    iovecs: None,
-                    deadline: Some(deadline),
-                })
-                .await
-                .map_err(|_| Error::SendFailed)?;
-
-            // Wait for the operation to complete and get the buffer back
-            let (return_value, return_buf) = receiver.await.map_err(|_| Error::SendFailed)?;
-            buf = match return_buf {
-                Some(OpBuffer::Write(b)) => b,
-                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
-            };
-            if should_retry(return_value) {
-                continue;
-            }
-
-            // Retryable error paths are handled above. From here:
-            // - ETIMEDOUT maps to caller-visible timeout
-            // - any other negative or zero result is treated as send failure
-            if return_value <= 0 {
-                if return_value == -libc::ETIMEDOUT {
-                    return Err(Error::Timeout);
-                } else {
-                    return Err(Error::SendFailed);
-                };
-            }
-
-            // Mark bytes as sent.
-            bytes_sent += return_value as usize;
-        }
-
-        Ok(())
-    }
-
-    async fn send_vectored(&self, mut bufs: IoBufs) -> Result<(), Error> {
-        let deadline = Instant::now() + self.timeout;
-        while bufs.has_remaining() {
-            let (iovecs, iovecs_len) = {
-                // Figure out how much is left to send and where to send from.
-                //
-                // Use one pre-initialized `libc::iovec` array as scratch space and
-                // view it as `IoSlice` to fill via `chunks_vectored`, since
-                // `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                let max_iovecs = bufs.chunk_count().min(IOVEC_BATCH_SIZE);
-                assert!(
-                    max_iovecs > 0,
-                    "chunk_count should be > 0 if bufs.has_remaining() is true"
-                );
-                let mut iovecs: Box<[libc::iovec]> = std::iter::repeat_n(
-                    libc::iovec {
-                        iov_base: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
-                        iov_len: 0,
-                    },
-                    max_iovecs,
-                )
-                .collect();
-
-                // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-                // `iovecs` is initialized with valid empty entries, so `io_slices`
-                // starts in a valid state for `chunks_vectored` to overwrite.
-                let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
-                        iovecs.len(),
-                    )
-                };
-                let io_slices_len = bufs.chunks_vectored(io_slices);
-                assert!(
-                    io_slices_len > 0,
-                    "chunks_vectored should produce at least one slice when bufs has remaining"
-                );
-                (OpIovecs::new(iovecs), io_slices_len)
-            };
-
-            // Create an operation to do the writev.
-            //
-            // For this payload send path, `writev` is sufficient since we don't need
-            // per-send flags, destination addresses, or cmsgs. This keeps the operation
-            // simpler and avoids building an `msghdr` that's required for `sendmsg`.
-            let op =
-                opcode::Writev::new(self.as_raw_fd(), iovecs.as_ptr(), iovecs_len as _).build();
-
-            // Submit the operation.
-            let (sender, receiver) = oneshot::channel();
-            self.submitter
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: Some(OpBuffer::WriteVectored(bufs)),
-                    fd: Some(OpFd::Fd(self.fd.clone())),
-                    iovecs: Some(iovecs),
-                    deadline: Some(deadline),
-                })
-                .await
-                .map_err(|_| Error::SendFailed)?;
-
-            // Wait for the result.
-            let (return_value, return_bufs) = receiver.await.map_err(|_| Error::SendFailed)?;
-            bufs = match return_bufs {
-                Some(OpBuffer::WriteVectored(b)) => b,
-                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
-            };
-            if should_retry(return_value) {
-                continue;
-            }
-
-            // Retryable error paths are handled above. From here:
-            // - ETIMEDOUT maps to caller-visible timeout
-            // - any other negative or zero result is treated as send failure
-            if return_value <= 0 {
-                if return_value == -libc::ETIMEDOUT {
-                    return Err(Error::Timeout);
-                } else {
-                    return Err(Error::SendFailed);
-                };
-            }
-
-            bufs.advance(return_value as usize);
-        }
-
-        Ok(())
-    }
 }
 
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        match bufs.into().try_into_single() {
-            Ok(buf) => self.send_single(buf).await,
-            Err(bufs) => self.send_vectored(bufs).await,
+        let bufs = bufs.into();
+        if !bufs.has_remaining() {
+            return Ok(());
         }
+
+        let deadline = Instant::now() + self.timeout;
+        let (tx, rx) = oneshot::channel();
+
+        self.submitter
+            .send(IoUringRequest::Send(SendRequest {
+                fd: self.fd.clone(),
+                bufs,
+                deadline: Some(deadline),
+                sender: tx,
+            }))
+            .await
+            .map_err(|_| Error::SendFailed)?;
+
+        rx.await.map_err(|_| Error::SendFailed)?
     }
 }
 
@@ -521,75 +378,52 @@ impl Stream {
         }
     }
 
-    fn as_raw_fd(&self) -> Fd {
-        Fd(self.fd.as_raw_fd())
-    }
-
-    /// Submits a recv operation to io_uring.
+    /// Submit a recv request to io_uring and wait for completion.
     ///
-    /// # Arguments
-    /// * `buffer` - Buffer for receiving data (kernel writes into this)
-    /// * `offset` - Offset into buffer to write received data
-    /// * `len` - Maximum bytes to receive
+    /// `offset` is the byte offset into `buffer` where received data should
+    /// start. `len` is the number of bytes to read starting at that offset.
     ///
-    /// # Returns
-    /// The buffer and either bytes received or an error.
+    /// Returns the buffer and either total bytes written (from offset 0) or an error.
     async fn submit_recv(
-        &mut self,
-        mut buffer: IoBufMut,
+        &self,
+        buffer: IoBufMut,
         offset: usize,
         len: usize,
+        exact: bool,
         deadline: Instant,
     ) -> (IoBufMut, Result<usize, Error>) {
-        loop {
-            // SAFETY: offset + len <= buffer.capacity() as guaranteed by callers.
-            // `buffer` is an `IoBufMut` guaranteeing the memory won't move.
-            let ptr = unsafe { buffer.as_mut_ptr().add(offset) };
-            let op = opcode::Recv::new(self.as_raw_fd(), ptr, len as u32).build();
+        let (tx, rx) = oneshot::channel();
 
-            let (sender, receiver) = oneshot::channel();
-            if self
-                .submitter
-                .send(iouring::Op {
-                    work: op,
-                    sender,
-                    buffer: Some(OpBuffer::Read(buffer)),
-                    fd: Some(OpFd::Fd(self.fd.clone())),
-                    iovecs: None,
-                    deadline: Some(deadline),
-                })
-                .await
-                .is_err()
-            {
+        if self
+            .submitter
+            .send(IoUringRequest::Recv(RecvRequest {
+                fd: self.fd.clone(),
+                buf: buffer,
+                // The active request tracks progress with `received` starting
+                // at `offset`, so `len` is the total target (offset + bytes to read).
+                len: offset + len,
+                received: offset,
+                exact,
+                deadline: Some(deadline),
+                sender: tx,
+            }))
+            .await
+            .is_err()
+        {
+            // Channel closed - io_uring thread died, buffer is lost
+            return (IoBufMut::default(), Err(Error::RecvFailed));
+        }
+
+        match rx.await {
+            Ok((buf, result)) => {
+                // Translate the total-bytes-received into bytes-read-in-this-call.
+                let result = result.map(|total| total - offset);
+                (buf, result)
+            }
+            Err(_) => {
                 // Channel closed - io_uring thread died, buffer is lost
-                return (IoBufMut::default(), Err(Error::RecvFailed));
+                (IoBufMut::default(), Err(Error::RecvFailed))
             }
-
-            let Ok((return_value, return_buf)) = receiver.await else {
-                // Channel closed - io_uring thread died, buffer is lost
-                return (IoBufMut::default(), Err(Error::RecvFailed));
-            };
-            buffer = match return_buf {
-                Some(OpBuffer::Read(b)) => b,
-                _ => unreachable!("io_uring loop returns the same OpBuffer that was submitted"),
-            };
-            if should_retry(return_value) {
-                continue;
-            }
-
-            // Retryable error paths are handled above. From here:
-            // - ETIMEDOUT maps to caller-visible timeout
-            // - any other negative or zero result is treated as recv failure
-            if return_value <= 0 {
-                let err = if return_value == -libc::ETIMEDOUT {
-                    Error::Timeout
-                } else {
-                    Error::RecvFailed
-                };
-                return (buffer, Err(err));
-            }
-
-            return (buffer, Ok(return_value as usize));
         }
     }
 
@@ -601,9 +435,7 @@ impl Stream {
         let buffer = std::mem::take(&mut self.buffer);
         let len = buffer.capacity();
 
-        // If the buffer is lost due to a channel error, we don't restore it.
-        // Channel errors mean the io_uring thread died, so the stream is unusable anyway.
-        let (buffer, result) = self.submit_recv(buffer, 0, len, deadline).await;
+        let (buffer, result) = self.submit_recv(buffer, 0, len, false, deadline).await;
         self.buffer = buffer;
         self.buffer_len = result?;
         // SAFETY: The kernel has written exactly `buffer_len` bytes into the buffer.
@@ -638,8 +470,9 @@ impl crate::Stream for Stream {
             // to fill the buffer and immediately drain it
             let buffer_capacity = self.buffer.capacity();
             if buffer_capacity == 0 || remaining >= buffer_capacity {
+                // Direct recv into the result buffer with exact=true.
                 let (returned_buf, result) = self
-                    .submit_recv(owned_buf, bytes_received, remaining, deadline)
+                    .submit_recv(owned_buf, bytes_received, remaining, true, deadline)
                     .await;
                 owned_buf = returned_buf;
                 bytes_received += result?;
@@ -841,9 +674,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_op_fd_keeps_descriptor_alive() {
-        // When a recv future is cancelled (e.g. via select!) after the Op has
+        // When a recv future is cancelled (e.g. via select!) after the Request has
         // been sent to the io_uring channel, the Stream can be dropped while
-        // the Op is still queued. The Op's `fd` field keeps the socket alive
+        // the request is still queued. The request's fd field keeps the socket alive
         // so the OS cannot reuse the FD number.
         let op_timeout = Duration::from_millis(200);
         let network = Network::start(
@@ -867,22 +700,20 @@ mod tests {
         assert_eq!(Arc::strong_count(&fd), 3);
 
         // Cancel a recv mid-flight (blocks because no data arrives).
-        // Polling the future submits the Op (with an fd clone) to the
-        // io_uring channel, the timeout then cancels the future.
         select! {
             _ = client_stream.recv(1) => unreachable!("no data was sent"),
             _ = tokio::time::sleep(Duration::from_millis(50)) => {},
         }
 
-        // The queued Op holds an additional clone.
+        // The queued request holds an additional clone.
         assert_eq!(Arc::strong_count(&fd), 4);
 
-        // Drop all handles. The queued Op still retains the fd.
+        // Drop all handles. The queued request still retains the fd.
         drop(client_sink);
         drop(client_stream);
-        assert_eq!(Arc::strong_count(&fd), 2); // our clone + Op
+        assert_eq!(Arc::strong_count(&fd), 2); // our clone + request
 
-        // After op_timeout, the Op completes and releases its fd clone.
+        // After op_timeout, the request completes and releases its fd clone.
         tokio::time::sleep(op_timeout).await;
         assert_eq!(Arc::strong_count(&fd), 1);
     }
