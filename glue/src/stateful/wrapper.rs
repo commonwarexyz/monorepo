@@ -237,19 +237,19 @@ where
     /// If the parent's merkleized state is in the pending map, creates
     /// child batches from it. Otherwise (parent is the finalized tip),
     /// creates batches from the committed database state.
-    async fn start_batches(
-        &mut self,
+    ///
+    /// Takes `databases` and `shared` by reference so that the returned
+    /// batch borrows only `databases`, leaving other fields (e.g. `inner`)
+    /// available to the caller.
+    async fn start_batches<'db>(
+        databases: &'db A::Databases,
+        shared: &Mutex<Shared<A, E>>,
         parent: &<A::Block as Digestible>::Digest,
-    ) -> <A::Databases as DatabaseSet>::Unmerkleized {
-        let forked = self
-            .shared
-            .lock()
-            .pending
-            .get_merkleized(parent)
-            .map(<A::Databases as DatabaseSet>::fork_batches);
-        match forked {
-            Some(batches) => batches,
-            None => self.databases.new_batches().await,
+    ) -> <A::Databases as DatabaseSet>::Unmerkleized<'db> {
+        let merkleized = shared.lock().pending.get_merkleized(parent).cloned();
+        match merkleized {
+            Some(ref parent) => databases.fork_batches(parent).await,
+            None => databases.new_batches().await,
         }
     }
 
@@ -316,7 +316,7 @@ where
             let context = block.context();
             let round = Round::new(context.epoch(), context.view());
 
-            let batches = self.start_batches(&parent_digest).await;
+            let batches = Self::start_batches(&self.databases, &self.shared, &parent_digest).await;
             let merkleized = self
                 .inner
                 .replay((self.context.clone(), context), &block, batches)
@@ -397,7 +397,7 @@ where
         self.ensure_pending(parent_digest).await;
 
         let round = Round::new(context.1.epoch(), context.1.view());
-        let batches = self.start_batches(&parent_digest).await;
+        let batches = Self::start_batches(&self.databases, &self.shared, &parent_digest).await;
         let (block, merkleized) = self
             .inner
             .propose(context, ancestry, batches, &mut self.input_provider)
@@ -454,7 +454,7 @@ where
         self.ensure_pending(parent_digest).await;
 
         let round = Round::new(consensus_context.epoch(), consensus_context.view());
-        let batches = self.start_batches(&parent_digest).await;
+        let batches = Self::start_batches(&self.databases, &self.shared, &parent_digest).await;
         let Some(merkleized) = self
             .inner
             .verify((runtime_context, consensus_context), ancestry, batches)
@@ -591,7 +591,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: AncestorStream<BP, Self::Block>,
-            _batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+            _batches: <Self::Databases as DatabaseSet>::Unmerkleized<'_>,
             _input: &mut Self::InputProvider,
         ) -> Option<(Self::Block, <Self::Databases as DatabaseSet>::Merkleized)> {
             panic!("unused in test")
@@ -601,7 +601,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: AncestorStream<BP, Self::Block>,
-            _batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+            _batches: <Self::Databases as DatabaseSet>::Unmerkleized<'_>,
         ) -> Option<<Self::Databases as DatabaseSet>::Merkleized> {
             panic!("unused in test")
         }
@@ -610,7 +610,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _block: &Self::Block,
-            _batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+            _batches: <Self::Databases as DatabaseSet>::Unmerkleized<'_>,
         ) -> <Self::Databases as DatabaseSet>::Merkleized {
             panic!("unused in test")
         }
@@ -645,12 +645,12 @@ mod tests {
     }
 
     impl DatabaseSet for RecordingDatabases {
-        type Unmerkleized = ();
+        type Unmerkleized<'a> = ();
         type Merkleized = sha256::Digest;
 
-        async fn new_batches(&self) -> Self::Unmerkleized {}
+        async fn new_batches(&self) -> Self::Unmerkleized<'_> {}
 
-        fn fork_batches(_parent: &Self::Merkleized) -> Self::Unmerkleized {}
+        async fn fork_batches(&self, _parent: &Self::Merkleized) -> Self::Unmerkleized<'_> {}
 
         async fn finalize(&self, batches: Self::Merkleized) {
             self.finalized.lock().push(batches);
@@ -702,7 +702,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: AncestorStream<BP, Self::Block>,
-            _batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+            _batches: <Self::Databases as DatabaseSet>::Unmerkleized<'_>,
             _input: &mut Self::InputProvider,
         ) -> Option<(Self::Block, <Self::Databases as DatabaseSet>::Merkleized)> {
             panic!("unused in test")
@@ -712,7 +712,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: AncestorStream<BP, Self::Block>,
-            _batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+            _batches: <Self::Databases as DatabaseSet>::Unmerkleized<'_>,
         ) -> Option<<Self::Databases as DatabaseSet>::Merkleized> {
             panic!("unused in test")
         }
@@ -721,19 +721,19 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: &Self::Block,
-            _batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+            _batches: <Self::Databases as DatabaseSet>::Unmerkleized<'_>,
         ) -> <Self::Databases as DatabaseSet>::Merkleized {
             block.digest()
         }
     }
 
     impl DatabaseSet for TrackingDatabases {
-        type Unmerkleized = ();
+        type Unmerkleized<'a> = ();
         type Merkleized = ();
 
-        async fn new_batches(&self) -> Self::Unmerkleized {}
+        async fn new_batches(&self) -> Self::Unmerkleized<'_> {}
 
-        fn fork_batches(_parent: &Self::Merkleized) -> Self::Unmerkleized {}
+        async fn fork_batches(&self, _parent: &Self::Merkleized) -> Self::Unmerkleized<'_> {}
 
         async fn finalize(&self, _batches: Self::Merkleized) {}
     }

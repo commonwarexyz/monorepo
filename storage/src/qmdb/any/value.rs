@@ -4,25 +4,30 @@ use commonware_codec::{CodecFixedShared, CodecShared};
 use std::marker::PhantomData;
 
 mod sealed {
-    use commonware_codec::CodecShared;
-
-    /// A wrapper around a value to indicate whether it is fixed or variable size.
-    /// Having separate wrappers for fixed and variable size values allows us to use the same
-    /// operation type for both fixed and variable size values, while still being able to
-    /// parameterize the operation encoding by the value type.
-    pub trait ValueEncoding: Clone + Send + Sync {
-        /// The wrapped value type.
-        type Value: CodecShared + Clone;
-    }
+    /// Prevents external implementations of [`ValueEncoding`](super::ValueEncoding).
+    pub trait Sealed {}
 }
 
-pub(crate) use sealed::ValueEncoding;
+use commonware_codec::CodecShared as ValueCodecShared;
+
+/// A wrapper around a value to indicate whether it is fixed or variable size.
+/// Having separate wrappers for fixed and variable size values allows us to
+/// use the same operation type for both, while still being able to
+/// parameterize the operation encoding by the value type.
+///
+/// This trait is sealed -- it cannot be implemented outside this crate.
+pub trait ValueEncoding: sealed::Sealed + Clone + Send + Sync {
+    /// The wrapped value type.
+    type Value: ValueCodecShared + Clone;
+}
 
 /// A fixed-size, clonable value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixedEncoding<V: FixedValue>(PhantomData<V>);
 
-impl<V: FixedValue> sealed::ValueEncoding for FixedEncoding<V> {
+impl<V: FixedValue> sealed::Sealed for FixedEncoding<V> {}
+
+impl<V: FixedValue> ValueEncoding for FixedEncoding<V> {
     type Value = V;
 }
 
@@ -30,7 +35,9 @@ impl<V: FixedValue> sealed::ValueEncoding for FixedEncoding<V> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VariableEncoding<V: VariableValue>(PhantomData<V>);
 
-impl<V: VariableValue> sealed::ValueEncoding for VariableEncoding<V> {
+impl<V: VariableValue> sealed::Sealed for VariableEncoding<V> {}
+
+impl<V: VariableValue> ValueEncoding for VariableEncoding<V> {
     type Value = V;
 }
 

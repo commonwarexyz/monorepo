@@ -324,11 +324,11 @@ mod tests {
     struct MockSyncError;
 
     impl DatabaseSet for MockDatabaseSet {
-        type Unmerkleized = ();
+        type Unmerkleized<'a> = () where Self: 'a;
         type Merkleized = ();
 
-        async fn new_batches(&self) -> Self::Unmerkleized {}
-        fn fork_batches(_parent: &Self::Merkleized) -> Self::Unmerkleized {}
+        async fn new_batches(&self) -> Self::Unmerkleized<'_> {}
+        async fn fork_batches(&self, _parent: &Self::Merkleized) -> Self::Unmerkleized<'_> {}
         async fn finalize(&self, _batches: Self::Merkleized) {}
     }
 
@@ -445,11 +445,11 @@ mod tests {
     }
 
     impl DatabaseSet for MockBackpressuredDatabaseSet {
-        type Unmerkleized = ();
+        type Unmerkleized<'a> = () where Self: 'a;
         type Merkleized = ();
 
-        async fn new_batches(&self) -> Self::Unmerkleized {}
-        fn fork_batches(_parent: &Self::Merkleized) -> Self::Unmerkleized {}
+        async fn new_batches(&self) -> Self::Unmerkleized<'_> {}
+        async fn fork_batches(&self, _parent: &Self::Merkleized) -> Self::Unmerkleized<'_> {}
         async fn finalize(&self, _batches: Self::Merkleized) {}
     }
 

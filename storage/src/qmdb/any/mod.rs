@@ -94,12 +94,12 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
 
 pub mod batch;
-pub(crate) mod db;
-pub(crate) mod operation;
+pub mod db;
+pub mod operation;
 #[cfg(any(test, feature = "test-traits"))]
 pub mod traits;
-pub(crate) mod value;
-pub(crate) use value::{FixedValue, ValueEncoding, VariableValue};
+pub mod value;
+pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;

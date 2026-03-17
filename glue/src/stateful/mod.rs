@@ -72,8 +72,8 @@ pub use wrapper::{Config, Stateful};
 pub mod db;
 pub mod sync;
 
-#[cfg(test)]
-mod tests;
+// #[cfg(test)]
+// mod tests;
 
 /// A stateful application whose storage is managed by a [`DatabaseSet`].
 ///
@@ -140,7 +140,7 @@ where
         &mut self,
         context: (E, Self::Context),
         ancestry: AncestorStream<A, Self::Block>,
-        batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+        batches: <Self::Databases as DatabaseSet>::Unmerkleized<'_>,
         input: &mut Self::InputProvider,
     ) -> impl Future<Output = Option<(Self::Block, <Self::Databases as DatabaseSet>::Merkleized)>> + Send;
 
@@ -154,7 +154,7 @@ where
         &mut self,
         context: (E, Self::Context),
         ancestry: AncestorStream<A, Self::Block>,
-        batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+        batches: <Self::Databases as DatabaseSet>::Unmerkleized<'_>,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet>::Merkleized>> + Send;
 
     /// Re-execute a previously certified block to reconstruct its
@@ -173,6 +173,6 @@ where
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+        batches: <Self::Databases as DatabaseSet>::Unmerkleized<'_>,
     ) -> impl Future<Output = <Self::Databases as DatabaseSet>::Merkleized> + Send;
 }

@@ -196,7 +196,7 @@ impl App {
     /// Execute a block: increment "counter" and write `height -> height_bytes`.
     async fn execute(
         height: Height,
-        mut batches: <MockDatabaseSet as DatabaseSet>::Unmerkleized,
+        mut batches: <MockDatabaseSet as DatabaseSet>::Unmerkleized<'_>,
     ) -> (
         Vec<(Vec<u8>, Vec<u8>)>,
         <MockDatabaseSet as DatabaseSet>::Merkleized,
@@ -251,7 +251,7 @@ where
         &mut self,
         context: (E, Self::Context),
         ancestry: AncestorStream<A, Self::Block>,
-        batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+        batches: <Self::Databases as DatabaseSet>::Unmerkleized<'_>,
         _input: &mut Self::InputProvider,
     ) -> Option<(Self::Block, <Self::Databases as DatabaseSet>::Merkleized)> {
         let parent = ancestry.peek()?;
@@ -288,7 +288,7 @@ where
         &mut self,
         _context: (E, Self::Context),
         ancestry: AncestorStream<A, Self::Block>,
-        batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+        batches: <Self::Databases as DatabaseSet>::Unmerkleized<'_>,
     ) -> Option<<Self::Databases as DatabaseSet>::Merkleized> {
         let tip = ancestry.peek()?;
         let height = tip.height();
@@ -307,7 +307,7 @@ where
         &mut self,
         _context: (E, Self::Context),
         block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet>::Unmerkleized,
+        batches: <Self::Databases as DatabaseSet>::Unmerkleized<'_>,
     ) -> <Self::Databases as DatabaseSet>::Merkleized {
         let (_, merkleized) = Self::execute(block.height(), batches).await;
         merkleized

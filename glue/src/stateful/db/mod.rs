@@ -24,6 +24,8 @@ use futures::join;
 use rand::Rng;
 use std::{fmt::Debug, future::Future, sync::Arc};
 
+pub mod any;
+
 const TARGET_UPDATE_CHANNEL_CAPACITY: usize = 16;
 
 /// An in-progress batch of mutations that has not yet been merkleized.
@@ -31,7 +33,10 @@ const TARGET_UPDATE_CHANNEL_CAPACITY: usize = 16;
 /// The application reads state via [`get`](Self::get), writes mutations via
 /// [`write`](Self::write), and seals the batch by calling
 /// [`merkleize`](Self::merkleize) at the end of execution.
-pub trait Unmerkleized: Sized + Send {
+///
+/// The lifetime `'a` represents the borrow of the underlying database that
+/// the batch reads through for keys not yet written in this batch.
+pub trait Unmerkleized<'a>: Sized + Send {
     /// The key type for this database.
     type Key: Send;
 
@@ -69,17 +74,8 @@ pub trait Merkleized: Sized + Send + Sync {
     /// The digest type used for the state root.
     type Digest: Digest;
 
-    /// The unmerkleized batch type produced by [`new_batch`](Self::new_batch).
-    type Unmerkleized: Unmerkleized;
-
     /// The committed state root after merkleization.
     fn root(&self) -> Self::Digest;
-
-    /// Create a child unmerkleized batch that reads through this batch's
-    /// pending changes before falling back to the committed database state.
-    ///
-    /// In QMDB, this maps to `merkleized_batch.new_batch()`.
-    fn new_batch(&self) -> Self::Unmerkleized;
 }
 
 /// A single database whose batch lifecycle is managed by the
@@ -88,17 +84,17 @@ pub trait Merkleized: Sized + Send + Sync {
 /// Each instance wraps a QMDB database and knows how to create
 /// unmerkleized batches from committed state and how to persist a
 /// finalized changeset. Child batches (forked from pending state) are
-/// created via [`Merkleized::new_batch`] instead.
+/// created via [`fork_batch`](Self::fork_batch).
 pub trait ManagedDb: Send + Sync {
     /// An in-progress batch of mutations that has not yet been merkleized.
-    type Unmerkleized: Unmerkleized;
+    ///
+    /// The GAT lifetime `'a` represents the borrow of `&'a Self` during
+    /// batch reads.
+    type Unmerkleized<'a>: Unmerkleized<'a> where Self: 'a;
 
     /// A batch whose root has been computed but has not yet been applied to
     /// the underlying database.
-    ///
-    /// Constrained so that [`Merkleized::new_batch`] produces the same
-    /// [`Unmerkleized`] type as [`ManagedDb::new_batch`](Self::new_batch).
-    type Merkleized: Merkleized<Unmerkleized = Self::Unmerkleized>;
+    type Merkleized: Merkleized;
 
     /// The error type returned by fallible operations.
     type Error: Debug + Send;
@@ -107,7 +103,13 @@ pub trait ManagedDb: Send + Sync {
     /// state.
     ///
     /// In QMDB, this maps to `db.new_batch()`.
-    fn new_batch(&self) -> Self::Unmerkleized;
+    fn new_batch(&self) -> Self::Unmerkleized<'_>;
+
+    /// Create a child unmerkleized batch that reads through `parent`'s
+    /// pending changes before falling back to the committed database state.
+    ///
+    /// In QMDB, this maps to `merkleized_batch.new_batch(db)`.
+    fn fork_batch<'a>(&'a self, parent: &'a Self::Merkleized) -> Self::Unmerkleized<'a>;
 
     /// Apply a merkleized batch's changeset to the underlying database.
     ///
@@ -165,20 +167,26 @@ pub struct SyncHandle<T, E> {
 /// external services (RPC, state sync) without a global lock.
 pub trait DatabaseSet: Clone + Send + Sync + 'static {
     /// Tuple of [`ManagedDb::Unmerkleized`] for every database in the set.
-    type Unmerkleized: Send;
+    type Unmerkleized<'a>: Send
+    where
+        Self: 'a;
 
     /// Tuple of [`ManagedDb::Merkleized`] for every database in the set.
-    type Merkleized: Send + Sync;
+    type Merkleized: Clone + Send + Sync;
 
     /// Create unmerkleized batches from each database's committed state.
     ///
     /// Acquires a read lock on each database.
-    fn new_batches(&self) -> impl Future<Output = Self::Unmerkleized> + Send;
+    fn new_batches(&self) -> impl Future<Output = Self::Unmerkleized<'_>> + Send;
 
     /// Create child unmerkleized batches from a pending merkleized parent.
     ///
-    /// No lock is needed; reads come from the in-memory merkleized state.
-    fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized;
+    /// Acquires a read lock on each database so that child batches can read
+    /// through the parent's pending changes and fall back to committed state.
+    fn fork_batches(
+        &self,
+        parent: &Self::Merkleized,
+    ) -> impl Future<Output = Self::Unmerkleized<'_>> + Send;
 
     /// Apply each merkleized batch's changeset to its underlying database.
     ///
@@ -234,16 +242,19 @@ async fn finalize_or_panic<T: ManagedDb>(
 }
 
 /// Implement [`DatabaseSet`] for a single [`ManagedDb`] behind a lock.
-impl<T: ManagedDb + 'static> DatabaseSet for Arc<AsyncRwLock<T>> {
-    type Unmerkleized = T::Unmerkleized;
+impl<T: ManagedDb + 'static> DatabaseSet for Arc<AsyncRwLock<T>>
+where
+    T::Merkleized: Clone,
+{
+    type Unmerkleized<'a> = T::Unmerkleized<'a> where Self: 'a;
     type Merkleized = T::Merkleized;
 
-    async fn new_batches(&self) -> Self::Unmerkleized {
+    async fn new_batches(&self) -> Self::Unmerkleized<'_> {
         self.read().await.new_batch()
     }
 
-    fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {
-        parent.new_batch()
+    async fn fork_batches(&self, parent: &Self::Merkleized) -> Self::Unmerkleized<'_> {
+        self.read().await.fork_batch(parent)
     }
 
     async fn finalize(&self, batches: Self::Merkleized) {
@@ -252,7 +263,10 @@ impl<T: ManagedDb + 'static> DatabaseSet for Arc<AsyncRwLock<T>> {
     }
 }
 
-impl<T: SyncableDb + 'static> SyncableDatabaseSet for Arc<AsyncRwLock<T>> {
+impl<T: SyncableDb + 'static> SyncableDatabaseSet for Arc<AsyncRwLock<T>>
+where
+    T::Merkleized: Clone,
+{
     type SyncConfigs = T::SyncConfig;
     type SyncResolvers = T::SyncResolver;
     type SyncTargets = T::SyncTarget;
@@ -291,16 +305,18 @@ macro_rules! impl_database_set {
     ($($T:ident : $idx:tt),+) => {
         impl<$($T: ManagedDb + 'static),+> DatabaseSet
             for ($(Arc<AsyncRwLock<$T>>,)+)
+        where
+            $($T::Merkleized: Clone,)+
         {
-            type Unmerkleized = ($($T::Unmerkleized,)+);
+            type Unmerkleized<'a> = ($($T::Unmerkleized<'a>,)+) where Self: 'a;
             type Merkleized = ($($T::Merkleized,)+);
 
-            async fn new_batches(&self) -> Self::Unmerkleized {
+            async fn new_batches(&self) -> Self::Unmerkleized<'_> {
                 join!($(async { self.$idx.read().await.new_batch() },)+)
             }
 
-            fn fork_batches(parent: &Self::Merkleized) -> Self::Unmerkleized {
-                ($(parent.$idx.new_batch(),)+)
+            async fn fork_batches(&self, parent: &Self::Merkleized) -> Self::Unmerkleized<'_> {
+                join!($(async { self.$idx.read().await.fork_batch(&parent.$idx) },)+)
             }
 
             async fn finalize(&self, batches: Self::Merkleized) {
@@ -325,6 +341,7 @@ macro_rules! impl_syncable_database_set {
         where
             Err: Debug + Send + 'static,
             $($T: SyncableDb<SyncError = Err> + 'static,)+
+            $($T::Merkleized: Clone,)+
         {
             type SyncConfigs = ($($T::SyncConfig,)+);
             type SyncResolvers = ($($T::SyncResolver,)+);
@@ -446,9 +463,10 @@ mod tests {
     #[derive(Clone, Copy)]
     struct TestUnmerkleized;
 
+    #[derive(Clone)]
     struct TestMerkleized;
 
-    impl Unmerkleized for TestUnmerkleized {
+    impl<'a> Unmerkleized<'a> for TestUnmerkleized {
         type Key = ();
         type Value = ();
         type Merkleized = TestMerkleized;
@@ -469,14 +487,9 @@ mod tests {
 
     impl Merkleized for TestMerkleized {
         type Digest = sha256::Digest;
-        type Unmerkleized = TestUnmerkleized;
 
         fn root(&self) -> Self::Digest {
             sha256::Digest::from([0; 32])
-        }
-
-        fn new_batch(&self) -> Self::Unmerkleized {
-            TestUnmerkleized
         }
     }
 
@@ -484,11 +497,15 @@ mod tests {
     struct TestDb;
 
     impl ManagedDb for TestDb {
-        type Unmerkleized = TestUnmerkleized;
+        type Unmerkleized<'a> = TestUnmerkleized where Self: 'a;
         type Merkleized = TestMerkleized;
         type Error = Infallible;
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        fn new_batch(&self) -> Self::Unmerkleized<'_> {
+            TestUnmerkleized
+        }
+
+        fn fork_batch<'a>(&'a self, _parent: &'a Self::Merkleized) -> Self::Unmerkleized<'a> {
             TestUnmerkleized
         }
 
@@ -517,11 +534,15 @@ mod tests {
     struct FailingFinalizeDb;
 
     impl ManagedDb for FailingFinalizeDb {
-        type Unmerkleized = TestUnmerkleized;
+        type Unmerkleized<'a> = TestUnmerkleized where Self: 'a;
         type Merkleized = TestMerkleized;
         type Error = TestFinalizeError;
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        fn new_batch(&self) -> Self::Unmerkleized<'_> {
+            TestUnmerkleized
+        }
+
+        fn fork_batch<'a>(&'a self, _parent: &'a Self::Merkleized) -> Self::Unmerkleized<'a> {
             TestUnmerkleized
         }
 
@@ -531,11 +552,15 @@ mod tests {
     }
 
     impl ManagedDb for BlockingFinalizeDb {
-        type Unmerkleized = TestUnmerkleized;
+        type Unmerkleized<'a> = TestUnmerkleized where Self: 'a;
         type Merkleized = TestMerkleized;
         type Error = Infallible;
 
-        fn new_batch(&self) -> Self::Unmerkleized {
+        fn new_batch(&self) -> Self::Unmerkleized<'_> {
+            TestUnmerkleized
+        }
+
+        fn fork_batch<'a>(&'a self, _parent: &'a Self::Merkleized) -> Self::Unmerkleized<'a> {
             TestUnmerkleized
         }
 

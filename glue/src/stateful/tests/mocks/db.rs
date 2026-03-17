@@ -33,7 +33,7 @@ pub struct MockUnmerkleized {
     overlay: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
 }
 
-impl Unmerkleized for MockUnmerkleized {
+impl<'a> Unmerkleized<'a> for MockUnmerkleized {
     type Key = Vec<u8>;
     type Value = Vec<u8>;
     type Merkleized = MockMerkleized;
@@ -92,6 +92,7 @@ pub fn compute_root(state: &BTreeMap<Vec<u8>, Vec<u8>>) -> sha256::Digest {
 }
 
 /// A sealed batch whose state root has been computed.
+#[derive(Clone)]
 pub struct MockMerkleized {
     resolved: Arc<BTreeMap<Vec<u8>, Vec<u8>>>,
     state_root: sha256::Digest,
@@ -99,17 +100,9 @@ pub struct MockMerkleized {
 
 impl Merkleized for MockMerkleized {
     type Digest = sha256::Digest;
-    type Unmerkleized = MockUnmerkleized;
 
     fn root(&self) -> sha256::Digest {
         self.state_root
-    }
-
-    fn new_batch(&self) -> MockUnmerkleized {
-        MockUnmerkleized {
-            parent: ParentState::Resolved(self.resolved.clone()),
-            overlay: BTreeMap::new(),
-        }
     }
 }
 
@@ -134,13 +127,20 @@ impl MockDb {
 }
 
 impl ManagedDb for MockDb {
-    type Unmerkleized = MockUnmerkleized;
+    type Unmerkleized<'a> = MockUnmerkleized where Self: 'a;
     type Merkleized = MockMerkleized;
     type Error = Infallible;
 
-    fn new_batch(&self) -> MockUnmerkleized {
+    fn new_batch(&self) -> Self::Unmerkleized<'_> {
         MockUnmerkleized {
             parent: ParentState::Committed(self.committed.clone()),
+            overlay: BTreeMap::new(),
+        }
+    }
+
+    fn fork_batch(&self, parent: &Self::Merkleized) -> Self::Unmerkleized<'_> {
+        MockUnmerkleized {
+            parent: ParentState::Resolved(parent.resolved.clone()),
             overlay: BTreeMap::new(),
         }
     }

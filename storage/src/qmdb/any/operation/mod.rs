@@ -8,9 +8,9 @@ use commonware_utils::hex;
 use std::fmt;
 
 pub(crate) mod fixed;
-pub(crate) mod update;
+pub mod update;
 pub(crate) mod variable;
-pub(crate) use update::Update;
+pub use update::Update;
 
 pub(crate) const DELETE_CONTEXT: u8 = 0xD1;
 pub(crate) const UPDATE_CONTEXT: u8 = 0xD2;
