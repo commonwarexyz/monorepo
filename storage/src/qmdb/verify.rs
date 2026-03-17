@@ -235,7 +235,6 @@ mod tests {
     }
 
     #[test_traced]
-
     fn test_verify_proof_and_extract_digests() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
@@ -363,7 +362,6 @@ mod tests {
     }
 
     #[test_traced]
-
     fn test_create_multi_proof() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
