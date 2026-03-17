@@ -1377,14 +1377,13 @@ mod tests {
         let tracked1 = pool.try_alloc(page).expect("first tracked allocation");
         let tracked2 = pool.try_alloc(page).expect("second tracked allocation");
 
-        // The first return should stay globally visible so another thread can
-        // still make progress when the class is otherwise full.
+        // The first return should stay entirely in the current thread's local cache.
         drop(tracked1);
-        assert_eq!(pool.inner.classes[class_index].global.len(), 1);
-        assert_eq!(get_local_len(&pool.inner.classes[class_index]), 0);
+        assert_eq!(pool.inner.classes[class_index].global.len(), 0);
+        assert_eq!(get_local_len(&pool.inner.classes[class_index]), 1);
 
-        // Returning another tracked buffer can now use the local cache because
-        // one free buffer is already visible in the shared freelist.
+        // Returning another tracked buffer should spill one buffer to the global
+        // freelist and retain one in the current thread's local bin.
         drop(tracked2);
         assert_eq!(pool.inner.classes[class_index].global.len(), 1);
         assert_eq!(get_local_len(&pool.inner.classes[class_index]), 1);
