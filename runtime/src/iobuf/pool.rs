@@ -921,7 +921,7 @@ mod tests {
     use crate::iobuf::IoBuf;
     use bytes::{Buf, BufMut};
     use std::{
-        sync::{mpsc, Arc, Barrier},
+        sync::{mpsc, Arc},
         thread,
     };
 
