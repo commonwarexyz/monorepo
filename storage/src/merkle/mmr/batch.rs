@@ -87,7 +87,7 @@ pub struct UnmerkleizedBatch<D: Digest> {
 impl<D: Digest> UnmerkleizedBatch<D> {
     /// Create a new batch from `parent`.
     /// O(1) time and space (the parent is an `Arc`-backed persistent structure).
-    pub fn new(parent: MerkleizedBatch<D>) -> Self {
+    pub const fn new(parent: MerkleizedBatch<D>) -> Self {
         Self {
             parent,
             appended: Vec::new(),
