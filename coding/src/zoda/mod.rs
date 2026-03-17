@@ -189,12 +189,13 @@ fn row_digest<H: Hasher>(row: &[F]) -> H::Digest {
 }
 
 mod topology;
-use topology::Topology;
+use topology::{Topology, TopologyHint};
 
 /// A shard of data produced by the encoding scheme.
 #[derive(Clone, Debug)]
 pub struct StrongShard<D: Digest> {
     data_bytes: usize,
+    topology_hint: TopologyHint,
     root: D,
     inclusion_proof: Proof<D>,
     rows: Matrix<F>,
@@ -204,6 +205,7 @@ pub struct StrongShard<D: Digest> {
 impl<D: Digest> PartialEq for StrongShard<D> {
     fn eq(&self, other: &Self) -> bool {
         self.data_bytes == other.data_bytes
+            && self.topology_hint == other.topology_hint
             && self.root == other.root
             && self.inclusion_proof == other.inclusion_proof
             && self.rows == other.rows
@@ -216,6 +218,7 @@ impl<D: Digest> Eq for StrongShard<D> {}
 impl<D: Digest> EncodeSize for StrongShard<D> {
     fn encode_size(&self) -> usize {
         self.data_bytes.encode_size()
+            + self.topology_hint.encode_size()
             + self.root.encode_size()
             + self.inclusion_proof.encode_size()
             + self.rows.encode_size()
@@ -226,6 +229,7 @@ impl<D: Digest> EncodeSize for StrongShard<D> {
 impl<D: Digest> Write for StrongShard<D> {
     fn write(&self, buf: &mut impl BufMut) {
         self.data_bytes.write(buf);
+        self.topology_hint.write(buf);
         self.root.write(buf);
         self.inclusion_proof.write(buf);
         self.rows.write(buf);
@@ -244,6 +248,7 @@ impl<D: Digest> Read for StrongShard<D> {
         let max_els = cfg.maximum_shard_size / F::SIZE;
         Ok(Self {
             data_bytes,
+            topology_hint: ReadExt::read(buf)?,
             root: ReadExt::read(buf)?,
             inclusion_proof: Read::read_cfg(buf, &max_els)?,
             rows: Read::read_cfg(buf, &(max_els, ()))?,
@@ -260,6 +265,7 @@ where
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
             data_bytes: u.arbitrary::<u32>()? as usize,
+            topology_hint: u.arbitrary()?,
             root: u.arbitrary()?,
             inclusion_proof: u.arbitrary()?,
             rows: u.arbitrary()?,
@@ -381,28 +387,30 @@ impl<D: Digest> CheckingData<D> {
     /// We're provided with `commitment`, which should hash over `root`,
     /// and `data_bytes`.
     ///
-    /// We're also give a `checksum` matrix used to check the shards we receive.
+    /// We're also given a `checksum` matrix used to check the shards we receive.
     fn reckon(
         namespace: &[u8],
         config: &Config,
         commitment: &Summary,
+        topology_hint: TopologyHint,
         data_bytes: usize,
         root: D,
         checksum: &Matrix<F>,
     ) -> Result<Self, Error> {
-        let topology = Topology::reckon(config, data_bytes);
+        let topology =
+            Topology::reckon(topology_hint, config, data_bytes).ok_or(Error::BadShard)?;
         let mut transcript = Transcript::new(NAMESPACE);
         transcript.commit(namespace);
         transcript.commit((topology.data_bytes as u64).encode());
         transcript.commit(root.encode());
         let expected_commitment = transcript.summarize();
         if *commitment != expected_commitment {
-            return Err(Error::InvalidShard);
+            return Err(Error::BadShard);
         }
         let mut transcript = Transcript::resume(expected_commitment);
         let checking_matrix = checking_matrix(&transcript, &topology);
         if checksum.rows() != topology.data_rows || checksum.cols() != topology.column_samples {
-            return Err(Error::InvalidShard);
+            return Err(Error::BadShard);
         }
         // Commit to the checksum before generating the indices to check.
         //
@@ -436,7 +444,7 @@ impl<D: Digest> CheckingData<D> {
         weak_shard: &WeakShard<D>,
     ) -> Result<CheckedShard, Error> {
         if self.commitment != *commitment {
-            return Err(Error::InvalidShard);
+            return Err(Error::BadShard);
         }
         self.topology.check_index(index)?;
         if weak_shard.shard.rows() != self.topology.samples
@@ -483,8 +491,8 @@ impl<D: Digest> CheckingData<D> {
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("invalid shard")]
-    InvalidShard,
+    #[error("bad shard")]
+    BadShard,
     #[error("invalid weak shard")]
     InvalidWeakShard,
     #[error("invalid index {0}")]
@@ -526,7 +534,10 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
     ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error> {
         // Step 1: arrange the data as a matrix.
         let data_bytes = data.remaining();
-        let topology = Topology::reckon(config, data_bytes);
+        let topology_hint = TopologyHint::search(config, data_bytes);
+        let topology = Topology::reckon(topology_hint, config, data_bytes)
+            .expect("searched topology hint must be valid");
+        let topology_hint = topology.hint();
         let data = Matrix::init(
             topology.data_rows,
             topology.data_cols,
@@ -586,6 +597,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
                     .map_err(Error::FailedToCreateInclusionProof)?;
                 Ok(StrongShard {
                     data_bytes,
+                    topology_hint,
                     root,
                     inclusion_proof,
                     rows,
@@ -613,6 +625,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
             namespace,
             config,
             commitment,
+            shard.topology_hint,
             shard.data_bytes,
             shard.root,
             shard.checksum.as_ref(),
@@ -639,24 +652,22 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         _strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
         if checking_data.commitment != *commitment {
-            return Err(Error::InvalidShard);
+            return Err(Error::BadShard);
         }
 
-        let Topology {
-            encoded_rows,
-            data_cols,
-            samples,
-            data_rows,
-            data_bytes,
-            min_shards,
-            ..
-        } = checking_data.topology;
+        let topology = checking_data.topology;
+        let encoded_rows = topology.encoded_rows;
+        let data_cols = topology.data_cols;
+        let samples = topology.samples;
+        let data_rows = topology.data_rows;
+        let data_bytes = topology.data_bytes;
+        let min_shards = topology.min_shards;
         let mut evaluation = EvaluationVector::<F>::empty(encoded_rows.ilog2() as usize, data_cols);
         let mut shard_count = 0usize;
         for shard in shards {
             shard_count += 1;
             if shard.commitment != *commitment {
-                return Err(Error::InvalidShard);
+                return Err(Error::BadShard);
             }
             let indices =
                 &checking_data.shuffled_indices[shard.index * samples..(shard.index + 1) * samples];
@@ -808,6 +819,23 @@ mod tests {
         assert!(matches!(
             Zoda::<Sha256>::weaken(b"", &config, &commitment, a_i as u16, shards[a_i].clone()),
             Err(Error::InvalidWeakShard)
+        ));
+    }
+
+    #[test]
+    fn weaken_rejects_forged_topology_hint() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let data = vec![0xA5u8; 65_536];
+        let (commitment, mut shards) =
+            Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
+        shards[0].topology_hint.data_cols = 1;
+
+        assert!(matches!(
+            Zoda::<Sha256>::weaken(&config, &commitment, 0, shards[0].clone()),
+            Err(Error::BadShard)
         ));
     }
 
