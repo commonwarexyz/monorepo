@@ -516,7 +516,10 @@ where
         }
     }
 
-    async fn handle_resolvers(&mut self, idx: usize, bytes: Vec<u8>) {
+    async fn handle_honest_resolvers(&mut self, sender: &S::PublicKey, receiver_idx: usize, bytes: Vec<u8>) {
+        if sender != &self.honest {
+            return;
+        }
         let default_response = self
             .strategy
             .mutate_resolver_bytes(&mut self.context, &bytes);
@@ -539,12 +542,15 @@ where
         } else {
             default_response
         };
-        let _ = self.resolver_senders[idx]
+        let _ = self.resolver_senders[receiver_idx]
             .send(Recipients::One(self.honest.clone()), response, true)
             .await;
     }
 
-    fn handle_certificates(&mut self, bytes: Vec<u8>) {
+    fn handle_honest_certificates(&mut self, sender: &S::PublicKey, bytes: Vec<u8>) {
+        if sender != &self.honest {
+            return;
+        }
         let cfg = self.schemes[0].certificate_codec_config();
         let Ok(certificate) = Certificate::<S, Sha256Digest>::read_cfg(&mut bytes.as_slice(), &cfg)
         else {
@@ -593,16 +599,16 @@ where
         }
 
         for idx in 0..self.certificate_receivers.len() {
-            while let Some(Ok((_, msg))) = self.certificate_receivers[idx].recv().now_or_never() {
+            while let Some(Ok((sender, msg))) = self.certificate_receivers[idx].recv().now_or_never() {
                 let bytes: Vec<u8> = msg.into();
-                self.handle_certificates(bytes);
+                self.handle_honest_certificates(&sender, bytes);
             }
         }
 
         for idx in 0..self.resolver_receivers.len() {
-            while let Some(Ok((_, msg))) = self.resolver_receivers[idx].recv().now_or_never() {
+            while let Some(Ok((sender, msg))) = self.resolver_receivers[idx].recv().now_or_never() {
                 let bytes: Vec<u8> = msg.into();
-                self.handle_resolvers(idx, bytes).await;
+                self.handle_honest_resolvers(&sender, idx, bytes).await;
             }
         }
     }
@@ -910,7 +916,7 @@ where
 
         for (view, proposal) in notarized {
             // Intuition: if we observe an honest notarize, quickly add byzantine nodes support so the
-            // honest node can make progress as in the real protocol and keep advancing height under heavy load.
+            // honest node can make progress, as in the real protocol, and keep advancing the height under heavy load.
             for signer_idx in 0..self.schemes.len() {
                 self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
                     .await;
