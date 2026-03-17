@@ -832,6 +832,59 @@ mod tests {
     }
 
     #[test]
+    fn test_last_element_proof_size_is_two() {
+        // An MMB property is that the most recent item always has a small proof
+        // (at most 2 digests). Verify this holds as the tree grows.
+        let mut hasher = H::new();
+        let (_, mut mmb) = make_mmb(1000);
+        let mut n = 1000u64;
+
+        while n <= 5000 {
+            let leaves = mmb.leaves();
+            let root = *mmb.root();
+
+            let loc = n - 1;
+            let bp =
+                blueprint(leaves, Location::new(loc)..Location::new(n)).unwrap();
+
+            let total_digests =
+                usize::from(!bp.fold_prefix.is_empty()) + bp.fetch_nodes.len();
+            assert!(
+                total_digests <= 2,
+                "n={n}: expected <= 2 digests, got {total_digests} \
+                 (fold_prefix={}, fetch_nodes={})",
+                bp.fold_prefix.len(),
+                bp.fetch_nodes.len(),
+            );
+
+            // Verify the proof actually works.
+            let proof = mmb
+                .proof(&mut hasher, Location::new(loc))
+                .unwrap();
+            assert!(
+                proof.verify_element_inclusion(
+                    &mut hasher,
+                    &loc.to_be_bytes(),
+                    Location::new(loc),
+                    &root,
+                ),
+                "n={n}: verification failed"
+            );
+
+            // Grow by 100 elements.
+            let changeset = {
+                let mut batch = mmb.new_batch();
+                for i in n..n + 100 {
+                    batch.add(&mut hasher, &i.to_be_bytes());
+                }
+                batch.merkleize(&mut hasher).finalize()
+            };
+            mmb.apply(changeset).unwrap();
+            n += 100;
+        }
+    }
+
+    #[test]
     fn test_tampered_proof_digests_rejected() {
         for n in [8u64, 13, 20, 32] {
             let (mut hasher, mmb) = make_mmb(n);
