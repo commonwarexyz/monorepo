@@ -319,6 +319,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     ///
     /// With stable leaders, if the current view follows a skipped term, prefer
     /// a nullification from that term over a notarization at the previous view.
+    /// The nullification is what proves the skipped views were abandoned, which
+    /// is the evidence peers need to enter the new term safely.
     pub fn get_best_certificate(&self) -> Option<Certificate<S, D>> {
         let prev = self
             .view
@@ -335,8 +337,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             return Some(Certificate::Finalization(finalization));
         }
 
-        // If we are at the start of a term, it's possible that a nullification somewhere in the
-        // previous term sent us here.
+        // At a term boundary, prefer the highest nullification from the previous
+        // term because it proves the skipped views were abandoned.
         if self.view.term_start(self.term_length) == self.view {
             let term_start = prev.term_start(self.term_length);
             // Check for the highest nullification in the previous term
@@ -466,10 +468,13 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         // Enforce term safety rule: if we voted to nullify a view earlier in the term and have not
         // finalized over that view, refuse to finalize.
         let term_start = view.term_start(self.term_length);
-        if let Some(nullify_view) = self.nullify_views.range(term_start..=view).next_back() {
-            if *nullify_view > self.last_finalized {
-                return None;
-            }
+        if self
+            .nullify_views
+            .range(term_start..=view)
+            .next_back()
+            .is_some_and(|nullify_view| *nullify_view > self.last_finalized)
+        {
+            return None;
         }
 
         let candidate = self
