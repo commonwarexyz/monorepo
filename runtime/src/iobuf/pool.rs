@@ -45,11 +45,6 @@
 //! freelist before attempting to create a new tracked buffer. Returned buffers
 //! first try to re-enter the dropping thread's local cache, spilling a bounded
 //! batch back to the global freelist if needed.
-//!
-//! To prevent livelock when the class is at capacity, returning a buffer to a
-//! completely empty global freelist always pushes directly to global rather
-//! than caching locally. This ensures at least one free buffer remains visible
-//! to other threads.
 
 use super::IoBufMut;
 use crate::iobuf::aligned::{AlignedBuffer, PooledBufMut};
