@@ -45,6 +45,11 @@
 //! freelist before attempting to create a new tracked buffer. Returned buffers
 //! first try to re-enter the dropping thread's local cache, spilling a bounded
 //! batch back to the global freelist if needed.
+//!
+//! To prevent livelock when the class is at capacity, returning a buffer to a
+//! completely empty global freelist always pushes directly to global rather
+//! than caching locally. This ensures at least one free buffer remains visible
+//! to other threads.
 
 use super::IoBufMut;
 use crate::iobuf::aligned::{AlignedBuffer, PooledBufMut};
@@ -412,7 +417,12 @@ impl SizeClass {
         }
     }
 
-    // Keep local bins small so a hot thread cannot hoard most of the class budget.
+    /// Per-thread cache capacity for this size class.
+    ///
+    /// Sized to `max / (2 * threads)`, clamped to `[1, 8]`. The 2x divisor
+    /// reserves half the class budget for the shared global freelist so that
+    /// cross-thread reuse and the global-visibility guarantee remain effective.
+    /// The clamp to 8 caps per-thread memory retention.
     fn local_capacity(max: usize) -> usize {
         let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
         let effective_threads = threads.min(max);
@@ -475,12 +485,17 @@ impl TlsSizeClassCache {
         self.entries.pop()
     }
 
+    /// Pushes an entry into the local cache, spilling to global if full.
+    ///
+    /// When the cache is at capacity, half the entries (at least one) are
+    /// drained back to the global freelist before the new entry is inserted.
     fn push(&mut self, entry: TlsSizeClassCacheEntry) {
         if self.entries.len() < self.local_capacity {
             self.entries.push(entry);
             return;
         }
 
+        // Spill half the cache to global to make room.
         let spill = self.entries.len().min(self.local_capacity / 2).max(1);
         for _ in 0..spill {
             let Some(spilled) = self.entries.pop() else {
@@ -553,6 +568,11 @@ impl TlsCache {
         });
     }
 
+    /// Batch-refills the local cache from the global freelist.
+    ///
+    /// Pulls up to `target - 1` buffers from global into the local cache.
+    /// Called after a global pop succeeds, so the caller already holds one
+    /// buffer and we warm the cache for subsequent local hits.
     #[inline]
     fn refill(class: &Arc<SizeClass>, target: usize) {
         Self::with_class_cache_mut(class.class_id, class.local_capacity, |cache| {
@@ -604,14 +624,17 @@ pub(crate) struct BufferPoolInner {
 impl BufferPoolInner {
     /// Try to allocate a buffer from the given size class.
     ///
+    /// Uses a three-tier strategy:
+    /// 1. **Thread-local cache** (fast path): no atomics, no contention.
+    /// 2. **Global freelist**: atomic pop, then batch-refill the local cache.
+    /// 3. **New allocation**: reserve capacity via CAS, allocate from heap.
+    ///
     /// If `zero_on_new` is true, newly-created buffers are allocated with
     /// `alloc_zeroed`. Reused buffers are never re-zeroed here.
     fn try_alloc(&self, class_index: usize, zero_on_new: bool) -> Option<Allocation> {
         let class = &self.classes[class_index];
-        let label = SizeClassLabel {
-            size_class: class.size as u64,
-        };
 
+        // Fast path: reuse from thread-local cache (no atomics, no metrics).
         if let Some(entry) = TlsCache::pop(class) {
             return Some(Allocation {
                 buffer: entry.buffer,
@@ -620,6 +643,7 @@ impl BufferPoolInner {
             });
         }
 
+        // Medium path: refill from global freelist.
         let target = (class.local_capacity / 2).max(1);
         if let Some(buffer) = class.global.pop() {
             TlsCache::refill(class, target);
@@ -630,6 +654,10 @@ impl BufferPoolInner {
             });
         }
 
+        // Slow path: create a new tracked buffer (metrics only here).
+        let label = SizeClassLabel {
+            size_class: class.size as u64,
+        };
         if !class.try_reserve() {
             self.metrics.exhausted_total.get_or_create(&label).inc();
             return None;
@@ -897,7 +925,10 @@ mod tests {
     use super::*;
     use crate::iobuf::IoBuf;
     use bytes::{Buf, BufMut};
-    use std::{sync::mpsc, thread};
+    use std::{
+        sync::{mpsc, Arc, Barrier},
+        thread,
+    };
 
     fn test_size_class(size: usize, alignment: usize) -> Arc<SizeClass> {
         Arc::new(SizeClass::new(
@@ -1351,13 +1382,14 @@ mod tests {
         let tracked1 = pool.try_alloc(page).expect("first tracked allocation");
         let tracked2 = pool.try_alloc(page).expect("second tracked allocation");
 
-        // The first return should stay entirely in the current thread's local cache.
+        // The first return should stay globally visible so another thread can
+        // still make progress when the class is otherwise full.
         drop(tracked1);
-        assert_eq!(pool.inner.classes[class_index].global.len(), 0);
-        assert_eq!(get_local_len(&pool.inner.classes[class_index]), 1);
+        assert_eq!(pool.inner.classes[class_index].global.len(), 1);
+        assert_eq!(get_local_len(&pool.inner.classes[class_index]), 0);
 
-        // Returning another tracked buffer should spill one buffer to the global
-        // freelist and retain one in the current thread's local bin.
+        // Returning another tracked buffer can now use the local cache because
+        // one free buffer is already visible in the shared freelist.
         drop(tracked2);
         assert_eq!(pool.inner.classes[class_index].global.len(), 1);
         assert_eq!(get_local_len(&pool.inner.classes[class_index]), 1);

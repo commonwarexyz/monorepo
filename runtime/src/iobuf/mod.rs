@@ -1,5 +1,12 @@
 //! Buffer types for I/O operations.
 //!
+//! Each buffer type is backed by one of three storage variants:
+//! - [`Bytes`]/[`BytesMut`]: standard heap allocation (from `From` conversions)
+//! - Aligned: untracked aligned allocation (from [`IoBufMut::with_alignment`]
+//!   or pool-bypass for small requests)
+//! - Pooled: tracked aligned allocation returned to a [`BufferPool`] on drop
+//!
+//! Public types:
 //! - [`IoBuf`]: Immutable byte buffer
 //! - [`IoBufMut`]: Mutable byte buffer
 //! - [`IoBufs`]: Container for one or more immutable buffers
@@ -35,6 +42,11 @@ pub struct IoBuf {
     inner: IoBufInner,
 }
 
+/// Internal storage variant for [`IoBuf`].
+///
+/// - `Bytes`: from `From<Bytes>`, `From<Vec<u8>>`, `From<&'static [u8]>`, etc.
+/// - `Aligned`: from untracked aligned allocation (pool bypass or fallback)
+/// - `Pooled`: from [`BufferPool`] allocation (returned to pool on final drop)
 #[derive(Clone, Debug)]
 enum IoBufInner {
     Bytes(Bytes),
@@ -419,6 +431,8 @@ pub struct IoBufMut {
     inner: IoBufMutInner,
 }
 
+/// Internal storage variant for [`IoBufMut`]. See [`IoBufInner`] for variant
+/// semantics.
 #[derive(Debug)]
 enum IoBufMutInner {
     Bytes(BytesMut),
@@ -452,6 +466,9 @@ impl IoBufMut {
     /// pooled reuse.
     #[inline]
     pub fn with_alignment(capacity: usize, alignment: NonZeroUsize) -> Self {
+        if capacity == 0 {
+            return Self::with_capacity(0);
+        }
         let buffer = AlignedBuffer::new(capacity, alignment.get());
         Self::from_aligned(AlignedBufMut::new(buffer))
     }
@@ -463,6 +480,9 @@ impl IoBufMut {
     /// range to zero and sets `len == capacity == len`.
     #[inline]
     pub fn zeroed_with_alignment(len: usize, alignment: NonZeroUsize) -> Self {
+        if len == 0 {
+            return Self::zeroed(0);
+        }
         let buffer = AlignedBuffer::new_zeroed(len, alignment.get());
         let mut buffer = Self::from_aligned(AlignedBufMut::new(buffer));
         // SAFETY: the aligned allocation was zero-initialized for `len` bytes.
@@ -3679,6 +3699,21 @@ mod tests {
         // `Bytes::from_static` cannot be converted to mutable without copy.
         let from_iobuf = IoBufMut::from(IoBuf::from(Bytes::from_static(b"io")));
         assert_eq!(from_iobuf.as_ref(), b"io");
+    }
+
+    #[test]
+    fn test_iobufmut_aligned_zero_length_constructors() {
+        let alignment = NonZeroUsize::new(64).expect("non-zero alignment");
+
+        let with_alignment = IoBufMut::with_alignment(0, alignment);
+        assert!(with_alignment.is_empty());
+        assert_eq!(with_alignment.len(), 0);
+        assert_eq!(with_alignment.capacity(), 0);
+
+        let zeroed = IoBufMut::zeroed_with_alignment(0, alignment);
+        assert!(zeroed.is_empty());
+        assert_eq!(zeroed.len(), 0);
+        assert_eq!(zeroed.capacity(), 0);
     }
 
     #[test]

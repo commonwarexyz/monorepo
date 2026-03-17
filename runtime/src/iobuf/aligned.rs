@@ -108,6 +108,7 @@ pub(crate) trait Owner: Send + Sync + 'static {
     fn release(self, buffer: AlignedBuffer);
 }
 
+/// Owner that deallocates the buffer directly on drop.
 #[derive(Clone, Copy)]
 pub(crate) struct UntrackedOwner;
 
@@ -118,6 +119,10 @@ impl Owner for UntrackedOwner {
     }
 }
 
+/// Owner that returns the buffer to its originating pool size class on drop.
+///
+/// The `Arc<SizeClass>` is *moved* (not cloned) through the TLS cache on the
+/// steady-state alloc/free path, avoiding refcount traffic.
 #[derive(Clone)]
 pub(crate) struct TrackedOwner {
     class: Arc<SizeClass>,
@@ -140,7 +145,10 @@ struct BufInner<O: Owner> {
     owner: ManuallyDrop<O>,
 }
 
-// SAFETY: `BufInner` contains only the aligned allocation and owner state.
+// SAFETY: `AlignedBuffer` is `!Send`/`!Sync` due to `NonNull<u8>`, but it
+// represents a uniquely-owned heap allocation with no aliasing pointers, so it
+// is safe to transfer across threads. `O: Send + Sync + 'static` is enforced
+// by the `Owner` trait bound.
 unsafe impl<O: Owner> Send for BufInner<O> {}
 // SAFETY: see above.
 unsafe impl<O: Owner> Sync for BufInner<O> {}
@@ -411,11 +419,17 @@ pub(crate) struct BufMut<O: Owner> {
 }
 
 impl<O: Owner> BufMut<O> {
+    /// Capacity of the underlying allocation (ignoring cursor).
     #[inline]
     fn raw_capacity(&self) -> usize {
         self.inner.capacity()
     }
 
+    /// Converts this mutable buffer into a shared immutable view.
+    ///
+    /// Wraps `self` in [`ManuallyDrop`] to suppress its `Drop` impl, then
+    /// moves the inner state into an `Arc`-backed [`Buf`]. The resulting
+    /// view covers only the current readable window (`cursor..len`).
     fn into_shared(self) -> Buf<O> {
         let mut me = ManuallyDrop::new(self);
         // SAFETY: `me` is wrapped in `ManuallyDrop`, so its `Drop` impl will not run.
