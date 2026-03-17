@@ -246,8 +246,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                         &peer, &*rate_limits, batch_remaining,
                                     ).await?;
                                 }
-                                conn_sender.flush().await.map_err(Error::SendFailed)?;
                             }
+                            conn_sender.flush().await.map_err(Error::SendFailed)?;
                         },
                         msg_low = self.low.recv() => {
                             let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
@@ -260,13 +260,20 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             .await?;
 
                             if self.max_send_batch > 1 {
-                                let batch_remaining = self.max_send_batch - 1;
-                                Self::drain_data_channel(
-                                    &mut self.low, &mut conn_sender, &self.sent_messages,
+                                let mut batch_remaining = self.max_send_batch - 1;
+                                let drained = Self::drain_data_channel(
+                                    &mut self.high, &mut conn_sender, &self.sent_messages,
                                     &peer, &*rate_limits, batch_remaining,
                                 ).await?;
-                                conn_sender.flush().await.map_err(Error::SendFailed)?;
+                                batch_remaining -= drained;
+                                if batch_remaining > 0 {
+                                    Self::drain_data_channel(
+                                        &mut self.low, &mut conn_sender, &self.sent_messages,
+                                        &peer, &*rate_limits, batch_remaining,
+                                    ).await?;
+                                }
                             }
+                            conn_sender.flush().await.map_err(Error::SendFailed)?;
                         },
                     }
 
