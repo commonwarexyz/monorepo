@@ -229,6 +229,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.broadcast_notarize
     }
 
+    /// Returns true if we already broadcast a finalize vote for this round.
+    pub const fn broadcast_finalize(&self) -> bool {
+        self.broadcast_finalize
+    }
+
     /// Returns true if certification was aborted due to finalization.
     #[cfg(test)]
     pub const fn is_certify_aborted(&self) -> bool {

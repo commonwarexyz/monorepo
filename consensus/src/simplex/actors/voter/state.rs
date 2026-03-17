@@ -519,10 +519,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Indirect notarization can make a view usable as ancestry, but does not
     /// replace the local certification requirement for finalization.
     ///
-    /// Within a term, the immediate parent must also be certified. We do not
-    /// need to walk farther back because a certifiable parent would already have
-    /// triggered our finalize vote unless term safety was blocked by a prior
-    /// nullify, which the guard above already enforces.
+    /// Within a term, the immediate parent must also be certified and either
+    /// have our local finalize vote or already have a finalization certificate.
+    /// We do not need to walk farther back because a certifiable parent would
+    /// already have triggered our finalize vote unless term safety was blocked
+    /// by a prior nullify, which the guard above already enforces.
     pub fn construct_finalize(&mut self, view: View) -> Option<Finalize<S, D>> {
         // We don't need to finalize views that are already finalized.
         if view <= self.last_finalized {
@@ -549,7 +550,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             let parent = view
                 .previous()
                 .expect("non-genesis views must have a parent");
-            if parent > self.last_finalized && !self.is_explicitly_certified(parent) {
+            if parent > self.last_finalized && !self.can_finalize_child(parent) {
                 return None;
             }
         }
@@ -891,13 +892,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         None
     }
 
-    fn is_explicitly_certified(&self, view: View) -> bool {
+    fn can_finalize_child(&self, view: View) -> bool {
         if view == GENESIS_VIEW {
             return true;
         }
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.finalization().is_some() || round.is_certified())
+        self.views.get(&view).is_some_and(|round| {
+            (round.finalization().is_some() || round.is_certified())
+                && (round.finalization().is_some() || round.broadcast_finalize())
+        })
     }
 
     /// Returns true if the view is notarized, directly or through a descendant.
@@ -3812,7 +3814,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_requires_immediate_parent_certification_within_term() {
+    fn finalize_requires_parent_finalize_participation_within_term() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -3852,6 +3854,22 @@ mod tests {
             assert!(state.certified(View::new(2), true).is_some());
 
             assert!(state.construct_finalize(View::new(2)).is_none());
+
+            let proposal_v1 = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([45u8; 32]),
+            );
+            let finalize_votes_v1: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal_v1.clone()).unwrap())
+                .collect();
+            let finalization_v1 =
+                Finalization::from_finalizes(&verifier, finalize_votes_v1.iter(), &Sequential)
+                    .expect("finalization");
+            state.add_finalization(finalization_v1);
+
+            assert!(state.construct_finalize(View::new(2)).is_some());
         });
     }
 
@@ -3875,8 +3893,9 @@ mod tests {
                 optimistic_depth: 0,
             };
 
-            // Helper that prepares certified views 1 and 2 within the same term.
-            let build_certified_view_2 = |state: &mut State<_, _, _, _>| {
+            // Helper that prepares a locally finalized parent at view 1 and a
+            // certified child at view 2 within the same term.
+            let build_finalizable_view_2 = |state: &mut State<_, _, _, _>| {
                 let proposal_v1 = Proposal::new(
                     Rnd::new(Epoch::new(1), View::new(1)),
                     GENESIS_VIEW,
@@ -3894,6 +3913,7 @@ mod tests {
                         .expect("notarization");
                 assert!(state.add_notarization(notarization_v1).0);
                 assert!(state.certified(View::new(1), true).is_some());
+                assert!(state.construct_finalize(View::new(1)).is_some());
 
                 let proposal = Proposal::new(
                     Rnd::new(Epoch::new(1), View::new(2)),
@@ -3916,7 +3936,7 @@ mod tests {
             // Baseline: without replayed nullify, finalization is allowed at view 2.
             let mut baseline = State::new(context.with_label("baseline"), cfg);
             baseline.set_genesis(test_genesis());
-            build_certified_view_2(&mut baseline);
+            build_finalizable_view_2(&mut baseline);
             assert!(
                 baseline.construct_finalize(View::new(2)).is_some(),
                 "finalize should be allowed without prior nullify"
