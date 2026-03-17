@@ -1151,7 +1151,7 @@ where
         let journal_size = *self.last_commit_loc + 1;
         UnmerkleizedBatch {
             db: self,
-            journal_batch: self.log.to_batch().new_batch::<H>(),
+            journal_batch: self.log.new_batch(),
             mutations: BTreeMap::new(),
             base_diff: Arc::new(BTreeMap::new()),
             base_operations: Vec::new(),

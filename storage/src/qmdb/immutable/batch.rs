@@ -102,7 +102,7 @@ where
     pub(super) fn new(immutable: &'a Immutable<E, K, V, H, T>, journal_size: u64) -> Self {
         Self {
             immutable,
-            journal_batch: immutable.journal.to_batch().new_batch::<H>(),
+            journal_batch: immutable.journal.new_batch(),
             mutations: BTreeMap::new(),
             base_diff: Arc::new(BTreeMap::new()),
             base_size: journal_size,

@@ -77,7 +77,7 @@ where
     pub(super) fn new(keyless: &'a Keyless<E, V, H>, journal_size: u64) -> Self {
         Self {
             keyless,
-            journal_batch: keyless.journal.to_batch().new_batch::<H>(),
+            journal_batch: keyless.journal.new_batch(),
             appends: Vec::new(),
             base_operations: Vec::new(),
             base_size: journal_size,

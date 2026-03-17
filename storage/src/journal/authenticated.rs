@@ -213,7 +213,12 @@ where
     where
         C::Item: Encode,
     {
-        self.to_batch().new_batch()
+        let mut batch = self.to_batch().new_batch();
+        #[cfg(feature = "std")]
+        {
+            batch.inner = batch.inner.with_pool(self.mmr.pool());
+        }
+        batch
     }
 
     /// Create an owned [`MerkleizedBatch`] representing the current committed state.
