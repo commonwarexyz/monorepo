@@ -34,6 +34,7 @@ pub struct Actor<
     gossip_bit_vec_frequency: Duration,
     max_peer_set_size: u64,
     peer_gossip_max_count: usize,
+    max_send_batch: usize,
     info_verifier: InfoVerifier<C>,
 
     receiver: mpsc::Receiver<Message<O, I, C>>,
@@ -82,6 +83,7 @@ impl<
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
+                max_send_batch: cfg.max_send_batch,
                 info_verifier: cfg.info_verifier,
                 receiver,
                 sent_messages,
@@ -153,6 +155,7 @@ impl<
                                         gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
                                         max_peer_set_size: self.max_peer_set_size,
                                         peer_gossip_max_count: self.peer_gossip_max_count,
+                                        max_send_batch: self.max_send_batch,
                                         info_verifier,
                                     },
                                 );

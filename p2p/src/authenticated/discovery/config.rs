@@ -117,6 +117,16 @@ pub struct Config<C: Signer> {
     /// of which requires a signature verification).
     pub peer_gossip_max_count: usize,
 
+    /// Maximum number of data messages to coalesce per send batch.
+    ///
+    /// After dequeuing one data message, the peer actor drains up to
+    /// `max_send_batch - 1` more ready messages (high-priority first)
+    /// before flushing. Requires a non-zero
+    /// [`write_buffer_size`](commonware_runtime::tokio::Config::write_buffer_size)
+    /// on the runtime to benefit from syscall coalescing.
+    /// Defaults to 1 (no batching).
+    pub max_send_batch: usize,
+
     /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
 }
@@ -155,6 +165,7 @@ impl<C: Signer> Config<C> {
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
             peer_gossip_max_count: 32,
+            max_send_batch: 1,
             block_duration: Duration::from_hours(4),
         }
     }
@@ -197,6 +208,7 @@ impl<C: Signer> Config<C> {
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
             peer_gossip_max_count: 32,
+            max_send_batch: 1,
             block_duration: Duration::from_hours(1),
         }
     }
@@ -232,6 +244,7 @@ impl<C: Signer> Config<C> {
             max_peer_set_size: 1 << 8, // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),
             peer_gossip_max_count: 32,
+            max_send_batch: 1,
             block_duration: Duration::from_mins(1),
         }
     }

@@ -26,6 +26,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
 
     ping_frequency: Duration,
+    max_send_batch: usize,
 
     control: mpsc::Receiver<Message>,
     high: mpsc::Receiver<EncodedData>,
@@ -47,6 +48,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
             Self {
                 context,
                 ping_frequency: cfg.ping_frequency,
+                max_send_batch: cfg.max_send_batch,
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
@@ -91,7 +93,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         Ok(())
     }
 
-    /// Sends pre-encoded bytes directly to the stream.
     async fn send_encoded<Si: Sink>(
         sender: &mut Sender<Si>,
         sent_messages: &Family<metrics::Message, Counter>,
@@ -101,6 +102,37 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         sender.send(payload).await.map_err(Error::SendFailed)?;
         sent_messages.get_or_create(&metric).inc();
         Ok(())
+    }
+
+    async fn drain_data_channel<Si: Sink, V>(
+        rx: &mut mpsc::Receiver<EncodedData>,
+        conn_sender: &mut Sender<Si>,
+        sent_messages: &Family<metrics::Message, Counter>,
+        peer: &C,
+        rate_limits: &HashMap<u64, V>,
+        remaining: usize,
+    ) -> Result<usize, Error> {
+        let mut count = 0;
+        for _ in 0..remaining {
+            match rx.try_recv() {
+                Ok(encoded) => {
+                    assert!(
+                        rate_limits.contains_key(&encoded.channel),
+                        "outbound message on invalid channel"
+                    );
+                    Self::send_encoded(
+                        conn_sender,
+                        sent_messages,
+                        metrics::Message::new_data(peer, encoded.channel),
+                        encoded.payload,
+                    )
+                    .await?;
+                    count += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        Ok(count)
     }
 
     pub async fn run<Si: Sink, St: Stream>(
@@ -149,6 +181,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 types::Message::Ping,
                             )
                             .await?;
+                            conn_sender.flush().await.map_err(Error::SendFailed)?;
 
                             // Reset ticker
                             deadline = context.current() + self.ping_frequency;
@@ -159,7 +192,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                         },
                         msg_high = self.high.recv() => {
-                            // Data is already pre-encoded, just forward to stream
                             let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
                             Self::send_encoded(
                                 &mut conn_sender,
@@ -168,9 +200,24 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 encoded.payload,
                             )
                             .await?;
+
+                            if self.max_send_batch > 1 {
+                                let mut batch_remaining = self.max_send_batch - 1;
+                                let drained = Self::drain_data_channel(
+                                    &mut self.high, &mut conn_sender, &self.sent_messages,
+                                    &peer, &*rate_limits, batch_remaining,
+                                ).await?;
+                                batch_remaining -= drained;
+                                if batch_remaining > 0 {
+                                    Self::drain_data_channel(
+                                        &mut self.low, &mut conn_sender, &self.sent_messages,
+                                        &peer, &*rate_limits, batch_remaining,
+                                    ).await?;
+                                }
+                                conn_sender.flush().await.map_err(Error::SendFailed)?;
+                            }
                         },
                         msg_low = self.low.recv() => {
-                            // Data is already pre-encoded, just forward to stream
                             let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
                             Self::send_encoded(
                                 &mut conn_sender,
@@ -179,6 +226,15 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 encoded.payload,
                             )
                             .await?;
+
+                            if self.max_send_batch > 1 {
+                                let batch_remaining = self.max_send_batch - 1;
+                                Self::drain_data_channel(
+                                    &mut self.low, &mut conn_sender, &self.sent_messages,
+                                    &peer, &*rate_limits, batch_remaining,
+                                ).await?;
+                                conn_sender.flush().await.map_err(Error::SendFailed)?;
+                            }
                         },
                     }
 
@@ -303,6 +359,7 @@ mod tests {
         Config {
             mailbox_size: 10,
             ping_frequency: Duration::from_secs(30),
+            max_send_batch: 1,
             sent_messages: Family::<metrics::Message, Counter>::default(),
             received_messages: Family::<metrics::Message, Counter>::default(),
             dropped_messages: Family::<metrics::Message, Counter>::default(),

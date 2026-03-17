@@ -180,6 +180,7 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
             config.max_message_size,
         )
         .await?;
+        sink.flush().await.map_err(Error::SendFailed)?;
 
         let (current_time, ok_timestamps) = config.time_information(&ctx);
         let (state, syn) = dial_start(
@@ -193,12 +194,14 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
             ),
         );
         send_frame(&mut sink, syn.encode(), config.max_message_size).await?;
+        sink.flush().await.map_err(Error::SendFailed)?;
 
         let syn_ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
         let syn_ack = SynAck::<S::Signature>::decode(syn_ack_bytes)?;
 
         let (ack, send, recv) = dial_end(state, syn_ack)?;
         send_frame(&mut sink, ack.encode(), config.max_message_size).await?;
+        sink.flush().await.map_err(Error::SendFailed)?;
 
         Ok((
             Sender {
@@ -263,6 +266,7 @@ pub async fn listen<
             msg1,
         )?;
         send_frame(&mut sink, syn_ack.encode(), config.max_message_size).await?;
+        sink.flush().await.map_err(Error::SendFailed)?;
 
         let ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
         let ack = Ack::decode(ack_bytes)?;
@@ -337,6 +341,11 @@ impl<O: Sink> Sender<O> {
             },
         )
         .await
+    }
+
+    /// Flush any buffered data in the underlying transport.
+    pub async fn flush(&mut self) -> Result<(), Error> {
+        self.sink.flush().await.map_err(Error::SendFailed)
     }
 }
 

@@ -29,6 +29,10 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
         });
         Ok(())
     }
+
+    async fn flush(&mut self) -> Result<(), Error> {
+        self.inner.flush().await
+    }
 }
 
 /// A stream that audits network operations.

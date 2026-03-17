@@ -590,6 +590,15 @@ stability_scope!(BETA {
             &mut self,
             bufs: impl Into<IoBufs> + Send,
         ) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Flush any buffered data to the underlying transport.
+        ///
+        /// Implementations that buffer writes (e.g. the tokio backend) must
+        /// override this to ensure data reaches the peer. The default is a
+        /// no-op for implementations that write through immediately.
+        fn flush(&mut self) -> impl Future<Output = Result<(), Error>> + Send {
+            async { Ok(()) }
+        }
     }
 
     /// Interface that any runtime must implement to receive
