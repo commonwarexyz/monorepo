@@ -144,6 +144,10 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
 }
 
 fn touch_pages(ptr: *mut u8, size: usize, page_size: usize) {
+    if size == 0 {
+        return;
+    }
+
     // SAFETY: `ptr` is valid for writes to `size` bytes.
     unsafe {
         for offset in (0..size).step_by(page_size) {
