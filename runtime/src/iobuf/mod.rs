@@ -299,9 +299,8 @@ impl Buf for IoBuf {
                 if len != 0 && len == p.remaining() {
                     let inner = std::mem::replace(&mut self.inner, IoBufInner::Bytes(Bytes::new()));
                     match inner {
-                        IoBufInner::Aligned(a) => a.into_bytes(),
                         IoBufInner::Pooled(p) => p.into_bytes(),
-                        IoBufInner::Bytes(_) => unreachable!(),
+                        IoBufInner::Bytes(_) | IoBufInner::Aligned(_) => unreachable!(),
                     }
                 } else {
                     p.copy_to_bytes(len)
@@ -714,9 +713,8 @@ impl Buf for IoBufMut {
                     let inner =
                         std::mem::replace(&mut self.inner, IoBufMutInner::Bytes(BytesMut::new()));
                     match inner {
-                        IoBufMutInner::Aligned(a) => a.into_bytes(),
                         IoBufMutInner::Pooled(p) => p.into_bytes(),
-                        IoBufMutInner::Bytes(_) => unreachable!(),
+                        IoBufMutInner::Bytes(_) | IoBufMutInner::Aligned(_) => unreachable!(),
                     }
                 } else {
                     p.copy_to_bytes(len)
