@@ -8,8 +8,8 @@
 
 use criterion::{criterion_group, criterion_main};
 
-mod reuse;
+mod pool;
 
-criterion_group!(benches, reuse::bench);
+criterion_group!(benches, pool::bench);
 
 criterion_main!(benches);
