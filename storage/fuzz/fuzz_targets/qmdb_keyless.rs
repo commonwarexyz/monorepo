@@ -165,7 +165,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for v in pending_appends.drain(..) {
-                            batch.append(v);
+                            batch = batch.append(v);
                         }
                         batch.merkleize(metadata_bytes.clone()).finalize()
                     };
@@ -189,7 +189,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for v in pending_appends.drain(..) {
-                            batch.append(v);
+                            batch = batch.append(v);
                         }
                         batch.merkleize(None).finalize()
                     };
@@ -204,7 +204,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for v in pending_appends.drain(..) {
-                            batch.append(v);
+                            batch = batch.append(v);
                         }
                         batch.merkleize(None).finalize()
                     };
@@ -228,7 +228,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for v in pending_appends.drain(..) {
-                            batch.append(v);
+                            batch = batch.append(v);
                         }
                         batch.merkleize(None).finalize()
                     };
@@ -248,7 +248,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for v in pending_appends.drain(..) {
-                            batch.append(v);
+                            batch = batch.append(v);
                         }
                         batch.merkleize(None).finalize()
                     };
@@ -278,7 +278,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for v in pending_appends.drain(..) {
-                            batch.append(v);
+                            batch = batch.append(v);
                         }
                         batch.merkleize(None).finalize()
                     };
@@ -321,7 +321,7 @@ fn fuzz(input: FuzzInput) {
         let finalized = {
             let mut batch = db.new_batch();
             for v in pending_appends.drain(..) {
-                batch.append(v);
+                batch = batch.append(v);
             }
             batch.merkleize(None).finalize()
         };

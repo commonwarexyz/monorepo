@@ -452,10 +452,11 @@ where
         // parent already contains all prior batches' MMR state, so we only
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
+        let mut journal_batch = self.journal_batch;
         for op in &ops {
-            self.journal_batch.add(op.clone());
+            journal_batch = journal_batch.add(op.clone());
         }
-        let journal_batch = self.journal_batch.merkleize();
+        let journal_batch = journal_batch.merkleize();
 
         // Build the operation chain: parent segments + this batch's segment.
         self.base_operations.push(Arc::new(ops));
