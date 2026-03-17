@@ -756,6 +756,96 @@ mod tests {
     }
 
     #[test]
+    fn test_untracked_aligned_debug_and_view_paths() {
+        let page = page_size();
+
+        // Cover debug formatting for the raw aligned owner.
+        let buffer = AlignedBuffer::new(16, page);
+        let buffer_debug = format!("{buffer:?}");
+        assert!(buffer_debug.contains("AlignedBuffer"));
+        assert!(buffer_debug.contains("capacity"));
+
+        // Exercise the mutable aligned wrapper through Buf/BufMut-style access.
+        let mut aligned_mut = AlignedBufMut::new(buffer);
+        let aligned_mut_debug = format!("{aligned_mut:?}");
+        assert!(aligned_mut_debug.contains("AlignedBufMut"));
+        assert!(aligned_mut.is_empty());
+
+        aligned_mut.put_slice(b"abcdefgh");
+        assert_eq!(aligned_mut.as_mut(), b"abcdefgh");
+        assert_eq!(Buf::remaining(&aligned_mut), 8);
+        assert_eq!(Buf::chunk(&aligned_mut), b"abcdefgh");
+
+        Buf::advance(&mut aligned_mut, 2);
+        assert_eq!(aligned_mut.as_mut_ptr() as usize % page, 2);
+        assert_eq!(Buf::chunk(&aligned_mut), b"cdefgh");
+
+        let prefix = Buf::copy_to_bytes(&mut aligned_mut, 2);
+        assert_eq!(prefix.as_ref(), b"cd");
+        assert_eq!(Buf::chunk(&aligned_mut), b"efgh");
+
+        aligned_mut.clear();
+        assert!(aligned_mut.is_empty());
+        aligned_mut.put_slice(b"wxyz");
+
+        // Empty aligned owners should detach into empty Bytes cleanly.
+        let empty_bytes = AlignedBufMut::new(AlignedBuffer::new(8, page)).into_bytes();
+        assert!(empty_bytes.is_empty());
+
+        // Cover immutable debug/view/slice paths on the aligned wrapper.
+        let aligned = aligned_mut.into_aligned();
+        let aligned_debug = format!("{aligned:?}");
+        assert!(aligned_debug.contains("AlignedBuf"));
+        assert_eq!(aligned.as_ptr(), aligned.as_ref().as_ptr());
+        assert_eq!(aligned.as_ref(), b"wxyz");
+        assert_eq!(aligned.clone().slice(..2).unwrap().as_ref(), b"wx");
+        assert_eq!(aligned.clone().slice(1..).unwrap().as_ref(), b"xyz");
+        assert_eq!(aligned.clone().slice(1..=2).unwrap().as_ref(), b"xy");
+        assert_eq!(
+            aligned
+                .clone()
+                .slice((Bound::Included(1), Bound::Excluded(3)))
+                .unwrap()
+                .as_ref(),
+            b"xy"
+        );
+
+        let mut split = aligned.clone();
+        let split_prefix = split.split_to(2);
+        assert_eq!(split_prefix.as_ref(), b"wx");
+        assert_eq!(split.as_ref(), b"yz");
+
+        let mut drained = aligned.clone();
+        let head = Buf::copy_to_bytes(&mut drained, 1);
+        assert_eq!(head.as_ref(), b"w");
+        let tail = Buf::copy_to_bytes(&mut drained, 3);
+        assert_eq!(tail.as_ref(), b"xyz");
+        assert_eq!(Buf::remaining(&drained), 0);
+
+        // Unique aligned owners can recover mutability without copying.
+        let mut unique_source = AlignedBufMut::new(AlignedBuffer::new(8, page));
+        unique_source.put_slice(b"qrst");
+        let unique = unique_source.into_aligned();
+        let recovered = unique
+            .try_into_mut()
+            .expect("unique aligned buffer should recover mutability");
+        assert_eq!(recovered.as_ref(), b"qrst");
+
+        // Shared aligned owners must refuse the mutable conversion.
+        let mut shared_source = AlignedBufMut::new(AlignedBuffer::new(8, page));
+        shared_source.put_slice(b"uvwx");
+        let shared = shared_source.into_aligned();
+        let _clone = shared.clone();
+        assert!(shared.try_into_mut().is_err());
+
+        // Fully draining a unique aligned owner should hand back owned Bytes.
+        let mut bytes_source = AlignedBufMut::new(AlignedBuffer::new(8, page));
+        bytes_source.put_slice(b"lmno");
+        let owned_bytes = bytes_source.into_aligned().into_bytes();
+        assert_eq!(owned_bytes.as_ref(), b"lmno");
+    }
+
+    #[test]
     fn test_pooled_buf_mut_freeze() {
         let page = page_size();
         let mut registry = test_registry();

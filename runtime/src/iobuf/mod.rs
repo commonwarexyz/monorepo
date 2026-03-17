@@ -2296,6 +2296,20 @@ mod tests {
         let encoded = large.encode();
         let decoded = IoBuf::decode_cfg(encoded, &large_cfg).unwrap();
         assert_eq!(large, decoded);
+
+        let mut truncated = BytesMut::new();
+        4usize.write(&mut truncated);
+        truncated.extend_from_slice(b"xy");
+        let mut truncated = truncated.freeze();
+        assert!(IoBuf::read_cfg(&mut truncated, &cfg).is_err());
+
+        // Directly exercise the successful `read_cfg` path, not just decode helpers.
+        let mut direct = BytesMut::new();
+        4usize.write(&mut direct);
+        direct.extend_from_slice(b"wxyz");
+        let mut direct = direct.freeze();
+        let decoded = IoBuf::read_cfg(&mut direct, &cfg).unwrap();
+        assert_eq!(decoded, b"wxyz");
     }
 
     #[test]
@@ -2420,6 +2434,12 @@ mod tests {
         let mut prepend_noop = IoBufs::from(b"x");
         prepend_noop.prepend(IoBuf::default());
         assert_eq!(prepend_noop.coalesce(), b"x");
+
+        let mut prepend_into_empty = IoBufs::default();
+        // Prepending into an empty aggregate should stay on the single-buffer fast path.
+        prepend_into_empty.prepend(IoBuf::from(b"z"));
+        assert!(prepend_into_empty.is_single());
+        assert_eq!(prepend_into_empty.coalesce(), b"z");
 
         let mut prepend_pair = IoBufs::from(vec![IoBuf::from(b"b"), IoBuf::from(b"c")]);
         prepend_pair.prepend(IoBuf::from(b"a"));
@@ -3272,7 +3292,11 @@ mod tests {
         assert!(matches!(bufs.inner, IoBufsMutInner::Chunked(_)));
         let first = bufs.copy_to_bytes(1);
         assert_eq!(&first[..], b"a");
-        assert_eq!(bufs.remaining(), 4);
+        // Stay chunked while consuming across multiple tiny chunks.
+        let next = bufs.copy_to_bytes(3);
+        assert_eq!(&next[..], b"bcd");
+        assert_eq!(bufs.chunk(), b"e");
+        assert_eq!(bufs.remaining(), 1);
     }
 
     #[test]
@@ -3617,6 +3641,17 @@ mod tests {
         assert_eq!(coalesced, b"hello world");
         assert!(coalesced.is_pooled());
 
+        let bufs = IoBufsMut::from(vec![
+            IoBufMut::from(b"a"),
+            IoBufMut::from(b"b"),
+            IoBufMut::from(b"c"),
+            IoBufMut::from(b"d"),
+        ]);
+        // Four chunks force the deque-backed coalesce path instead of pair/triple fast paths.
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"abcd");
+        assert!(coalesced.is_pooled());
+
         // With extra capacity: zero-copy if sufficient spare capacity
         let mut buf = IoBufMut::with_capacity(100);
         buf.put_slice(b"hello");
@@ -3699,6 +3734,107 @@ mod tests {
         // `Bytes::from_static` cannot be converted to mutable without copy.
         let from_iobuf = IoBufMut::from(IoBuf::from(Bytes::from_static(b"io")));
         assert_eq!(from_iobuf.as_ref(), b"io");
+    }
+
+    #[test]
+    fn test_iobuf_aligned_public_paths() {
+        static ARRAY: &[u8; 4] = b"wxyz";
+
+        let alignment = NonZeroUsize::new(64).expect("non-zero alignment");
+
+        // Start from a non-zero untracked aligned buffer to cover the public mutable API.
+        let mut aligned_mut = IoBufMut::with_alignment(8, alignment);
+        assert!(!aligned_mut.is_pooled());
+        assert!(aligned_mut.is_empty());
+        assert_eq!(aligned_mut.capacity(), 8);
+        assert!((aligned_mut.as_mut_ptr() as usize).is_multiple_of(64));
+
+        aligned_mut.put_slice(b"abcdefgh");
+        assert_eq!(aligned_mut.as_mut(), b"abcdefgh");
+        assert_eq!(aligned_mut.chunk(), b"abcdefgh");
+        aligned_mut.advance(2);
+        assert_eq!(aligned_mut.chunk(), b"cdefgh");
+
+        let partial = aligned_mut.copy_to_bytes(2);
+        assert_eq!(partial.as_ref(), b"cd");
+        assert_eq!(aligned_mut.as_ref(), b"efgh");
+        let empty = aligned_mut.copy_to_bytes(0);
+        assert!(empty.is_empty());
+        assert_eq!(aligned_mut.as_ref(), b"efgh");
+
+        aligned_mut.clear();
+        assert!(aligned_mut.is_empty());
+        aligned_mut.put_slice(&*ARRAY);
+        assert!(aligned_mut == ARRAY);
+
+        // Full aligned drains should use the owner-transfer path, including len == 0 first.
+        let mut fully_drained = IoBufMut::with_alignment(4, alignment);
+        fully_drained.put_slice(b"lmno");
+        let empty = fully_drained.copy_to_bytes(0);
+        assert!(empty.is_empty());
+        assert_eq!(fully_drained.as_ref(), b"lmno");
+        let drained = fully_drained.copy_to_bytes(4);
+        assert_eq!(drained.as_ref(), b"lmno");
+        assert!(fully_drained.is_empty());
+
+        // Freeze to an immutable aligned `IoBuf` and exercise its view/Buf dispatch.
+        let aligned = aligned_mut.freeze();
+        assert!(!aligned.is_pooled());
+        assert_eq!(aligned.as_ref(), &ARRAY[..]);
+        assert!(aligned == ARRAY);
+        assert!(!aligned.as_ptr().is_null());
+        assert_eq!(aligned.slice(..2), b"wx");
+        assert_eq!(aligned.slice(1..), b"xyz");
+        assert_eq!(aligned.slice(1..=2), b"xy");
+        assert_eq!(aligned.chunk(), b"wxyz");
+
+        let mut split = aligned.clone();
+        let prefix = split.split_to(2);
+        assert_eq!(prefix, b"wx");
+        assert_eq!(split, b"yz");
+
+        let mut advanced = aligned.clone();
+        advanced.advance(2);
+        assert_eq!(advanced.chunk(), b"yz");
+
+        // Partial and full immutable drains should preserve the aligned backing behavior.
+        let mut drained = aligned.clone();
+        let empty = drained.copy_to_bytes(0);
+        assert!(empty.is_empty());
+        assert_eq!(drained.as_ref(), &ARRAY[..]);
+        let first = drained.copy_to_bytes(1);
+        assert_eq!(first.as_ref(), b"w");
+        let rest = drained.copy_to_bytes(3);
+        assert_eq!(rest.as_ref(), b"xyz");
+        assert_eq!(drained.remaining(), 0);
+
+        // Unique aligned immutable buffers can become mutable again.
+        let mut unique_source = IoBufMut::zeroed_with_alignment(4, alignment);
+        unique_source.as_mut().copy_from_slice(b"pqrs");
+        let unique = unique_source.freeze();
+        let recovered = unique
+            .try_into_mut()
+            .expect("unique aligned iobuf should recover mutability");
+        assert_eq!(recovered.as_ref(), b"pqrs");
+
+        // Shared aligned immutable buffers must reject the mutable conversion.
+        let mut shared_source = IoBufMut::zeroed_with_alignment(4, alignment);
+        shared_source.as_mut().copy_from_slice(b"tuvw");
+        let shared = shared_source.freeze();
+        let _shared_clone = shared.clone();
+        assert!(shared.try_into_mut().is_err());
+
+        // Owned/container conversions should preserve bytes for aligned backings.
+        let vec_out: Vec<u8> = aligned.clone().into();
+        let bytes_out: Bytes = aligned.into();
+        assert_eq!(vec_out, ARRAY.to_vec());
+        assert_eq!(bytes_out.as_ref(), &ARRAY[..]);
+
+        let from_array = IoBuf::from(ARRAY);
+        assert_eq!(from_array, b"wxyz");
+
+        let iobufs = IoBufs::from(ARRAY);
+        assert_eq!(iobufs.chunk(), b"wxyz");
     }
 
     #[test]
@@ -4045,6 +4181,36 @@ mod tests {
         assert_eq!(bytes.as_ref(), b"abc");
         assert!(needs_canonicalize);
 
+        let mut empty_with_leading_mut = VecDeque::from([IoBufMut::default()]);
+        let (bytes, needs_canonicalize) =
+            copy_to_bytes_chunked(&mut empty_with_leading_mut, 0, "x");
+        assert!(bytes.is_empty());
+        assert!(!needs_canonicalize);
+        assert!(empty_with_leading_mut.is_empty());
+
+        // Mirror the fast/slow chunked helper paths for mutable chunks too.
+        let mut fast_mut = VecDeque::from([
+            IoBufMut::from(b"ab"),
+            IoBufMut::from(b"cd"),
+            IoBufMut::from(b"ef"),
+            IoBufMut::from(b"gh"),
+        ]);
+        let (bytes, needs_canonicalize) = copy_to_bytes_chunked(&mut fast_mut, 2, "x");
+        assert_eq!(bytes.as_ref(), b"ab");
+        assert!(needs_canonicalize);
+        assert_eq!(fast_mut.front().expect("front exists").as_ref(), b"cd");
+
+        let mut slow_mut = VecDeque::from([
+            IoBufMut::from(b"a"),
+            IoBufMut::from(b"bc"),
+            IoBufMut::from(b"de"),
+            IoBufMut::from(b"f"),
+        ]);
+        let (bytes, needs_canonicalize) = copy_to_bytes_chunked(&mut slow_mut, 4, "x");
+        assert_eq!(bytes.as_ref(), b"abcd");
+        assert!(needs_canonicalize);
+        assert_eq!(slow_mut.front().expect("front exists").as_ref(), b"e");
+
         // `advance_chunked_front` should skip empties and drain in linear order.
         let mut advance_chunked = VecDeque::from([
             IoBuf::default(),
@@ -4058,6 +4224,20 @@ mod tests {
         );
         advance_chunked_front(&mut advance_chunked, 2);
         assert!(advance_chunked.is_empty());
+
+        // The front-advance helper also has a separate mutable monomorphization.
+        let mut advance_chunked_mut = VecDeque::from([
+            IoBufMut::default(),
+            IoBufMut::from(b"abc"),
+            IoBufMut::from(b"d"),
+        ]);
+        advance_chunked_front(&mut advance_chunked_mut, 2);
+        assert_eq!(
+            advance_chunked_mut.front().expect("front exists").as_ref(),
+            b"c"
+        );
+        advance_chunked_front(&mut advance_chunked_mut, 2);
+        assert!(advance_chunked_mut.is_empty());
 
         // `advance_small_chunks` signals canonicalization when front chunks are exhausted.
         let mut small = [IoBuf::default(), IoBuf::from(b"abc".to_vec())];
@@ -4075,6 +4255,17 @@ mod tests {
         assert_eq!(small_exact[0].remaining(), 0);
         assert_eq!(small_exact[1].remaining(), 0);
         assert_eq!(small_exact[2].remaining(), 0);
+
+        // Small-chunk copy canonicalization is also instantiated for mutable chunks.
+        let mut small_mut = [
+            IoBufMut::from(b"a"),
+            IoBufMut::from(b"bc"),
+            IoBufMut::from(b"d"),
+        ];
+        let (bytes, needs_canonicalize) = copy_to_bytes_small_chunks(&mut small_mut, 3, "x");
+        assert_eq!(bytes.as_ref(), b"abc");
+        assert!(needs_canonicalize);
+        assert_eq!(small_mut[2].as_ref(), b"d");
 
         // `advance_mut_in_chunks` returns whether the request fully fit in writable chunks.
         let mut writable = [IoBufMut::with_capacity(2), IoBufMut::with_capacity(1)];
@@ -4132,15 +4323,21 @@ mod tests {
         wrapped.push_back(IoBufMut::with_capacity(1));
         wrapped.push_back(IoBufMut::with_capacity(1));
         wrapped.push_back(IoBufMut::with_capacity(1));
+        wrapped.push_back(IoBufMut::with_capacity(1));
+        wrapped.push_back(IoBufMut::with_capacity(1));
         let _ = wrapped.pop_front();
         wrapped.push_back(IoBufMut::with_capacity(1));
-        wrapped.push_back(IoBufMut::with_capacity(1));
+        let (first, second) = wrapped.as_slices();
+        assert!(!first.is_empty());
+        assert!(!second.is_empty());
+        // Force `advance_mut` to consume across the wrapped second slice as well.
+        let to_advance = first.len() + 1;
         let mut chunked = IoBufsMut {
             inner: IoBufsMutInner::Chunked(wrapped),
         };
         // SAFETY: We only verify cursor movement (`remaining`) and do not read bytes.
-        unsafe { chunked.advance_mut(4) };
-        assert_eq!(chunked.remaining(), 4);
+        unsafe { chunked.advance_mut(to_advance) };
+        assert_eq!(chunked.remaining(), to_advance);
         assert!(chunked.remaining_mut() > 0);
     }
 

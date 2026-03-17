@@ -507,9 +507,10 @@ impl TlsSizeClassCache {
         // Spill half the cache to global to make room.
         let spill = self.entries.len().min(self.local_capacity / 2).max(1);
         for _ in 0..spill {
-            let Some(spilled) = self.entries.pop() else {
-                break;
-            };
+            let spilled = self
+                .entries
+                .pop()
+                .expect("spill count must not exceed cached entries");
             spilled.class.push_global(spilled.buffer);
         }
 
@@ -1471,6 +1472,50 @@ mod tests {
         let _d = pool.try_alloc(page).expect("global reuse with refill");
         assert_eq!(get_local_len(class), class.local_capacity / 2 - 1);
         assert_eq!(class.global.len(), 0);
+    }
+
+    #[test]
+    fn test_tls_refill_stops_when_global_runs_empty() {
+        let class = test_size_class(64, 64);
+
+        // A short global freelist should refill only what exists, then stop.
+        class.push_global(AlignedBuffer::new(class.size, class.alignment));
+        TlsCache::refill(&class, MIN_BATCH_CAPACITY);
+
+        assert_eq!(get_local_len(&class), 1);
+        assert_eq!(class.global.len(), 0);
+    }
+
+    #[test]
+    fn test_tls_size_class_cache_push_tolerates_empty_spill() {
+        let class = test_size_class(64, 64);
+        let mut cache = TlsSizeClassCache {
+            entries: Vec::new(),
+            local_capacity: 0,
+        };
+
+        // Small local capacities should bypass batching and push straight to global.
+        cache.push(TlsSizeClassCacheEntry {
+            buffer: AlignedBuffer::new(class.size, class.alignment),
+            class,
+        });
+        drop(cache);
+    }
+
+    #[test]
+    #[should_panic(expected = "tracked buffer should always fit in the global pool")]
+    fn test_push_global_panics_when_global_queue_is_inconsistently_full() {
+        let class = Arc::new(SizeClass::new(
+            NEXT_SIZE_CLASS_ID.fetch_add(1, Ordering::Relaxed),
+            64,
+            64,
+            1,
+            false,
+        ));
+
+        // Overfilling the fixed-size global queue should trip the invariant.
+        class.push_global(AlignedBuffer::new(64, 64));
+        class.push_global(AlignedBuffer::new(64, 64));
     }
 
     #[test]
