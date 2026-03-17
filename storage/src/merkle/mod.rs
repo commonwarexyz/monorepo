@@ -8,6 +8,7 @@
 pub mod batch;
 pub mod hasher;
 mod location;
+pub mod mem;
 pub mod mmb;
 pub mod mmr;
 mod position;
@@ -15,6 +16,7 @@ mod proof;
 mod read;
 
 use alloc::vec::Vec;
+use commonware_cryptography::Digest;
 use core::fmt::Debug;
 pub use location::{Location, LocationRangeExt};
 pub use position::Position;
@@ -56,6 +58,55 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     /// Return the positions of the left and right children of the node at `pos` with the
     /// given `height`. The caller guarantees `height > 0` (leaves have no children).
     fn children(pos: Position<Self>, height: u32) -> (Position<Self>, Position<Self>);
+
+    // --- Peak iteration ---
+
+    /// Iterator over `(peak_position, height)` pairs.
+    type PeakIterator: Iterator<Item = (Position<Self>, u32)>;
+
+    /// Iterate peaks for the given size.
+    fn peak_iterator(size: Position<Self>) -> Self::PeakIterator;
+
+    /// Peaks in oldest-to-newest order for root fold computation.
+    /// Default: same as `peak_iterator` (correct for MMR whose iterator already yields in fold
+    /// order).
+    fn peaks_fold_order(size: Position<Self>) -> Vec<(Position<Self>, u32)> {
+        Self::peak_iterator(size).collect()
+    }
+
+    // --- Append support ---
+
+    /// Heights of internal nodes created when appending a leaf to a structure of the given
+    /// `size`. After appending the leaf at position `size`, each internal node is appended
+    /// sequentially at `size + 1`, `size + 2`, etc.
+    fn merge_heights_on_append(size: Position<Self>) -> Vec<u32>;
+
+    // --- Dirty path support ---
+
+    /// Ancestors of the leaf at `loc` up to its peak root, bottom-up.
+    /// Returns `(parent_position, height)` pairs, starting from the leaf's immediate parent.
+    fn leaf_ancestors(loc: Location<Self>, size: Position<Self>) -> Vec<(Position<Self>, u32)>;
+
+    // --- Proof support ---
+
+    /// Compute the proof blueprint for a leaf range: which peaks are before, after, or contain
+    /// the range, and which sibling nodes are needed for reconstruction.
+    fn proof_blueprint(
+        leaves: Location<Self>,
+        range: core::ops::Range<Location<Self>>,
+    ) -> Result<mem::Blueprint<Self>, mem::Error<Self>>;
+
+    /// Reconstruct the root digest from proof data and elements.
+    ///
+    /// This is the family-specific algorithm that rebuilds the root from a fold-based proof layout.
+    /// MMR and MMB have fundamentally different tree traversal strategies for reconstruction.
+    fn reconstruct_root<D: Digest, H: hasher::Hasher<Self, Digest = D>, E: AsRef<[u8]>>(
+        hasher: &mut H,
+        proof_leaves: Location<Self>,
+        proof_digests: &[D],
+        elements: &[E],
+        start_loc: Location<Self>,
+    ) -> Result<D, proof::ReconstructionError>;
 }
 
 /// Errors from converting between `Position` and `Location`.

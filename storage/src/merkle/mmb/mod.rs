@@ -174,6 +174,122 @@ impl merkle::Family for Family {
         iterator::children(pos, height)
     }
 
+    type PeakIterator = iterator::PeakIterator;
+
+    fn peak_iterator(size: Position) -> Self::PeakIterator {
+        iterator::PeakIterator::new(size)
+    }
+
+    fn peaks_fold_order(size: Position) -> alloc::vec::Vec<(Position, u32)> {
+        let mut peaks: alloc::vec::Vec<_> = iterator::PeakIterator::new(size).collect();
+        peaks.reverse();
+        peaks
+    }
+
+    fn merge_heights_on_append(size: Position) -> alloc::vec::Vec<u32> {
+        // MMB merges at most one pair of same-height adjacent peaks per append.
+        let mut prev_height = 0;
+        for (_, height) in iterator::PeakIterator::new(size) {
+            if height == prev_height {
+                return alloc::vec![height + 1];
+            }
+            prev_height = height;
+        }
+        alloc::vec::Vec::new()
+    }
+
+    fn leaf_ancestors(loc: Location, size: Position) -> alloc::vec::Vec<(Position, u32)> {
+        let peaks = iterator::PeakIterator::new(size);
+        let mut end_leaf_cursor = peaks.leaves().as_u64();
+
+        for (peak_pos, height) in peaks {
+            let leaves_in_peak = 1u64 << height;
+            let leaf_start = end_leaf_cursor - leaves_in_peak;
+            end_leaf_cursor = leaf_start;
+
+            if loc.as_u64() < leaf_start || loc.as_u64() >= leaf_start + leaves_in_peak {
+                continue;
+            }
+
+            // Collect path from peak to leaf (top-down), then reverse for bottom-up.
+            let path = batch::collect_path(peak_pos, height, leaf_start, loc);
+            return path.into_iter().rev().collect();
+        }
+        alloc::vec::Vec::new()
+    }
+
+    fn proof_blueprint(
+        leaves: Location,
+        range: core::ops::Range<Location>,
+    ) -> Result<crate::merkle::mem::Blueprint<Self>, crate::merkle::mem::Error<Self>> {
+        use crate::merkle::mem::{Blueprint, Error};
+
+        if range.is_empty() {
+            return Err(Error::InvalidSize(0));
+        }
+        let end_minus_one = range
+            .end
+            .checked_sub(1)
+            .expect("can't underflow because range is non-empty");
+        if end_minus_one >= leaves {
+            return Err(Error::LeafOutOfBounds(range.end));
+        }
+
+        let size = Position::try_from(leaves)?;
+        let n = leaves;
+
+        // Single-pass peak walk: classify each peak.
+        // PeakIterator yields newest-to-oldest.
+        let mut before = alloc::vec::Vec::new();
+        let mut after = alloc::vec::Vec::new();
+        let mut range_peaks = alloc::vec::Vec::new();
+        let mut end_leaf_cursor = n;
+        for (peak_pos, height) in iterator::PeakIterator::new(size) {
+            let leaves_in_peak = 1u64 << height;
+            let leaf_start = end_leaf_cursor - leaves_in_peak;
+
+            if leaf_start >= range.end {
+                after.push(peak_pos);
+            } else if end_leaf_cursor <= range.start {
+                before.push(peak_pos);
+            } else {
+                let birth_leaf = iterator::peak_birth_leaf(end_leaf_cursor - 1, height);
+                range_peaks.push((birth_leaf, height, leaf_start));
+            }
+            end_leaf_cursor = leaf_start;
+        }
+
+        // Reverse all from newest-to-oldest to oldest-to-newest.
+        before.reverse();
+        after.reverse();
+        range_peaks.reverse();
+
+        // Build fetch_nodes: after-peaks first, then DFS siblings for each range peak.
+        let mut fetch_nodes = after;
+        for &(birth_leaf, height, leaf_start) in &range_peaks {
+            proof::collect_siblings_dfs(birth_leaf, height, leaf_start, &range, &mut fetch_nodes);
+        }
+
+        Ok(Blueprint {
+            fold_prefix: before,
+            fetch_nodes,
+        })
+    }
+
+    fn reconstruct_root<
+        D: commonware_cryptography::Digest,
+        H: crate::merkle::hasher::Hasher<Self, Digest = D>,
+        E: AsRef<[u8]>,
+    >(
+        hasher: &mut H,
+        proof_leaves: Location,
+        proof_digests: &[D],
+        elements: &[E],
+        start_loc: Location,
+    ) -> Result<D, crate::merkle::proof::ReconstructionError> {
+        proof::reconstruct_root_standalone(hasher, proof_leaves, proof_digests, elements, start_loc)
+    }
+
     fn is_valid_size(size: Position) -> bool {
         iterator::leaves_for_size(size).is_some()
     }
@@ -185,7 +301,7 @@ pub type Position = merkle::Position<Family>;
 /// A leaf index or leaf count in an MMB.
 pub type Location = merkle::Location<Family>;
 
-pub type StandardHasher<H> = merkle::hasher::Standard<Family, H>;
+pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 
 /// Errors that can occur during MMB operations.
 #[derive(Debug)]
@@ -223,6 +339,23 @@ impl From<merkle::Error<Family>> for Error {
             merkle::Error::LocationOverflow(loc) => Self::LocationOverflow(loc),
             merkle::Error::NonLeaf(pos) => Self::NonLeaf(pos),
             merkle::Error::PositionOverflow(pos) => Self::PositionOverflow(pos),
+        }
+    }
+}
+
+impl From<merkle::mem::Error<Family>> for Error {
+    fn from(e: merkle::mem::Error<Family>) -> Self {
+        match e {
+            merkle::mem::Error::InvalidSize(s) => Self::InvalidSize(s),
+            merkle::mem::Error::InvalidPinnedNodes => Self::InvalidPinnedNodes,
+            merkle::mem::Error::ElementPruned(pos) => Self::ElementPruned(pos),
+            merkle::mem::Error::LeafOutOfBounds(loc) => Self::LeafOutOfBounds(loc),
+            merkle::mem::Error::LocationOverflow(loc) => Self::LocationOverflow(loc),
+            merkle::mem::Error::NonLeaf(pos) => Self::NonLeaf(pos),
+            merkle::mem::Error::PositionOverflow(pos) => Self::PositionOverflow(pos),
+            merkle::mem::Error::StaleChangeset { expected, actual } => {
+                Self::StaleChangeset { expected, actual }
+            }
         }
     }
 }

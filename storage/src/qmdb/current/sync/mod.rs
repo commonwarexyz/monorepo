@@ -30,7 +30,6 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    merkle::hasher::Hasher as _,
     mmr::{self, journaled::Config as MmrConfig, Location, Position, StandardHasher},
     qmdb::{
         self,

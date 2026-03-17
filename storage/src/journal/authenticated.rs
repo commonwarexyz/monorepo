@@ -145,7 +145,7 @@ impl<
 
     fn proof(
         &self,
-        hasher: &mut impl crate::merkle::hasher::Hasher<Family = crate::mmr::Family, Digest = H::Digest>,
+        hasher: &mut impl crate::merkle::hasher::Hasher<crate::mmr::Family, Digest = H::Digest>,
         loc: Location,
     ) -> Result<Proof<H::Digest>, crate::mmr::Error> {
         self.inner.proof(hasher, loc)
@@ -153,7 +153,7 @@ impl<
 
     fn range_proof(
         &self,
-        hasher: &mut impl crate::merkle::hasher::Hasher<Family = crate::mmr::Family, Digest = H::Digest>,
+        hasher: &mut impl crate::merkle::hasher::Hasher<crate::mmr::Family, Digest = H::Digest>,
         range: core::ops::Range<Location>,
     ) -> Result<Proof<H::Digest>, crate::mmr::Error> {
         self.inner.range_proof(hasher, range)

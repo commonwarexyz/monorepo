@@ -10,10 +10,7 @@ use crate::merkle::{
     },
     proof::{Proof, ReconstructionError},
 };
-use alloc::{
-    collections::{BTreeMap, BTreeSet},
-    vec::Vec,
-};
+use alloc::{collections::BTreeSet, vec::Vec};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -24,125 +21,6 @@ use core::ops::Range;
 pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
 
 impl<D: Digest> Proof<Family, D> {
-    /// Return true if this proof proves that `element` appears at location `loc` within the MMB
-    /// with root digest `root`.
-    pub fn verify_element_inclusion<H>(
-        &self,
-        hasher: &mut H,
-        element: &[u8],
-        loc: Location,
-        root: &D,
-    ) -> bool
-    where
-        H: Hasher<Family = Family, Digest = D>,
-    {
-        self.verify_range_inclusion(hasher, &[element], loc, root)
-    }
-
-    /// Return true if this proof proves that the `elements` appear consecutively starting at
-    /// location `start_loc` within the MMB with root digest `root`.
-    pub fn verify_range_inclusion<H, E>(
-        &self,
-        hasher: &mut H,
-        elements: &[E],
-        start_loc: Location,
-        root: &D,
-    ) -> bool
-    where
-        H: Hasher<Family = Family, Digest = D>,
-        E: AsRef<[u8]>,
-    {
-        match self.reconstruct_root(hasher, elements, start_loc) {
-            Ok(reconstructed_root) => *root == reconstructed_root,
-            Err(_error) => {
-                #[cfg(feature = "std")]
-                tracing::debug!(error = ?_error, "invalid proof input");
-                false
-            }
-        }
-    }
-
-    /// Return true if this proof proves that the elements at the specified locations are included
-    /// in the MMB with root digest `root`. A malformed proof will return false.
-    ///
-    /// The order of the elements does not affect the output.
-    pub fn verify_multi_inclusion<H, E>(
-        &self,
-        hasher: &mut H,
-        elements: &[(E, Location)],
-        root: &D,
-    ) -> bool
-    where
-        H: Hasher<Family = Family, Digest = D>,
-        E: AsRef<[u8]>,
-    {
-        if elements.is_empty() {
-            return self.leaves == Location::new(0)
-                && *root == hasher.root(Location::new(0), core::iter::empty());
-        }
-
-        let mut node_positions = BTreeSet::new();
-        let mut blueprints = BTreeMap::new();
-
-        for (_, loc) in elements {
-            if !loc.is_valid() {
-                return false;
-            }
-            let Ok(bp) = blueprint(self.leaves, *loc..*loc + 1) else {
-                return false;
-            };
-            for &pos in &bp.fold_prefix {
-                node_positions.insert(pos);
-            }
-            for &pos in &bp.fetch_nodes {
-                node_positions.insert(pos);
-            }
-            blueprints.insert(*loc, bp);
-        }
-
-        if node_positions.len() != self.digests.len() {
-            return false;
-        }
-
-        let node_digests: BTreeMap<Position, D> = node_positions
-            .iter()
-            .zip(self.digests.iter())
-            .map(|(&pos, digest)| (pos, *digest))
-            .collect();
-
-        for (element, loc) in elements {
-            let bp = &blueprints[loc];
-
-            let mut digests = Vec::with_capacity(
-                if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len(),
-            );
-            if !bp.fold_prefix.is_empty() {
-                let mut acc = *node_digests
-                    .get(&bp.fold_prefix[0])
-                    .expect("must exist by construction");
-                for &pos in &bp.fold_prefix[1..] {
-                    let d = node_digests.get(&pos).expect("must exist by construction");
-                    acc = hasher.fold(&acc, d);
-                }
-                digests.push(acc);
-            }
-            for &pos in &bp.fetch_nodes {
-                let d = node_digests.get(&pos).expect("must exist by construction");
-                digests.push(*d);
-            }
-            let proof = Self {
-                leaves: self.leaves,
-                digests,
-            };
-
-            if !proof.verify_element_inclusion(hasher, element.as_ref(), *loc, root) {
-                return false;
-            }
-        }
-
-        true
-    }
-
     /// Reconstruct the root digest from this proof and the given elements.
     ///
     /// `elements` are the leaf values for the range `start_loc..start_loc + elements.len()`.
@@ -153,98 +31,113 @@ impl<D: Digest> Proof<Family, D> {
         start_loc: Location,
     ) -> Result<D, ReconstructionError>
     where
-        H: Hasher<Family = Family, Digest = D>,
+        H: Hasher<Family, Digest = D>,
         E: AsRef<[u8]>,
     {
-        if elements.is_empty() {
-            if start_loc == 0 {
-                return if self.digests.is_empty() {
-                    Ok(hasher.digest(&self.leaves.to_be_bytes()))
-                } else {
-                    Err(ReconstructionError::ExtraDigests)
-                };
-            }
-            return Err(ReconstructionError::MissingElements);
-        }
-
-        let end_loc = start_loc
-            .checked_add(elements.len() as u64)
-            .ok_or(ReconstructionError::InvalidEndLoc)?;
-
-        // Classify peaks: before range, after range, or containing range elements.
-        let size = Position::try_from(self.leaves).map_err(|_| ReconstructionError::InvalidSize)?;
-        let mut num_before = 0usize;
-        let mut num_after = 0usize;
-        let mut range_peaks = Vec::new();
-        let mut end_leaf_cursor = self.leaves;
-        for (_peak_pos, height) in PeakIterator::new(size) {
-            let leaves_in_peak = 1u64 << height;
-            let leaf_start = end_leaf_cursor - leaves_in_peak;
-
-            if leaf_start >= end_loc {
-                num_after += 1;
-            } else if end_leaf_cursor <= start_loc {
-                num_before += 1;
-            } else {
-                let birth_leaf = peak_birth_leaf(end_leaf_cursor - 1, height);
-                range_peaks.push((birth_leaf, height, leaf_start));
-            }
-            end_leaf_cursor = leaf_start;
-        }
-        // PeakIterator yields newest-to-oldest; reverse for oldest-to-newest fold order.
-        range_peaks.reverse();
-
-        // Slice self.digests: [folded_prefix? | after_peaks... | siblings...]
-        let prefix_count = usize::from(num_before > 0);
-        let sibling_start = prefix_count + num_after;
-        if self.digests.len() < sibling_start {
-            return Err(ReconstructionError::MissingDigests);
-        }
-        let after_digests = &self.digests[prefix_count..sibling_start];
-        let mut sibling_iter = self.digests[sibling_start..].iter();
-
-        // Fold all peaks into an accumulator (without the leaf count, which is hashed in at the
-        // end to prevent malleability via the `leaves` field).
-        let mut acc: Option<D> = if num_before > 0 {
-            Some(self.digests[0])
-        } else {
-            None
-        };
-
-        // Fold range-containing peaks (reconstructed from elements + siblings).
-        let mut elem_iter = elements.iter();
-        for &(birth_leaf, height, leaf_start) in &range_peaks {
-            let peak_d = reconstruct_peak_from_range(
-                hasher,
-                birth_leaf,
-                height,
-                leaf_start,
-                start_loc..end_loc,
-                &mut elem_iter,
-                &mut sibling_iter,
-            )?;
-            acc = Some(acc.map_or(peak_d, |a| hasher.fold(&a, &peak_d)));
-        }
-
-        if elem_iter.next().is_some() {
-            return Err(ReconstructionError::ExtraDigests);
-        }
-        if sibling_iter.next().is_some() {
-            return Err(ReconstructionError::ExtraDigests);
-        }
-
-        // Fold after-peak digests in oldest-to-newest order (matching the proof layout).
-        for after_d in after_digests.iter() {
-            acc = Some(acc.map_or(*after_d, |a| hasher.fold(&a, after_d)));
-        }
-
-        // Hash the leaf count into the final result.
-        Ok(if let Some(peaks_acc) = acc {
-            hasher.hash([self.leaves.to_be_bytes().as_slice(), peaks_acc.as_ref()])
-        } else {
-            hasher.digest(&self.leaves.to_be_bytes())
-        })
+        reconstruct_root_standalone(hasher, self.leaves, &self.digests, elements, start_loc)
     }
+}
+
+/// Standalone MMB root reconstruction from proof data.
+pub(super) fn reconstruct_root_standalone<D, H, E>(
+    hasher: &mut H,
+    proof_leaves: Location,
+    proof_digests: &[D],
+    elements: &[E],
+    start_loc: Location,
+) -> Result<D, ReconstructionError>
+where
+    D: Digest,
+    H: Hasher<Family, Digest = D>,
+    E: AsRef<[u8]>,
+{
+    if elements.is_empty() {
+        if start_loc == 0 {
+            return if proof_digests.is_empty() {
+                Ok(hasher.digest(&proof_leaves.to_be_bytes()))
+            } else {
+                Err(ReconstructionError::ExtraDigests)
+            };
+        }
+        return Err(ReconstructionError::MissingElements);
+    }
+
+    let end_loc = start_loc
+        .checked_add(elements.len() as u64)
+        .ok_or(ReconstructionError::InvalidEndLoc)?;
+
+    // Classify peaks: before range, after range, or containing range elements.
+    let size = Position::try_from(proof_leaves).map_err(|_| ReconstructionError::InvalidSize)?;
+    let mut num_before = 0usize;
+    let mut num_after = 0usize;
+    let mut range_peaks = Vec::new();
+    let mut end_leaf_cursor = proof_leaves;
+    for (_peak_pos, height) in PeakIterator::new(size) {
+        let leaves_in_peak = 1u64 << height;
+        let leaf_start = end_leaf_cursor - leaves_in_peak;
+
+        if leaf_start >= end_loc {
+            num_after += 1;
+        } else if end_leaf_cursor <= start_loc {
+            num_before += 1;
+        } else {
+            let birth_leaf = peak_birth_leaf(end_leaf_cursor - 1, height);
+            range_peaks.push((birth_leaf, height, leaf_start));
+        }
+        end_leaf_cursor = leaf_start;
+    }
+    // PeakIterator yields newest-to-oldest; reverse for oldest-to-newest fold order.
+    range_peaks.reverse();
+
+    // Slice proof_digests: [folded_prefix? | after_peaks... | siblings...]
+    let prefix_count = usize::from(num_before > 0);
+    let sibling_start = prefix_count + num_after;
+    if proof_digests.len() < sibling_start {
+        return Err(ReconstructionError::MissingDigests);
+    }
+    let after_digests = &proof_digests[prefix_count..sibling_start];
+    let mut sibling_iter = proof_digests[sibling_start..].iter();
+
+    // Fold all peaks into an accumulator.
+    let mut acc: Option<D> = if num_before > 0 {
+        Some(proof_digests[0])
+    } else {
+        None
+    };
+
+    // Fold range-containing peaks (reconstructed from elements + siblings).
+    let mut elem_iter = elements.iter();
+    for &(birth_leaf, height, leaf_start) in &range_peaks {
+        let peak_d = reconstruct_peak_from_range(
+            hasher,
+            birth_leaf,
+            height,
+            leaf_start,
+            start_loc..end_loc,
+            &mut elem_iter,
+            &mut sibling_iter,
+        )?;
+        acc = Some(acc.map_or(peak_d, |a| hasher.fold(&a, &peak_d)));
+    }
+
+    if elem_iter.next().is_some() {
+        return Err(ReconstructionError::ExtraDigests);
+    }
+    if sibling_iter.next().is_some() {
+        return Err(ReconstructionError::ExtraDigests);
+    }
+
+    // Fold after-peak digests in oldest-to-newest order.
+    for after_d in after_digests.iter() {
+        acc = Some(acc.map_or(*after_d, |a| hasher.fold(&a, after_d)));
+    }
+
+    // Hash the leaf count into the final result.
+    Ok(if let Some(peaks_acc) = acc {
+        hasher.hash([proof_leaves.to_be_bytes().as_slice(), peaks_acc.as_ref()])
+    } else {
+        hasher.digest(&proof_leaves.to_be_bytes())
+    })
 }
 
 /// Collect the positions of sibling nodes required for reconstructing a peak digest, in the
@@ -252,7 +145,7 @@ impl<D: Digest> Proof<Family, D> {
 ///
 /// At each node: if the subtree is entirely outside the range, its root position is emitted.
 /// If it's a leaf in the range, nothing is emitted. Otherwise, recurse left then right.
-fn collect_siblings_dfs(
+pub(super) fn collect_siblings_dfs(
     birth_leaf: Location,
     height: u32,
     leaf_start: Location,
@@ -375,49 +268,6 @@ pub(crate) fn nodes_required_for_multi_proof(
     })
 }
 
-/// Build a range proof from a node-fetching closure.
-///
-/// # Errors
-///
-/// - Returns [Error::Empty] if the range is empty.
-/// - Returns [Error::LocationOverflow] if a location exceeds the valid range.
-/// - Returns [Error::RangeOutOfBounds] if the range end exceeds `leaves`.
-/// - Returns [Error::ElementPruned] if any required node is not available via `get_node`.
-#[allow(dead_code)]
-pub(crate) fn build_range_proof<D, H>(
-    hasher: &mut H,
-    leaves: Location,
-    range: Range<Location>,
-    get_node: impl Fn(Position) -> Option<D>,
-) -> Result<Proof<Family, D>, Error>
-where
-    D: Digest,
-    H: Hasher<Family = Family, Digest = D>,
-{
-    let bp = blueprint(leaves, range)?;
-
-    let mut digests =
-        Vec::with_capacity(if bp.fold_prefix.is_empty() { 0 } else { 1 } + bp.fetch_nodes.len());
-
-    // Fold prefix peaks into a single accumulator (without the leaf count, which is always
-    // hashed into the final root independently).
-    if !bp.fold_prefix.is_empty() {
-        let mut acc = get_node(bp.fold_prefix[0]).ok_or(Error::ElementPruned(bp.fold_prefix[0]))?;
-        for &pos in &bp.fold_prefix[1..] {
-            let d = get_node(pos).ok_or(Error::ElementPruned(pos))?;
-            acc = hasher.fold(&acc, &d);
-        }
-        digests.push(acc);
-    }
-
-    // Append after-peak and sibling digests.
-    for &pos in &bp.fetch_nodes {
-        digests.push(get_node(pos).ok_or(Error::ElementPruned(pos))?);
-    }
-
-    Ok(Proof { leaves, digests })
-}
-
 /// Reconstruct a peak digest from elements within a range and sibling digests for subtrees
 /// outside the range.
 ///
@@ -436,7 +286,7 @@ fn reconstruct_peak_from_range<'a, D, H, E, S>(
 ) -> Result<D, ReconstructionError>
 where
     D: Digest,
-    H: Hasher<Family = Family, Digest = D>,
+    H: Hasher<Family, Digest = D>,
     E: Iterator,
     E::Item: AsRef<[u8]>,
     S: Iterator<Item = &'a D>,
@@ -499,7 +349,7 @@ mod tests {
     use commonware_cryptography::Sha256;
 
     type D = <Sha256 as commonware_cryptography::Hasher>::Digest;
-    type H = Standard<Family, Sha256>;
+    type H = Standard<Sha256>;
 
     /// Build an in-memory MMB with `n` elements (element i = i.to_be_bytes()).
     fn make_mmb(n: u64) -> (H, Mmb<D>) {
@@ -844,11 +694,9 @@ mod tests {
             let root = *mmb.root();
 
             let loc = n - 1;
-            let bp =
-                blueprint(leaves, Location::new(loc)..Location::new(n)).unwrap();
+            let bp = blueprint(leaves, Location::new(loc)..Location::new(n)).unwrap();
 
-            let total_digests =
-                usize::from(!bp.fold_prefix.is_empty()) + bp.fetch_nodes.len();
+            let total_digests = usize::from(!bp.fold_prefix.is_empty()) + bp.fetch_nodes.len();
             assert!(
                 total_digests <= 2,
                 "n={n}: expected <= 2 digests, got {total_digests} \
@@ -858,9 +706,7 @@ mod tests {
             );
 
             // Verify the proof actually works.
-            let proof = mmb
-                .proof(&mut hasher, Location::new(loc))
-                .unwrap();
+            let proof = mmb.proof(&mut hasher, Location::new(loc)).unwrap();
             assert!(
                 proof.verify_element_inclusion(
                     &mut hasher,

@@ -2,16 +2,15 @@
 
 use crate::merkle::{Family, Location, Position};
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use core::marker::PhantomData;
 
 /// A trait for computing the various digests of a Merkle-family structure.
 ///
-/// The [`Family`](Self::Family) associated type determines which Merkle family (MMR, MMB, etc.)
-/// this hasher targets, and consequently which `Position` and `Location` types appear in
-/// method signatures. Default implementations are provided for all methods except `hash()`.
-pub trait Hasher: Clone + Send + Sync {
-    /// The Merkle family this hasher targets.
-    type Family: Family;
+/// The `F` type parameter selects the Merkle family (MMR, MMB, etc.) and consequently which
+/// `Position` and `Location` types appear in method signatures. A single hasher implementation
+/// can work with any family, since the hashing logic is family-agnostic.
+///
+/// Default implementations are provided for all methods except `hash()`.
+pub trait Hasher<F: Family>: Clone + Send + Sync {
     type Digest: Digest;
 
     /// Hash an arbitrary sequence of byte slices into a single digest.
@@ -23,7 +22,7 @@ pub trait Hasher: Clone + Send + Sync {
     /// Computes the digest for a node given its position and the digests of its children.
     fn node_digest(
         &mut self,
-        pos: Position<Self::Family>,
+        pos: Position<F>,
         left: &Self::Digest,
         right: &Self::Digest,
     ) -> Self::Digest {
@@ -35,7 +34,7 @@ pub trait Hasher: Clone + Send + Sync {
     }
 
     /// Computes the digest for a leaf given its position and the element it represents.
-    fn leaf_digest(&mut self, pos: Position<Self::Family>, element: &[u8]) -> Self::Digest {
+    fn leaf_digest(&mut self, pos: Position<F>, element: &[u8]) -> Self::Digest {
         self.hash([(*pos).to_be_bytes().as_slice(), element])
     }
 
@@ -56,7 +55,7 @@ pub trait Hasher: Clone + Send + Sync {
     /// in canonical order.
     fn root<'a>(
         &mut self,
-        leaves: Location<Self::Family>,
+        leaves: Location<F>,
         peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
     ) -> Self::Digest {
         let mut iter = peak_digests.into_iter();
@@ -71,49 +70,59 @@ pub trait Hasher: Clone + Send + Sync {
 
 /// The standard hasher for Merkle-family structures. Leverages no external data.
 ///
-/// The type parameter `F` selects the Merkle family (e.g. MMR, MMB).
+/// A single `Standard<H>` instance can hash for any Merkle family, since the hash computation
+/// is family-agnostic.
 #[derive(Clone)]
-pub struct Standard<F: Family, H: CHasher> {
+pub struct Standard<H: CHasher> {
     hasher: H,
-    _family: PhantomData<F>,
 }
 
-impl<F: Family, H: CHasher> Standard<F, H> {
+impl<H: CHasher> Standard<H> {
     /// Creates a new [Standard] hasher.
     pub fn new() -> Self {
-        Self {
-            hasher: H::new(),
-            _family: PhantomData,
+        Self { hasher: H::new() }
+    }
+
+    /// Hash an arbitrary sequence of byte slices into a single digest.
+    ///
+    /// This is a convenience method that avoids the need to specify a family type parameter
+    /// when the family is not relevant.
+    pub fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
+        for part in parts {
+            self.hasher.update(part);
         }
+        self.hasher.finalize()
+    }
+
+    /// Compute the digest of a byte slice.
+    pub fn digest(&mut self, data: &[u8]) -> H::Digest {
+        self.hash(core::iter::once(data))
     }
 }
 
-impl<F: Family, H: CHasher> Default for Standard<F, H> {
+impl<H: CHasher> Default for Standard<H> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<F: Family, H: CHasher> Hasher for Standard<F, H> {
-    type Family = F;
+impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     type Digest = H::Digest;
 
     fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        for part in parts {
-            self.hasher.update(part);
-        }
-        self.hasher.finalize()
+        // Delegate to the inherent method.
+        Self::hash(self, parts)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{self, mem::Mmr, Location, Position};
+    use crate::mmr::{mem::Mmr, Location, Position};
     use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 
-    type MmrStandard<H> = Standard<mmr::Family, H>;
+    type MmrStandard<H> = Standard<H>;
 
     #[test]
     fn test_leaf_digest_sha256() {
@@ -137,52 +146,52 @@ mod tests {
     }
 
     fn test_leaf_digest<H: CHasher>() {
-        let mut mmr_hasher: MmrStandard<H> = MmrStandard::new();
+        let mut hasher: MmrStandard<H> = MmrStandard::new();
         let digest1 = test_digest::<H>(1);
         let digest2 = test_digest::<H>(2);
 
-        let out = mmr_hasher.leaf_digest(Position::new(0), &digest1);
+        let out = hasher.leaf_digest(Position::new(0), &digest1);
         assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
 
-        let mut out2 = mmr_hasher.leaf_digest(Position::new(0), &digest1);
+        let mut out2 = hasher.leaf_digest(Position::new(0), &digest1);
         assert_eq!(out, out2, "hash should be re-computed consistently");
 
-        out2 = mmr_hasher.leaf_digest(Position::new(1), &digest1);
+        out2 = hasher.leaf_digest(Position::new(1), &digest1);
         assert_ne!(out, out2, "hash should change with different pos");
 
-        out2 = mmr_hasher.leaf_digest(Position::new(0), &digest2);
+        out2 = hasher.leaf_digest(Position::new(0), &digest2);
         assert_ne!(out, out2, "hash should change with different input digest");
     }
 
     fn test_node_digest<H: CHasher>() {
-        let mut mmr_hasher: MmrStandard<H> = MmrStandard::new();
+        let mut hasher: MmrStandard<H> = MmrStandard::new();
 
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);
         let d3 = test_digest::<H>(3);
 
-        let out = mmr_hasher.node_digest(Position::new(0), &d1, &d2);
+        let out = hasher.node_digest(Position::new(0), &d1, &d2);
         assert_ne!(out, test_digest::<H>(0), "hash should be non-zero");
 
-        let mut out2 = mmr_hasher.node_digest(Position::new(0), &d1, &d2);
+        let mut out2 = hasher.node_digest(Position::new(0), &d1, &d2);
         assert_eq!(out, out2, "hash should be re-computed consistently");
 
-        out2 = mmr_hasher.node_digest(Position::new(1), &d1, &d2);
+        out2 = hasher.node_digest(Position::new(1), &d1, &d2);
         assert_ne!(out, out2, "hash should change with different pos");
 
-        out2 = mmr_hasher.node_digest(Position::new(0), &d3, &d2);
+        out2 = hasher.node_digest(Position::new(0), &d3, &d2);
         assert_ne!(
             out, out2,
             "hash should change with different first input hash"
         );
 
-        out2 = mmr_hasher.node_digest(Position::new(0), &d1, &d3);
+        out2 = hasher.node_digest(Position::new(0), &d1, &d3);
         assert_ne!(
             out, out2,
             "hash should change with different second input hash"
         );
 
-        out2 = mmr_hasher.node_digest(Position::new(0), &d2, &d1);
+        out2 = hasher.node_digest(Position::new(0), &d2, &d1);
         assert_ne!(
             out, out2,
             "hash should change when swapping order of inputs"
@@ -190,14 +199,14 @@ mod tests {
     }
 
     fn test_root<H: CHasher>() {
-        let mut mmr_hasher: MmrStandard<H> = MmrStandard::new();
+        let mut hasher: MmrStandard<H> = MmrStandard::new();
         let d1 = test_digest::<H>(1);
         let d2 = test_digest::<H>(2);
         let d3 = test_digest::<H>(3);
         let d4 = test_digest::<H>(4);
 
         let empty_vec: Vec<H::Digest> = Vec::new();
-        let empty_out = mmr_hasher.root(Location::new(0), empty_vec.iter());
+        let empty_out = hasher.root(Location::new(0), empty_vec.iter());
         assert_ne!(
             empty_out,
             test_digest::<H>(0),
@@ -207,22 +216,22 @@ mod tests {
         assert_eq!(empty_out, Mmr::empty_mmr_root(&mut H::new()));
 
         let digests = [d1, d2, d3, d4];
-        let out = mmr_hasher.root(Location::new(10), digests.iter());
+        let out = hasher.root(Location::new(10), digests.iter());
         assert_ne!(out, test_digest::<H>(0), "root should be non-zero");
         assert_ne!(out, empty_out, "root should differ from empty MMR");
 
-        let mut out2 = mmr_hasher.root(Location::new(10), digests.iter());
+        let mut out2 = hasher.root(Location::new(10), digests.iter());
         assert_eq!(out, out2, "root should be computed consistently");
 
-        out2 = mmr_hasher.root(Location::new(11), digests.iter());
+        out2 = hasher.root(Location::new(11), digests.iter());
         assert_ne!(out, out2, "root should change with different position");
 
         let digests = [d1, d2, d4, d3];
-        out2 = mmr_hasher.root(Location::new(10), digests.iter());
+        out2 = hasher.root(Location::new(10), digests.iter());
         assert_ne!(out, out2, "root should change with different digest order");
 
         let digests = [d1, d2, d3];
-        out2 = mmr_hasher.root(Location::new(10), digests.iter());
+        out2 = hasher.root(Location::new(10), digests.iter());
         assert_ne!(
             out, out2,
             "root should change with different number of hashes"

@@ -9,7 +9,7 @@ use crate::merkle::{
     hasher::Hasher,
     mmr::{
         iterator::{nodes_needing_parents, PathIterator, PeakIterator},
-        proof, Error, Family, Location, Position, Proof, Readable,
+        Error, Family, Location, Position, Proof, Readable,
     },
 };
 #[cfg(any(feature = "std", test))]
@@ -51,7 +51,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
     /// Hash `element` and add it as a leaf. Returns the leaf's location.
     pub fn add(
         &mut self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         element: &[u8],
     ) -> Location {
         let digest = hasher.leaf_digest(self.size(), element);
@@ -66,7 +66,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
     /// Returns [`Error::ElementPruned`] if the leaf has been pruned.
     pub fn update_leaf(
         &mut self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         loc: Location,
         element: &[u8],
     ) -> Result<(), Error> {
@@ -128,7 +128,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
     /// Consume this batch and produce an immutable [MerkleizedBatch] with computed root.
     pub fn merkleize(
         mut self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
     ) -> MerkleizedBatch<'a, D, P> {
         self.merkleize_dirty(hasher);
 
@@ -204,7 +204,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>> Rea
 
     fn proof(
         &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         loc: Location,
     ) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
@@ -218,10 +218,13 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>> Rea
 
     fn range_proof(
         &self,
-        hasher: &mut impl Hasher<Family = Family, Digest = D>,
+        hasher: &mut impl Hasher<Family, Digest = D>,
         range: core::ops::Range<Location>,
     ) -> Result<Proof<D>, Error> {
-        proof::build_range_proof(hasher, self.leaves(), range, |pos| self.get_node(pos))
+        crate::merkle::proof::build_range_proof(hasher, self.leaves(), range, |pos| {
+            self.get_node(pos)
+        })
+        .map_err(Error::from)
     }
 }
 

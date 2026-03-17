@@ -153,12 +153,12 @@ pub(super) fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) ->
 /// intercepts [HasherTrait::node_digest] to perform the conversion via [grafted_to_ops_pos];
 /// all other methods delegate unchanged.
 #[derive(Clone)]
-pub(super) struct GraftedHasher<H: HasherTrait<Family = mmr::Family>> {
+pub(super) struct GraftedHasher<H: HasherTrait<mmr::Family>> {
     inner: H,
     grafting_height: u32,
 }
 
-impl<H: HasherTrait<Family = mmr::Family>> GraftedHasher<H> {
+impl<H: HasherTrait<mmr::Family>> GraftedHasher<H> {
     pub(super) const fn new(inner: H, grafting_height: u32) -> Self {
         Self {
             inner,
@@ -167,8 +167,7 @@ impl<H: HasherTrait<Family = mmr::Family>> GraftedHasher<H> {
     }
 }
 
-impl<H: HasherTrait<Family = mmr::Family>> HasherTrait for GraftedHasher<H> {
-    type Family = mmr::Family;
+impl<H: HasherTrait<mmr::Family>> HasherTrait<mmr::Family> for GraftedHasher<H> {
     type Digest = H::Digest;
 
     fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
@@ -222,8 +221,7 @@ impl<'a, H: CHasher> Verifier<'a, H> {
     }
 }
 
-impl<H: CHasher> HasherTrait for Verifier<'_, H> {
-    type Family = mmr::Family;
+impl<H: CHasher> HasherTrait<mmr::Family> for Verifier<'_, H> {
     type Digest = H::Digest;
 
     fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
