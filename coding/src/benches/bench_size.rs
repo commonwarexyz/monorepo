@@ -1,5 +1,5 @@
 use commonware_codec::EncodeSize as _;
-use commonware_coding::{Config, NoCoding, ReedSolomon, Scheme, Zoda};
+use commonware_coding::{Config, PhasedAsScheme, ReedSolomon, Scheme, Zoda};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_utils::NZU16;
@@ -26,29 +26,14 @@ fn bench_size<S: Scheme>(name: &str) {
                 data
             };
 
-            let (commitment, mut shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
-            let shard = shards.pop().unwrap();
+            let (_, shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+            let shard = &shards[0];
             println!(
                 "{} (shard)/msg_len={} chunks={}: {} B",
                 name,
                 data_length,
                 chunks,
                 shard.encode_size()
-            );
-
-            let (_, _, weak_shard) = S::weaken(
-                &config,
-                &commitment,
-                config.minimum_shards.get() + config.extra_shards.get() - 1,
-                shard,
-            )
-            .unwrap();
-            println!(
-                "{} (weak_shard)/msg_len={} chunks={}: {} B",
-                name,
-                data_length,
-                chunks,
-                weak_shard.encode_size()
             );
             println!();
         }
@@ -57,6 +42,5 @@ fn bench_size<S: Scheme>(name: &str) {
 
 fn main() {
     bench_size::<ReedSolomon<Sha256>>("reed_solomon size");
-    bench_size::<NoCoding<Sha256>>("no_coding size");
-    bench_size::<Zoda<Sha256>>("zoda size");
+    bench_size::<PhasedAsScheme<Zoda<Sha256>>>("zoda size");
 }

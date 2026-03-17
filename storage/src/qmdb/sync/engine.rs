@@ -170,10 +170,10 @@ where
 {
     /// Create a new sync engine with the given configuration
     pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
-        if config.target.range.is_empty() || !config.target.range.end.is_valid() {
+        if !config.target.range.end().is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
-                lower_bound_pos: config.target.range.start,
-                upper_bound_pos: config.target.range.end,
+                lower_bound_pos: config.target.range.start(),
+                upper_bound_pos: config.target.range.end(),
             }));
         }
 
@@ -181,7 +181,7 @@ where
         let journal = <DB::Journal as Journal>::new(
             config.context.with_label("journal"),
             config.db_config.journal_config(),
-            config.target.range.clone(),
+            config.target.range.clone().into(),
         )
         .await?;
 
@@ -206,18 +206,18 @@ where
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
-        let target_size = self.target.range.end;
+        let target_size = self.target.range.end();
 
-        // Special case: If we don't have pinned nodes, we need to extract them from a proof
+        // Special case: If we don't have pinned nodes, we need to get them from the resolver
         // for the lower sync bound.
         if self.pinned_nodes.is_none() {
-            let start_loc = self.target.range.start;
+            let start_loc = self.target.range.start();
             let resolver = self.resolver.clone();
             self.outstanding_requests.add(
                 start_loc,
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, start_loc, NZU64!(1))
+                        .get_operations(target_size, start_loc, NZU64!(1), true)
                         .await;
                     IndexedFetchResult { start_loc, result }
                 }),
@@ -241,7 +241,7 @@ where
 
             // Find the next gap in the sync range that needs to be fetched.
             let Some(gap_range) = crate::qmdb::sync::gaps::find_next(
-                Location::new(log_size)..self.target.range.end,
+                Location::new(log_size)..self.target.range.end(),
                 &operation_counts,
                 self.outstanding_requests.locations(),
                 self.fetch_batch_size,
@@ -260,7 +260,7 @@ where
                 gap_range.start,
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, gap_range.start, batch_size)
+                        .get_operations(target_size, gap_range.start, batch_size, false)
                         .await;
                     IndexedFetchResult {
                         start_loc: gap_range.start,
@@ -278,7 +278,7 @@ where
         mut self,
         new_target: Target<DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
-        self.journal.resize(new_target.range.start).await?;
+        self.journal.resize(new_target.range.start()).await?;
 
         Ok(Self {
             outstanding_requests: Requests::new(),
@@ -373,7 +373,7 @@ where
     /// Check if sync is complete based on the current journal size and target
     pub async fn is_complete(&self) -> Result<bool, Error<DB, R>> {
         let journal_size = self.journal.size().await;
-        let target_journal_size = self.target.range.end;
+        let target_journal_size = self.target.range.end();
 
         // Check if we've completed sync
         if journal_size >= target_journal_size {
@@ -407,6 +407,7 @@ where
             proof,
             operations,
             success_tx,
+            pinned_nodes,
         } = fetch_result.result.map_err(SyncError::Resolver)?;
 
         // Validate batch size
@@ -418,31 +419,50 @@ where
             return Ok(());
         }
 
-        // Verify the proof
-        let proof_valid = qmdb::verify_proof(
-            &mut self.hasher,
-            &proof,
-            start_loc,
-            &operations,
-            &self.target.root,
-        );
+        // Verify the proof (and pinned nodes if this is the sync boundary batch).
+        let need_pinned = self.pinned_nodes.is_none() && start_loc == self.target.range.start();
+        let valid = if need_pinned {
+            let elements: Vec<_> = operations
+                .iter()
+                .map(commonware_codec::Encode::encode)
+                .collect();
+            let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
+            proof.verify_proof_and_pinned_nodes(
+                &mut self.hasher,
+                &elements,
+                start_loc,
+                nodes,
+                &self.target.root,
+            )
+        } else {
+            qmdb::verify_proof(
+                &mut self.hasher,
+                &proof,
+                start_loc,
+                &operations,
+                &self.target.root,
+            )
+        };
 
-        // Report success or failure to the resolver
-        let _ = success_tx.send(proof_valid);
+        // Report success or failure to the resolver.
+        let _ = success_tx.send(valid);
 
-        if proof_valid {
-            // Extract pinned nodes if we don't have them and this is the first batch
-            if self.pinned_nodes.is_none() && start_loc == self.target.range.start {
-                if let Ok(nodes) =
-                    crate::qmdb::extract_pinned_nodes(&proof, start_loc, operations_len)
-                {
-                    self.pinned_nodes = Some(nodes);
-                }
+        if !valid {
+            if need_pinned {
+                tracing::warn!("boundary proof or pinned nodes failed verification, will retry");
             }
-
-            // Store operations for later application
-            self.store_operations(start_loc, operations);
+            return Ok(());
         }
+
+        // Cache pinned nodes only after successful verification.
+        if need_pinned {
+            if let Some(nodes) = pinned_nodes {
+                self.pinned_nodes = Some(nodes);
+            }
+        }
+
+        // Store operations for later application.
+        self.store_operations(start_loc, operations);
 
         Ok(())
     }
@@ -468,7 +488,7 @@ where
                 self.config,
                 self.journal,
                 self.pinned_nodes,
-                self.target.range.clone(),
+                self.target.range.clone().into(),
                 self.apply_batch_size,
             )
             .await?;
@@ -559,6 +579,7 @@ mod tests {
                     },
                     operations: vec![],
                     success_tx: oneshot::channel().0,
+                    pinned_nodes: None,
                 }),
             }
         });

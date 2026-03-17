@@ -14,7 +14,7 @@ use crate::{
     metadata::{Config as MConfig, Metadata},
     mmr::{
         batch::UnmerkleizedBatch,
-        hasher::Hasher as MmrHasher,
+        hasher::Hasher,
         iterator::nodes_to_pin,
         mem::{Config, Mmr, MIN_TO_PARALLELIZE},
         storage::Storage,
@@ -24,7 +24,7 @@ use crate::{
     },
 };
 use commonware_codec::DecodeExt;
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::{
@@ -45,10 +45,12 @@ pub(crate) fn partial_chunk_root<H: Hasher, const N: usize>(
 ) -> H::Digest {
     assert!(next_bit > 0);
     assert!(next_bit < UtilsBitMap::<N>::CHUNK_SIZE_BITS);
-    hasher.update(mmr_root);
-    hasher.update(&next_bit.to_be_bytes());
-    hasher.update(last_chunk_digest);
-    hasher.finalize()
+    let next_bit = next_bit.to_be_bytes();
+    hasher.hash([
+        mmr_root.as_ref(),
+        next_bit.as_slice(),
+        last_chunk_digest.as_ref(),
+    ])
 }
 
 mod private {
@@ -222,7 +224,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
     /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
     /// bitmap corresponding to `root`.
     pub fn verify_bit_inclusion(
-        hasher: &mut impl MmrHasher<Digest = D>,
+        hasher: &mut impl Hasher<Digest = D>,
         proof: &Proof<D>,
         chunk: &[u8; N],
         bit: u64,
@@ -265,12 +267,8 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
             }
             let last_chunk_digest = hasher.digest(chunk);
             let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
-            let reconstructed_root = partial_chunk_root::<_, N>(
-                hasher.inner(),
-                &last_digest,
-                next_bit,
-                &last_chunk_digest,
-            );
+            let reconstructed_root =
+                partial_chunk_root::<_, N>(hasher, &last_digest, next_bit, &last_chunk_digest);
             return reconstructed_root == *root;
         };
 
@@ -286,7 +284,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
 
         let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
-            partial_chunk_root::<_, N>(hasher.inner(), &mmr_root, next_bit, &last_digest);
+            partial_chunk_root::<_, N>(hasher, &mmr_root, next_bit, &last_digest);
 
         reconstructed_root == *root
     }
@@ -303,7 +301,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         context: E,
         partition: &str,
         pool: Option<ThreadPool>,
-        hasher: &mut impl MmrHasher<Digest = D>,
+        hasher: &mut impl Hasher<Digest = D>,
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig {
             partition: partition.into(),
@@ -457,7 +455,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
     /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
     pub async fn proof(
         &self,
-        hasher: &mut impl MmrHasher<Digest = D>,
+        hasher: &mut impl Hasher<Digest = D>,
         bit: u64,
     ) -> Result<(Proof<D>, [u8; N]), Error> {
         if bit >= self.len() {
@@ -482,7 +480,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         }
 
         let range = chunk_loc..chunk_loc + 1;
-        let mut proof = verification::range_proof(&self.mmr, range).await?;
+        let mut proof = verification::range_proof(hasher, &self.mmr, range).await?;
         proof.leaves = Location::new(self.len());
         if next_bit == Self::CHUNK_SIZE_BITS {
             // Bitmap is chunk aligned.
@@ -558,7 +556,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
     /// Merkleize all updates not yet reflected in the bitmap's root.
     pub fn merkleize(
         mut self,
-        hasher: &mut impl MmrHasher<Digest = D>,
+        hasher: &mut impl Hasher<Digest = D>,
     ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
         // Add newly pushed complete chunks to the batch.
         let mut batch = UnmerkleizedBatch::new(&self.mmr).with_pool(self.pool.clone());
@@ -586,7 +584,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
                     updates
                         .par_iter()
                         .map_init(
-                            || hasher.fork(),
+                            || hasher.clone(),
                             |h, &(loc, chunk)| {
                                 let pos = Position::try_from(loc).unwrap();
                                 (loc, h.leaf_digest(pos, chunk.as_ref()))
@@ -616,7 +614,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         } else {
             let (last_chunk, next_bit) = self.bitmap.last_chunk();
             let last_chunk_digest = hasher.digest(last_chunk);
-            partial_chunk_root::<_, N>(hasher.inner(), &mmr_root, next_bit, &last_chunk_digest)
+            partial_chunk_root::<_, N>(hasher, &mmr_root, next_bit, &last_chunk_digest)
         };
 
         Ok(MerkleizedBitMap {

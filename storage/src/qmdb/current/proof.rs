@@ -40,7 +40,8 @@ impl<D: Digest> RangeProof<D> {
         range: Range<Location>,
         ops_root: D,
     ) -> Result<Self, Error> {
-        let proof = verification::range_proof(storage, range).await?;
+        let mut mmr_hasher = crate::mmr::StandardHasher::<H>::new();
+        let proof = verification::range_proof(&mut mmr_hasher, storage, range).await?;
 
         let (last_chunk, next_bit) = status.last_chunk();
         let partial_chunk_digest = if next_bit != BitMap::<N>::CHUNK_SIZE_BITS {

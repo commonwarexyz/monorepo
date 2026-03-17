@@ -133,6 +133,13 @@ where
         self.historical_proof(op_count, start_loc, max_ops)
     }
 
+    fn pinned_nodes_at(
+        &self,
+        loc: Location,
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error>> + Send {
+        self.pinned_nodes_at(loc)
+    }
+
     fn name() -> &'static str {
         "immutable"
     }

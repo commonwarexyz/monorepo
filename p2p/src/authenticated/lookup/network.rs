@@ -63,7 +63,7 @@ impl<
             tracker::Config {
                 crypto: cfg.crypto.clone(),
                 tracked_peer_sets: cfg.tracked_peer_sets,
-                allowed_connection_rate_per_peer: cfg.allowed_connection_rate_per_peer,
+                peer_connection_cooldown: cfg.peer_connection_cooldown,
                 allow_private_ips: cfg.allow_private_ips,
                 allow_dns: cfg.allow_dns,
                 bypass_ip_check: cfg.bypass_ip_check,
@@ -185,7 +185,7 @@ impl<
             dialer::Config {
                 stream_cfg,
                 dial_frequency: self.cfg.dial_frequency,
-                query_frequency: self.cfg.query_frequency,
+                peer_connection_cooldown: self.cfg.peer_connection_cooldown,
                 allow_private_ips: self.cfg.allow_private_ips,
             },
         );

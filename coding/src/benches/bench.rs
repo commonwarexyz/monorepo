@@ -4,9 +4,10 @@ use commonware_utils::{NZUsize, NZU16};
 use criterion::{criterion_main, BatchSize, Criterion};
 use rand::{RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
+use shard_selection::SELECTIONS;
 
-mod no_coding;
 mod reed_solomon;
+mod shard_selection;
 mod zoda;
 
 pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
@@ -48,52 +49,6 @@ pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum ShardSelection {
-    Best,
-    Exception,
-    Worst,
-    Interleaved,
-}
-
-impl ShardSelection {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Best => "best",
-            Self::Exception => "exception",
-            Self::Worst => "worst",
-            Self::Interleaved => "interleaved",
-        }
-    }
-
-    fn indices(self, min: u16) -> Vec<u16> {
-        match self {
-            Self::Best => (0..min).collect(),
-            Self::Exception => (1..=min).collect(),
-            Self::Worst => (min..min + min).collect(),
-            Self::Interleaved => (0..min)
-                .map(|i| {
-                    let k = i / 2;
-                    // Alternate between original shard indices [0, min) and
-                    // recovery shard indices [min, 2 * min).
-                    if i % 2 == 0 {
-                        k
-                    } else {
-                        min + k
-                    }
-                })
-                .collect(),
-        }
-    }
-}
-
-const SELECTIONS: [ShardSelection; 4] = [
-    ShardSelection::Best,
-    ShardSelection::Exception,
-    ShardSelection::Worst,
-    ShardSelection::Interleaved,
-];
-
 pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let cases = [20, 22, 23].map(|i| 2usize.pow(i));
@@ -120,74 +75,44 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
                                     rng.fill_bytes(&mut data);
 
                                     // Encode data
-                                    let (commitment, mut shards) = if conc > 1 {
+                                    let (commitment, shards) = if conc > 1 {
                                         S::encode(&config, data.as_slice(), &strategy).unwrap()
                                     } else {
                                         S::encode(&config, data.as_slice(), &Sequential).unwrap()
                                     };
 
-                                    // Get my shard
-                                    let my_shard = shards.pop().unwrap();
                                     let indices = selection.indices(min);
-                                    let mut opt_shards: Vec<Option<_>> =
-                                        shards.into_iter().map(Some).collect();
-                                    let weak_shards: Vec<(u16, _)> = indices
+                                    let selected_shards: Vec<(u16, _)> = indices
                                         .iter()
                                         .map(|&i| {
-                                            let shard =
-                                                opt_shards[i as usize].take().unwrap();
-                                            let (_, _, weak_shard) =
-                                                S::weaken(&config, &commitment, i, shard)
-                                                    .unwrap();
-                                            (i, weak_shard)
+                                            (i, shards[i as usize].clone())
                                         })
                                         .collect();
 
-                                    (commitment, my_shard, weak_shards)
-                                },
-                                |(commitment, my_shard, weak_shards)| {
-                                    // Weaken my shard
-                                    let (checking_data, _, _) = S::weaken(
-                                        &config,
-                                        &commitment,
-                                        config.minimum_shards.get()
-                                            + config.extra_shards.get()
-                                            - 1,
-                                        my_shard,
-                                    )
-                                    .unwrap();
-
-                                    // Check shards
-                                    let checked_shards = weak_shards
-                                        .into_iter()
-                                        .map(|(idx, weak_shard)| {
-                                            S::check(
-                                                &config,
-                                                &commitment,
-                                                &checking_data,
-                                                idx,
-                                                weak_shard,
-                                            )
-                                            .unwrap()
+                                    let checked_shards: Vec<_> = selected_shards
+                                        .iter()
+                                        .map(|(idx, shard)| {
+                                            S::check(&config, &commitment, *idx, shard).unwrap()
                                         })
-                                        .collect::<Vec<_>>();
+                                        .collect();
 
+                                    (commitment, checked_shards)
+                                },
+                                |(commitment, checked_shards)| {
                                     // Decode data
                                     if conc > 1 {
                                         S::decode(
                                             &config,
                                             &commitment,
-                                            checking_data,
-                                            &checked_shards,
+                                            checked_shards.iter(),
                                             &strategy,
                                         )
-                                        .unwrap()
+                                            .unwrap()
                                     } else {
                                         S::decode(
                                             &config,
                                             &commitment,
-                                            checking_data,
-                                            &checked_shards,
+                                            checked_shards.iter(),
                                             &Sequential,
                                         )
                                         .unwrap()
@@ -203,4 +128,4 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     }
 }
 
-criterion_main!(reed_solomon::benches, no_coding::benches, zoda::benches);
+criterion_main!(reed_solomon::benches, zoda::benches);

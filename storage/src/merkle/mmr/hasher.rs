@@ -5,12 +5,14 @@ use crate::mmr::Location;
 use commonware_cryptography::{Digest, Hasher as CHasher};
 
 /// A trait for computing the various digests of an MMR.
-pub trait Hasher: Send + Sync {
+pub trait Hasher: Clone + Send + Sync {
     type Digest: Digest;
-    type Inner: commonware_cryptography::Hasher<Digest = Self::Digest>;
 
-    /// Computes the digest for a leaf given its position and the element it represents.
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest;
+    /// Hash an arbitrary sequence of byte slices into a single digest.
+    ///
+    /// The parts are concatenated before hashing (i.e. there is no domain separation
+    /// between parts).
+    fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest;
 
     /// Computes the digest for a node given its position and the digests of its children.
     fn node_digest(
@@ -18,30 +20,52 @@ pub trait Hasher: Send + Sync {
         pos: Position,
         left: &Self::Digest,
         right: &Self::Digest,
-    ) -> Self::Digest;
+    ) -> Self::Digest {
+        self.hash([
+            (*pos).to_be_bytes().as_slice(),
+            left.as_ref(),
+            right.as_ref(),
+        ])
+    }
 
-    /// Computes the root for an MMR given its size and an iterator over the digests of its peaks in
-    /// decreasing order of height.
+    /// Computes the digest for a leaf given its position and the element it represents.
+    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest {
+        self.hash([(*pos).to_be_bytes().as_slice(), element])
+    }
+
+    /// Compute the digest of a byte slice.
+    fn digest(&mut self, data: &[u8]) -> Self::Digest {
+        self.hash(core::iter::once(data))
+    }
+
+    /// Folds a peak digest into a running accumulator: `Hash(acc || peak)`.
+    fn fold(&mut self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
+        self.hash([acc.as_ref(), peak.as_ref()])
+    }
+
+    /// Computes the root for an MMR given its leaf count and peak digests in canonical order.
+    ///
+    /// The root digest is computed as `Hash(leaves || fold(peak_digests))`, where `fold` is
+    /// defined as `fold(acc, peak) = Hash(acc || peak)`. The `peak_digests` are assumed to be
+    /// in canonical order.
     fn root<'a>(
         &mut self,
         leaves: Location,
-        peak_digests: impl Iterator<Item = &'a Self::Digest>,
-    ) -> Self::Digest;
+        peak_digests: impl IntoIterator<Item = &'a Self::Digest>,
+    ) -> Self::Digest {
+        let mut iter = peak_digests.into_iter();
+        let Some(first) = iter.next() else {
+            return self.digest(&leaves.to_be_bytes());
+        };
+        let acc = iter.fold(*first, |acc, digest| self.fold(&acc, digest));
 
-    /// Compute the digest of a byte slice.
-    fn digest(&mut self, data: &[u8]) -> Self::Digest;
-
-    /// Access the inner [CHasher] hasher.
-    fn inner(&mut self) -> &mut Self::Inner;
-
-    /// Fork the hasher to provide equivalent functionality in another thread. This is different
-    /// than [Clone::clone] because the forked hasher need not be a deep copy, and may share non-mutable
-    /// state with the hasher from which it was forked.
-    fn fork(&self) -> impl Hasher<Digest = Self::Digest>;
+        self.hash([leaves.to_be_bytes().as_slice(), acc.as_ref()])
+    }
 }
 
 /// The standard hasher to use with an MMR for computing leaf, node and root digests. Leverages no
 /// external data.
+#[derive(Clone)]
 pub struct Standard<H: CHasher> {
     hasher: H,
 }
@@ -50,23 +74,6 @@ impl<H: CHasher> Standard<H> {
     /// Creates a new [Standard] hasher.
     pub fn new() -> Self {
         Self { hasher: H::new() }
-    }
-
-    pub fn update_with_pos(&mut self, pos: Position) {
-        let pos = *pos;
-        self.hasher.update(&pos.to_be_bytes());
-    }
-
-    pub fn update_with_digest(&mut self, digest: &H::Digest) {
-        self.hasher.update(digest.as_ref());
-    }
-
-    pub fn update_with_element(&mut self, element: &[u8]) {
-        self.hasher.update(element);
-    }
-
-    pub fn finalize(&mut self) -> H::Digest {
-        self.hasher.finalize()
     }
 }
 
@@ -78,44 +85,12 @@ impl<H: CHasher> Default for Standard<H> {
 
 impl<H: CHasher> Hasher for Standard<H> {
     type Digest = H::Digest;
-    type Inner = H;
 
-    fn inner(&mut self) -> &mut H {
-        &mut self.hasher
-    }
-
-    fn fork(&self) -> impl Hasher<Digest = H::Digest> {
-        Self { hasher: H::new() }
-    }
-
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
-        self.update_with_pos(pos);
-        self.update_with_element(element);
-        self.finalize()
-    }
-
-    fn node_digest(&mut self, pos: Position, left: &H::Digest, right: &H::Digest) -> H::Digest {
-        self.update_with_pos(pos);
-        self.update_with_digest(left);
-        self.update_with_digest(right);
-        self.finalize()
-    }
-
-    fn root<'a>(
-        &mut self,
-        leaves: Location,
-        peak_digests: impl Iterator<Item = &'a H::Digest>,
-    ) -> H::Digest {
-        self.hasher.update(&leaves.to_be_bytes());
-        for digest in peak_digests {
-            self.update_with_digest(digest);
+    fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
+        for part in parts {
+            self.hasher.update(part);
         }
-        self.finalize()
-    }
-
-    fn digest(&mut self, data: &[u8]) -> H::Digest {
-        self.hasher.update(data);
-        self.finalize()
+        self.hasher.finalize()
     }
 }
 
@@ -218,7 +193,7 @@ mod tests {
             "root of empty MMR should be non-zero"
         );
         // Empty MMR root is the hash of size 0 bytes, not the empty hash
-        assert_eq!(empty_out, Mmr::empty_mmr_root(mmr_hasher.inner()));
+        assert_eq!(empty_out, Mmr::empty_mmr_root(&mut H::new()));
 
         let digests = [d1, d2, d3, d4];
         let out = mmr_hasher.root(Location::new(10), digests.iter());

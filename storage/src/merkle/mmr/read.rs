@@ -4,8 +4,8 @@
 //!
 //! [`BatchChainInfo`] is used to walk chains of batches.
 
-use crate::mmr::{iterator::PeakIterator, proof, Error, Location, Position, Proof};
-use alloc::{collections::BTreeMap, vec::Vec};
+use crate::mmr::{hasher::Hasher, iterator::PeakIterator, proof, Error, Location, Position, Proof};
+use alloc::collections::BTreeMap;
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -42,25 +42,28 @@ pub trait Readable: Send + Sync {
     }
 
     /// Inclusion proof for the element at `loc`.
-    fn proof(&self, loc: Location) -> Result<Proof<Self::Digest>, Error> {
+    fn proof(
+        &self,
+        hasher: &mut impl Hasher<Digest = Self::Digest>,
+        loc: Location,
+    ) -> Result<Proof<Self::Digest>, Error> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
         }
-        self.range_proof(loc..loc + 1).map_err(|e| match e {
+        self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
             Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
             _ => e,
         })
     }
 
     /// Inclusion proof for all elements in `range`.
-    fn range_proof(&self, range: Range<Location>) -> Result<Proof<Self::Digest>, Error> {
+    fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Digest = Self::Digest>,
+        range: Range<Location>,
+    ) -> Result<Proof<Self::Digest>, Error> {
         let leaves = self.leaves();
-        let positions = proof::nodes_required_for_range_proof(leaves, range)?;
-        let digests = positions
-            .into_iter()
-            .map(|pos| self.get_node(pos).ok_or(Error::ElementPruned(pos)))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Proof { leaves, digests })
+        proof::build_range_proof(hasher, leaves, range, |pos| self.get_node(pos))
     }
 }
 

@@ -93,7 +93,11 @@ fn bench_update(c: &mut Criterion) {
                             match strategy {
                                 Strategy::NoBatching => {
                                     for (loc, element) in &leaf_map {
-                                        mmr.update_leaf(&mut h, *loc, element).unwrap();
+                                        let batch = mmr
+                                            .new_batch()
+                                            .update_leaf(&mut h, *loc, element)
+                                            .unwrap();
+                                        mmr.apply(batch.merkleize(&mut h).finalize()).unwrap();
                                     }
                                 }
                                 _ => {

@@ -19,6 +19,7 @@ use commonware_sync::{
 };
 use commonware_utils::{
     channel::mpsc,
+    non_empty_range,
     sync::{AsyncRwLock, Mutex},
     DurationExt,
 };
@@ -171,7 +172,7 @@ where
         request_id: request.request_id,
         target: Target {
             root,
-            range: inactivity_floor..size,
+            range: non_empty_range!(inactivity_floor, size),
         },
     };
 
@@ -220,12 +221,26 @@ where
         .historical_proof(request.op_count, request.start_loc, max_ops)
         .await;
 
-    drop(database);
-
     let (proof, operations) = result.map_err(|err| {
         warn!(?err, "failed to generate historical proof");
         Error::Database(err)
     })?;
+
+    // Optionally fetch pinned nodes
+    let pinned_nodes = if request.include_pinned_nodes {
+        let nodes = database
+            .pinned_nodes_at(request.start_loc)
+            .await
+            .map_err(|err| {
+                warn!(?err, "failed to get pinned nodes");
+                Error::Database(err)
+            })?;
+        Some(nodes)
+    } else {
+        None
+    };
+
+    drop(database);
 
     debug!(
         request_id = request.request_id,
@@ -238,6 +253,7 @@ where
         request_id: request.request_id,
         proof,
         operations,
+        pinned_nodes,
     })
 }
 

@@ -371,35 +371,6 @@ impl<D: Digest> Mmr<D> {
         self.root = Self::compute_root(hasher, &self.nodes, &self.pinned_nodes, self.pruned_to_pos);
     }
 
-    /// Change the digest of any retained leaf. This is useful if you want to use the MMR
-    /// implementation as an updatable binary Merkle tree, and otherwise should be avoided.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::ElementPruned] if the leaf has been pruned.
-    /// Returns [Error::LeafOutOfBounds] if `loc` is not an existing leaf.
-    /// Returns [Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
-    ///
-    /// # Warning
-    ///
-    /// This method will change the root and invalidate any previous inclusion proofs.
-    /// Use of this method will prevent using this structure as a base mmr for grafting.
-    pub fn update_leaf(
-        &mut self,
-        hasher: &mut impl Hasher<Digest = D>,
-        loc: Location,
-        element: &[u8],
-    ) -> Result<(), Error> {
-        let changeset = self
-            .new_batch()
-            .update_leaf(hasher, loc, element)?
-            .merkleize(hasher)
-            .finalize();
-        self.apply(changeset)
-            .expect("db unmodified since batch creation");
-        Ok(())
-    }
-
     /// Get the root digest of the MMR.
     pub const fn root(&self) -> &D {
         &self.root
@@ -412,12 +383,16 @@ impl<D: Digest> Mmr<D> {
     /// Returns [Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION].
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
     /// Returns [Error::LeafOutOfBounds] if `loc` >= [Self::leaves()].
-    pub fn proof(&self, loc: Location) -> Result<Proof<D>, Error> {
+    pub fn proof(
+        &self,
+        hasher: &mut impl Hasher<Digest = D>,
+        loc: Location,
+    ) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
         }
         // loc is valid so it won't overflow from + 1
-        self.range_proof(loc..loc + 1).map_err(|e| match e {
+        self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
             Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
             _ => e,
         })
@@ -431,15 +406,13 @@ impl<D: Digest> Mmr<D> {
     /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::mmr::MAX_LOCATION].
     /// Returns [Error::RangeOutOfBounds] if `range.end` > [Self::leaves()].
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    pub fn range_proof(&self, range: Range<Location>) -> Result<Proof<D>, Error> {
+    pub fn range_proof(
+        &self,
+        hasher: &mut impl Hasher<Digest = D>,
+        range: Range<Location>,
+    ) -> Result<Proof<D>, Error> {
         let leaves = self.leaves();
-        let positions = proof::nodes_required_for_range_proof(leaves, range)?;
-        let digests = positions
-            .into_iter()
-            .map(|pos| self.get_node(pos).ok_or(Error::ElementPruned(pos)))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Proof { leaves, digests })
+        proof::build_range_proof(hasher, leaves, range, |pos| self.get_node(pos))
     }
 
     /// Get the digests of nodes that need to be pinned (those required for proof generation) in
@@ -553,7 +526,7 @@ mod tests {
             assert_eq!(mmr.leaves(), Location::new(0));
             assert!(mmr.bounds().is_empty());
             assert_eq!(mmr.get_node(Position::new(0)), None);
-            assert_eq!(*mmr.root(), Mmr::empty_mmr_root(hasher.inner()));
+            assert_eq!(*mmr.root(), Mmr::empty_mmr_root(&mut Sha256::new()));
             let mut mmr2 = Mmr::new(&mut hasher);
             mmr2.prune_all();
             assert_eq!(mmr2.size(), 0, "prune_all on empty MMR should do nothing");
@@ -661,28 +634,30 @@ mod tests {
             // in this case, we actually can still generate a proof for the node with location 7
             // even though it's pruned.)
             assert!(matches!(
-                mmr.proof(Location::new(0)),
+                mmr.proof(&mut hasher, Location::new(0)),
                 Err(Error::ElementPruned(_))
             ));
             assert!(matches!(
-                mmr.proof(Location::new(6)),
+                mmr.proof(&mut hasher, Location::new(6)),
                 Err(Error::ElementPruned(_))
             ));
 
             // We should still be able to generate a proof for any leaf following the pruning
             // boundary, the first of which is at location 8 and the last location 10.
-            assert!(mmr.proof(Location::new(8)).is_ok());
-            assert!(mmr.proof(Location::new(10)).is_ok());
+            assert!(mmr.proof(&mut hasher, Location::new(8)).is_ok());
+            assert!(mmr.proof(&mut hasher, Location::new(10)).is_ok());
 
             let root_after_prune = *mmr.root();
             assert_eq!(root, root_after_prune, "root changed after pruning");
 
             assert!(
-                mmr.range_proof(Location::new(5)..Location::new(9)).is_err(),
+                mmr.range_proof(&mut hasher, Location::new(5)..Location::new(9))
+                    .is_err(),
                 "attempts to range_prove elements at or before the oldest retained should fail"
             );
             assert!(
-                mmr.range_proof(Location::new(8)..mmr.leaves()).is_ok(),
+                mmr.range_proof(&mut hasher, Location::new(8)..mmr.leaves())
+                    .is_ok(),
                 "attempts to range_prove over all elements following oldest retained should succeed"
             );
 
@@ -775,8 +750,7 @@ mod tests {
             let changeset = {
                 let mut batch = batched_mmr.new_batch();
                 for i in 0..NUM_ELEMENTS {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
+                    let element = hasher.digest(&i.to_be_bytes());
                     batch = batch.add(&mut hasher, &element);
                 }
                 batch.merkleize(&mut hasher).finalize()
@@ -819,8 +793,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch().with_pool(Some(pool));
                 for i in 0u64..NUM_ELEMENTS {
-                    hasher.inner().update(&i.to_be_bytes());
-                    let element = hasher.inner().finalize();
+                    let element = hasher.digest(&i.to_be_bytes());
                     batch = batch.add(&mut hasher, &element);
                 }
                 batch.merkleize(&mut hasher).finalize()
@@ -843,8 +816,7 @@ mod tests {
             let mut reference_mmr = Mmr::new(&mut hasher);
             let mut mmr = Mmr::new(&mut hasher);
             for i in 0u64..200 {
-                hasher.inner().update(&i.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&i.to_be_bytes());
 
                 // Add to reference MMR
                 let cs = {
@@ -884,14 +856,21 @@ mod tests {
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
                 let leaf_loc = Location::new(leaf as u64);
-                mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                let batch = mmr
+                    .new_batch()
+                    .update_leaf(&mut hasher, leaf_loc, &element)
+                    .unwrap();
+                mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
                 let updated_root = *mmr.root();
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
-                hasher.inner().update(&leaf.to_be_bytes());
-                let element = hasher.inner().finalize();
-                mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                let element = hasher.digest(&leaf.to_be_bytes());
+                let batch = mmr
+                    .new_batch()
+                    .update_leaf(&mut hasher, leaf_loc, &element)
+                    .unwrap();
+                mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
                 let restored_root = *mmr.root();
                 assert_eq!(root, restored_root);
             }
@@ -901,7 +880,11 @@ mod tests {
             for leaf in 100u64..=190 {
                 mmr.prune(Location::new(leaf)).unwrap();
                 let leaf_loc = Location::new(leaf);
-                mmr.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                let batch = mmr
+                    .new_batch()
+                    .update_leaf(&mut hasher, leaf_loc, &element)
+                    .unwrap();
+                mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
         });
     }
@@ -914,10 +897,13 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let mmr = Mmr::new(&mut hasher);
-            let mut mmr = build_test_mmr(&mut hasher, mmr, 200);
+            let mmr = build_test_mmr(&mut hasher, mmr, 200);
             let invalid_loc = mmr.leaves();
-            let result = mmr.update_leaf(&mut hasher, invalid_loc, &element);
-            assert!(matches!(result, Err(Error::LeafOutOfBounds(_))));
+            let batch = mmr.new_batch();
+            assert!(matches!(
+                batch.update_leaf(&mut hasher, invalid_loc, &element),
+                Err(Error::LeafOutOfBounds(_))
+            ));
         });
     }
 
@@ -931,7 +917,8 @@ mod tests {
             let mmr = Mmr::new(&mut hasher);
             let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
             mmr.prune_all();
-            let result = mmr.update_leaf(&mut hasher, Location::new(0), &element);
+            let batch = mmr.new_batch();
+            let result = batch.update_leaf(&mut hasher, Location::new(0), &element);
             assert!(matches!(result, Err(Error::ElementPruned(_))));
         });
     }
@@ -1083,8 +1070,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
-                hasher.inner().update(&leaf.to_be_bytes());
-                let element = hasher.inner().finalize();
+                let element = hasher.digest(&leaf.to_be_bytes());
                 let leaf_loc = Location::new(leaf);
                 batch = batch.update_leaf(hasher, leaf_loc, &element).unwrap();
             }
@@ -1274,17 +1260,17 @@ mod tests {
             // Range end > leaves errors on empty MMR
             let mmr = Mmr::new(&mut hasher);
             assert_eq!(mmr.leaves(), Location::new(0));
-            let result = mmr.range_proof(Location::new(0)..Location::new(1));
+            let result = mmr.range_proof(&mut hasher, Location::new(0)..Location::new(1));
             assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
 
             // Range end > leaves errors on non-empty MMR
             let mmr = build_test_mmr(&mut hasher, mmr, 10);
             assert_eq!(mmr.leaves(), Location::new(10));
-            let result = mmr.range_proof(Location::new(5)..Location::new(11));
+            let result = mmr.range_proof(&mut hasher, Location::new(5)..Location::new(11));
             assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
 
             // Range end == leaves succeeds
-            let result = mmr.range_proof(Location::new(5)..Location::new(10));
+            let result = mmr.range_proof(&mut hasher, Location::new(5)..Location::new(10));
             assert!(result.is_ok());
         });
     }
@@ -1297,7 +1283,7 @@ mod tests {
         executor.start(|_| async move {
             // Test on empty MMR - should return error, not panic
             let mmr = Mmr::new(&mut hasher);
-            let result = mmr.proof(Location::new(0));
+            let result = mmr.proof(&mut hasher, Location::new(0));
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),
                 "expected LeafOutOfBounds, got {:?}",
@@ -1306,7 +1292,7 @@ mod tests {
 
             // Test on non-empty MMR with location >= leaves
             let mmr = build_test_mmr(&mut hasher, mmr, 10);
-            let result = mmr.proof(Location::new(10));
+            let result = mmr.proof(&mut hasher, Location::new(10));
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),
                 "expected LeafOutOfBounds, got {:?}",
@@ -1314,7 +1300,7 @@ mod tests {
             );
 
             // location < leaves should succeed
-            let result = mmr.proof(Location::new(9));
+            let result = mmr.proof(&mut hasher, Location::new(9));
             assert!(result.is_ok(), "expected Ok, got {:?}", result);
         });
     }

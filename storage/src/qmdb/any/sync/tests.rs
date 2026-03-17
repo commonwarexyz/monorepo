@@ -14,7 +14,7 @@ use crate::{
         sync::{
             self,
             engine::{Config, NextStep},
-            resolver::{self, Resolver},
+            resolver::{self, FetchResult, Resolver},
             Engine, Target,
         },
     },
@@ -23,7 +23,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
-use commonware_utils::{channel::mpsc, sync::AsyncRwLock, NZU64};
+use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, NZU64};
 use rand::RngCore as _;
 use std::{num::NonZeroU64, sync::Arc};
 
@@ -64,9 +64,6 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
         &self,
         pos: Position,
     ) -> impl std::future::Future<Output = Vec<Self::Digest>> + Send;
-
-    /// Get pinned nodes from the internal cached map (used before closing db in partial match tests)
-    fn pinned_nodes_from_map(&self, pos: Position) -> Vec<Self::Digest>;
 }
 
 /// Harness for sync tests.
@@ -123,7 +120,7 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: Digest::from([1u8; 32]),
-                range: Location::new(0)..Location::new(10),
+                range: non_empty_range!(Location::new(0), Location::new(10)),
             },
             context: context.with_label("client"),
             resolver: Arc::new(target_db),
@@ -146,45 +143,6 @@ where
     });
 }
 
-/// Test that invalid bounds are rejected
-pub(crate) fn test_sync_invalid_bounds<H: SyncTestHarness>()
-where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let target_db = H::init_db(context.with_label("target")).await;
-        let db_config = H::config(&context.next_u64().to_string(), &context);
-        let config = Config {
-            db_config,
-            fetch_batch_size: NZU64!(10),
-            target: Target {
-                root: Digest::from([1u8; 32]),
-                range: Location::new(31)..Location::new(30), // Invalid: start > end
-            },
-            context: context.with_label("client"),
-            resolver: Arc::new(target_db),
-            apply_batch_size: 1024,
-            max_outstanding_requests: 1,
-            update_rx: None,
-        };
-
-        let result: Result<H::Db, _> = sync::sync(config).await;
-        match result {
-            Err(sync::Error::Engine(sync::EngineError::InvalidTarget {
-                lower_bound_pos,
-                upper_bound_pos,
-            })) => {
-                assert_eq!(lower_bound_pos, Location::new(31));
-                assert_eq!(upper_bound_pos, Location::new(30));
-            }
-            _ => panic!("Expected InvalidTarget error"),
-        }
-    });
-}
-
 /// Test that resolver failure is handled correctly
 pub(crate) fn test_sync_resolver_fails<H: SyncTestHarness>()
 where
@@ -202,7 +160,7 @@ where
             context: context.with_label("client"),
             target: Target {
                 root: target_root,
-                range: Location::new(0)..Location::new(5),
+                range: non_empty_range!(Location::new(0), Location::new(5)),
             },
             resolver,
             apply_batch_size: 2,
@@ -251,7 +209,7 @@ where
             fetch_batch_size,
             target: Target {
                 root: sync_root,
-                range: lower_bound..target_op_count,
+                range: non_empty_range!(lower_bound, target_op_count),
             },
             context: client_context.clone(),
             resolver: target_db.clone(),
@@ -331,7 +289,7 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: sync_root,
-                range: lower_bound..upper_bound,
+                range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.with_label("client"),
             resolver: Arc::new(target_db),
@@ -404,7 +362,7 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: sync_root,
-                range: lower_bound..upper_bound,
+                range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.with_label("sync"),
             resolver: target_db.clone(),
@@ -504,7 +462,7 @@ where
             fetch_batch_size: NZU64!(10),
             target: Target {
                 root: sync_root,
-                range: lower_bound..upper_bound,
+                range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.with_label("sync"),
             resolver,
@@ -566,7 +524,7 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: initial_root,
-                range: initial_lower_bound..initial_upper_bound,
+                range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -579,8 +537,10 @@ where
         update_sender
             .send(Target {
                 root: initial_root,
-                range: initial_lower_bound.checked_sub(1).unwrap()
-                    ..initial_upper_bound.checked_add(1).unwrap(),
+                range: non_empty_range!(
+                    initial_lower_bound.checked_sub(1).unwrap(),
+                    initial_upper_bound.checked_add(1).unwrap()
+                ),
             })
             .await
             .unwrap();
@@ -630,7 +590,7 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: initial_root,
-                range: initial_lower_bound..initial_upper_bound,
+                range: non_empty_range!(initial_lower_bound, initial_upper_bound),
             },
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -643,7 +603,10 @@ where
         update_sender
             .send(Target {
                 root: initial_root,
-                range: initial_lower_bound..initial_upper_bound.checked_sub(1).unwrap(),
+                range: non_empty_range!(
+                    initial_lower_bound,
+                    initial_upper_bound.checked_sub(1).unwrap()
+                ),
             })
             .await
             .unwrap();
@@ -707,7 +670,7 @@ where
                 fetch_batch_size: NZU64!(1),
                 target: Target {
                     root: initial_root,
-                    range: initial_lower_bound..initial_upper_bound,
+                    range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -719,7 +682,7 @@ where
             update_sender
                 .send(Target {
                     root: new_sync_root,
-                    range: new_lower_bound..new_upper_bound,
+                    range: non_empty_range!(new_lower_bound, new_upper_bound),
                 })
                 .await
                 .unwrap();
@@ -743,67 +706,6 @@ where
             new_verification_root
         };
         let _ = new_verification_root; // Silence unused variable warning
-    });
-}
-
-/// Test that the client fails to sync with invalid bounds (lower > upper) sent via target update.
-pub(crate) fn test_target_update_invalid_bounds<H: SyncTestHarness>()
-where
-    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        // Create and populate target database
-        let mut target_db = H::init_db(context.with_label("target")).await;
-        let target_ops = H::create_ops(50);
-        target_db = H::apply_ops(target_db, target_ops).await;
-        // commit already done in apply_ops
-
-        // Capture initial target state
-        let initial_lower_bound = target_db.inactivity_floor_loc().await;
-        let initial_upper_bound = target_db.bounds().await.end;
-        let initial_root = H::sync_target_root(&target_db);
-
-        // Create client with initial target
-        let (update_sender, update_receiver) = mpsc::channel(1);
-        let target_db = Arc::new(target_db);
-        let config = Config {
-            context: context.with_label("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
-            fetch_batch_size: NZU64!(5),
-            target: Target {
-                root: initial_root,
-                range: initial_lower_bound..initial_upper_bound,
-            },
-            resolver: target_db.clone(),
-            apply_batch_size: 1024,
-            max_outstanding_requests: 10,
-            update_rx: Some(update_receiver),
-        };
-        let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
-
-        // Send target update with invalid range (start > end)
-        update_sender
-            .send(Target {
-                root: initial_root,
-                range: initial_upper_bound..initial_lower_bound,
-            })
-            .await
-            .unwrap();
-
-        let result = client.step().await;
-        assert!(matches!(
-            result,
-            Err(sync::Error::Engine(sync::EngineError::InvalidTarget { .. }))
-        ));
-
-        Arc::try_unwrap(target_db)
-            .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
-            .destroy()
-            .await
-            .unwrap();
     });
 }
 
@@ -837,7 +739,7 @@ where
             fetch_batch_size: NZU64!(20),
             target: Target {
                 root: sync_root,
-                range: lower_bound..upper_bound,
+                range: non_empty_range!(lower_bound, upper_bound),
             },
             resolver: target_db.clone(),
             apply_batch_size: 1024,
@@ -854,7 +756,7 @@ where
             .send(Target {
                 // Dummy target update
                 root: Digest::from([2u8; 32]),
-                range: lower_bound + 1..upper_bound + 1,
+                range: non_empty_range!(lower_bound + 1, upper_bound + 1),
             })
             .await;
 
@@ -907,7 +809,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 db_config: H::config(&context.next_u64().to_string(), &context),
                 target: Target {
                     root: initial_sync_root,
-                    range: initial_lower_bound..initial_upper_bound,
+                    range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
                 fetch_batch_size: NZU64!(1), // Small batch size so we don't finish after one batch
@@ -948,7 +850,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             update_sender
                 .send(Target {
                     root: new_sync_root,
-                    range: new_lower_bound..new_upper_bound,
+                    range: non_empty_range!(new_lower_bound, new_upper_bound),
                 })
                 .await
                 .unwrap();
@@ -1013,7 +915,7 @@ where
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: sync_root,
-                range: lower_bound..upper_bound,
+                range: non_empty_range!(lower_bound, upper_bound),
             },
             context: client_context.clone(),
             resolver: target_db.clone(),
@@ -1078,7 +980,7 @@ where
             fetch_batch_size: NZU64!(100),
             target: Target {
                 root: sync_root,
-                range: lower_bound..upper_bound,
+                range: non_empty_range!(lower_bound, upper_bound),
             },
             context: context.with_label("client"),
             resolver: target_db.clone(),
@@ -1186,12 +1088,6 @@ where
             .prune(sync_db.inactivity_floor_loc().await)
             .await
             .unwrap();
-        let sync_db_original_size = sync_db.bounds().await.end;
-
-        // Get pinned nodes before closing the database
-        let pinned_nodes =
-            sync_db.pinned_nodes_from_map(Position::try_from(sync_db_original_size).unwrap());
-
         sync_db.sync().await.unwrap();
         drop(sync_db);
 
@@ -1208,6 +1104,11 @@ where
         let sync_lower_bound = target_db.inactivity_floor_loc().await;
         let sync_upper_bound = bounds.end;
         let target_hash = target_db.root();
+
+        // Get pinned nodes at the sync lower bound from the target db (which has all the data).
+        let pinned_nodes = target_db
+            .pinned_nodes_at(Position::try_from(sync_lower_bound).unwrap())
+            .await;
 
         let (mmr, journal) = target_db.into_log_components();
 
@@ -1346,6 +1247,98 @@ where
 
         synced_db.destroy().await.unwrap();
         mmr.destroy().await.unwrap();
+    });
+}
+
+/// A resolver wrapper that corrupts pinned nodes on the first request, then returns correct
+/// data on subsequent requests.
+#[derive(Clone)]
+struct CorruptFirstPinnedNodesResolver<R> {
+    inner: R,
+    corrupted: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<R: Resolver<Digest = Digest>> Resolver for CorruptFirstPinnedNodesResolver<R> {
+    type Digest = Digest;
+    type Op = R::Op;
+    type Error = R::Error;
+
+    async fn get_operations(
+        &self,
+        op_count: Location,
+        start_loc: Location,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+    ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
+        let mut result = self
+            .inner
+            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes)
+            .await?;
+        // Corrupt pinned nodes only on the first request that includes them.
+        if result.pinned_nodes.is_some()
+            && !self
+                .corrupted
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Some(ref mut nodes) = result.pinned_nodes {
+                if !nodes.is_empty() {
+                    nodes[0] = Digest::from([0xFFu8; 32]);
+                }
+            }
+        }
+        Ok(result)
+    }
+}
+
+/// Test that corrupted pinned nodes on the first attempt are rejected and the sync
+/// succeeds on retry when the resolver returns correct data.
+pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        // Build a target database with some operations and prune so that pinned nodes are needed.
+        let mut target_db = H::init_db(context.with_label("target")).await;
+        let ops = H::create_ops(20);
+        target_db = H::apply_ops(target_db, ops).await;
+        target_db
+            .prune(target_db.inactivity_floor_loc().await)
+            .await
+            .unwrap();
+
+        let sync_root = H::sync_target_root(&target_db);
+        let lower_bound = target_db.inactivity_floor_loc().await;
+        let upper_bound = target_db.bounds().await.end;
+
+        let db_config = H::config(&context.next_u64().to_string(), &context);
+
+        let resolver = CorruptFirstPinnedNodesResolver {
+            inner: Arc::new(target_db),
+            corrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+
+        let config = sync::engine::Config {
+            db_config,
+            fetch_batch_size: NZU64!(100),
+            target: Target {
+                root: sync_root,
+                range: non_empty_range!(lower_bound, upper_bound),
+            },
+            context: context.with_label("client"),
+            resolver,
+            apply_batch_size: 1024,
+            max_outstanding_requests: 1,
+            update_rx: None,
+        };
+
+        // Sync should succeed on the second attempt after the first corrupted pinned nodes
+        // are rejected.
+        let synced_db: H::Db = sync::sync(config).await.unwrap();
+        assert_eq!(synced_db.root(), sync_root);
+        synced_db.destroy().await.unwrap();
     });
 }
 
@@ -1604,11 +1597,6 @@ macro_rules! sync_tests_for_harness {
             use std::num::NonZeroU64;
 
             #[test_traced]
-            fn test_sync_invalid_bounds() {
-                super::test_sync_invalid_bounds::<$harness>();
-            }
-
-            #[test_traced]
             fn test_sync_empty_operations_no_panic() {
                 super::test_sync_empty_operations_no_panic::<$harness>();
             }
@@ -1660,11 +1648,6 @@ macro_rules! sync_tests_for_harness {
             }
 
             #[test_traced("WARN")]
-            fn test_target_update_invalid_bounds() {
-                super::test_target_update_invalid_bounds::<$harness>();
-            }
-
-            #[test_traced("WARN")]
             fn test_target_update_on_done_client() {
                 super::test_target_update_on_done_client::<$harness>();
             }
@@ -1702,6 +1685,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_resolver_fails() {
                 super::test_sync_resolver_fails::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_retries_bad_pinned_nodes() {
+                super::test_sync_retries_bad_pinned_nodes::<$harness>();
             }
 
             #[test_traced("WARN")]

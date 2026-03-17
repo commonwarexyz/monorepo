@@ -172,7 +172,11 @@ fn fuzz(input: FuzzInput) {
 
                         let leaf_loc =
                             Location::try_from(pos).expect("leaf position should map to location");
-                        mmr.update_leaf(&mut hasher, leaf_loc, limited_data).unwrap();
+                        let batch = mmr
+                            .new_batch()
+                            .update_leaf(&mut hasher, leaf_loc, limited_data)
+                            .unwrap();
+                        mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
                         reference.update_leaf(location, limited_data.to_vec());
 
                         // Size should not change
@@ -246,7 +250,7 @@ fn fuzz(input: FuzzInput) {
                         continue;
                     }
 
-                    if let Ok(proof) = mmr.proof(loc) {
+                    if let Ok(proof) = mmr.proof(&mut hasher, loc) {
                         let root = mmr.root();
                         assert!(proof.verify_element_inclusion(
                             &mut hasher,
