@@ -515,6 +515,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// When `term_length` is 1 every view is its own term, so this is
     /// equivalent to the per-view rule already enforced by
     /// `Round::can_construct_finalize` (which checks `broadcast_nullify`).
+    ///
+    /// Indirect notarization can make a view usable as ancestry, but does not
+    /// replace the local certification requirement for finalization.
     pub fn construct_finalize(&mut self, view: View) -> Option<Finalize<S, D>> {
         // We don't need to finalize views that are already finalized.
         if view <= self.last_finalized {
@@ -534,11 +537,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
 
         let round = self.views.get(&view)?;
-        let indirectly_notarized = self.indirectly_notarized_views.contains(&view);
-        if !self.is_notarized(view)
-            || !round.can_construct_finalize()
-            || !(round.is_certified() || indirectly_notarized && round.is_verified())
-        {
+        if !self.is_notarized(view) || !round.can_construct_finalize() || !round.is_certified() {
             return None;
         }
         let candidate = round.proposal().cloned()?;
@@ -603,8 +602,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Replays a journaled artifact into the appropriate round during recovery.
     ///
     /// Restores round-level broadcast flags (via [`Round::replay`]) and
-    /// tracking sets (`nullify_views`, `nullification_views`) so that
-    /// term-safety checks work correctly after a restart.
+    /// tracking sets (`nullify_views`, `nullification_views`, and indirect
+    /// notarization state) so recovery preserves the same optimistic ancestry
+    /// decisions as the pre-restart node.
     pub fn replay(&mut self, artifact: &Artifact<S, D>) {
         if let Artifact::Nullify(n) = artifact {
             self.nullify_views.insert(n.view());
@@ -613,6 +613,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             self.nullification_views.insert(n.view());
         }
         self.create_round(artifact.view()).replay(artifact);
+        if matches!(
+            artifact,
+            Artifact::Notarization(_) | Artifact::Finalization(_)
+        ) {
+            self.rebuild_indirectly_notarized();
+        }
     }
 
     /// Returns the leader index for `view` if we already entered it.
@@ -891,6 +897,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
 
         if self.is_notarized(view) {
+            let round = self.views.get(&view)?;
+            if !self.is_directly_notarized(view)
+                && (!round.has_unequivocated_proposal() || !round.is_verified())
+            {
+                return None;
+            }
             return self
                 .views
                 .get(&view)
@@ -916,6 +928,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Marks ancestors of a directly notarized proposal as indirectly notarized.
+    ///
+    /// Only ancestors we locally verified and voted to notarize without
+    /// equivocation are eligible for indirect notarization.
     fn mark_indirectly_notarized(&mut self, view: View) {
         if !self.optimistic_validation_enabled() {
             return;
@@ -932,14 +947,32 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             let Some(round) = self.views.get(&parent) else {
                 break;
             };
+            if !round.has_unequivocated_proposal()
+                || !round.is_verified()
+                || !round.broadcast_notarize()
+            {
+                break;
+            }
             let Some(proposal) = round.proposal() else {
                 break;
             };
             self.indirectly_notarized_views.insert(parent);
-            if parent > self.last_finalized {
-                self.certification_candidates.insert(parent);
-            }
             cursor = Some(proposal.parent);
+        }
+    }
+
+    /// Rebuilds the indirect notarization cache from currently tracked direct certificates.
+    fn rebuild_indirectly_notarized(&mut self) {
+        self.indirectly_notarized_views.clear();
+        let directly_notarized = self
+            .views
+            .iter()
+            .filter_map(|(&view, round)| {
+                (round.notarization().is_some() || round.finalization().is_some()).then_some(view)
+            })
+            .collect::<Vec<_>>();
+        for view in directly_notarized {
+            self.mark_indirectly_notarized(view);
         }
     }
 
@@ -2163,7 +2196,7 @@ mod tests {
     }
 
     #[test]
-    fn indirect_notarization_allows_finalize_without_direct_notarization_certificate() {
+    fn indirect_notarization_still_requires_certification_for_finalize() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -2192,7 +2225,6 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([101u8; 32]),
             );
-            let ancestor_finalize = ancestor.clone();
             state.create_round(View::new(1));
             assert!(state.proposed(ancestor));
             assert!(state.construct_notarize(View::new(1)).is_some());
@@ -2218,9 +2250,76 @@ mod tests {
             let round = state.views.get(&View::new(1)).expect("ancestor round");
             assert!(round.proposal().is_some());
             assert!(round.is_verified());
-            assert!(Finalize::sign(&schemes[1], ancestor_finalize).is_some());
 
-            assert!(state.construct_finalize(View::new(1)).is_some());
+            assert!(state.construct_finalize(View::new(1)).is_none());
+        });
+    }
+
+    #[test]
+    fn indirect_notarization_requires_verified_unequivocated_ancestors() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let local_scheme = schemes[1].clone();
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: local_scheme,
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(11),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    optimistic_validation_depth: 2,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let view1 = Proposal::new(
+                Rnd::new(Epoch::new(11), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([111u8; 32]),
+            );
+            state.create_round(View::new(1));
+            assert!(state.proposed(view1));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let view2 = Proposal::new(
+                Rnd::new(Epoch::new(11), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([112u8; 32]),
+            );
+            state.create_round(View::new(2));
+            assert!(state.proposed(view2));
+            assert!(state.construct_notarize(View::new(2)).is_some());
+            let conflicting_view2 = Proposal::new(
+                Rnd::new(Epoch::new(11), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([113u8; 32]),
+            );
+            assert!(!state.set_proposal(View::new(2), conflicting_view2));
+
+            let view3 = Proposal::new(
+                Rnd::new(Epoch::new(11), View::new(3)),
+                View::new(2),
+                Sha256Digest::from([114u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(3), view3.clone()));
+            assert!(state.verified(View::new(3)));
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, view3.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap();
+            assert!(state.add_notarization(notarization).0);
+
+            assert!(!state.indirectly_notarized_views.contains(&View::new(2)));
         });
     }
 
@@ -2677,6 +2776,86 @@ mod tests {
 
             // Shouldn't finalize the certificate's proposal (proposal_b)
             assert!(restarted.construct_finalize(view).is_none());
+        });
+    }
+
+    #[test]
+    fn replay_restores_indirect_notarization_state() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let local_scheme = schemes[1].clone();
+            let ancestor = Proposal::new(
+                Rnd::new(Epoch::new(12), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([121u8; 32]),
+            );
+            let descendant = Proposal::new(
+                Rnd::new(Epoch::new(12), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([122u8; 32]),
+            );
+
+            let mut state = State::new(
+                context.with_label("initial"),
+                Config {
+                    scheme: local_scheme.clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(12),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    optimistic_validation_depth: 2,
+                },
+            );
+            state.set_genesis(test_genesis());
+            state.create_round(View::new(1));
+            assert!(state.proposed(ancestor));
+            let local_vote = state
+                .construct_notarize(View::new(1))
+                .expect("local notarize vote");
+            assert!(state.set_proposal(View::new(2), descendant.clone()));
+            assert!(state.verified(View::new(2)));
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, descendant.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap();
+            assert!(state.add_notarization(notarization.clone()).0);
+            assert!(state.indirectly_notarized_views.contains(&View::new(1)));
+
+            let mut restarted = State::new(
+                context.with_label("restarted"),
+                Config {
+                    scheme: local_scheme,
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(12),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    optimistic_validation_depth: 2,
+                },
+            );
+            restarted.set_genesis(test_genesis());
+            restarted.replay(&Artifact::Notarize(local_vote));
+            assert!(restarted.set_proposal(View::new(2), descendant));
+            assert!(restarted.verified(View::new(2)));
+            restarted.add_notarization(notarization.clone());
+            restarted.replay(&Artifact::Notarization(notarization));
+
+            assert!(restarted.indirectly_notarized_views.contains(&View::new(1)));
+            assert_eq!(
+                restarted.notarized_parent_payload(View::new(1)).copied(),
+                Some(Sha256Digest::from([121u8; 32]))
+            );
         });
     }
 

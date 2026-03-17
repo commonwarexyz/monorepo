@@ -301,6 +301,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.proposal()
     }
 
+    /// Returns true if the round contains a proposal and no equivocation.
+    pub fn has_unequivocated_proposal(&self) -> bool {
+        self.proposal.has_unequivocated_proposal()
+    }
+
     pub const fn set_deadlines(
         &mut self,
         leader_deadline: SystemTime,
