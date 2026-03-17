@@ -374,6 +374,14 @@ where
         }
     }
 
+    fn next_sender(&mut self) -> usize {
+        debug_assert!(
+            !self.certificate_senders.is_empty(),
+            "expected certificate senders"
+        );
+        self.context.gen_range(0..self.certificate_senders.len())
+    }
+
     // Picks a proposal for the next fuzz event. It may reuse a recent proposal
     // or mutate one to create nearby variants.
     fn select_event_proposal(&mut self) -> Proposal<Sha256Digest> {
@@ -831,9 +839,9 @@ where
             Event::OnNotarize => self.send_notarize_vote(signer_idx).await,
             Event::OnNullify => self.send_nullify_vote(signer_idx).await,
             Event::OnFinalize => self.send_finalize_vote(signer_idx).await,
-            Event::OnNotarization => self.send_notarization_certificate(signer_idx).await,
-            Event::OnNullification => self.send_nullification_certificate(signer_idx).await,
-            Event::OnFinalization => self.send_finalization_certificate(signer_idx).await,
+            Event::OnNotarization => self.send_notarization_certificate().await,
+            Event::OnNullification => self.send_nullification_certificate().await,
+            Event::OnFinalization => self.send_finalization_certificate().await,
         }
     }
 
@@ -968,6 +976,13 @@ where
         self.send_vote_bytes(signer_idx, msg).await;
     }
 
+    async fn send_notarize_quorum_votes(&mut self, proposal: Proposal<Sha256Digest>) {
+        for signer_idx in 0..self.schemes.len() {
+            self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
+                .await;
+        }
+    }
+
     async fn send_nullify_vote(&mut self, signer_idx: usize) {
         let view = self.strategy.mutate_nullify_view(
             &mut self.context,
@@ -990,6 +1005,12 @@ where
         self.send_vote_bytes(signer_idx, msg).await;
     }
 
+    async fn send_nullify_quorum_votes(&mut self, view: u64) {
+        for signer_idx in 0..self.schemes.len() {
+            self.send_nullify_vote_for_view(signer_idx, view).await;
+        }
+    }
+
     async fn send_finalize_vote(&mut self, signer_idx: usize) {
         let proposal = self.select_event_proposal();
         self.send_finalize_vote_for_proposal(signer_idx, proposal)
@@ -1007,6 +1028,13 @@ where
 
         let msg = Vote::<S, Sha256Digest>::Finalize(vote).encode();
         self.send_vote_bytes(signer_idx, msg).await;
+    }
+
+    async fn send_finalize_quorum_votes(&mut self, proposal: Proposal<Sha256Digest>) {
+        for signer_idx in 0..self.schemes.len() {
+            self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
+                .await;
+        }
     }
 
     async fn send_vote_bytes(&mut self, signer_idx: usize, msg: Bytes) {
@@ -1040,20 +1068,21 @@ where
         self.send_vote_bytes(signer_idx, msg).await;
     }
 
-    async fn send_certificate_bytes(&mut self, signer_idx: usize, msg: Bytes) {
-        let _ = self.certificate_senders[signer_idx]
+    async fn send_certificate_bytes(&mut self, msg: Bytes) {
+        let sender_idx = self.next_sender();
+        let _ = self.certificate_senders[sender_idx]
             .send(Recipients::One(self.honest.clone()), msg, true)
             .await;
     }
 
-    async fn send_malformed_certificate(&mut self, signer_idx: usize) {
+    async fn send_malformed_certificate(&mut self) {
         let msg = self
             .strategy
             .mutate_certificate_bytes(&mut self.context, &[0u8]);
-        self.send_certificate_bytes(signer_idx, msg.into()).await;
+        self.send_certificate_bytes(msg.into()).await;
     }
 
-    async fn send_wrong_epoch_nullification_certificate(&mut self, signer_idx: usize) {
+    async fn send_wrong_epoch_nullification_certificate(&mut self) {
         let view = self.last_vote_view.clamp(1, MAX_SAFE_VIEW);
         let wrong_epoch = Epoch::new(crate::EPOCH.saturating_add(1));
         let round = Round::new(wrong_epoch, View::new(view));
@@ -1062,10 +1091,10 @@ where
         };
 
         let msg = Certificate::<S, Sha256Digest>::Nullification(cert).encode();
-        self.send_certificate_bytes(signer_idx, msg).await;
+        self.send_certificate_bytes(msg).await;
     }
 
-    async fn send_invalid_notarization_certificate(&mut self, signer_idx: usize) {
+    async fn send_invalid_notarization_certificate(&mut self) {
         let view = self
             .last_vote_view
             .max(self.last_notarized_view)
@@ -1076,10 +1105,10 @@ where
         };
 
         let msg = Certificate::<S, Sha256Digest>::Notarization(cert).encode();
-        self.send_certificate_bytes(signer_idx, msg).await;
+        self.send_certificate_bytes(msg).await;
     }
 
-    async fn send_invalid_nullification_certificate(&mut self, signer_idx: usize) {
+    async fn send_invalid_nullification_certificate(&mut self) {
         let view = self
             .last_vote_view
             .max(self.last_nullified_view)
@@ -1090,7 +1119,7 @@ where
         };
 
         let msg = Certificate::<S, Sha256Digest>::Nullification(cert).encode();
-        self.send_certificate_bytes(signer_idx, msg).await;
+        self.send_certificate_bytes(msg).await;
     }
 
     // After an honest notarize, inject one Byzantine progress branch for that view:
@@ -1116,42 +1145,30 @@ where
             // the notarize/finalize path or force the nullification path, but never both.
             match self.choose_progress_branch() {
                 ProgressBranch::NullificationCertificate => {
-                    self.send_nullification_certificate_for_view(0, view).await;
+                    self.send_nullification_certificate_for_view(view).await;
                 }
                 ProgressBranch::NullifyVotes => {
-                    for signer_idx in 0..self.schemes.len() {
-                        self.send_nullify_vote_for_view(signer_idx, view).await;
-                    }
+                    self.send_nullify_quorum_votes(view).await;
                 }
                 ProgressBranch::NotarizationCertificateAndFinalizationCertificate => {
-                    self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
+                    self.send_notarization_certificate_for_proposal(proposal.clone(), true)
                         .await;
-                    self.send_finalization_certificate_for_proposal(0, proposal.clone())
+                    self.send_finalization_certificate_for_proposal(proposal.clone())
                         .await;
                 }
                 ProgressBranch::NotarizationCertificateAndFinalizeVotes => {
-                    self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
+                    self.send_notarization_certificate_for_proposal(proposal.clone(), true)
                         .await;
-                    for signer_idx in 0..self.schemes.len() {
-                        self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
-                            .await;
-                    }
+                    self.send_finalize_quorum_votes(proposal.clone()).await;
                 }
                 ProgressBranch::NotarizeVotesAndFinalizationCertificate => {
-                    for signer_idx in 0..self.schemes.len() {
-                        self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
-                            .await;
-                    }
-                    self.send_finalization_certificate_for_proposal(0, proposal.clone())
+                    self.send_notarize_quorum_votes(proposal.clone()).await;
+                    self.send_finalization_certificate_for_proposal(proposal.clone())
                         .await;
                 }
                 ProgressBranch::NotarizeVotesAndFinalizeVotes => {
-                    for signer_idx in 0..self.schemes.len() {
-                        self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
-                            .await;
-                        self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
-                            .await;
-                    }
+                    self.send_notarize_quorum_votes(proposal.clone()).await;
+                    self.send_finalize_quorum_votes(proposal.clone()).await;
                 }
             }
 
@@ -1162,7 +1179,6 @@ where
 
     async fn send_notarization_certificate_for_proposal(
         &mut self,
-        signer_idx: usize,
         proposal: Proposal<Sha256Digest>,
         prefer_honest_vote: bool,
     ) {
@@ -1179,39 +1195,32 @@ where
         self.last_notarized_view = self.last_notarized_view.max(view);
 
         let msg = Certificate::<S, Sha256Digest>::Notarization(certificate).encode();
-        let _ = self.certificate_senders[signer_idx]
-            .send(Recipients::One(self.honest.clone()), msg, true)
-            .await;
+        self.send_certificate_bytes(msg).await;
     }
 
-    async fn send_notarization_certificate(&mut self, signer_idx: usize) {
+    async fn send_notarization_certificate(&mut self) {
         let proposal = self.select_event_proposal();
         let prefer_honest_vote =
             matches!(self.choose_vote_preference(), VotePreference::PreferHonest);
 
         match self.choose_notarization_certificate_branch() {
             NotarizationCertificateBranch::Normal => {
-                self.send_notarization_certificate_for_proposal(
-                    signer_idx,
-                    proposal,
-                    prefer_honest_vote,
-                )
-                .await;
-            }
-            NotarizationCertificateBranch::Malformed => {
-                self.send_malformed_certificate(signer_idx).await;
-            }
-            NotarizationCertificateBranch::WrongEpochNullification => {
-                self.send_wrong_epoch_nullification_certificate(signer_idx)
+                self.send_notarization_certificate_for_proposal(proposal, prefer_honest_vote)
                     .await;
             }
+            NotarizationCertificateBranch::Malformed => {
+                self.send_malformed_certificate().await;
+            }
+            NotarizationCertificateBranch::WrongEpochNullification => {
+                self.send_wrong_epoch_nullification_certificate().await;
+            }
             NotarizationCertificateBranch::InvalidNotarization => {
-                self.send_invalid_notarization_certificate(signer_idx).await;
+                self.send_invalid_notarization_certificate().await;
             }
         }
     }
 
-    async fn send_nullification_certificate_for_view(&mut self, signer_idx: usize, view: u64) {
+    async fn send_nullification_certificate_for_view(&mut self, view: u64) {
         let view = view.max(1);
 
         let round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
@@ -1222,9 +1231,7 @@ where
         self.last_nullified_view = self.last_nullified_view.max(view);
 
         let msg = Certificate::<S, Sha256Digest>::Nullification(cert).encode();
-        let _ = self.certificate_senders[signer_idx]
-            .send(Recipients::One(self.honest.clone()), msg, true)
-            .await;
+        self.send_certificate_bytes(msg).await;
     }
 
     // Force the honest node to assemble and broadcast a local nullification for
@@ -1252,16 +1259,14 @@ where
             let Some(parent_proposal) = self.proposal_by_view.get(&parent_view).cloned() else {
                 return;
             };
-            self.send_notarization_certificate_for_proposal(0, parent_proposal, true)
+            self.send_notarization_certificate_for_proposal(parent_proposal, true)
                 .await;
         }
 
-        for signer_idx in 0..self.schemes.len() {
-            self.send_nullify_vote_for_view(signer_idx, view).await;
-        }
+        self.send_nullify_quorum_votes(view).await;
     }
 
-    async fn send_nullification_certificate(&mut self, signer_idx: usize) {
+    async fn send_nullification_certificate(&mut self) {
         let view = self.strategy.mutate_nullify_view(
             &mut self.context,
             self.last_vote_view,
@@ -1272,29 +1277,25 @@ where
 
         match self.choose_nullification_certificate_branch() {
             NullificationCertificateBranch::Normal => {
-                self.send_nullification_certificate_for_view(signer_idx, view)
-                    .await;
+                self.send_nullification_certificate_for_view(view).await;
             }
             NullificationCertificateBranch::TriggerLocalFloor => {
                 self.try_trigger_local_nullification_floor().await;
             }
             NullificationCertificateBranch::Malformed => {
-                self.send_malformed_certificate(signer_idx).await;
+                self.send_malformed_certificate().await;
             }
             NullificationCertificateBranch::WrongEpoch => {
-                self.send_wrong_epoch_nullification_certificate(signer_idx)
-                    .await;
+                self.send_wrong_epoch_nullification_certificate().await;
             }
             NullificationCertificateBranch::InvalidNullification => {
-                self.send_invalid_nullification_certificate(signer_idx)
-                    .await;
+                self.send_invalid_nullification_certificate().await;
             }
         }
     }
 
     async fn send_finalization_certificate_for_proposal(
         &mut self,
-        signer_idx: usize,
         proposal: Proposal<Sha256Digest>,
     ) {
         let view = proposal.view().get();
@@ -1305,7 +1306,7 @@ where
             .get(&view)
             .is_none_or(|d| *d != payload)
         {
-            self.send_notarization_certificate_for_proposal(signer_idx, proposal.clone(), true)
+            self.send_notarization_certificate_for_proposal(proposal.clone(), true)
                 .await;
         }
 
@@ -1321,9 +1322,7 @@ where
         self.last_finalized_view = self.last_finalized_view.max(view);
 
         let msg = Certificate::<S, Sha256Digest>::Finalization(certificate).encode();
-        let _ = self.certificate_senders[signer_idx]
-            .send(Recipients::One(self.honest.clone()), msg, true)
-            .await;
+        self.send_certificate_bytes(msg).await;
     }
 
     fn build_invalid_finalization_for_view(
@@ -1357,32 +1356,29 @@ where
         })
     }
 
-    async fn send_invalid_finalization_certificate(&mut self, signer_idx: usize) -> bool {
+    async fn send_invalid_finalization_certificate(&mut self) {
         let view = self
             .last_vote_view
             .max(self.last_notarized_view)
             .max(self.last_finalized_view);
         let Some(cert) = self.build_invalid_finalization_for_view(view) else {
-            return false;
+            return;
         };
 
         let msg = Certificate::<S, Sha256Digest>::Finalization(cert).encode();
-        let _ = self.certificate_senders[signer_idx]
-            .send(Recipients::One(self.honest.clone()), msg, true)
-            .await;
-        true
+        self.send_certificate_bytes(msg).await;
     }
 
-    async fn send_finalization_certificate(&mut self, signer_idx: usize) {
+    async fn send_finalization_certificate(&mut self) {
         let proposal = self.select_event_proposal();
 
         match self.choose_finalization_certificate_branch() {
             FinalizationCertificateBranch::Normal => {
-                self.send_finalization_certificate_for_proposal(signer_idx, proposal)
+                self.send_finalization_certificate_for_proposal(proposal)
                     .await;
             }
             FinalizationCertificateBranch::InvalidFinalization => {
-                self.send_invalid_finalization_certificate(signer_idx).await;
+                self.send_invalid_finalization_certificate().await;
             }
         }
     }
