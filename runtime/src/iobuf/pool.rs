@@ -792,8 +792,8 @@ impl BufferPool {
     ///
     /// The returned buffer has `len() == 0` and `capacity() >= capacity`,
     /// matching the semantics of [`IoBufMut::with_capacity`] and
-    /// [`bytes::BytesMut::with_capacity`]. Use [`BufMut::put_slice`] or other
-    /// [`BufMut`] methods to write data to the buffer.
+    /// [`bytes::BytesMut::with_capacity`]. Use [`bytes::BufMut::put_slice`] or
+    /// other [`bytes::BufMut`] methods to write data to the buffer.
     ///
     /// If the pool can provide a buffer (capacity within limits and pool not
     /// exhausted), returns a pooled buffer that will be returned to the pool
