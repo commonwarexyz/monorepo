@@ -19,7 +19,7 @@
 
 use crate::bls12381::{
     primitives::{
-        group::{Scalar, GT},
+        group::{Scalar, SmallScalar, GT},
         ops::hash_with_namespace,
         variant::Variant,
     },
@@ -28,7 +28,7 @@ use crate::bls12381::{
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use commonware_math::algebra::{Additive, CryptoGroup, Random, Space};
+use commonware_math::algebra::{Additive, CryptoGroup, Space};
 use rand_core::CryptoRngCore;
 
 /// Hint produced during decryption for batch verification.
@@ -103,7 +103,7 @@ pub fn verify_decryption<R, V>(
 where
     R: CryptoRngCore,
     V: Variant,
-    V::Public: Space<Scalar>,
+    V::Public: Space<Scalar> + Space<SmallScalar>,
 {
     assert_eq!(ciphertexts.len(), hints.len());
     let n = ciphertexts.len();
@@ -120,13 +120,14 @@ where
         alphas.push(alpha);
     }
 
-    // Step 2: Sample random challenges
-    let challenges: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut *rng)).collect();
+    // Step 2: Sample 128-bit random challenges (sufficient for batch security)
+    let challenges: Vec<SmallScalar> =
+        (0..n).map(|_| SmallScalar::random(&mut *rng)).collect();
 
     // Compute shared scalar: s = sum(r_i * alpha_i)
     let mut s = Scalar::zero();
     for (r, alpha) in challenges.iter().zip(alphas.iter()) {
-        s = s + &(r.clone() * alpha);
+        s += &(r * alpha);
     }
 
     // Step 3: G1 check — sum(r_i * ct_0_i) == s * G
@@ -166,6 +167,7 @@ mod tests {
     use super::*;
     use crate::bls12381::primitives::{ops, variant::MinPk};
     use commonware_macros::test_group;
+    use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
     use std::time::Instant;
 
