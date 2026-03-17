@@ -980,6 +980,31 @@ impl From<u64> for Scalar {
     }
 }
 
+impl From<SmallScalar> for Scalar {
+    fn from(small: SmallScalar) -> Self {
+        let mut fr = blst_fr::default();
+        // SAFETY: blst_fr_from_scalar reads a valid blst_scalar.
+        unsafe {
+            blst_fr_from_scalar(&mut fr, &small.inner);
+        }
+        Self(fr)
+    }
+}
+
+impl<'a, 'b> Mul<&'a Scalar> for &'b SmallScalar {
+    type Output = Scalar;
+
+    fn mul(self, rhs: &'a Scalar) -> Scalar {
+        let mut fr = blst_fr::default();
+        // SAFETY: blst_fr_from_scalar reads a valid blst_scalar.
+        unsafe {
+            blst_fr_from_scalar(&mut fr, &self.inner);
+        }
+        let lhs = Scalar(fr);
+        lhs * rhs
+    }
+}
+
 impl<'a> AddAssign<&'a Self> for Scalar {
     fn add_assign(&mut self, rhs: &'a Self) {
         let ptr = &raw mut self.0;
