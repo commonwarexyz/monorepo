@@ -44,8 +44,8 @@ const BYZANTINE_IDS: [usize; BYZANTINE_COUNT] = [0, 1, 2];
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
 pub enum Event {
-    OnBroadcastPayload,
-    OnBroadcastAndNotarize,
+    OnProposalBroadcast,
+    OnProposalBroadcastThenNotarize,
     OnNotarize,
     OnNullify,
     OnFinalize,
@@ -635,8 +635,10 @@ where
     async fn apply_event(&mut self, event: NodeEvent) {
         let signer_idx = self.signer_index(event.from_node_idx);
         match event.event {
-            Event::OnBroadcastPayload => self.broadcast_payload_event(signer_idx).await,
-            Event::OnBroadcastAndNotarize => self.send_broadcast_and_notarize(signer_idx).await,
+            Event::OnProposalBroadcast => self.broadcast_payload(signer_idx).await,
+            Event::OnProposalBroadcastThenNotarize => {
+                self.send_broadcast_and_notarize(signer_idx).await
+            }
             Event::OnNotarize => self.send_notarize_vote(signer_idx).await,
             Event::OnNullify => self.send_nullify_vote(signer_idx).await,
             Event::OnFinalize => self.send_finalize_vote(signer_idx).await,
@@ -646,7 +648,7 @@ where
         }
     }
 
-    async fn broadcast_payload_event(&mut self, signer_idx: usize) {
+    async fn broadcast_payload(&mut self, signer_idx: usize) {
         let proposal = self.select_event_proposal();
         let view = proposal.view().get();
         if !self.is_round_robin_leader(signer_idx, view) {
@@ -1384,7 +1386,7 @@ mod tests {
             events: vec![
                 NodeEvent {
                     from_node_idx: 0,
-                    event: Event::OnBroadcastAndNotarize,
+                    event: Event::OnProposalBroadcastThenNotarize,
                 },
                 NodeEvent {
                     from_node_idx: 1,
