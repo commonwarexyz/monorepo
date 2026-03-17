@@ -92,7 +92,7 @@ pub struct WithRecovery;
 
 #[derive(Clone, Copy)]
 enum ProgressBranch {
-    NullifyCertificate,
+    NullificationCertificate,
     NullifyVotes,
     NotarizationCertificateAndFinalizationCertificate,
     NotarizationCertificateAndFinalizeVotes,
@@ -276,7 +276,7 @@ where
 
     fn choose_progress_branch(&mut self) -> ProgressBranch {
         match self.context.gen_range(0..100u8) {
-            0..=9 => ProgressBranch::NullifyCertificate,
+            0..=9 => ProgressBranch::NullificationCertificate,
             10..=19 => ProgressBranch::NullifyVotes,
             20..=39 => ProgressBranch::NotarizationCertificateAndFinalizationCertificate,
             40..=59 => ProgressBranch::NotarizationCertificateAndFinalizeVotes,
@@ -1094,7 +1094,7 @@ where
     }
 
     // After an honest notarize, inject one Byzantine progress branch for that view:
-    // either notarize+finalize evidence, or nullification evidence.
+    // either notarize+finalize/notarization+finalization evidence, or nullification evidence.
     async fn drive_progress(&mut self) {
         let notarized: Vec<_> = self
             .honest_notarize_votes
@@ -1115,14 +1115,8 @@ where
             // Intuition: once the honest node notarizes a proposal, either help it complete
             // the notarize/finalize path or force the nullification path, but never both.
             match self.choose_progress_branch() {
-                ProgressBranch::NullifyCertificate => {
-                    if !self.schemes.is_empty() {
-                        self.send_nullification_certificate_for_view(0, view).await;
-                    } else {
-                        for signer_idx in 0..self.schemes.len() {
-                            self.send_nullify_vote_for_view(signer_idx, view).await;
-                        }
-                    }
+                ProgressBranch::NullificationCertificate => {
+                    self.send_nullification_certificate_for_view(0, view).await;
                 }
                 ProgressBranch::NullifyVotes => {
                     for signer_idx in 0..self.schemes.len() {
@@ -1130,30 +1124,14 @@ where
                     }
                 }
                 ProgressBranch::NotarizationCertificateAndFinalizationCertificate => {
-                    if !self.schemes.is_empty() {
-                        self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
-                            .await;
-                        self.send_finalization_certificate_for_proposal(0, proposal.clone())
-                            .await;
-                    } else {
-                        for signer_idx in 0..self.schemes.len() {
-                            self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
-                                .await;
-                            self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
-                                .await;
-                        }
-                    }
+                    self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
+                        .await;
+                    self.send_finalization_certificate_for_proposal(0, proposal.clone())
+                        .await;
                 }
                 ProgressBranch::NotarizationCertificateAndFinalizeVotes => {
-                    if !self.schemes.is_empty() {
-                        self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
-                            .await;
-                    } else {
-                        for signer_idx in 0..self.schemes.len() {
-                            self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
-                                .await;
-                        }
-                    }
+                    self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
+                        .await;
                     for signer_idx in 0..self.schemes.len() {
                         self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
                             .await;
@@ -1164,15 +1142,8 @@ where
                         self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
                             .await;
                     }
-                    if !self.schemes.is_empty() {
-                        self.send_finalization_certificate_for_proposal(0, proposal.clone())
-                            .await;
-                    } else {
-                        for signer_idx in 0..self.schemes.len() {
-                            self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
-                                .await;
-                        }
-                    }
+                    self.send_finalization_certificate_for_proposal(0, proposal.clone())
+                        .await;
                 }
                 ProgressBranch::NotarizeVotesAndFinalizeVotes => {
                     for signer_idx in 0..self.schemes.len() {
