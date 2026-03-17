@@ -64,6 +64,13 @@ use std::{
     },
 };
 
+/// Minimum local capacity required before refill/spill starts batching.
+///
+/// Below this threshold TLS still provides same-thread locality, but batching
+/// would degrade to single-buffer moves and add policy complexity without
+/// amortizing shared-queue traffic.
+const MIN_BATCH_CAPACITY: usize = 4;
+
 /// Error returned when buffer pool allocation fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolError {
@@ -454,9 +461,9 @@ struct TlsSizeClassCacheEntry {
 /// Per-class thread-local cache for tracked buffers.
 ///
 /// The hot steady-state path allocates from and returns to this cache. When
-/// the cache is full it spills some entries back to the class-global freelist,
-/// and when the thread exits its remaining entries are flushed to that same
-/// global freelist.
+/// the cache is full, small bins route overflow directly to the class-global
+/// freelist while larger bins spill a batch back to it. When the thread exits
+/// its remaining entries are flushed to that same global freelist.
 struct TlsSizeClassCache {
     entries: Vec<TlsSizeClassCacheEntry>,
     local_capacity: usize,
@@ -482,11 +489,18 @@ impl TlsSizeClassCache {
 
     /// Pushes an entry into the local cache, spilling to global if full.
     ///
-    /// When the cache is at capacity, half the entries (at least one) are
-    /// drained back to the global freelist before the new entry is inserted.
+    /// Small local caches prioritize same-thread locality and route overflow
+    /// directly to the global freelist. Once the local cache is large enough
+    /// to batch effectively, half the entries are drained to amortize global
+    /// queue traffic across future returns.
     fn push(&mut self, entry: TlsSizeClassCacheEntry) {
         if self.entries.len() < self.local_capacity {
             self.entries.push(entry);
+            return;
+        }
+
+        if self.local_capacity < MIN_BATCH_CAPACITY {
+            entry.class.push_global(entry.buffer);
             return;
         }
 
@@ -565,9 +579,10 @@ impl TlsCache {
 
     /// Batch-refills the local cache from the global freelist.
     ///
-    /// Pulls up to `target - 1` buffers from global into the local cache.
-    /// Called after a global pop succeeds, so the caller already holds one
-    /// buffer and we warm the cache for subsequent local hits.
+    /// Pulls up to `target - 1` buffers from global into the local cache. For
+    /// small local bins, batching is disabled and this becomes a no-op. Called
+    /// after a global pop succeeds, so the caller already holds one buffer and
+    /// we warm the cache for subsequent local hits when batching is enabled.
     #[inline]
     fn refill(class: &Arc<SizeClass>, target: usize) {
         Self::with_class_cache_mut(class.class_id, class.local_capacity, |cache| {
@@ -621,7 +636,8 @@ impl BufferPoolInner {
     ///
     /// Uses a three-tier strategy:
     /// 1. **Thread-local cache** (fast path): no atomics, no contention.
-    /// 2. **Global freelist**: atomic pop, then batch-refill the local cache.
+    /// 2. **Global freelist**: atomic pop, then batch-refill the local cache
+    ///    when the local bin is large enough to amortize shared-queue traffic.
     /// 3. **New allocation**: reserve capacity via CAS, allocate from heap.
     ///
     /// If `zero_on_new` is true, newly-created buffers are allocated with
@@ -1382,12 +1398,79 @@ mod tests {
         assert_eq!(pool.inner.classes[class_index].global.len(), 0);
         assert_eq!(get_local_len(&pool.inner.classes[class_index]), 1);
 
-        // Returning another tracked buffer should spill one buffer to the global
+        // Returning another tracked buffer should route overflow to the global
         // freelist and retain one in the current thread's local bin.
         drop(tracked2);
         assert_eq!(pool.inner.classes[class_index].global.len(), 1);
         assert_eq!(get_local_len(&pool.inner.classes[class_index]), 1);
         assert_eq!(get_available(&pool, page), 2);
+    }
+
+    #[test]
+    fn test_small_local_cache_overflow_preserves_locality() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+
+        // With `local_capacity == 1`, the first return stays local and the
+        // second overflows directly to global instead of spilling the hot
+        // local entry through the shared queue.
+        let mut tracked1 = pool.try_alloc(page).expect("first tracked allocation");
+        let ptr1 = tracked1.as_mut_ptr();
+        let mut tracked2 = pool.try_alloc(page).expect("second tracked allocation");
+        let ptr2 = tracked2.as_mut_ptr();
+
+        drop(tracked1);
+        drop(tracked2);
+
+        let mut reused_local = pool.try_alloc(page).expect("reuse from local cache");
+        assert_eq!(reused_local.as_mut_ptr(), ptr1);
+
+        let mut reused_global = pool.try_alloc(page).expect("reuse from global freelist");
+        assert_eq!(reused_global.as_mut_ptr(), ptr2);
+    }
+
+    #[test]
+    fn test_large_local_cache_batches_overflow_and_refill() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let threads = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+        let max_per_class = threads * 8;
+        let pool = BufferPool::new(test_config(page, page, max_per_class), &mut registry);
+        let class_index = pool
+            .inner
+            .config
+            .class_index(page)
+            .expect("class exists for page-sized buffer");
+        let class = &pool.inner.classes[class_index];
+
+        assert!(class.local_capacity >= MIN_BATCH_CAPACITY);
+
+        // Drop enough distinct checked-out buffers to force an overflow from a
+        // full local cache. Large bins should spill half the entries to global
+        // and keep the remainder local for fast same-thread reuse.
+        let mut bufs = Vec::new();
+        for _ in 0..class.local_capacity + 1 {
+            bufs.push(pool.try_alloc(page).expect("tracked allocation"));
+        }
+        for buf in bufs {
+            drop(buf);
+        }
+
+        assert_eq!(get_local_len(class), class.local_capacity / 2 + 1);
+        assert_eq!(class.global.len(), class.local_capacity / 2);
+
+        // Drain the local half, then hit global once. That global pop should
+        // batch-refill the local cache back up to the configured target.
+        let _a = pool.try_alloc(page).expect("first local reuse");
+        let _b = pool.try_alloc(page).expect("second local reuse");
+        let _c = pool.try_alloc(page).expect("third local reuse");
+        assert_eq!(get_local_len(class), 0);
+        assert_eq!(class.global.len(), class.local_capacity / 2);
+
+        let _d = pool.try_alloc(page).expect("global reuse with refill");
+        assert_eq!(get_local_len(class), class.local_capacity / 2 - 1);
+        assert_eq!(class.global.len(), 0);
     }
 
     #[test]
