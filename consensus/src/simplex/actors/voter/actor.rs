@@ -173,7 +173,7 @@ impl<
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
                 term_length: cfg.term_length,
-                optimistic_validation_depth: cfg.optimistic_validation_depth,
+                optimistic_depth: cfg.optimistic_depth,
             },
         );
         (

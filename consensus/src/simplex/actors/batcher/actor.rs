@@ -69,7 +69,7 @@ where
     forwarding: ForwardingPolicy,
     epoch: Epoch,
     term_length: NonZeroU64,
-    optimistic_validation_depth: u64,
+    optimistic_depth: u64,
 
     mailbox_receiver: mpsc::Receiver<Message<S, D>>,
 
@@ -158,7 +158,7 @@ where
                 forwarding: cfg.forwarding,
                 epoch: cfg.epoch,
                 term_length: cfg.term_length,
-                optimistic_validation_depth: cfg.optimistic_validation_depth,
+                optimistic_depth: cfg.optimistic_depth,
 
                 mailbox_receiver: receiver,
 
@@ -377,7 +377,7 @@ where
                         view,
                         false,
                         self.term_length,
-                        self.optimistic_validation_depth,
+                        self.optimistic_depth,
                     ) {
                         continue;
                     }
@@ -422,7 +422,7 @@ where
                     view,
                     true,
                     self.term_length,
-                    self.optimistic_validation_depth,
+                    self.optimistic_depth,
                 ) {
                     continue;
                 }
@@ -532,7 +532,7 @@ where
                     view,
                     false,
                     self.term_length,
-                    self.optimistic_validation_depth,
+                    self.optimistic_depth,
                 ) {
                     continue;
                 }
@@ -681,7 +681,7 @@ where
                         view,
                         false,
                         self.term_length,
-                        self.optimistic_validation_depth,
+                        self.optimistic_depth,
                     )
                 }) {
                     work.pop_first();

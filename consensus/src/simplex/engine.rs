@@ -73,7 +73,7 @@ impl<
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
                 term_length: cfg.term_length,
-                optimistic_validation_depth: cfg.optimistic_validation_depth,
+                optimistic_depth: cfg.optimistic_depth,
                 forwarding: cfg.forwarding,
             },
         );
@@ -96,7 +96,7 @@ impl<
                 timeout_retry: cfg.timeout_retry,
                 activity_timeout: cfg.activity_timeout,
                 term_length: cfg.term_length,
-                optimistic_validation_depth: cfg.optimistic_validation_depth,
+                optimistic_depth: cfg.optimistic_depth,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
                 page_cache: cfg.page_cache,

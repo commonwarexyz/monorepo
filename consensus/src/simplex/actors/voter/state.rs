@@ -91,7 +91,7 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
     pub term_length: NonZeroU64,
-    pub optimistic_validation_depth: u64,
+    pub optimistic_depth: u64,
 }
 
 /// Per-[Epoch] state machine.
@@ -108,7 +108,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     certification_timeout: Duration,
     timeout_retry: Duration,
     term_length: NonZeroU64,
-    optimistic_validation_depth: u64,
+    optimistic_depth: u64,
     view: View,
     last_finalized: View,
     genesis: Option<D>,
@@ -125,7 +125,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     nullification_views: BTreeSet<View>,
 
     /// Views that are notarized only through a descendant's notarization certificate.
-    indirectly_notarized_views: BTreeSet<View>,
+    indirect_notarized: BTreeSet<View>,
 
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
@@ -140,14 +140,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     State<E, S, L, D>
 {
     const fn optimistic_validation_enabled(&self) -> bool {
-        self.term_length.get() > 1 && self.optimistic_validation_depth > 0
+        self.term_length.get() > 1 && self.optimistic_depth > 0
     }
 
     fn optimistic_validation_enabled_for(&self, view: View) -> bool {
         self.optimistic_validation_enabled() && view != view.term_start(self.term_length)
     }
 
-    fn optimistic_anchor(&self, view: View) -> View {
+    fn direct_anchor(&self, view: View) -> View {
         self.views
             .range(..view)
             .rev()
@@ -159,9 +159,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if !self.optimistic_validation_enabled_for(view) {
             return false;
         }
-        let anchor = self.optimistic_anchor(view);
+        let anchor = self.direct_anchor(view);
         let optimistic_hops = view.get().saturating_sub(anchor.get()).saturating_sub(1);
-        optimistic_hops <= self.optimistic_validation_depth
+        optimistic_hops <= self.optimistic_depth
     }
 
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
@@ -189,14 +189,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             certification_timeout: cfg.certification_timeout,
             timeout_retry: cfg.timeout_retry,
             term_length: cfg.term_length,
-            optimistic_validation_depth: cfg.optimistic_validation_depth,
+            optimistic_depth: cfg.optimistic_depth,
             view: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
             nullify_views: BTreeSet::new(),
             nullification_views: BTreeSet::new(),
-            indirectly_notarized_views: BTreeSet::new(),
+            indirect_notarized: BTreeSet::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
             current_view,
@@ -242,7 +242,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             pending,
             false,
             self.term_length,
-            self.optimistic_validation_depth,
+            self.optimistic_depth,
         )
     }
 
@@ -255,7 +255,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             pending,
             true,
             self.term_length,
-            self.optimistic_validation_depth,
+            self.optimistic_depth,
         )
     }
 
@@ -427,7 +427,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.set_leader(view.next(), Some(&notarization.certificate));
         let result = self.create_round(view).add_notarization(notarization);
         if result.0 {
-            self.mark_indirectly_notarized(view);
+            self.mark_indirect_ancestors(view);
         }
         if result.0 && view > self.last_finalized && self.views.contains_key(&view) {
             self.certification_candidates.insert(view);
@@ -617,7 +617,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             artifact,
             Artifact::Notarization(_) | Artifact::Finalization(_)
         ) {
-            self.rebuild_indirectly_notarized();
+            self.rebuild_indirect_views();
         }
     }
 
@@ -838,7 +838,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         // so pruned entries could never affect that decision.
         self.nullification_views = self.nullification_views.split_off(&min);
         self.nullify_views = self.nullify_views.split_off(&min);
-        self.indirectly_notarized_views = self.indirectly_notarized_views.split_off(&min);
+        self.indirect_notarized = self.indirect_notarized.split_off(&min);
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
@@ -882,8 +882,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     fn is_notarized(&self, view: View) -> bool {
         view == GENESIS_VIEW
             || self.is_directly_notarized(view)
-            || (self.optimistic_validation_enabled()
-                && self.indirectly_notarized_views.contains(&view))
+            || (self.optimistic_validation_enabled() && self.indirect_notarized.contains(&view))
     }
 
     /// Returns the payload of a parent we can safely use for optimistic validation.
@@ -931,7 +930,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     ///
     /// Only ancestors we locally verified and voted to notarize without
     /// equivocation are eligible for indirect notarization.
-    fn mark_indirectly_notarized(&mut self, view: View) {
+    fn mark_indirect_ancestors(&mut self, view: View) {
         if !self.optimistic_validation_enabled() {
             return;
         }
@@ -956,14 +955,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             let Some(proposal) = round.proposal() else {
                 break;
             };
-            self.indirectly_notarized_views.insert(parent);
+            self.indirect_notarized.insert(parent);
             cursor = Some(proposal.parent);
         }
     }
 
     /// Rebuilds the indirect notarization cache from currently tracked direct certificates.
-    fn rebuild_indirectly_notarized(&mut self) {
-        self.indirectly_notarized_views.clear();
+    fn rebuild_indirect_views(&mut self) {
+        self.indirect_notarized.clear();
         let directly_notarized = self
             .views
             .iter()
@@ -972,7 +971,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             })
             .collect::<Vec<_>>();
         for view in directly_notarized {
-            self.mark_indirectly_notarized(view);
+            self.mark_indirect_ancestors(view);
         }
     }
 
@@ -1190,7 +1189,7 @@ mod tests {
                 timeout_retry: Duration::from_secs(3),
                 term_length: std::num::NonZeroU64::new(term_length)
                     .expect("term length must be non-zero"),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             },
         );
         let mut state = state;
@@ -1217,7 +1216,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                    optimistic_depth: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -1298,7 +1297,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1364,7 +1363,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1422,7 +1421,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1466,7 +1465,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1528,7 +1527,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1583,7 +1582,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -1646,7 +1645,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1713,7 +1712,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1772,7 +1771,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -1846,7 +1845,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -2064,7 +2063,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(5),
-                    optimistic_validation_depth: 1,
+                    optimistic_depth: 1,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2096,7 +2095,7 @@ mod tests {
     }
 
     #[test]
-    fn optimistic_validation_depth_zero_disables_intra_term_lookahead() {
+    fn optimistic_depth_zero_disables_intra_term_lookahead() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -2113,7 +2112,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(5),
-                    optimistic_validation_depth: 0,
+                    optimistic_depth: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2138,7 +2137,7 @@ mod tests {
     }
 
     #[test]
-    fn optimistic_validation_depth_bounds_chain_length() {
+    fn optimistic_depth_bounds_chain_length() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -2155,7 +2154,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(5),
-                    optimistic_validation_depth: 1,
+                    optimistic_depth: 1,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2215,7 +2214,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(5),
-                    optimistic_validation_depth: 1,
+                    optimistic_depth: 1,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2246,7 +2245,7 @@ mod tests {
             let (added, equivocator) = state.add_notarization(notarization);
             assert!(added);
             assert!(equivocator.is_none());
-            assert!(state.indirectly_notarized_views.contains(&View::new(1)));
+            assert!(state.indirect_notarized.contains(&View::new(1)));
             let round = state.views.get(&View::new(1)).expect("ancestor round");
             assert!(round.proposal().is_some());
             assert!(round.is_verified());
@@ -2275,7 +2274,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(5),
-                    optimistic_validation_depth: 2,
+                    optimistic_depth: 2,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2319,7 +2318,7 @@ mod tests {
                 Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap();
             assert!(state.add_notarization(notarization).0);
 
-            assert!(!state.indirectly_notarized_views.contains(&View::new(2)));
+            assert!(!state.indirect_notarized.contains(&View::new(2)));
         });
     }
 
@@ -2562,7 +2561,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     term_length: NZU64!(5),
-                    optimistic_validation_depth: 2,
+                    optimistic_depth: 2,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2621,7 +2620,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                    optimistic_depth: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2679,7 +2678,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                    optimistic_depth: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2727,7 +2726,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                    optimistic_depth: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2766,7 +2765,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(1),
-                    optimistic_validation_depth: 0,
+                    optimistic_depth: 0,
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -2810,7 +2809,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(5),
-                    optimistic_validation_depth: 2,
+                    optimistic_depth: 2,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2828,7 +2827,7 @@ mod tests {
             let notarization =
                 Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap();
             assert!(state.add_notarization(notarization.clone()).0);
-            assert!(state.indirectly_notarized_views.contains(&View::new(1)));
+            assert!(state.indirect_notarized.contains(&View::new(1)));
 
             let mut restarted = State::new(
                 context.with_label("restarted"),
@@ -2841,7 +2840,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(5),
-                    optimistic_validation_depth: 2,
+                    optimistic_depth: 2,
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -2851,7 +2850,7 @@ mod tests {
             restarted.add_notarization(notarization.clone());
             restarted.replay(&Artifact::Notarization(notarization));
 
-            assert!(restarted.indirectly_notarized_views.contains(&View::new(1)));
+            assert!(restarted.indirect_notarized.contains(&View::new(1)));
             assert_eq!(
                 restarted.notarized_parent_payload(View::new(1)).copied(),
                 Some(Sha256Digest::from([121u8; 32]))
@@ -2876,7 +2875,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3100,7 +3099,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3172,7 +3171,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3252,7 +3251,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(5),
-                    optimistic_validation_depth: 0,
+                    optimistic_depth: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -3313,7 +3312,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(5),
-                    optimistic_validation_depth: 0,
+                    optimistic_depth: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -3380,7 +3379,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_secs(30),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());
@@ -3462,7 +3461,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3508,7 +3507,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(5),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3553,7 +3552,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(3),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3626,7 +3625,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(1),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3670,7 +3669,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(5),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3727,7 +3726,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(5),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3807,7 +3806,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(5),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
 
             // Helper that prepares a certified notarization at view 2.
@@ -3851,7 +3850,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
                     term_length: NZU64!(5),
-                    optimistic_validation_depth: 0,
+                    optimistic_depth: 0,
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -3885,7 +3884,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(3),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3956,7 +3955,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
                 term_length: NZU64!(3),
-                optimistic_validation_depth: 0,
+                optimistic_depth: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());

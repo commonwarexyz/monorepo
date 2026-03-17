@@ -149,7 +149,7 @@ where
     /// directly notarized view.
     ///
     /// A value of `0` disables optimistic validation entirely.
-    pub optimistic_validation_depth: u64,
+    pub optimistic_depth: u64,
 
     /// Policy for proactively forwarding certified blocks when entering the
     /// next view.
