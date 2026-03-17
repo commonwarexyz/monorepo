@@ -907,7 +907,7 @@ where
 
     // After an honest notarize, inject one Byzantine progress branch for that view:
     // either notarize+finalize evidence, or nullification evidence.
-    async fn advance_honest(&mut self) {
+    async fn drive_progress(&mut self) {
         let notarized: Vec<_> = self
             .honest_notarize_votes
             .iter()
@@ -1294,9 +1294,7 @@ where
     for event in input.events.iter() {
         driver.check_finalization(&mut latest, &mut monitor);
         driver.handle_receivers().await;
-        driver
-            .advance_honest()
-            .await;
+        driver.drive_progress().await;
         driver.apply_event(*event).await;
     }
 
