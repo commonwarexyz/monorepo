@@ -55,11 +55,15 @@
 use crate::mmr::{
     hasher::Hasher,
     iterator::{nodes_needing_parents, PathIterator, PeakIterator},
-    mem::{Dirty, Mmr},
+    mem::Mmr,
     read::Readable,
     Error, Location, Position,
 };
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    vec::Vec,
+};
 use commonware_cryptography::Digest;
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
@@ -75,7 +79,7 @@ pub struct UnmerkleizedBatch<D: Digest> {
     parent: MerkleizedBatch<D>,
     appended: Vec<D>,
     overwrites: BTreeMap<Position, D>,
-    state: Dirty,
+    dirty_nodes: BTreeSet<(Position, u32)>,
     #[cfg(feature = "std")]
     pool: Option<ThreadPool>,
 }
@@ -88,7 +92,7 @@ impl<D: Digest> UnmerkleizedBatch<D> {
             parent,
             appended: Vec::new(),
             overwrites: BTreeMap::new(),
-            state: Dirty::default(),
+            dirty_nodes: BTreeSet::new(),
             #[cfg(feature = "std")]
             pool: None,
         }
@@ -150,7 +154,7 @@ impl<D: Digest> UnmerkleizedBatch<D> {
         for _ in nodes_needing_parents {
             let new_node_pos = self.size();
             self.appended.push(D::EMPTY);
-            self.state.insert(new_node_pos, height);
+            self.dirty_nodes.insert((new_node_pos, height));
             height += 1;
         }
 
@@ -229,7 +233,8 @@ impl<D: Digest> UnmerkleizedBatch<D> {
 
     /// Consume this batch and produce an immutable [`MerkleizedBatch`] with computed root.
     pub fn merkleize(mut self, hasher: &mut impl Hasher<Digest = D>) -> MerkleizedBatch<D> {
-        let dirty = self.state.take_sorted_by_height();
+        let mut dirty: Vec<_> = core::mem::take(&mut self.dirty_nodes).into_iter().collect();
+        dirty.sort_by_key(|a| a.1);
 
         #[cfg(feature = "std")]
         if let Some(pool) = self.pool.take() {
@@ -362,7 +367,7 @@ impl<D: Digest> UnmerkleizedBatch<D> {
                 .rev();
             height = 1;
             for (parent_pos, _) in path {
-                if !self.state.insert(parent_pos, height) {
+                if !self.dirty_nodes.insert((parent_pos, height)) {
                     break;
                 }
                 height += 1;

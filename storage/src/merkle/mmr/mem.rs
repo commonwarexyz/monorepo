@@ -8,7 +8,7 @@ use crate::mmr::{
     Error, Location, Position, Proof,
 };
 use alloc::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     sync::Arc,
     vec::Vec,
 };
@@ -18,29 +18,6 @@ use core::ops::Range;
 /// Minimum number of digest computations required during batch updates to trigger parallelization.
 #[cfg(feature = "std")]
 pub(crate) const MIN_TO_PARALLELIZE: usize = 20;
-
-/// Marker type for an unmerkleized batch (root digest not computed).
-#[derive(Clone, Debug, Default)]
-pub struct Dirty {
-    /// Non-leaf nodes that need to have their digests recomputed due to a batched update operation.
-    ///
-    /// This is a set of tuples of the form (node_pos, height).
-    dirty_nodes: BTreeSet<(Position, u32)>,
-}
-
-impl Dirty {
-    /// Insert a dirty node. Returns true if newly inserted.
-    pub(crate) fn insert(&mut self, pos: Position, height: u32) -> bool {
-        self.dirty_nodes.insert((pos, height))
-    }
-
-    /// Take all dirty nodes sorted by ascending height (bottom-up for merkleize).
-    pub(crate) fn take_sorted_by_height(&mut self) -> Vec<(Position, u32)> {
-        let mut v: Vec<_> = core::mem::take(&mut self.dirty_nodes).into_iter().collect();
-        v.sort_by_key(|a| a.1);
-        v
-    }
-}
 
 /// Configuration for initializing an [Mmr].
 pub struct Config<D: Digest> {
