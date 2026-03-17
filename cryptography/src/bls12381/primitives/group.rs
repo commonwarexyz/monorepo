@@ -502,11 +502,13 @@ impl GT {
     /// subgroup (i.e. pairing outputs).
     pub fn scalar_mul(&self, scalar: &Scalar) -> GT {
         let s = scalar.as_blst_scalar();
-        // blst_scalar.b is little-endian
-        let bytes = &s.b;
+        self.scalar_mul_bytes(&s.b)
+    }
 
+    /// Double-and-add over little-endian scalar bytes.
+    fn scalar_mul_bytes(&self, bytes: &[u8]) -> GT {
         // Find the highest set bit
-        let mut top_byte = SCALAR_LENGTH - 1;
+        let mut top_byte = bytes.len() - 1;
         while top_byte > 0 && bytes[top_byte] == 0 {
             top_byte -= 1;
         }
@@ -515,7 +517,7 @@ impl GT {
         }
         let top_bit = 7 - bytes[top_byte].leading_zeros() as usize;
 
-        // Square-and-multiply (MSB to LSB)
+        // Double-and-add (MSB to LSB)
         let mut acc = self.0;
         let base = &self.0;
         let mut started = false;
@@ -588,6 +590,33 @@ impl GT {
         }
         GT(result)
     }
+
+    /// Shared MSM logic: filters identity points and zero scalars, then
+    /// delegates to Pippenger.
+    fn msm_inner<'a>(
+        points: impl Iterator<Item = (&'a Self, &'a [u8])>,
+        nbits: usize,
+    ) -> Self {
+        let nbytes = nbits.div_ceil(8);
+        let (points_filtered, flat_scalars): (Vec<_>, Vec<u8>) = points
+            .filter(|(point, scalar)| {
+                !point.is_identity() && !bool::from(all_zero(&scalar[..nbytes]))
+            })
+            .fold(
+                (Vec::new(), Vec::new()),
+                |(mut pts, mut scs), (point, scalar)| {
+                    pts.push(*point);
+                    scs.extend_from_slice(&scalar[..nbytes]);
+                    (pts, scs)
+                },
+            );
+
+        if points_filtered.is_empty() {
+            return Self::zero();
+        }
+
+        Self::msm_sequential(&points_filtered, &flat_scalars, nbits)
+    }
 }
 
 // GT is treated as an additive group (matching G1/G2). The underlying fp12
@@ -653,44 +682,47 @@ impl<'a> MulAssign<&'a Scalar> for GT {
 impl<'a> Mul<&'a Scalar> for GT {
     type Output = Self;
 
-    fn mul(self, rhs: &'a Scalar) -> Self::Output {
-        self.scalar_mul(rhs)
+    fn mul(mut self, rhs: &'a Scalar) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl<'a> MulAssign<&'a SmallScalar> for GT {
+    fn mul_assign(&mut self, rhs: &'a SmallScalar) {
+        *self = self.scalar_mul_bytes(rhs.as_bytes());
+    }
+}
+
+impl<'a> Mul<&'a SmallScalar> for GT {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a SmallScalar) -> Self::Output {
+        self *= rhs;
+        self
     }
 }
 
 impl Space<Scalar> for GT {
     fn msm(points: &[Self], scalars: &[Scalar], _strategy: &impl Strategy) -> Self {
         assert_eq!(points.len(), scalars.len(), "mismatched lengths");
-        let n = points.len();
-        if n == 0 {
-            return Self::zero();
-        }
-
-        // Filter out identity points and zero scalars
         let scalar_bytes: Vec<_> = scalars.iter().map(|s| s.as_blst_scalar()).collect();
-        let (points_filtered, scalars_filtered): (Vec<_>, Vec<_>) = points
-            .iter()
-            .zip(scalar_bytes.iter())
-            .filter_map(|(point, scalar)| {
-                if point.is_identity() || all_zero(&scalar.b).into() {
-                    return None;
-                }
-                Some((*point, scalar))
-            })
-            .unzip();
+        Self::msm_inner(
+            points
+                .iter()
+                .zip(scalar_bytes.iter().map(|s| s.b.as_slice())),
+            SCALAR_BITS,
+        )
+    }
+}
 
-        if points_filtered.is_empty() {
-            return Self::zero();
-        }
-
-        // Flatten scalars into contiguous byte array
-        let nbytes = SCALAR_BITS.div_ceil(8);
-        let flat_scalars: Vec<u8> = scalars_filtered
-            .iter()
-            .flat_map(|s| s.b[..nbytes].iter().copied())
-            .collect();
-
-        Self::msm_sequential(&points_filtered, &flat_scalars, SCALAR_BITS)
+impl Space<SmallScalar> for GT {
+    fn msm(points: &[Self], scalars: &[SmallScalar], _strategy: &impl Strategy) -> Self {
+        assert_eq!(points.len(), scalars.len(), "mismatched lengths");
+        Self::msm_inner(
+            points.iter().zip(scalars.iter().map(|s| s.as_bytes())),
+            SMALL_SCALAR_BITS,
+        )
     }
 }
 
@@ -2373,7 +2405,8 @@ mod tests {
         assert_eq!(msm_result, naive_result, "GT MSM != naive");
 
         // Empty MSM should be identity
-        let empty_result = GT::msm(&[], &[], &Sequential);
+        let empty_scalars: &[Scalar] = &[];
+        let empty_result = GT::msm(&[], empty_scalars, &Sequential);
         assert_eq!(empty_result, GT::zero(), "empty GT MSM should be zero");
 
         // Single element
