@@ -9,6 +9,7 @@ use bytes::Bytes;
 use commonware_codec::{Encode, Read, ReadExt};
 use commonware_consensus::{
     simplex::{
+        elector::{Config as ElectorConfig, Elector, RoundRobin, RoundRobinElector},
         scheme::Scheme as SimplexScheme,
         types::{
             Certificate, Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
@@ -18,7 +19,7 @@ use commonware_consensus::{
     types::{Epoch, Round, View},
     Monitor, Viewable,
 };
-use commonware_cryptography::sha256::Digest as Sha256Digest;
+use commonware_cryptography::{certificate::Scheme as _, sha256::Digest as Sha256Digest, Sha256};
 use commonware_p2p::{simulated, Receiver as _, Recipients, Sender as _};
 use commonware_parallel::Sequential;
 use commonware_runtime::{deterministic, Clock, Metrics, Runner};
@@ -31,7 +32,7 @@ use std::{
 };
 
 const MIN_EVENTS: usize = 10;
-const MAX_EVENTS: usize = 50;
+const MAX_EVENTS: usize = 100;
 const MAX_SAFE_VIEW: u64 = u64::MAX - 2;
 const PROPOSAL_CACHE_LIMIT: usize = 64;
 
@@ -189,6 +190,7 @@ where
     certificate_receivers: Vec<simulated::Receiver<S::PublicKey>>,
     resolver_receivers: Vec<simulated::Receiver<S::PublicKey>>,
     strategy: SmallScope,
+    elector: RoundRobinElector<S>,
 
     last_vote_view: u64,
     last_finalized_view: u64,
@@ -204,6 +206,7 @@ where
 
     notarized_by_view: HashMap<u64, Sha256Digest>,
     finalized_by_view: HashMap<u64, Sha256Digest>,
+    leader_certificate_by_view: HashMap<u64, S::Certificate>,
 }
 
 impl<S> NodeDriver<S>
@@ -226,6 +229,7 @@ where
         vote_receivers: Vec<simulated::Receiver<S::PublicKey>>,
         certificate_receivers: Vec<simulated::Receiver<S::PublicKey>>,
         resolver_receivers: Vec<simulated::Receiver<S::PublicKey>>,
+        elector: RoundRobinElector<S>,
     ) -> Self {
         Self {
             context,
@@ -243,6 +247,7 @@ where
                 fault_rounds: 1,
                 fault_rounds_bound: 1,
             },
+            elector,
             last_vote_view: 1,
             last_finalized_view: 0,
             last_notarized_view: 0,
@@ -254,6 +259,7 @@ where
             injected_finalize_views: HashSet::new(),
             notarized_by_view: HashMap::new(),
             finalized_by_view: HashMap::new(),
+            leader_certificate_by_view: HashMap::new(),
         }
     }
 
@@ -261,17 +267,41 @@ where
         usize::from(node_idx) % self.schemes.len()
     }
 
-    fn is_round_robin_leader(&self, signer_idx: usize, view: u64) -> bool {
-        let participant_count = self.byzantine_participants.len() + 1;
-        let leader_idx = (crate::EPOCH.wrapping_add(view) as usize) % participant_count;
-        leader_idx == signer_idx
+    fn leader_for_view(&self, view: u64) -> usize {
+        let round = Round::new(Epoch::new(crate::EPOCH), View::new(view));
+        let certificate = if view <= 1 {
+            None
+        } else {
+            self.leader_certificate_by_view.get(&view.saturating_sub(1))
+        };
+        usize::from(self.elector.elect(round, certificate))
     }
 
-    fn is_honest_round_robin_leader(&self, view: u64) -> bool {
-        let participant_count = self.byzantine_participants.len() + 1;
-        let honest_idx = self.byzantine_participants.len();
-        let leader_idx = (crate::EPOCH.wrapping_add(view) as usize) % participant_count;
-        leader_idx == honest_idx
+    fn is_elected_leader(&self, participant_idx: usize, view: u64) -> bool {
+        self.leader_for_view(view) == participant_idx
+    }
+
+    fn is_elected_honest_leader(&self, view: u64) -> bool {
+        self.is_elected_leader(self.byzantine_participants.len(), view)
+    }
+
+    fn track_certificate(&mut self, certificate: &Certificate<S, Sha256Digest>) {
+        match certificate {
+            Certificate::Notarization(notarization) => {
+                self.leader_certificate_by_view
+                    .insert(notarization.view().get(), notarization.certificate.clone());
+            }
+            Certificate::Nullification(nullification) => {
+                self.leader_certificate_by_view.insert(
+                    nullification.view().get(),
+                    nullification.certificate.clone(),
+                );
+            }
+            Certificate::Finalization(finalization) => {
+                self.leader_certificate_by_view
+                    .insert(finalization.view().get(), finalization.certificate.clone());
+            }
+        }
     }
 
     fn choose_progress_branch(&mut self) -> ProgressBranch {
@@ -761,6 +791,8 @@ where
 
         match certificate {
             Certificate::Notarization(notarization) => {
+                self.leader_certificate_by_view
+                    .insert(notarization.view().get(), notarization.certificate.clone());
                 let view = notarization.view().get();
                 self.last_vote_view = self.last_vote_view.max(view);
                 self.last_notarized_view = self.last_notarized_view.max(view);
@@ -771,11 +803,17 @@ where
                 self.latest_proposals.push_back(notarization.proposal);
             }
             Certificate::Nullification(nullification) => {
+                self.leader_certificate_by_view.insert(
+                    nullification.view().get(),
+                    nullification.certificate.clone(),
+                );
                 let view = nullification.view().get();
                 self.last_nullified_view = self.last_nullified_view.max(view);
                 self.last_vote_view = self.last_vote_view.max(view);
             }
             Certificate::Finalization(finalization) => {
+                self.leader_certificate_by_view
+                    .insert(finalization.view().get(), finalization.certificate.clone());
                 let view = finalization.view().get();
                 self.last_vote_view = self.last_vote_view.max(view);
                 self.last_finalized_view = self.last_finalized_view.max(view);
@@ -848,7 +886,7 @@ where
     async fn broadcast_payload(&mut self, signer_idx: usize) {
         let proposal = self.select_event_proposal();
         let view = proposal.view().get();
-        if !self.is_round_robin_leader(signer_idx, view) {
+        if !self.is_elected_leader(signer_idx, view) {
             return;
         }
         self.broadcast_payload_for_verify(signer_idx, &proposal)
@@ -912,7 +950,7 @@ where
 
         let proposal = self.select_event_proposal();
         let view = proposal.view().get();
-        if self.is_round_robin_leader(signer_idx, view) {
+        if self.is_elected_leader(signer_idx, view) {
             self.broadcast_payload_for_verify(signer_idx, &proposal)
                 .await;
         }
@@ -922,9 +960,9 @@ where
 
     async fn send_valid_broadcast_and_notarize(&mut self, signer_idx: usize) -> bool {
         let mut view = self.last_vote_view.clamp(1, MAX_SAFE_VIEW);
-        if !self.is_round_robin_leader(signer_idx, view) {
+        if !self.is_elected_leader(signer_idx, view) {
             let next = view.saturating_add(1).min(MAX_SAFE_VIEW);
-            if !self.is_round_robin_leader(signer_idx, next) {
+            if !self.is_elected_leader(signer_idx, next) {
                 return false;
             }
             view = next;
@@ -1194,6 +1232,7 @@ where
         self.notarized_by_view.insert(view, payload);
         self.last_notarized_view = self.last_notarized_view.max(view);
 
+        self.track_certificate(&Certificate::Notarization(certificate.clone()));
         let msg = Certificate::<S, Sha256Digest>::Notarization(certificate).encode();
         self.send_certificate_bytes(msg).await;
     }
@@ -1230,6 +1269,7 @@ where
 
         self.last_nullified_view = self.last_nullified_view.max(view);
 
+        self.track_certificate(&Certificate::Nullification(cert.clone()));
         let msg = Certificate::<S, Sha256Digest>::Nullification(cert).encode();
         self.send_certificate_bytes(msg).await;
     }
@@ -1242,7 +1282,7 @@ where
             .keys()
             .filter(|proposal| {
                 let view = proposal.view().get();
-                self.is_honest_round_robin_leader(view) && proposal.parent.get() > 0
+                self.is_elected_honest_leader(view) && proposal.parent.get() > 0
             })
             .max_by_key(|proposal| proposal.view().get())
             .cloned()
@@ -1321,6 +1361,7 @@ where
         self.finalized_by_view.insert(view, payload);
         self.last_finalized_view = self.last_finalized_view.max(view);
 
+        self.track_certificate(&Certificate::Finalization(certificate.clone()));
         let msg = Certificate::<S, Sha256Digest>::Finalization(certificate).encode();
         self.send_certificate_bytes(msg).await;
     }
@@ -1459,6 +1500,7 @@ where
     .with_strict(false);
 
     let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+    let elector = RoundRobin::<Sha256>::default().build(fuzzer_schemes[0].participants());
 
     let mut driver = NodeDriver::<P::Scheme>::new(
         context.with_label("simplex_node_driver"),
@@ -1472,6 +1514,7 @@ where
         vote_receivers,
         certificate_receivers,
         resolver_receivers,
+        elector,
     );
 
     for event in input.events.iter() {
