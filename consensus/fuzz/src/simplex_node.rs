@@ -516,7 +516,12 @@ where
         }
     }
 
-    async fn handle_honest_resolvers(&mut self, sender: &S::PublicKey, receiver_idx: usize, bytes: Vec<u8>) {
+    async fn handle_honest_resolvers(
+        &mut self,
+        sender: &S::PublicKey,
+        receiver_idx: usize,
+        bytes: Vec<u8>,
+    ) {
         if sender != &self.honest {
             return;
         }
@@ -599,7 +604,9 @@ where
         }
 
         for idx in 0..self.certificate_receivers.len() {
-            while let Some(Ok((sender, msg))) = self.certificate_receivers[idx].recv().now_or_never() {
+            while let Some(Ok((sender, msg))) =
+                self.certificate_receivers[idx].recv().now_or_never()
+            {
                 let bytes: Vec<u8> = msg.into();
                 self.handle_honest_certificates(&sender, bytes);
             }
@@ -896,9 +903,9 @@ where
         self.send_certificate_bytes(signer_idx, msg).await;
     }
 
-    // Boost progress after an honest notarize by injecting byzantine support for that
-    // proposal, and sometimes fast-forwarding with notarization/finalization certificates.
-    async fn inject_finalize_quorum_for_honest_notarize_views(&mut self) {
+    // After an honest notarize, inject one Byzantine progress branch for that view:
+    // either notarize+finalize evidence, or nullification evidence.
+    async fn inject_progress_evidence_for_honest_notarize_views(&mut self) {
         let notarized: Vec<_> = self
             .honest_notarize_votes
             .iter()
@@ -915,20 +922,36 @@ where
         }
 
         for (view, proposal) in notarized {
-            // Intuition: if we observe an honest notarize, quickly add byzantine nodes support so the
-            // honest node can make progress, as in the real protocol, and keep advancing the height under heavy load.
-            for signer_idx in 0..self.schemes.len() {
-                self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
-                    .await;
-            }
-
-            if !self.schemes.is_empty() && self.context.gen_bool(0.4) {
-                self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
-                    .await;
-            }
+            // Intuition: once the honest node notarizes a proposal, either help it complete
+            // the notarize/finalize path or force the nullification path, but never both.
             if !self.schemes.is_empty() && self.context.gen_bool(0.2) {
-                self.send_finalization_certificate_for_proposal(0, proposal.clone())
-                    .await;
+                if self.context.gen_bool(0.5) {
+                    self.send_nullification_certificate_for_view(0, view).await;
+                } else {
+                    for signer_idx in 0..self.schemes.len() {
+                        self.send_nullify_vote_for_view(signer_idx, view).await;
+                    }
+                }
+            } else {
+                if !self.schemes.is_empty() && self.context.gen_bool(0.5) {
+                    self.send_notarization_certificate_for_proposal(0, proposal.clone(), true)
+                        .await;
+                } else {
+                    for signer_idx in 0..self.schemes.len() {
+                        self.send_notarize_vote_for_proposal(signer_idx, proposal.clone())
+                            .await;
+                    }
+                }
+
+                if !self.schemes.is_empty() && self.context.gen_bool(0.5) {
+                    self.send_finalization_certificate_for_proposal(0, proposal.clone())
+                        .await;
+                } else {
+                    for signer_idx in 0..self.schemes.len() {
+                        self.send_finalize_vote_for_proposal(signer_idx, proposal.clone())
+                            .await;
+                    }
+                }
             }
 
             // Keep existing one-shot-per-view behavior.
@@ -1270,7 +1293,7 @@ where
         driver.check_finalization(&mut latest, &mut monitor);
         driver.handle_receivers().await;
         driver
-            .inject_finalize_quorum_for_honest_notarize_views()
+            .inject_progress_evidence_for_honest_notarize_views()
             .await;
         driver.apply_event(*event).await;
     }
