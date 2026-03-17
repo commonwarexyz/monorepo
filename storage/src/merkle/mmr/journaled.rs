@@ -401,20 +401,33 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             page_cache: cfg.config.page_cache.clone(),
         };
 
-        // Open the journal, handling existing data vs sync range.
-        assert!(!cfg.range.is_empty(), "range must not be empty");
+        // Open the journal, performing a rewind if necessary for crash recovery.
         let journal: Journal<E, D> =
             Journal::init(context.with_label("mmr_journal"), journal_cfg).await?;
-        let size = journal.size().await;
+        let mut journal_size = Position::new(journal.size().await);
 
-        if size > *end_pos {
-            return Err(crate::journal::Error::ItemOutOfRange(size).into());
+        // If a crash left the journal at an invalid MMR size (e.g., a leaf was written
+        // but its parent nodes were not), rewind to the last valid size.
+        let last_valid_size = PeakIterator::to_nearest_size(journal_size);
+        if last_valid_size != journal_size {
+            warn!(
+                ?last_valid_size,
+                "init_sync: encountered invalid MMR structure, recovering from last valid size"
+            );
+            journal.rewind(*last_valid_size).await?;
+            journal.sync().await?;
+            journal_size = last_valid_size;
         }
-        if size <= *prune_pos && *prune_pos != 0 {
+
+        // Handle existing data vs sync range.
+        assert!(!cfg.range.is_empty(), "range must not be empty");
+        if journal_size > *end_pos {
+            return Err(crate::journal::Error::ItemOutOfRange(*journal_size).into());
+        }
+        if journal_size <= *prune_pos && *prune_pos != 0 {
             journal.clear_to_size(*prune_pos).await?;
+            journal_size = Position::new(journal.size().await);
         }
-
-        let journal_size = Position::new(journal.size().await);
 
         // Open the metadata.
         let metadata_cfg = MConfig {
@@ -1377,9 +1390,9 @@ mod tests {
         });
     }
 
-    #[test_traced]
     /// Generates a stateful MMR, simulates various partial-write scenarios, and confirms we
     /// appropriately recover to a valid state.
+    #[test_traced]
     fn test_journaled_mmr_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1606,8 +1619,8 @@ mod tests {
         });
     }
 
-    #[test_traced("WARN")]
     /// Simulate partial writes after pruning, making sure we recover to a valid state.
+    #[test_traced("WARN")]
     fn test_journaled_mmr_recovery_with_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2884,6 +2897,159 @@ mod tests {
             assert_eq!(mmr.root(), *reference.root());
 
             mmr.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: init_sync must recover from a journal left at an invalid MMR size
+    /// (e.g., a crash wrote a leaf but not its parent nodes).
+    #[test_traced]
+    fn test_init_sync_recovers_from_invalid_journal_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Build an MMR with 3 leaves (valid size = 4), sync, and drop.
+            let mut mmr = Mmr::init(
+                context.with_label("init"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap();
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                for i in 0..3 {
+                    batch.add(&mut hasher, &test_digest(i));
+                }
+                batch.merkleize(&mut hasher).finalize()
+            };
+            mmr.apply(changeset).unwrap();
+            assert_eq!(mmr.size(), 4);
+            let valid_size = mmr.size();
+            let valid_root = mmr.root();
+            mmr.sync().await.unwrap();
+            drop(mmr);
+
+            // Append one extra digest to the journal, simulating a crash that wrote a
+            // leaf (for the 4th element) but not its parent nodes. This makes the
+            // journal size = 5, which is not a valid MMR size (4 is valid for 3 leaves,
+            // 7 is valid for 4 leaves).
+            {
+                let journal: Journal<_, Digest> = Journal::init(
+                    context.with_label("corrupt"),
+                    JConfig {
+                        partition: "journal-partition".into(),
+                        items_per_blob: NZU64!(7),
+                        write_buffer: NZUsize!(1024),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(journal.size().await, valid_size);
+                journal.append(&Sha256::hash(b"orphan")).await.unwrap();
+                journal.sync().await.unwrap();
+                assert_eq!(journal.size().await, valid_size + 1);
+            }
+
+            // init_sync should recover by rewinding to the last valid size.
+            let sync_cfg = SyncConfig::<Digest> {
+                config: test_config(&context),
+                range: Location::new(0)..Location::new(100),
+                pinned_nodes: None,
+            };
+            let sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &mut hasher)
+                .await
+                .unwrap();
+
+            assert_eq!(sync_mmr.size(), valid_size);
+            assert_eq!(sync_mmr.root(), valid_root);
+
+            sync_mmr.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: init_sync's "fresh start" path (journal data entirely before sync range)
+    /// calls clear_to_size which changes the journal size, but journal_size must be re-read
+    /// afterward. Without the re-read, nodes_to_pin and the mem_mmr are initialized with a
+    /// stale size, causing incorrect pinned nodes or init failure.
+    #[test_traced]
+    fn test_init_sync_fresh_start_updates_journal_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut hasher = Standard::<Sha256>::new();
+
+            // Build an MMR with 5 leaves (size 8), sync, drop.
+            let mut mmr = Mmr::init(
+                context.with_label("init"),
+                &mut hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap();
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                for i in 0..5 {
+                    batch.add(&mut hasher, &test_digest(i));
+                }
+                batch.merkleize(&mut hasher).finalize()
+            };
+            mmr.apply(changeset).unwrap();
+            mmr.sync().await.unwrap();
+            drop(mmr);
+
+            // Build a reference MMR to 100 leaves to get valid pinned nodes for the
+            // sync boundary.
+            let ref_cfg = Config {
+                journal_partition: "ref-journal".into(),
+                metadata_partition: "ref-metadata".into(),
+                items_per_blob: NZU64!(7),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let mut ref_mmr = Mmr::init(context.with_label("ref"), &mut hasher, ref_cfg)
+                .await
+                .unwrap();
+            let changeset = {
+                let mut batch = ref_mmr.new_batch();
+                for i in 0..100 {
+                    batch.add(&mut hasher, &test_digest(i));
+                }
+                batch.merkleize(&mut hasher).finalize()
+            };
+            ref_mmr.apply(changeset).unwrap();
+            let expected_size = ref_mmr.size();
+            let prune_pos = Position::try_from(Location::new(100)).unwrap();
+            let mut pinned = Vec::new();
+            for pos in nodes_to_pin(prune_pos) {
+                pinned.push(ref_mmr.get_node(pos).await.unwrap().unwrap());
+            }
+            ref_mmr.destroy().await.unwrap();
+
+            // init_sync with range starting beyond the existing data triggers the
+            // "fresh start" path (clear_to_size).
+            let sync_cfg = SyncConfig::<Digest> {
+                config: test_config(&context),
+                range: Location::new(100)..Location::new(200),
+                pinned_nodes: Some(pinned),
+            };
+            let mut sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &mut hasher)
+                .await
+                .unwrap();
+
+            // The MMR should have size matching the prune boundary position.
+            assert_eq!(sync_mmr.size(), expected_size);
+
+            // Should be able to add new elements without panic.
+            let changeset = {
+                let mut batch = sync_mmr.new_batch();
+                batch.add(&mut hasher, &test_digest(999));
+                batch.merkleize(&mut hasher).finalize()
+            };
+            sync_mmr.apply(changeset).unwrap();
+
+            sync_mmr.destroy().await.unwrap();
         });
     }
 
