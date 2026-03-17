@@ -1,5 +1,5 @@
-use crate::bls12381::primitives::group::{Scalar, G1, G2, GT};
-use commonware_math::algebra::{Additive, CryptoGroup, Random, Space};
+use crate::bls12381::primitives::group::{Scalar, SmallScalar, G1, G2, GT};
+use commonware_math::algebra::{Additive, CryptoGroup, Space};
 use commonware_parallel::Sequential;
 use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
@@ -147,22 +147,22 @@ pub fn batch_verify(
         }
     }
 
-    // Step 2: sample r in F^{2B} and batch-check ct2 and ct3
+    // Step 2: sample 128-bit challenges and batch-check ct2 and ct3
     // LHS: sum_i r_i * ct3_i + sum_i r_{B+i} * ct2_i
     // RHS: c1 * h + c2 * hsk_tau - c3 * hsk
-    let r: Vec<Scalar> = (0..2 * batch_size)
-        .map(|_| Scalar::random(&mut *rng))
+    let r: Vec<SmallScalar> = (0..2 * batch_size)
+        .map(|_| SmallScalar::random(&mut *rng))
         .collect();
 
     let mut c1 = Scalar::zero();
     let mut c2 = Scalar::zero();
     let mut c3 = Scalar::zero();
     for i in 0..batch_size {
-        let ri_alpha = r[i].clone() * &alphas[i];
+        let ri_alpha = &r[i] * &alphas[i];
         c1 += &ri_alpha;
-        let rbi_alpha = r[batch_size + i].clone() * &alphas[i];
+        let rbi_alpha = &r[batch_size + i] * &alphas[i];
         c2 += &rbi_alpha;
-        let rbi_alpha_x = rbi_alpha.clone() * &ct[i].x;
+        let rbi_alpha_x = rbi_alpha * &ct[i].x;
         c3 += &rbi_alpha_x;
     }
 
@@ -188,13 +188,13 @@ pub fn batch_verify(
     // RHS: e(c1 * hid - c4 * g, hsk)
     let mut c4 = Scalar::zero();
     for i in 0..batch_size {
-        let ri_alpha_tg = r[i].clone() * &alphas[i] * &tgs[i];
+        let ri_alpha_tg = &r[i] * &alphas[i] * &tgs[i];
         c4 += &ri_alpha_tg;
     }
 
     let gt_hints: Vec<GT> = decrypted.iter().map(|d| d.hint).collect();
-    let r_first_b: Vec<Scalar> = r[..batch_size].to_vec();
-    let lhs_gt = GT::msm(&gt_hints, &r_first_b, &Sequential);
+    let r_first_b = &r[..batch_size];
+    let lhs_gt = GT::msm(&gt_hints, r_first_b, &Sequential);
     let rhs_gt = GT::pairing(&(hid * &c1 - &(g * &c4)), &pk.hsk);
 
     lhs_gt == rhs_gt
@@ -382,7 +382,7 @@ mod tests {
         );
         println!("{}", "-".repeat(70));
 
-        for lg in 13..=16 {
+        for lg in 2..=12 {
             let batch_size = 1 << lg;
             let mut rng = test_rng();
             let tx_domain = Domain::new(batch_size);
