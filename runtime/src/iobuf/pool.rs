@@ -48,7 +48,6 @@
 
 use super::IoBufMut;
 use crate::iobuf::aligned::{AlignedBuffer, PooledBufMut};
-use bytes::BufMut;
 use commonware_utils::NZUsize;
 use crossbeam_queue::ArrayQueue;
 use prometheus_client::{
@@ -848,7 +847,11 @@ impl BufferPool {
             unsafe { buf.set_len(len) };
         } else {
             // Reused buffers may contain old bytes, re-zero requested readable range.
-            buf.put_bytes(0, len);
+            // SAFETY: `as_mut_ptr()` is valid for writes up to `capacity() >= len` bytes.
+            unsafe {
+                std::ptr::write_bytes(buf.as_mut_ptr(), 0, len);
+                buf.set_len(len);
+            }
         }
         Ok(buf)
     }
@@ -893,7 +896,7 @@ impl BufferPool {
 mod tests {
     use super::*;
     use crate::iobuf::IoBuf;
-    use bytes::Buf;
+    use bytes::{Buf, BufMut};
     use std::{sync::mpsc, thread};
 
     fn test_size_class(size: usize, alignment: usize) -> Arc<SizeClass> {
