@@ -497,4 +497,350 @@ mod tests {
             );
         });
     }
+
+    fn make_encoded_data(
+        pool: &commonware_runtime::BufferPool,
+        channel: u64,
+        payload_byte: u8,
+    ) -> EncodedData {
+        use commonware_runtime::iobuf::EncodeExt;
+        let data = crate::authenticated::data::Data {
+            channel,
+            message: commonware_runtime::IoBuf::from(vec![payload_byte; 10]),
+        };
+        let payload = types::Message::Data(data);
+        EncodedData {
+            channel,
+            payload: commonware_runtime::IoBufs::from(payload.encode_with_pool(pool)),
+        }
+    }
+
+    struct EncryptedPair {
+        local_receiver: commonware_stream::encrypted::Receiver<mocks::Stream>,
+        remote_sender: commonware_stream::encrypted::Sender<mocks::Sink>,
+        remote_receiver: commonware_stream::encrypted::Receiver<mocks::Stream>,
+    }
+
+    async fn setup_encrypted_connection(
+        context: deterministic::Context,
+        local_key: PrivateKey,
+        remote_key: PrivateKey,
+    ) -> EncryptedPair {
+        let local_pk = local_key.public_key();
+        let remote_pk = remote_key.public_key();
+        let (local_sink, remote_stream) = mocks::Channel::init();
+        let (remote_sink, local_stream) = mocks::Channel::init();
+
+        let local_config = stream_config(local_key);
+        let remote_config = stream_config(remote_key.clone());
+
+        let listener_handle = context.clone().spawn({
+            move |ctx| async move {
+                commonware_stream::encrypted::listen(
+                    ctx,
+                    |_| async { true },
+                    remote_config,
+                    remote_stream,
+                    remote_sink,
+                )
+                .await
+                .map(|(pk, sender, receiver)| {
+                    assert_eq!(pk, local_pk);
+                    (sender, receiver)
+                })
+            }
+        });
+
+        let (_local_sender, local_receiver) = commonware_stream::encrypted::dial(
+            context.clone(),
+            local_config,
+            remote_pk,
+            local_stream,
+            local_sink,
+        )
+        .await
+        .expect("dial failed");
+
+        let (remote_sender, remote_receiver) = listener_handle
+            .await
+            .expect("listen failed")
+            .expect("listen result failed");
+
+        EncryptedPair {
+            local_receiver,
+            remote_sender,
+            remote_receiver,
+        }
+    }
+
+    #[test]
+    fn test_batch_drain_sends_all_queued_data() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let local_key = PrivateKey::from_seed(10);
+            let remote_key = PrivateKey::from_seed(11);
+            let local_pk = local_key.public_key();
+
+            let pair = setup_encrypted_connection(
+                context.clone(),
+                local_key,
+                remote_key,
+            )
+            .await;
+
+            let sent_messages = Family::<metrics::Message, Counter>::default();
+            let config = Config {
+                mailbox_size: 64,
+                ping_frequency: Duration::from_secs(300),
+                max_send_batch: 8,
+                sent_messages: sent_messages.clone(),
+                received_messages: Family::default(),
+                dropped_messages: Family::default(),
+                rate_limited: Family::default(),
+            };
+            let (peer_actor, _mailbox, relay) =
+                Actor::<deterministic::Context, PublicKey>::new(context.clone(), config);
+
+            let channel_id = 0u64;
+            let (router_mailbox, _router_receiver) =
+                Mailbox::<router::Message<PublicKey>>::new(10);
+            let messenger =
+                router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
+            let mut channels = Channels::new(messenger, MAX_MESSAGE_SIZE);
+            let (_ch_sender, _ch_receiver) = channels.register(
+                channel_id,
+                commonware_runtime::Quota::per_second(
+                    std::num::NonZeroU32::new(100).unwrap(),
+                ),
+                64,
+                context.clone(),
+            );
+
+            let pool = context.network_buffer_pool();
+            for i in 0..5u8 {
+                relay
+                    .send(make_encoded_data(pool, channel_id, i), true)
+                    .unwrap();
+            }
+
+            let _ = peer_actor
+                .run(
+                    local_pk.clone(),
+                    (pair.remote_sender, pair.remote_receiver),
+                    channels,
+                )
+                .await;
+
+            let data_metric = metrics::Message::new_data(&local_pk, channel_id);
+            let sent_count = sent_messages.get_or_create(&data_metric).get();
+            assert_eq!(
+                sent_count, 5,
+                "Expected 5 data messages to be sent via batch drain, got {sent_count}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_drain_high_priority_before_low() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let local_key = PrivateKey::from_seed(20);
+            let remote_key = PrivateKey::from_seed(21);
+            let local_pk = local_key.public_key();
+
+            let pair = setup_encrypted_connection(
+                context.clone(),
+                local_key,
+                remote_key,
+            )
+            .await;
+
+            let sent_messages = Family::<metrics::Message, Counter>::default();
+            let config = Config {
+                mailbox_size: 64,
+                ping_frequency: Duration::from_secs(300),
+                max_send_batch: 16,
+                sent_messages: sent_messages.clone(),
+                received_messages: Family::default(),
+                dropped_messages: Family::default(),
+                rate_limited: Family::default(),
+            };
+            let (peer_actor, _mailbox, relay) =
+                Actor::<deterministic::Context, PublicKey>::new(context.clone(), config);
+
+            let channel_id = 0u64;
+            let (router_mailbox, _router_receiver) =
+                Mailbox::<router::Message<PublicKey>>::new(10);
+            let messenger =
+                router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
+            let mut channels = Channels::new(messenger, MAX_MESSAGE_SIZE);
+            let (_ch_sender, _ch_receiver) = channels.register(
+                channel_id,
+                commonware_runtime::Quota::per_second(
+                    std::num::NonZeroU32::new(100).unwrap(),
+                ),
+                64,
+                context.clone(),
+            );
+
+            let pool = context.network_buffer_pool();
+
+            for i in 0..3u8 {
+                relay
+                    .send(make_encoded_data(pool, channel_id, 100 + i), false)
+                    .unwrap();
+            }
+            for i in 0..3u8 {
+                relay
+                    .send(make_encoded_data(pool, channel_id, i), true)
+                    .unwrap();
+            }
+
+            let mut local_receiver = pair.local_receiver;
+            let expected_total = 6;
+            let reader_handle =
+                context
+                    .clone()
+                    .spawn(move |_| async move {
+                        let mut payload_bytes = Vec::new();
+                        while payload_bytes.len() < expected_total {
+                            let msg = match local_receiver.recv().await {
+                                Ok(msg) => msg,
+                                Err(_) => break,
+                            };
+                            let max_data_length = msg.len();
+                            if let Ok(types::Message::Data(data)) =
+                                types::Message::decode_cfg(msg, &max_data_length)
+                            {
+                                payload_bytes.push(data.message.as_ref()[0]);
+                            }
+                        }
+                        payload_bytes
+                    });
+
+            let _ = peer_actor
+                .run(
+                    local_pk.clone(),
+                    (pair.remote_sender, pair.remote_receiver),
+                    channels,
+                )
+                .await;
+
+            let data_metric = metrics::Message::new_data(&local_pk, channel_id);
+            let sent_count = sent_messages.get_or_create(&data_metric).get();
+            assert_eq!(
+                sent_count, 6,
+                "Expected 6 data messages (3 high + 3 low), got {sent_count}"
+            );
+
+            let received: Vec<u8> = reader_handle.await.unwrap_or_default();
+            assert_eq!(
+                received.len(),
+                6,
+                "Expected 6 data payloads, got {}",
+                received.len()
+            );
+            let high_msgs: Vec<_> = received.iter().filter(|b| **b < 100).collect();
+            let low_msgs: Vec<_> = received.iter().filter(|b| **b >= 100).collect();
+            assert_eq!(high_msgs.len(), 3);
+            assert_eq!(low_msgs.len(), 3);
+
+            let first_low_pos = received.iter().position(|b| *b >= 100).unwrap();
+            let last_high_pos = received.iter().rposition(|b| *b < 100).unwrap();
+            assert!(
+                last_high_pos < first_low_pos,
+                "High-priority messages must precede low-priority: received {received:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_flush_after_single_data_send() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let local_key = PrivateKey::from_seed(30);
+            let remote_key = PrivateKey::from_seed(31);
+            let local_pk = local_key.public_key();
+
+            let pair = setup_encrypted_connection(
+                context.clone(),
+                local_key,
+                remote_key,
+            )
+            .await;
+
+            let sent_messages = Family::<metrics::Message, Counter>::default();
+            let config = Config {
+                mailbox_size: 64,
+                ping_frequency: Duration::from_secs(300),
+                max_send_batch: 1,
+                sent_messages: sent_messages.clone(),
+                received_messages: Family::default(),
+                dropped_messages: Family::default(),
+                rate_limited: Family::default(),
+            };
+            let (peer_actor, _mailbox, relay) =
+                Actor::<deterministic::Context, PublicKey>::new(context.clone(), config);
+
+            let channel_id = 0u64;
+            let (router_mailbox, _router_receiver) =
+                Mailbox::<router::Message<PublicKey>>::new(10);
+            let messenger =
+                router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
+            let mut channels = Channels::new(messenger, MAX_MESSAGE_SIZE);
+            let (_ch_sender, _ch_receiver) = channels.register(
+                channel_id,
+                commonware_runtime::Quota::per_second(
+                    std::num::NonZeroU32::new(100).unwrap(),
+                ),
+                64,
+                context.clone(),
+            );
+
+            let pool = context.network_buffer_pool();
+            relay
+                .send(make_encoded_data(pool, channel_id, 42), true)
+                .unwrap();
+
+            let mut local_receiver = pair.local_receiver;
+            let reader_handle = context.clone().spawn(move |_| async move {
+                let mut data_count = 0u64;
+                while data_count < 1 {
+                    let msg = match local_receiver.recv().await {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    };
+                    let max_data_length = msg.len();
+                    if let Ok(types::Message::Data(data)) =
+                        types::Message::decode_cfg(msg, &max_data_length)
+                    {
+                        assert_eq!(data.message.as_ref()[0], 42);
+                        data_count += 1;
+                    }
+                }
+                data_count
+            });
+
+            let _ = peer_actor
+                .run(
+                    local_pk.clone(),
+                    (pair.remote_sender, pair.remote_receiver),
+                    channels,
+                )
+                .await;
+
+            let data_metric = metrics::Message::new_data(&local_pk, channel_id);
+            let sent_count = sent_messages.get_or_create(&data_metric).get();
+            assert_eq!(
+                sent_count, 1,
+                "Expected exactly 1 data message with max_send_batch=1, got {sent_count}"
+            );
+
+            let received_count: u64 = reader_handle.await.unwrap_or(0);
+            assert_eq!(
+                received_count, 1,
+                "Expected 1 received data message, got {received_count}"
+            );
+        });
+    }
 }

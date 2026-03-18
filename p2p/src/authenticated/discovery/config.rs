@@ -121,9 +121,8 @@ pub struct Config<C: Signer> {
     ///
     /// After dequeuing one data message, the peer actor drains up to
     /// `max_send_batch - 1` more ready messages (high-priority first)
-    /// before flushing. Requires a non-zero
-    /// [`write_buffer_size`](commonware_runtime::tokio::Config::write_buffer_size)
-    /// on the runtime to benefit from syscall coalescing.
+    /// before flushing. Pair with a non-zero write buffer on the
+    /// runtime network config to benefit from syscall coalescing.
     /// Defaults to 1 (no batching).
     pub max_send_batch: usize,
 
