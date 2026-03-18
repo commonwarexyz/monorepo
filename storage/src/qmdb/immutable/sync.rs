@@ -60,7 +60,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, Error> {
-        let mut hasher = StandardHasher::new();
+        let hasher = StandardHasher::new();
 
         // Initialize MMR for sync
         let mmr = Mmr::init_sync(
@@ -77,7 +77,7 @@ where
                 range,
                 pinned_nodes,
             },
-            &mut hasher,
+            &hasher,
         )
         .await?;
 

@@ -455,7 +455,7 @@ pub(super) fn partial_chunk<B: super::batch::BitmapRead<N>, const N: usize>(
 ///
 /// See the [Root structure](super) section in the module documentation.
 pub(super) fn combine_roots<H: Hasher>(
-    hasher: &mut StandardHasher<H>,
+    hasher: &StandardHasher<H>,
     ops_root: &H::Digest,
     grafted_mmr_root: &H::Digest,
     partial: Option<(u64, &H::Digest)>,
@@ -483,7 +483,7 @@ pub(super) async fn compute_db_root<
     S: mmr::storage::Storage<Digest = H::Digest>,
     const N: usize,
 >(
-    hasher: &mut StandardHasher<H>,
+    hasher: &StandardHasher<H>,
     storage: &grafting::Storage<'_, H::Digest, G, S>,
     partial_chunk: Option<([u8; N], u64)>,
     ops_root: &H::Digest,
@@ -509,7 +509,7 @@ pub(super) async fn compute_grafted_mmr_root<
     G: mmr::read::Readable<Digest = H::Digest>,
     S: mmr::storage::Storage<Digest = H::Digest>,
 >(
-    hasher: &mut StandardHasher<H>,
+    hasher: &StandardHasher<H>,
     storage: &grafting::Storage<'_, H::Digest, G, S>,
 ) -> Result<H::Digest, Error> {
     let size = storage.size().await;
@@ -536,7 +536,7 @@ pub(super) async fn compute_grafted_mmr_root<
 ///
 /// When a thread pool is provided and there are enough chunks, hashing is parallelized.
 pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
-    hasher: &mut StandardHasher<H>,
+    hasher: &StandardHasher<H>,
     ops_mmr: &impl mmr::storage::Storage<Digest = H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     pool: Option<&ThreadPool>,
@@ -599,7 +599,7 @@ pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
 /// ops MMR nodes for chunks >= `bitmap.pruned_chunks()` are still accessible in the ops MMR
 /// (i.e., not pruned from the journal).
 pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
-    hasher: &mut StandardHasher<H>,
+    hasher: &StandardHasher<H>,
     bitmap: &BitMap<N>,
     pinned_nodes: &[H::Digest],
     ops_mmr: &impl mmr::storage::Storage<Digest = H::Digest>,
@@ -619,17 +619,17 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     .await?;
 
     // Build a base Mmr: either from pruned components or empty.
-    let mut grafted_hasher = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
+    let grafted_hasher = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
     let mut grafted_mmr = if pruned_chunks > 0 {
         let grafted_pruned_to = Location::new(pruned_chunks as u64);
         mmr::mem::Mmr::from_components(
-            &mut grafted_hasher,
+            &grafted_hasher,
             Vec::new(),
             grafted_pruned_to,
             pinned_nodes.to_vec(),
         )?
     } else {
-        mmr::mem::Mmr::new(&mut grafted_hasher)
+        mmr::mem::Mmr::new(&grafted_hasher)
     };
 
     // Add each grafted leaf digest.
@@ -639,7 +639,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
             for &(_ops_pos, digest) in &leaves {
                 batch = batch.add_leaf_digest(digest);
             }
-            batch.merkleize(&mut grafted_hasher).finalize()
+            batch.merkleize(&grafted_hasher).finalize()
         };
         grafted_mmr.apply(changeset)?;
     }
@@ -746,38 +746,38 @@ mod tests {
 
     #[test]
     fn combine_roots_deterministic() {
-        let mut h1 = StandardHasher::<Sha256>::new();
-        let mut h2 = StandardHasher::<Sha256>::new();
+        let h1 = StandardHasher::<Sha256>::new();
+        let h2 = StandardHasher::<Sha256>::new();
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
-        let r1 = combine_roots(&mut h1, &ops, &grafted, None);
-        let r2 = combine_roots(&mut h2, &ops, &grafted, None);
+        let r1 = combine_roots(&h1, &ops, &grafted, None);
+        let r2 = combine_roots(&h2, &ops, &grafted, None);
         assert_eq!(r1, r2);
     }
 
     #[test]
     fn combine_roots_with_partial_differs() {
-        let mut h1 = StandardHasher::<Sha256>::new();
-        let mut h2 = StandardHasher::<Sha256>::new();
+        let h1 = StandardHasher::<Sha256>::new();
+        let h2 = StandardHasher::<Sha256>::new();
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let partial_digest = Sha256::hash(b"partial");
 
-        let without = combine_roots(&mut h1, &ops, &grafted, None);
-        let with = combine_roots(&mut h2, &ops, &grafted, Some((5, &partial_digest)));
+        let without = combine_roots(&h1, &ops, &grafted, None);
+        let with = combine_roots(&h2, &ops, &grafted, Some((5, &partial_digest)));
         assert_ne!(without, with);
     }
 
     #[test]
     fn combine_roots_different_ops_root() {
-        let mut h1 = StandardHasher::<Sha256>::new();
-        let mut h2 = StandardHasher::<Sha256>::new();
+        let h1 = StandardHasher::<Sha256>::new();
+        let h2 = StandardHasher::<Sha256>::new();
         let ops_a = Sha256::hash(b"ops_a");
         let ops_b = Sha256::hash(b"ops_b");
         let grafted = Sha256::hash(b"grafted");
 
-        let r1 = combine_roots(&mut h1, &ops_a, &grafted, None);
-        let r2 = combine_roots(&mut h2, &ops_b, &grafted, None);
+        let r1 = combine_roots(&h1, &ops_a, &grafted, None);
+        let r2 = combine_roots(&h2, &ops_b, &grafted, None);
         assert_ne!(r1, r2);
     }
 }

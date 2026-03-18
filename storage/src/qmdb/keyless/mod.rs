@@ -734,7 +734,7 @@ mod test {
     pub fn test_keyless_db_proof_generation_and_verification() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             // Build a db with some values
@@ -776,7 +776,7 @@ mod test {
 
                 // Verify the proof
                 assert!(
-                    verify_proof(&mut hasher, &proof, Location::new(start_loc), &ops, &root),
+                    verify_proof(&hasher, &proof, Location::new(start_loc), &ops, &root),
                     "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops",
                 );
 
@@ -815,14 +815,14 @@ mod test {
                 // Verify that proof fails with wrong root
                 let wrong_root = Sha256::hash(&[0xFF; 32]);
                 assert!(
-                    !verify_proof(&mut hasher, &proof, Location::new(start_loc), &ops, &wrong_root),
+                    !verify_proof(&hasher, &proof, Location::new(start_loc), &ops, &wrong_root),
                     "Proof should fail with wrong root"
                 );
 
                 // Verify that proof fails with wrong start location
                 if start_loc > 0 {
                     assert!(
-                        !verify_proof(&mut hasher, &proof, Location::new(start_loc - 1), &ops, &root),
+                        !verify_proof(&hasher, &proof, Location::new(start_loc - 1), &ops, &root),
                         "Proof should fail with wrong start location"
                     );
                 }
@@ -836,7 +836,7 @@ mod test {
     pub fn test_keyless_db_proof_with_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.with_label("db1")).await;
 
             // Build a db with some values
@@ -921,7 +921,7 @@ mod test {
 
                 // Verify the proof still works
                 assert!(
-                    verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
+                    verify_proof(&hasher, &proof, start_loc, &ops, &root),
                     "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops after pruning",
                 );
 
@@ -945,7 +945,7 @@ mod test {
             // Can still generate proofs for the remaining data
             let (proof, ops) = db.proof(new_oldest, NZU64!(20)).await.unwrap();
             assert!(
-                verify_proof(&mut hasher, &proof, new_oldest, &ops, &root),
+                verify_proof(&hasher, &proof, new_oldest, &ops, &root),
                 "Proof should still verify after aggressive pruning"
             );
 
@@ -960,7 +960,7 @@ mod test {
             if final_oldest < bounds.end {
                 let (final_proof, final_ops) = db.proof(final_oldest, NZU64!(10)).await.unwrap();
                 assert!(
-                    verify_proof(&mut hasher, &final_proof, final_oldest, &final_ops, &root),
+                    verify_proof(&hasher, &final_proof, final_oldest, &final_ops, &root),
                     "Should be able to prove remaining operations after extensive pruning"
                 );
             }
@@ -1449,7 +1449,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.with_label("db")).await;
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
             const BATCHES: u64 = 20;
             const APPENDS_PER_BATCH: u64 = 5;
@@ -1484,13 +1484,7 @@ mod test {
             // Verify proof over the full range.
             let root = db.root();
             let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-            assert!(verify_proof(
-                &mut hasher,
-                &proof,
-                Location::new(0),
-                &ops,
-                &root
-            ));
+            assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
 
             // Expected size: 1 initial commit + BATCHES * (APPENDS_PER_BATCH + 1 commit).
             let expected = 1 + BATCHES * (APPENDS_PER_BATCH + 1);
@@ -1594,7 +1588,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.with_label("db")).await;
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
             const N: u64 = 500;
             let mut values = Vec::new();
@@ -1625,13 +1619,7 @@ mod test {
             // Verify proof over the full range.
             let root = db.root();
             let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-            assert!(verify_proof(
-                &mut hasher,
-                &proof,
-                Location::new(0),
-                &ops,
-                &root
-            ));
+            assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
 
             // Expected: 1 initial commit + N appends + 1 commit.
             assert_eq!(db.bounds().await.end, 1 + N + 1);
