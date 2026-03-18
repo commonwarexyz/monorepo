@@ -27,7 +27,7 @@ mod tests {
         let changeset = {
             let mut batch = mmb.new_batch();
             for i in 0..n {
-                batch.add(&mut hasher, &i.to_be_bytes());
+                batch = batch.add(&mut hasher, &i.to_be_bytes());
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -52,7 +52,8 @@ mod tests {
         for i in 0u64..8 {
             let changeset = {
                 let mut batch = mmb.new_batch();
-                let loc = batch.add(&mut hasher, &i.to_be_bytes());
+                let loc = batch.leaves();
+                batch = batch.add(&mut hasher, &i.to_be_bytes());
                 assert_eq!(*loc, i);
                 batch.merkleize(&mut hasher).finalize()
             };
@@ -133,8 +134,8 @@ mod tests {
         let mut prev_root = *mmb.root();
         for i in 0u64..16 {
             let changeset = {
-                let mut batch = mmb.new_batch();
-                batch.add(&mut hasher, &i.to_be_bytes());
+                let batch = mmb.new_batch();
+                let batch = batch.add(&mut hasher, &i.to_be_bytes());
                 batch.merkleize(&mut hasher).finalize()
             };
             mmb.apply(changeset).unwrap();
@@ -267,7 +268,7 @@ mod tests {
         let changeset = {
             let mut batch = mmb.new_batch();
             for i in 20u64..48 {
-                batch.add(&mut hasher, &i.to_be_bytes());
+                batch = batch.add(&mut hasher, &i.to_be_bytes());
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -301,8 +302,8 @@ mod tests {
             );
             let old_size = mmb.size();
             let changeset = {
-                let mut batch = mmb.new_batch();
-                batch.add(&mut hasher, &i.to_be_bytes());
+                let batch = mmb.new_batch();
+                let batch = batch.add(&mut hasher, &i.to_be_bytes());
                 batch.merkleize(&mut hasher).finalize()
             };
             mmb.apply(changeset).unwrap();
@@ -324,7 +325,8 @@ mod tests {
             mmb.prune_all();
             let changeset = {
                 let mut batch = mmb.new_batch();
-                let loc = batch.add(&mut hasher, &i.to_be_bytes());
+                let loc = batch.leaves();
+                batch = batch.add(&mut hasher, &i.to_be_bytes());
                 assert_eq!(loc, Location::new(i));
                 batch.merkleize(&mut hasher).finalize()
             };
@@ -510,13 +512,13 @@ mod tests {
 
         // Create two batches from the same base.
         let changeset_a = {
-            let mut batch = mmb.new_batch();
-            batch.add(&mut hasher, b"leaf-a");
+            let batch = mmb.new_batch();
+            let batch = batch.add(&mut hasher, b"leaf-a");
             batch.merkleize(&mut hasher).finalize()
         };
         let changeset_b = {
-            let mut batch = mmb.new_batch();
-            batch.add(&mut hasher, b"leaf-b");
+            let batch = mmb.new_batch();
+            let batch = batch.add(&mut hasher, b"leaf-b");
             batch.merkleize(&mut hasher).finalize()
         };
 
@@ -537,18 +539,18 @@ mod tests {
 
         // Parent batch, then fork two children.
         let parent = {
-            let mut batch = mmb.new_batch();
-            batch.add(&mut hasher, b"leaf-1");
+            let batch = mmb.new_batch();
+            let batch = batch.add(&mut hasher, b"leaf-1");
             batch.merkleize(&mut hasher)
         };
         let child_a = {
-            let mut batch = parent.new_batch();
-            batch.add(&mut hasher, b"leaf-2a");
+            let batch = parent.new_batch();
+            let batch = batch.add(&mut hasher, b"leaf-2a");
             batch.merkleize(&mut hasher).finalize()
         };
         let child_b = {
-            let mut batch = parent.new_batch();
-            batch.add(&mut hasher, b"leaf-2b");
+            let batch = parent.new_batch();
+            let batch = batch.add(&mut hasher, b"leaf-2b");
             batch.merkleize(&mut hasher).finalize()
         };
 
@@ -568,13 +570,13 @@ mod tests {
 
         // Create parent, then child.
         let parent = {
-            let mut batch = mmb.new_batch();
-            batch.add(&mut hasher, b"leaf-0");
+            let batch = mmb.new_batch();
+            let batch = batch.add(&mut hasher, b"leaf-0");
             batch.merkleize(&mut hasher)
         };
         let child = {
-            let mut batch = parent.new_batch();
-            batch.add(&mut hasher, b"leaf-1");
+            let batch = parent.new_batch();
+            let batch = batch.add(&mut hasher, b"leaf-1");
             batch.merkleize(&mut hasher).finalize()
         };
         let parent = parent.finalize();
@@ -595,13 +597,13 @@ mod tests {
 
         // Create parent, then child.
         let parent = {
-            let mut batch = mmb.new_batch();
-            batch.add(&mut hasher, b"leaf-0");
+            let batch = mmb.new_batch();
+            let batch = batch.add(&mut hasher, b"leaf-0");
             batch.merkleize(&mut hasher)
         };
         let child = {
-            let mut batch = parent.new_batch();
-            batch.add(&mut hasher, b"leaf-1");
+            let batch = parent.new_batch();
+            let batch = batch.add(&mut hasher, b"leaf-1");
             batch.merkleize(&mut hasher).finalize()
         };
         let parent = parent.finalize();
@@ -622,8 +624,8 @@ mod tests {
 
         // Update leaf 5 with new data.
         let changeset = {
-            let mut batch = mmb.new_batch();
-            batch
+            let batch = mmb.new_batch();
+            let batch = batch
                 .update_leaf(&mut hasher, Location::new(5), b"updated-5")
                 .unwrap();
             batch.merkleize(&mut hasher).finalize()
@@ -677,8 +679,8 @@ mod tests {
 
         for update_loc in 0..n {
             let changeset = {
-                let mut batch = mmb.new_batch();
-                batch
+                let batch = mmb.new_batch();
+                let batch = batch
                     .update_leaf(&mut hasher, Location::new(update_loc), b"new-value")
                     .unwrap();
                 batch.merkleize(&mut hasher).finalize()
@@ -705,7 +707,7 @@ mod tests {
 
         // Out of bounds.
         {
-            let mut batch = mmb.new_batch();
+            let batch = mmb.new_batch();
             assert!(matches!(
                 batch.update_leaf(&mut hasher, Location::new(10), b"x"),
                 Err(Error::LeafOutOfBounds(_))
@@ -715,12 +717,13 @@ mod tests {
         // Pruned leaf.
         mmb.prune(Location::new(5)).unwrap();
         {
-            let mut batch = mmb.new_batch();
+            let batch = mmb.new_batch();
             assert!(matches!(
                 batch.update_leaf(&mut hasher, Location::new(3), b"x"),
                 Err(Error::ElementPruned(_))
             ));
             // Boundary leaf should succeed.
+            let batch = mmb.new_batch();
             assert!(batch
                 .update_leaf(&mut hasher, Location::new(5), b"x")
                 .is_ok());
@@ -733,12 +736,12 @@ mod tests {
 
         // Update an existing leaf and append new ones in the same batch.
         let changeset = {
-            let mut batch = mmb.new_batch();
-            batch
+            let batch = mmb.new_batch();
+            let batch = batch
                 .update_leaf(&mut hasher, Location::new(3), b"updated-3")
                 .unwrap();
-            batch.add(&mut hasher, &100u64.to_be_bytes());
-            batch.add(&mut hasher, &101u64.to_be_bytes());
+            let batch = batch.add(&mut hasher, &100u64.to_be_bytes());
+            let batch = batch.add(&mut hasher, &101u64.to_be_bytes());
             batch.merkleize(&mut hasher).finalize()
         };
         mmb.apply(changeset).unwrap();
@@ -772,7 +775,7 @@ mod tests {
 
         let mut batch = mmb.new_batch();
         for i in 50u64..60 {
-            batch.add(&mut hasher, &i.to_be_bytes());
+            batch = batch.add(&mut hasher, &i.to_be_bytes());
         }
         let merkleized = batch.merkleize(&mut hasher);
 
@@ -799,13 +802,13 @@ mod tests {
 
         let mut batch_a = mmb.new_batch();
         for i in 50u64..60 {
-            batch_a.add(&mut hasher, &i.to_be_bytes());
+            batch_a = batch_a.add(&mut hasher, &i.to_be_bytes());
         }
         let merkleized_a = batch_a.merkleize(&mut hasher);
 
         let mut batch_b = mmb.new_batch();
         for i in 100u64..105 {
-            batch_b.add(&mut hasher, &i.to_be_bytes());
+            batch_b = batch_b.add(&mut hasher, &i.to_be_bytes());
         }
         let merkleized_b = batch_b.merkleize(&mut hasher);
 
@@ -822,13 +825,13 @@ mod tests {
 
         let mut batch_a = mmb.new_batch();
         for i in 50u64..60 {
-            batch_a.add(&mut hasher, &i.to_be_bytes());
+            batch_a = batch_a.add(&mut hasher, &i.to_be_bytes());
         }
         let merkleized_a = batch_a.merkleize(&mut hasher);
 
         let mut batch_b = merkleized_a.new_batch();
         for i in 60u64..70 {
-            batch_b.add(&mut hasher, &i.to_be_bytes());
+            batch_b = batch_b.add(&mut hasher, &i.to_be_bytes());
         }
         let merkleized_b = batch_b.merkleize(&mut hasher);
 
@@ -858,13 +861,13 @@ mod tests {
 
         let mut batch_a = mmb.new_batch();
         for i in 50u64..60 {
-            batch_a.add(&mut hasher, &i.to_be_bytes());
+            batch_a = batch_a.add(&mut hasher, &i.to_be_bytes());
         }
         let merkleized_a = batch_a.merkleize(&mut hasher);
 
         let mut batch_b = merkleized_a.new_batch();
         for i in 60u64..70 {
-            batch_b.add(&mut hasher, &i.to_be_bytes());
+            batch_b = batch_b.add(&mut hasher, &i.to_be_bytes());
         }
         let merkleized_b = batch_b.merkleize(&mut hasher);
         let b_root = merkleized_b.root();
@@ -904,13 +907,13 @@ mod tests {
 
         let mut batch = mmb.new_batch();
         for i in 50u64..55 {
-            batch.add(&mut hasher, &i.to_be_bytes());
+            batch = batch.add(&mut hasher, &i.to_be_bytes());
         }
         let merkleized = batch.merkleize(&mut hasher);
 
         let mut dirty_again = merkleized.into_dirty();
         for i in 55u64..60 {
-            dirty_again.add(&mut hasher, &i.to_be_bytes());
+            dirty_again = dirty_again.add(&mut hasher, &i.to_be_bytes());
         }
         let merkleized_again = dirty_again.merkleize(&mut hasher);
 
@@ -926,7 +929,7 @@ mod tests {
         let cs1 = {
             let mut batch = mmb.new_batch();
             for i in 50u64..60 {
-                batch.add(&mut hasher, &i.to_be_bytes());
+                batch = batch.add(&mut hasher, &i.to_be_bytes());
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -935,7 +938,7 @@ mod tests {
         let cs2 = {
             let mut batch = mmb.new_batch();
             for i in 60u64..70 {
-                batch.add(&mut hasher, &i.to_be_bytes());
+                batch = batch.add(&mut hasher, &i.to_be_bytes());
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -954,7 +957,7 @@ mod tests {
         let changeset = {
             let mut batch = mmb.new_batch();
             for i in 100u64..110 {
-                batch.add(&mut hasher, &i.to_be_bytes());
+                batch = batch.add(&mut hasher, &i.to_be_bytes());
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -983,7 +986,7 @@ mod tests {
 
         let mut batch = mmb.new_batch();
         for i in 50u64..60 {
-            batch.add(&mut hasher, &i.to_be_bytes());
+            batch = batch.add(&mut hasher, &i.to_be_bytes());
         }
         let merkleized = batch.merkleize(&mut hasher);
 
@@ -1015,8 +1018,8 @@ mod tests {
         let (mut hasher, mut mmb) = build_mmb(100);
 
         // Layer A: overwrite leaf 5.
-        let mut batch_a = mmb.new_batch();
-        batch_a
+        let batch_a = mmb.new_batch();
+        let batch_a = batch_a
             .update_leaf(&mut hasher, Location::new(5), b"overwritten")
             .unwrap();
         let merkleized_a = batch_a.merkleize(&mut hasher);
@@ -1024,7 +1027,7 @@ mod tests {
         // Layer B on A: add leaves.
         let mut batch_b = merkleized_a.new_batch();
         for i in 100u64..105 {
-            batch_b.add(&mut hasher, &i.to_be_bytes());
+            batch_b = batch_b.add(&mut hasher, &i.to_be_bytes());
         }
         let merkleized_b = batch_b.merkleize(&mut hasher);
         let b_root = merkleized_b.root();
@@ -1051,15 +1054,15 @@ mod tests {
         let (mut hasher, mut mmb) = build_mmb(100);
 
         // Layer A: overwrite leaf 5.
-        let mut batch_a = mmb.new_batch();
-        batch_a
+        let batch_a = mmb.new_batch();
+        let batch_a = batch_a
             .update_leaf(&mut hasher, Location::new(5), b"val-a")
             .unwrap();
         let merkleized_a = batch_a.merkleize(&mut hasher);
 
         // Layer B on A: overwrite leaf 10.
-        let mut batch_b = merkleized_a.new_batch();
-        batch_b
+        let batch_b = merkleized_a.new_batch();
+        let batch_b = batch_b
             .update_leaf(&mut hasher, Location::new(10), b"val-b")
             .unwrap();
         let merkleized_b = batch_b.merkleize(&mut hasher);
@@ -1067,7 +1070,7 @@ mod tests {
         // Layer C on B: add 10 leaves.
         let mut batch_c = merkleized_b.new_batch();
         for i in 300u64..310 {
-            batch_c.add(&mut hasher, &i.to_be_bytes());
+            batch_c = batch_c.add(&mut hasher, &i.to_be_bytes());
         }
         let merkleized_c = batch_c.merkleize(&mut hasher);
         let c_root = merkleized_c.root();
@@ -1082,15 +1085,15 @@ mod tests {
         // Build the equivalent directly.
         let (mut ref_hasher, mut ref_mmb) = build_mmb(100);
         let changeset = {
-            let mut batch = ref_mmb.new_batch();
-            batch
+            let batch = ref_mmb.new_batch();
+            let batch = batch
                 .update_leaf(&mut ref_hasher, Location::new(5), b"val-a")
                 .unwrap();
-            batch
+            let mut batch = batch
                 .update_leaf(&mut ref_hasher, Location::new(10), b"val-b")
                 .unwrap();
             for i in 300u64..310 {
-                batch.add(&mut ref_hasher, &i.to_be_bytes());
+                batch = batch.add(&mut ref_hasher, &i.to_be_bytes());
             }
             batch.merkleize(&mut ref_hasher).finalize()
         };
@@ -1103,14 +1106,14 @@ mod tests {
     fn test_overwrite_collision_in_stack() {
         let (mut hasher, mut mmb) = build_mmb(100);
 
-        let mut batch_a = mmb.new_batch();
-        batch_a
+        let batch_a = mmb.new_batch();
+        let batch_a = batch_a
             .update_leaf(&mut hasher, Location::new(5), b"val-x")
             .unwrap();
         let merkleized_a = batch_a.merkleize(&mut hasher);
 
-        let mut batch_b = merkleized_a.new_batch();
-        batch_b
+        let batch_b = merkleized_a.new_batch();
+        let batch_b = batch_b
             .update_leaf(&mut hasher, Location::new(5), b"val-y")
             .unwrap();
         let merkleized_b = batch_b.merkleize(&mut hasher);
@@ -1139,9 +1142,9 @@ mod tests {
 
         let mut batch = mmb.new_batch();
         for i in 50u64..60 {
-            batch.add(&mut hasher, &i.to_be_bytes());
+            batch = batch.add(&mut hasher, &i.to_be_bytes());
         }
-        batch
+        let batch = batch
             .update_leaf(&mut hasher, Location::new(52), b"updated-52")
             .unwrap();
         let merkleized = batch.merkleize(&mut hasher);
@@ -1158,8 +1161,8 @@ mod tests {
         // Build reference the same way.
         let (mut ref_hasher, mut ref_mmb) = build_mmb(60);
         let changeset = {
-            let mut batch = ref_mmb.new_batch();
-            batch
+            let batch = ref_mmb.new_batch();
+            let batch = batch
                 .update_leaf(&mut ref_hasher, Location::new(52), b"updated-52")
                 .unwrap();
             batch.merkleize(&mut ref_hasher).finalize()
@@ -1177,9 +1180,9 @@ mod tests {
         // which is a child of that merge parent.
         let (mut hasher, mut mmb) = build_mmb(2);
         let changeset = {
-            let mut batch = mmb.new_batch();
-            batch.add(&mut hasher, &2u64.to_be_bytes());
-            batch
+            let batch = mmb.new_batch();
+            let batch = batch.add(&mut hasher, &2u64.to_be_bytes());
+            let batch = batch
                 .update_leaf(&mut hasher, Location::new(0), b"updated-0")
                 .unwrap();
             batch.merkleize(&mut hasher).finalize()
@@ -1189,14 +1192,14 @@ mod tests {
         // Build a reference MMB with the same operations applied separately.
         let (mut ref_hasher, mut ref_mmb) = build_mmb(2);
         let cs = {
-            let mut batch = ref_mmb.new_batch();
-            batch.add(&mut ref_hasher, &2u64.to_be_bytes());
+            let batch = ref_mmb.new_batch();
+            let batch = batch.add(&mut ref_hasher, &2u64.to_be_bytes());
             batch.merkleize(&mut ref_hasher).finalize()
         };
         ref_mmb.apply(cs).unwrap();
         let cs = {
-            let mut batch = ref_mmb.new_batch();
-            batch
+            let batch = ref_mmb.new_batch();
+            let batch = batch
                 .update_leaf(&mut ref_hasher, Location::new(0), b"updated-0")
                 .unwrap();
             batch.merkleize(&mut ref_hasher).finalize()

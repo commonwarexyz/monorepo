@@ -75,7 +75,7 @@ impl<
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, item: Item) -> Self {
         let encoded = item.encode();
-        self.inner.add(&mut self.hasher, &encoded);
+        self.inner = self.inner.add(&mut self.hasher, &encoded);
         self.items.push(item);
         self
     }
@@ -359,7 +359,7 @@ where
                     let mut count = 0u64;
                     while count < apply_batch_size && mmr_size < journal_size {
                         let op = reader.read(*mmr_size).await?;
-                        batch.add(hasher, &op.encode());
+                        batch = batch.add(hasher, &op.encode());
                         mmr_size += 1;
                         count += 1;
                     }
@@ -383,8 +383,8 @@ where
         // Append item to the journal, then update the MMR state.
         let loc = self.journal.append(item).await?;
         let changeset = {
-            let mut batch = self.mmr.new_batch();
-            batch.add(&mut self.hasher, &encoded_item);
+            let batch = self.mmr.new_batch();
+            let batch = batch.add(&mut self.hasher, &encoded_item);
             batch.merkleize(&mut self.hasher).finalize()
         };
         self.mmr.apply(changeset)?;
@@ -918,7 +918,7 @@ mod tests {
                     for i in 0..20 {
                         let op = create_operation(i as u8);
                         let encoded = op.encode();
-                        batch.add(&mut hasher, &encoded);
+                        batch = batch.add(&mut hasher, &encoded);
                         journal.append(&op).await.unwrap();
                     }
                     batch.merkleize(&mut hasher).finalize()

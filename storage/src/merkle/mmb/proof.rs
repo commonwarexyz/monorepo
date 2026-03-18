@@ -56,7 +56,7 @@ mod tests {
         let changeset = {
             let mut batch = mmb.new_batch();
             for i in 0..n {
-                batch.add(&mut hasher, &i.to_be_bytes());
+                batch = batch.add(&mut hasher, &i.to_be_bytes());
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -419,7 +419,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmb.new_batch();
                 for i in n..n + 100 {
-                    batch.add(&mut hasher, &i.to_be_bytes());
+                    batch = batch.add(&mut hasher, &i.to_be_bytes());
                 }
                 batch.merkleize(&mut hasher).finalize()
             };

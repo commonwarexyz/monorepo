@@ -5,7 +5,10 @@
 //! while retaining any family-specific proof helpers in its submodule.
 
 use crate::merkle::{hasher::Hasher, Family, Location, Position};
-use alloc::{vec, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    vec::Vec,
+};
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::Digest;
@@ -154,8 +157,8 @@ impl<F: Family, D: Digest> Proof<F, D> {
                 && *root == hasher.root(Location::new(0), core::iter::empty());
         }
 
-        let mut node_positions = alloc::collections::BTreeSet::new();
-        let mut blueprints = alloc::collections::BTreeMap::new();
+        let mut node_positions = BTreeSet::new();
+        let mut blueprints = BTreeMap::new();
 
         for (_, loc) in elements {
             if !loc.is_valid() {
@@ -173,7 +176,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             return false;
         }
 
-        let node_digests: alloc::collections::BTreeMap<Position<F>, D> = node_positions
+        let node_digests: BTreeMap<Position<F>, D> = node_positions
             .iter()
             .zip(self.digests.iter())
             .map(|(&pos, digest)| (pos, *digest))
@@ -522,21 +525,19 @@ where
 pub(crate) fn nodes_required_for_multi_proof<F: Family>(
     leaves: Location<F>,
     locations: &[Location<F>],
-) -> Result<alloc::collections::BTreeSet<Position<F>>, super::Error<F>> {
+) -> Result<BTreeSet<Position<F>>, super::Error<F>> {
     if locations.is_empty() {
         return Err(super::Error::Empty);
     }
-    locations
-        .iter()
-        .try_fold(alloc::collections::BTreeSet::new(), |mut acc, loc| {
-            if !loc.is_valid() {
-                return Err(super::Error::LocationOverflow(*loc));
-            }
-            let bp = Blueprint::new(leaves, *loc..*loc + 1)?;
-            acc.extend(bp.fold_prefix);
-            acc.extend(bp.fetch_nodes);
-            Ok(acc)
-        })
+    locations.iter().try_fold(BTreeSet::new(), |mut acc, loc| {
+        if !loc.is_valid() {
+            return Err(super::Error::LocationOverflow(*loc));
+        }
+        let bp = Blueprint::new(leaves, *loc..*loc + 1)?;
+        acc.extend(bp.fold_prefix);
+        acc.extend(bp.fetch_nodes);
+        Ok(acc)
+    })
 }
 
 /// Collect sibling positions needed to reconstruct a peak digest from a range of

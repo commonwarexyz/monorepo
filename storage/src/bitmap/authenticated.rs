@@ -564,7 +564,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         let start = self.authenticated_len;
         let end = self.complete_chunks();
         for i in start..end {
-            batch.add(hasher, self.bitmap.get_chunk(i));
+            batch = batch.add(hasher, self.bitmap.get_chunk(i));
         }
         self.authenticated_len = end;
 
@@ -602,7 +602,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
                     .collect(),
             }
         };
-        batch.update_leaf_batched(&dirty)?;
+        let batch = batch.update_leaf_batched(&dirty)?;
 
         // Merkleize and apply.
         let changeset = batch.merkleize(hasher).finalize();

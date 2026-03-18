@@ -27,7 +27,7 @@
 //!
 //! # Type aliases
 //!
-//! - [`UnmerkleizedBatch`] -- mutable phase: add, update leaves.
+//! - [`UnmerkleizedBatch`] -- builder phase: add, update leaves (each consumes and returns self).
 //! - [`MerkleizedBatch`]   -- immutable phase: root is computed, proofs available.
 //! - [`Changeset`]         -- owned delta that can be applied to the base.
 //!
@@ -41,12 +41,11 @@
 //! let mut mmr = Mmr::new(&mut hasher);
 //!
 //! // Build a batch of mutations.
-//! let changeset = {
-//!     let mut batch = mmr.new_batch();
-//!     batch.add(&mut hasher, b"leaf-0");
-//!     batch.add(&mut hasher, b"leaf-1");
-//!     batch.merkleize(&mut hasher).finalize()
-//! };
+//! let changeset = mmr.new_batch()
+//!     .add(&mut hasher, b"leaf-0")
+//!     .add(&mut hasher, b"leaf-1")
+//!     .merkleize(&mut hasher)
+//!     .finalize();
 //!
 //! // Apply the changeset back to the base.
 //! mmr.apply(changeset).unwrap();

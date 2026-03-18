@@ -76,8 +76,8 @@ pub type Changeset<D> = batch::Changeset<Family, D>;
 impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
     UnmerkleizedBatch<'a, D, P>
 {
-    /// Add a pre-computed leaf digest. Returns the leaf's location.
-    pub fn add_leaf_digest(&mut self, digest: D) -> Location {
+    /// Add a pre-computed leaf digest.
+    pub fn add_leaf_digest(mut self, digest: D) -> Self {
         let loc = self.leaves();
         let pos = leaf_pos(loc);
         debug_assert_eq!(pos, self.size());
@@ -91,15 +91,11 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
             self.state.insert(parent_pos, height);
         }
 
-        loc
+        self
     }
 
-    /// Hash `element` and add it as a leaf. Returns the leaf's location.
-    pub fn add(
-        &mut self,
-        hasher: &mut impl Hasher<Family, Digest = D>,
-        element: &[u8],
-    ) -> Location {
+    /// Hash `element` and add it as a leaf.
+    pub fn add(self, hasher: &mut impl Hasher<Family, Digest = D>, element: &[u8]) -> Self {
         let digest = hasher.leaf_digest(leaf_pos(self.leaves()), element);
         self.add_leaf_digest(digest)
     }
@@ -111,11 +107,11 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
     /// Returns [`Error::LeafOutOfBounds`] if `loc` is not an existing leaf.
     /// Returns [`Error::ElementPruned`] if the leaf has been pruned.
     pub fn update_leaf(
-        &mut self,
+        mut self,
         hasher: &mut impl Hasher<Family, Digest = D>,
         loc: Location,
         element: &[u8],
-    ) -> Result<(), Error> {
+    ) -> Result<Self, Error> {
         let leaves = self.leaves();
         if loc >= leaves {
             return Err(Error::LeafOutOfBounds(loc));
@@ -127,12 +123,12 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
         let digest = hasher.leaf_digest(pos, element);
         self.store_node(pos, digest);
         self.mark_dirty(loc);
-        Ok(())
+        Ok(self)
     }
 
     /// Overwrite the digest of an existing leaf and mark ancestors dirty.
     #[cfg(any(feature = "std", test))]
-    pub fn update_leaf_digest(&mut self, loc: Location, digest: D) -> Result<(), Error> {
+    pub fn update_leaf_digest(mut self, loc: Location, digest: D) -> Result<Self, Error> {
         let leaves = self.leaves();
         if loc >= leaves {
             return Err(Error::LeafOutOfBounds(loc));
@@ -143,12 +139,12 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
         }
         self.store_node(pos, digest);
         self.mark_dirty(loc);
-        Ok(())
+        Ok(self)
     }
 
     /// Batch update multiple leaf digests.
     #[cfg(any(feature = "std", test))]
-    pub fn update_leaf_batched(&mut self, updates: &[(Location, D)]) -> Result<(), Error> {
+    pub fn update_leaf_batched(mut self, updates: &[(Location, D)]) -> Result<Self, Error> {
         let leaves = self.leaves();
         let prune_boundary = self.parent.pruned_to_pos();
         for (loc, _) in updates {
@@ -165,7 +161,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
             self.store_node(pos, *digest);
             self.mark_dirty(*loc);
         }
-        Ok(())
+        Ok(self)
     }
 
     /// Mark ancestors of the leaf at `loc` as dirty up to its peak.

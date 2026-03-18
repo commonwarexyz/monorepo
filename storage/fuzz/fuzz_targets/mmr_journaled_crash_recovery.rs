@@ -128,8 +128,8 @@ async fn run_operations(
         let failed = match op {
             MmrOperation::Add { data } => {
                 let changeset = {
-                    let mut batch = mmr.new_batch();
-                    batch.add(hasher, data);
+                    let batch = mmr.new_batch();
+                    let batch = batch.add(hasher, data);
                     batch.merkleize(hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
@@ -337,8 +337,8 @@ fn fuzz(input: FuzzInput) {
         // Verify we can add new data after recovery
         let test_data = [0xABu8; DATA_SIZE];
         let changeset = {
-            let mut batch = mmr.new_batch();
-            batch.add(&mut hasher, &test_data);
+            let batch = mmr.new_batch();
+            let batch = batch.add(&mut hasher, &test_data);
             batch.merkleize(&mut hasher).finalize()
         };
         mmr.apply(changeset).unwrap();

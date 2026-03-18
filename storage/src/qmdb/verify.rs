@@ -147,7 +147,7 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    batch.add(&mut hasher, &encoded);
+                    batch = batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -201,13 +201,13 @@ mod tests {
                 // Add some initial operations (that we won't prove)
                 let mut batch = mmr.new_batch();
                 for i in 0u64..5 {
-                    batch.add(&mut hasher, &i.encode());
+                    batch = batch.add(&mut hasher, &i.encode());
                 }
 
                 // Add operations we want to prove (starting at location 5)
                 for op in &operations {
                     let encoded = op.encode();
-                    batch.add(&mut hasher, &encoded);
+                    batch = batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -250,7 +250,7 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    batch.add(&mut hasher, &encoded);
+                    batch = batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -297,7 +297,7 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    batch.add(&mut hasher, &encoded);
+                    batch = batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -344,7 +344,7 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    batch.add(&mut hasher, &encoded);
+                    batch = batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -377,7 +377,7 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    batch.add(&mut hasher, &encoded);
+                    batch = batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -431,7 +431,7 @@ mod tests {
             {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
-                    batch.add(&mut hasher, &op.encode());
+                    batch = batch.add(&mut hasher, &op.encode());
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -495,7 +495,7 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    batch.add(&mut hasher, &encoded);
+                    batch = batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
@@ -586,7 +586,7 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for op in &operations {
                     let encoded = op.encode();
-                    batch.add(&mut hasher, &encoded);
+                    batch = batch.add(&mut hasher, &encoded);
                 }
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }

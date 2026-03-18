@@ -530,7 +530,7 @@ mod tests {
             assert!(size_to_check.is_valid_size());
             let changeset = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, &digest);
+                batch = batch.add(&mut hasher, &digest);
                 batch.merkleize(&mut hasher).finalize()
             };
             mmr.apply(changeset).unwrap();

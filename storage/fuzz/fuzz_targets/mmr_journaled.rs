@@ -99,7 +99,7 @@ fn historical_root(
     let changeset = {
         let mut batch = mmr.new_batch();
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
-            batch.add(&mut hasher, element);
+            batch = batch.add(&mut hasher, element);
         }
         batch.merkleize(&mut hasher).finalize()
     };
@@ -140,8 +140,9 @@ fn fuzz(input: FuzzInput) {
 
                     let size_before = mmr.size();
                     let (loc, changeset) = {
-                        let mut batch = mmr.new_batch();
-                        let loc = batch.add(&mut hasher, limited_data);
+                        let batch = mmr.new_batch();
+                        let loc = batch.leaves();
+                        let batch = batch.add(&mut hasher, limited_data);
                         (loc, batch.merkleize(&mut hasher).finalize())
                     };
                     mmr.apply(changeset).unwrap();
@@ -171,10 +172,11 @@ fn fuzz(input: FuzzInput) {
                     let size_before = mmr.size();
                     let (locations, changeset) = {
                         let mut batch = mmr.new_batch();
-                        let locations: Vec<_> = items
-                            .iter()
-                            .map(|item| batch.add(&mut hasher, item))
-                            .collect();
+                        let mut locations = Vec::with_capacity(items.len());
+                        for item in &items {
+                            locations.push(batch.leaves());
+                            batch = batch.add(&mut hasher, item);
+                        }
                         (locations, batch.merkleize(&mut hasher).finalize())
                     };
                     mmr.apply(changeset).unwrap();

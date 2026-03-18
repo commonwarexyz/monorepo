@@ -286,7 +286,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
-                    batch.add(&mut hasher, element);
+                    batch = batch.add(&mut hasher, element);
                 }
                 batch.merkleize(&mut hasher).finalize()
             };
@@ -347,7 +347,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
-                    batch.add(&mut hasher, element);
+                    batch = batch.add(&mut hasher, element);
                 }
                 batch.merkleize(&mut hasher).finalize()
             };

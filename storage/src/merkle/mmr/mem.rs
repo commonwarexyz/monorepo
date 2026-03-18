@@ -101,7 +101,7 @@ mod tests {
                 let changeset = {
                     let mut batch = mmr.new_batch();
                     leaves.push(batch.leaves());
-                    batch.add(&mut hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                     batch.merkleize(&mut hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
@@ -242,7 +242,7 @@ mod tests {
                 mmr.prune_all();
                 let changeset = {
                     let mut batch = mmr.new_batch();
-                    batch.add(&mut hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                     batch.merkleize(&mut hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
@@ -267,7 +267,7 @@ mod tests {
                 let old_size = mmr.size();
                 let changeset = {
                     let mut batch = mmr.new_batch();
-                    batch.add(&mut hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                     batch.merkleize(&mut hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
@@ -300,7 +300,7 @@ mod tests {
                 let mut batch = batched_mmr.new_batch();
                 for i in 0..NUM_ELEMENTS {
                     let element = hasher.digest(&i.to_be_bytes());
-                    batch.add(&mut hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                 }
                 batch.merkleize(&mut hasher).finalize()
             };
@@ -343,7 +343,7 @@ mod tests {
                 let mut batch = mmr.new_batch().with_pool(Some(pool));
                 for i in 0u64..NUM_ELEMENTS {
                     let element = hasher.digest(&i.to_be_bytes());
-                    batch.add(&mut hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                 }
                 batch.merkleize(&mut hasher).finalize()
             };
@@ -370,7 +370,7 @@ mod tests {
                 // Add to reference MMR
                 let cs = {
                     let mut batch = reference_mmr.new_batch();
-                    batch.add(&mut hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                     batch.merkleize(&mut hasher).finalize()
                 };
                 reference_mmr.apply(cs).unwrap();
@@ -378,7 +378,7 @@ mod tests {
                 // Add to pruning MMR
                 let cs = {
                     let mut batch = mmr.new_batch();
-                    batch.add(&mut hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                     batch.merkleize(&mut hasher).finalize()
                 };
                 mmr.apply(cs).unwrap();
@@ -405,16 +405,16 @@ mod tests {
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
                 let leaf_loc = Location::new(leaf as u64);
-                let mut batch = mmr.new_batch();
-                batch.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                let batch = mmr.new_batch();
+                let batch = batch.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
                 let updated_root = *mmr.root();
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
                 let element = hasher.digest(&leaf.to_be_bytes());
-                let mut batch = mmr.new_batch();
-                batch.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                let batch = mmr.new_batch();
+                let batch = batch.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
                 let restored_root = *mmr.root();
                 assert_eq!(root, restored_root);
@@ -425,8 +425,8 @@ mod tests {
             for leaf in 100u64..=190 {
                 mmr.prune(Location::new(leaf)).unwrap();
                 let leaf_loc = Location::new(leaf);
-                let mut batch = mmr.new_batch();
-                batch.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
+                let batch = mmr.new_batch();
+                let batch = batch.update_leaf(&mut hasher, leaf_loc, &element).unwrap();
                 mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
             }
         });
@@ -442,7 +442,7 @@ mod tests {
             let mmr = Mmr::new(&mut hasher);
             let mmr = build_test_mmr(&mut hasher, mmr, 200);
             let invalid_loc = mmr.leaves();
-            let mut batch = mmr.new_batch();
+            let batch = mmr.new_batch();
             assert!(matches!(
                 batch.update_leaf(&mut hasher, invalid_loc, &element),
                 Err(Error::LeafOutOfBounds(_))
@@ -460,7 +460,7 @@ mod tests {
             let mmr = Mmr::new(&mut hasher);
             let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
             mmr.prune_all();
-            let mut batch = mmr.new_batch();
+            let batch = mmr.new_batch();
             let result = batch.update_leaf(&mut hasher, Location::new(0), &element);
             assert!(matches!(result, Err(Error::ElementPruned(_))));
         });
@@ -518,8 +518,8 @@ mod tests {
 
             // Update a leaf via batch update_leaf_digest.
             let changeset = {
-                let mut batch = mmr.new_batch();
-                batch.update_leaf_digest(loc, updated_digest).unwrap();
+                let batch = mmr.new_batch();
+                let batch = batch.update_leaf_digest(loc, updated_digest).unwrap();
                 batch.merkleize(&mut hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
@@ -527,8 +527,8 @@ mod tests {
 
             // Restore the original digest and confirm the root reverts.
             let changeset = {
-                let mut batch = mmr.new_batch();
-                batch.update_leaf_digest(loc, original_digest).unwrap();
+                let batch = mmr.new_batch();
+                let batch = batch.update_leaf_digest(loc, original_digest).unwrap();
                 batch.merkleize(&mut hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
@@ -538,7 +538,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in [0u64, 1, 50, 100, 199] {
-                    batch
+                    batch = batch
                         .update_leaf_digest(Location::new(i), updated_digest)
                         .unwrap();
                 }
@@ -599,7 +599,7 @@ mod tests {
             }
             for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
                 let leaf_loc = Location::new(leaf);
-                batch.update_leaf(hasher, leaf_loc, &element).unwrap();
+                batch = batch.update_leaf(hasher, leaf_loc, &element).unwrap();
             }
             batch.merkleize(hasher).finalize()
         };
@@ -613,7 +613,7 @@ mod tests {
             for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
                 let element = hasher.digest(&leaf.to_be_bytes());
                 let leaf_loc = Location::new(leaf);
-                batch.update_leaf(hasher, leaf_loc, &element).unwrap();
+                batch = batch.update_leaf(hasher, leaf_loc, &element).unwrap();
             }
             batch.merkleize(hasher).finalize()
         };
@@ -664,7 +664,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..50 {
-                    batch.add(&mut hasher, &i.to_be_bytes());
+                    batch = batch.add(&mut hasher, &i.to_be_bytes());
                 }
                 batch.merkleize(&mut hasher).finalize()
             };
@@ -722,7 +722,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..64 {
-                    batch.add(&mut hasher, &i.to_be_bytes());
+                    batch = batch.add(&mut hasher, &i.to_be_bytes());
                 }
                 batch.merkleize(&mut hasher).finalize()
             };
@@ -745,7 +745,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..11 {
-                    batch.add(&mut hasher, &i.to_be_bytes());
+                    batch = batch.add(&mut hasher, &i.to_be_bytes());
                 }
                 batch.merkleize(&mut hasher).finalize()
             };
@@ -857,12 +857,12 @@ mod tests {
             // Create two batches from the same base.
             let changeset_a = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, b"leaf-a");
+                batch = batch.add(&mut hasher, b"leaf-a");
                 batch.merkleize(&mut hasher).finalize()
             };
             let changeset_b = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, b"leaf-b");
+                batch = batch.add(&mut hasher, b"leaf-b");
                 batch.merkleize(&mut hasher).finalize()
             };
 
@@ -889,7 +889,7 @@ mod tests {
             // Seed with one element.
             let changeset = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, b"leaf-0");
+                batch = batch.add(&mut hasher, b"leaf-0");
                 batch.merkleize(&mut hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
@@ -897,17 +897,17 @@ mod tests {
             // Parent batch, then fork two children.
             let parent = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, b"leaf-1");
+                batch = batch.add(&mut hasher, b"leaf-1");
                 batch.merkleize(&mut hasher)
             };
             let child_a = {
                 let mut batch = parent.new_batch();
-                batch.add(&mut hasher, b"leaf-2a");
+                batch = batch.add(&mut hasher, b"leaf-2a");
                 batch.merkleize(&mut hasher).finalize()
             };
             let child_b = {
                 let mut batch = parent.new_batch();
-                batch.add(&mut hasher, b"leaf-2b");
+                batch = batch.add(&mut hasher, b"leaf-2b");
                 batch.merkleize(&mut hasher).finalize()
             };
 
@@ -932,12 +932,12 @@ mod tests {
             // Create parent, then child.
             let parent = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, b"leaf-0");
+                batch = batch.add(&mut hasher, b"leaf-0");
                 batch.merkleize(&mut hasher)
             };
             let child = {
                 let mut batch = parent.new_batch();
-                batch.add(&mut hasher, b"leaf-1");
+                batch = batch.add(&mut hasher, b"leaf-1");
                 batch.merkleize(&mut hasher).finalize()
             };
             let parent = parent.finalize();
@@ -963,12 +963,12 @@ mod tests {
             // Create parent, then child.
             let parent = {
                 let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, b"leaf-0");
+                batch = batch.add(&mut hasher, b"leaf-0");
                 batch.merkleize(&mut hasher)
             };
             let child = {
                 let mut batch = parent.new_batch();
-                batch.add(&mut hasher, b"leaf-1");
+                batch = batch.add(&mut hasher, b"leaf-1");
                 batch.merkleize(&mut hasher).finalize()
             };
             let parent = parent.finalize();

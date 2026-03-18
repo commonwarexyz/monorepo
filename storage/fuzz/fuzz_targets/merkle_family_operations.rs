@@ -93,8 +93,9 @@ impl FuzzMerkle for Mmr<Digest> {
         data: &[u8],
     ) -> merkle::Location<Self::Family> {
         let (loc, changeset) = {
-            let mut batch = self.new_batch();
-            let loc = batch.add(hasher, data);
+            let batch = self.new_batch();
+            let loc = batch.leaves();
+            let batch = batch.add(hasher, data);
             (loc, batch.merkleize(hasher).finalize())
         };
         self.apply(changeset).unwrap();
@@ -107,8 +108,8 @@ impl FuzzMerkle for Mmr<Digest> {
         loc: merkle::Location<Self::Family>,
         data: &[u8],
     ) -> Result<(), Self::Error> {
-        let mut batch = self.new_batch();
-        batch.update_leaf(hasher, loc, data)?;
+        let batch = self.new_batch();
+        let batch = batch.update_leaf(hasher, loc, data)?;
         self.apply(batch.merkleize(hasher).finalize()).unwrap();
         Ok(())
     }
@@ -169,8 +170,9 @@ impl FuzzMerkle for Mmb<Digest> {
         data: &[u8],
     ) -> merkle::Location<Self::Family> {
         let (loc, changeset) = {
-            let mut batch = self.new_batch();
-            let loc = batch.add(hasher, data);
+            let batch = self.new_batch();
+            let loc = batch.leaves();
+            let batch = batch.add(hasher, data);
             (loc, batch.merkleize(hasher).finalize())
         };
         self.apply(changeset).unwrap();
@@ -183,8 +185,8 @@ impl FuzzMerkle for Mmb<Digest> {
         loc: merkle::Location<Self::Family>,
         data: &[u8],
     ) -> Result<(), Self::Error> {
-        let mut batch = self.new_batch();
-        batch.update_leaf(hasher, loc, data)?;
+        let batch = self.new_batch();
+        let batch = batch.update_leaf(hasher, loc, data)?;
         self.apply(batch.merkleize(hasher).finalize()).unwrap();
         Ok(())
     }
