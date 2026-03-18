@@ -148,6 +148,15 @@ commonware_macros::stability_scope!(ALPHA {
     /// A violation of this property would be, for example, if a malicious
     /// payload could convince two parties that they both have valid shards, but
     /// then checking each other's shards reports issues with those shards.
+    ///
+    /// ## Unique Commitments
+    ///
+    /// [`Scheme::encode`] MUST be deterministic.
+    ///
+    /// For a given [`Config`] and `data`, the only [`Scheme::Commitment`] which
+    /// should pass [`Scheme::decode`] MUST be that produced by [`Scheme::encode`].
+    ///
+    /// In other words, a data has a unique valid commitment associated with it.
     pub trait Scheme: Debug + Clone + Send + Sync + 'static {
         /// A commitment attesting to the shards of data.
         type Commitment: Digest;
