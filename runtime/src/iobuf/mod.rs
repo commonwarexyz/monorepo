@@ -2,8 +2,8 @@
 //!
 //! Each buffer type is backed by one of three storage variants:
 //! - [`Bytes`]/[`BytesMut`]: standard heap allocation (from `From` conversions)
-//! - Aligned: untracked aligned allocation (from [`IoBufMut::with_alignment`]
-//!   or pool-bypass for small requests)
+//! - Aligned: untracked aligned allocation (from [`IoBufMut::with_alignment`],
+//!   pool bypass for small requests, or fallback)
 //! - Pooled: tracked aligned allocation returned to a [`BufferPool`] on drop
 //!
 //! Public types:
@@ -45,7 +45,8 @@ pub struct IoBuf {
 /// Internal storage variant for [`IoBuf`].
 ///
 /// - `Bytes`: from `From<Bytes>`, `From<Vec<u8>>`, `From<&'static [u8]>`, etc.
-/// - `Aligned`: from untracked aligned allocation (pool bypass or fallback)
+/// - `Aligned`: from untracked aligned allocation ([`IoBufMut::with_alignment`],
+///   pool bypass for small requests, or fallback)
 /// - `Pooled`: from [`BufferPool`] allocation (returned to pool on final drop)
 #[derive(Clone, Debug)]
 enum IoBufInner {
@@ -86,9 +87,9 @@ impl IoBuf {
     /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to the pool when the final reference is dropped.
     ///
-    /// Buffers backed by [`Bytes`], and untracked aligned allocations used for
-    /// fallback or requests smaller than [`BufferPoolConfig::pool_min_size`], return
-    /// `false`.
+    /// Buffers backed by [`Bytes`], and untracked aligned allocations (from
+    /// [`IoBufMut::with_alignment`], pool bypass for small requests, or
+    /// fallback), return `false`.
     #[inline]
     pub const fn is_pooled(&self) -> bool {
         match &self.inner {
@@ -293,17 +294,7 @@ impl Buf for IoBuf {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         match &mut self.inner {
             IoBufInner::Bytes(b) => b.copy_to_bytes(len),
-            IoBufInner::Aligned(a) => {
-                if len != 0 && len == a.remaining() {
-                    let inner = std::mem::replace(&mut self.inner, IoBufInner::Bytes(Bytes::new()));
-                    match inner {
-                        IoBufInner::Aligned(a) => a.into_bytes(),
-                        _ => unreachable!(),
-                    }
-                } else {
-                    a.copy_to_bytes(len)
-                }
-            }
+            IoBufInner::Aligned(a) => a.copy_to_bytes(len),
             IoBufInner::Pooled(p) => {
                 // Full non-empty drain: transfer ownership so the drained source no
                 // longer retains the pooled allocation. Keep len == 0 on the normal
@@ -522,9 +513,9 @@ impl IoBufMut {
     /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to the pool when dropped.
     ///
-    /// Buffers backed by [`BytesMut`], and untracked aligned allocations used
-    /// for fallback or requests smaller than [`BufferPoolConfig::pool_min_size`],
-    /// return `false`.
+    /// Buffers backed by [`BytesMut`], and untracked aligned allocations (from
+    /// [`IoBufMut::with_alignment`], pool bypass for small requests, or
+    /// fallback), return `false`.
     #[inline]
     pub const fn is_pooled(&self) -> bool {
         match &self.inner {
@@ -713,18 +704,7 @@ impl Buf for IoBufMut {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.copy_to_bytes(len),
-            IoBufMutInner::Aligned(a) => {
-                if len != 0 && len == a.remaining() {
-                    let inner =
-                        std::mem::replace(&mut self.inner, IoBufMutInner::Bytes(BytesMut::new()));
-                    match inner {
-                        IoBufMutInner::Aligned(a) => a.into_bytes(),
-                        _ => unreachable!(),
-                    }
-                } else {
-                    a.copy_to_bytes(len)
-                }
-            }
+            IoBufMutInner::Aligned(a) => a.copy_to_bytes(len),
             IoBufMutInner::Pooled(p) => {
                 // Full non-empty drain: transfer ownership so the drained source no
                 // longer retains the pooled allocation. Keep len == 0 on the normal

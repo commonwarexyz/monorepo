@@ -948,7 +948,7 @@ mod tests {
             let mut registry = Registry::default();
             let pool = BufferPool::new(
                 BufferPoolConfig::for_storage()
-                    .with_pool_min_size(0)
+                    .with_pool_min_size(PAGE_SIZE.get() as usize)
                     .with_max_per_class(NZUsize!(2)),
                 &mut registry,
             );
