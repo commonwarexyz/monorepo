@@ -32,6 +32,7 @@ pub const THREADS: NonZeroUsize = NZUsize!(8);
 pub const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
 pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 pub const DELETE_FREQUENCY: u32 = 10;
+pub const VARIABLE_VALUE_MAX_LEN: usize = 256;
 pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 // -- Type aliases for fixed-value databases --
@@ -428,7 +429,8 @@ pub fn make_fixed_value(rng: &mut StdRng) -> Digest {
     Sha256::hash(&rng.next_u32().to_be_bytes())
 }
 
-/// Generate a variable-size `Vec<u8>` value (20-40 bytes).
+/// Generate a variable-size `Vec<u8>` value (1-256 bytes).
 pub fn make_variable_value(rng: &mut StdRng) -> Vec<u8> {
-    vec![(rng.next_u32() % 255) as u8; ((rng.next_u32() % 16) + 24) as usize]
+    let len = (rng.next_u32() as usize) % VARIABLE_VALUE_MAX_LEN + 1;
+    vec![rng.next_u32() as u8; len]
 }

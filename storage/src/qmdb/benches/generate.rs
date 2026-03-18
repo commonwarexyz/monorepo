@@ -139,10 +139,7 @@ fn bench_keyless_generate(c: &mut Criterion) {
                         let mut rng = StdRng::seed_from_u64(42);
                         let mut batch = db.new_batch();
                         for _ in 0u64..operations {
-                            let v = vec![
-                                (rng.next_u32() % 255) as u8;
-                                ((rng.next_u32() % 300) + 10) as usize
-                            ];
+                            let v = make_variable_value(&mut rng);
                             batch = batch.append(v);
                             if rng.next_u32() % KEYLESS_COMMIT_FREQ == 0 {
                                 let finalized = batch.merkleize(None).finalize();
