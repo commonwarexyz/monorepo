@@ -323,7 +323,7 @@ impl<
         Some(Request(context, receiver))
     }
 
-    /// Records a locally verified nullify vote and ensures the round exists.
+    /// Persists our nullify vote to the journal for crash recovery.
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
         self.append_journal(nullify.view(), Artifact::Nullify(nullify))
             .await;
