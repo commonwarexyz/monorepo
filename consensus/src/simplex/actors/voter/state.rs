@@ -301,33 +301,18 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Constructs a nullify vote for `view`, if eligible.
-    ///
-    /// When `timeout` is true, this is the timeout path and `view` must be the current view.
-    /// When `timeout` is false, this is the certificate path and `view` must already have a
-    /// nullification certificate.
-    ///
-    /// Returns `Some((is_retry, nullify))` where `is_retry` is true when this is not the first
-    /// nullify emission for `view`. Returns `None` if we have already broadcast a finalize vote for this view.
-    pub fn construct_nullify(&mut self, view: View, timeout: bool) -> Option<(bool, Nullify<S>)> {
-        if timeout {
-            if view != self.view
-                && !self
-                    .views
-                    .get(&view)
-                    .is_some_and(|round| round.has_timeout_reason())
-            {
-                return None;
-            }
-        } else if self.nullification(view).is_none() {
+    pub fn construct_nullify(&mut self, view: View) -> Option<(bool, Nullify<S>)> {
+        if !self
+            .views
+            .get(&view)
+            .is_some_and(|round| round.has_timeout_reason())
+        {
             return None;
         }
         let is_retry = self.create_round(view).construct_nullify()?;
-        if !timeout && is_retry {
-            return None;
-        }
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
         self.nullify_views.insert(view);
-        if timeout && !is_retry {
+        if !is_retry {
             let round = self.create_round(view);
             let reason = if round.proposal().is_some() {
                 TimeoutReason::CertificationTimeout
@@ -342,13 +327,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             }
         }
         Some((is_retry, nullify))
-    }
-
-    /// Returns true if `view` can emit a timeout-style nullify immediately.
-    pub fn should_timeout_nullify(&self, view: View) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|round| round.has_timeout_reason())
     }
 
     /// Returns the best certificate to help peers enter the current view.
@@ -635,7 +613,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// retry schedule.
     ///
     /// This only records the first timeout reason for the view. Metrics are emitted
-    /// when the first timeout nullify vote is constructed.
+    /// when the first nullify vote is constructed.
     pub fn trigger_timeout(&mut self, view: View, reason: TimeoutReason) {
         if view != self.view {
             return;
@@ -880,6 +858,13 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         })
     }
 
+    fn parent_payload_for_child(&self, child: View, parent: View) -> Option<&D> {
+        if child != child.term_start(self.term_length) && self.within_optimistic_depth(child) {
+            return self.notarized_parent_payload(parent);
+        }
+        self.explicit_parent_payload(parent)
+    }
+
     /// Returns the payload of a parent we can safely use for optimistic validation.
     fn notarized_parent_payload(&self, view: View) -> Option<&D> {
         if view == GENESIS_VIEW {
@@ -970,11 +955,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             let parent = view
                 .previous()
                 .expect("non-genesis views must have a previous view");
-            let payload = if self.within_optimistic_depth(view) {
-                self.notarized_parent_payload(parent)
-            } else {
-                self.explicit_parent_payload(parent)
-            };
+            let payload = self.parent_payload_for_child(view, parent);
             return payload
                 .copied()
                 .map(|payload| (parent, payload))
@@ -1051,11 +1032,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         // May return `None` if the parent view is not yet either:
         // - notarized and certified
         // - finalized
-        let payload = if self.within_optimistic_depth(view) {
-            self.notarized_parent_payload(parent)
-        } else {
-            self.explicit_parent_payload(parent)
-        };
+        let payload = self.parent_payload_for_child(view, parent);
         payload
             .copied()
             .ok_or(ParentPayloadError::ParentNotCertified {
@@ -1246,8 +1223,8 @@ mod tests {
 
             // Timeout-mode nullify: first emission should not be marked as retry.
             let (was_retry, _) = state
-                .construct_nullify(state.current_view(), true)
-                .expect("first timeout nullify should exist");
+                .construct_nullify(state.current_view())
+                .expect("first nullify should exist");
             assert!(!was_retry, "first timeout is not a retry");
 
             // Set retry deadline
@@ -1269,8 +1246,8 @@ mod tests {
 
             // Timeout-mode nullify: second emission should be marked as retry.
             let (was_retry, _) = state
-                .construct_nullify(state.current_view(), true)
-                .expect("retry timeout nullify should exist");
+                .construct_nullify(state.current_view())
+                .expect("retry nullify should exist");
             assert!(was_retry, "subsequent timeout should be treated as retry");
 
             // Confirm retry deadline is set
@@ -1307,8 +1284,8 @@ mod tests {
 
             let view = state.current_view();
             let (was_retry, _) = state
-                .construct_nullify(view, true)
-                .expect("first timeout nullify should exist");
+                .construct_nullify(view)
+                .expect("first nullify should exist");
             assert!(!was_retry, "first timeout should not be marked as retry");
 
             let leader = state.leader_index(view).expect("leader must be set");
@@ -1317,7 +1294,7 @@ mod tests {
             assert_eq!(
                 state.timeouts.get_or_create(&label).get(),
                 1,
-                "first timeout nullify should record a leader-timeout metric"
+                "first nullify should record a leader-timeout metric"
             );
 
             context.sleep(Duration::from_secs(2)).await;
@@ -1366,8 +1343,8 @@ mod tests {
             let view = state.current_view();
             state.trigger_timeout(view, TimeoutReason::MissingProposal);
             let (was_retry, _) = state
-                .construct_nullify(view, true)
-                .expect("first timeout nullify should exist");
+                .construct_nullify(view)
+                .expect("first nullify should exist");
             assert!(!was_retry);
 
             let leader = state.leader_index(view).expect("leader must be set");
@@ -1378,8 +1355,8 @@ mod tests {
             assert_eq!(state.timeouts.get_or_create(&leader_timeout).get(), 0);
 
             let (was_retry, _) = state
-                .construct_nullify(view, true)
-                .expect("retry timeout nullify should exist");
+                .construct_nullify(view)
+                .expect("retry nullify should exist");
             assert!(was_retry);
             assert_eq!(state.timeouts.get_or_create(&missing).get(), 1);
         });
@@ -1545,16 +1522,16 @@ mod tests {
 
             // First emitted nullify should record the metric.
             let (was_retry, _) = state
-                .construct_nullify(view, true)
-                .expect("first timeout nullify should exist");
+                .construct_nullify(view)
+                .expect("first nullify should exist");
             assert!(!was_retry);
             assert_eq!(state.timeouts.get_or_create(&label).get(), 1);
 
             // Re-triggering with a different reason should preserve the first reason.
             state.trigger_timeout(view, TimeoutReason::LeaderTimeout);
             let (was_retry, _) = state
-                .construct_nullify(view, true)
-                .expect("retry timeout nullify should exist");
+                .construct_nullify(view)
+                .expect("retry nullify should exist");
             assert!(was_retry);
             assert_eq!(state.timeouts.get_or_create(&label).get(), 1);
 
@@ -1590,9 +1567,8 @@ mod tests {
             let next = current.next();
 
             // Without a nullification certificate, non-current views are not eligible.
-            assert!(state.construct_nullify(next, false).is_none());
             // Timeout mode is reserved for current-view timeout handling.
-            assert!(state.construct_nullify(next, true).is_none());
+            assert!(state.construct_nullify(next).is_none());
 
             // Observe a nullification for current view, which advances us to the next view.
             let current_round = Rnd::new(Epoch::new(4), current);
@@ -1608,26 +1584,17 @@ mod tests {
             assert!(state.add_nullification(current_nullification));
             assert_eq!(state.current_view(), next);
 
-            // We can emit a first-attempt nullify vote for the now-past nullified view.
-            let (was_retry, _) = state
-                .construct_nullify(current, false)
-                .expect("first nullify for nullified past view should be emitted");
-            assert!(!was_retry);
-
-            // A second certificate-path request for the same view does not emit again.
-            assert!(state.construct_nullify(current, false).is_none());
-
-            // Timeout mode remains current-view only.
-            assert!(state.construct_nullify(current, true).is_none());
+            // Nullify remains current-view only.
+            assert!(state.construct_nullify(current).is_none());
 
             // Timeout path on current view: first attempt then retry.
             let (was_retry, _) = state
-                .construct_nullify(next, true)
-                .expect("first timeout nullify for current view should be emitted");
+                .construct_nullify(next)
+                .expect("first nullify for current view should be emitted");
             assert!(!was_retry);
             let (was_retry, _) = state
-                .construct_nullify(next, true)
-                .expect("retry timeout nullify for current view should be emitted");
+                .construct_nullify(next)
+                .expect("retry nullify for current view should be emitted");
             assert!(was_retry);
         });
     }
@@ -3422,9 +3389,7 @@ mod tests {
             assert!(state.verified(view));
 
             // Timeout path emits a first-attempt nullify.
-            let (retry, _) = state
-                .construct_nullify(view, true)
-                .expect("timeout nullify should exist");
+            let (retry, _) = state.construct_nullify(view).expect("nullify should exist");
             assert!(!retry);
 
             // Attempt to notarize after timeout
@@ -3620,10 +3585,8 @@ mod tests {
             let view = state.current_view();
             assert_eq!(view, View::new(1));
 
-            // Emit a timeout nullify vote for view 1.
-            let (was_retry, _) = state
-                .construct_nullify(view, true)
-                .expect("timeout nullify should exist");
+            // Emit a nullify vote for view 1.
+            let (was_retry, _) = state.construct_nullify(view).expect("nullify should exist");
             assert!(!was_retry);
 
             // Now suppose we receive a notarization for view 1 (before the
@@ -3676,10 +3639,8 @@ mod tests {
             let view = state.current_view();
             assert_eq!(view, View::new(1));
 
-            // Emit a timeout nullify for view 1.
-            let (was_retry, _) = state
-                .construct_nullify(view, true)
-                .expect("timeout nullify should exist");
+            // Emit a nullify for view 1.
+            let (was_retry, _) = state.construct_nullify(view).expect("nullify should exist");
             assert!(!was_retry);
 
             // Receive a finalization certificate for view 1 (from the network).
@@ -3948,8 +3909,8 @@ mod tests {
             // Vote to nullify in term [1,3], activating the term safety lock.
             let view1 = View::new(1);
             let (was_retry, _) = state
-                .construct_nullify(view1, true)
-                .expect("timeout nullify should exist");
+                .construct_nullify(view1)
+                .expect("nullify should exist");
             assert!(!was_retry);
 
             // Receive nullification certificate for view 1 and skip to next term start (view 4).
