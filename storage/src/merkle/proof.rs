@@ -7,6 +7,7 @@
 use crate::merkle::{hasher::Hasher, Family, Location, Position};
 use alloc::{
     collections::{BTreeMap, BTreeSet},
+    vec,
     vec::Vec,
 };
 use bytes::{Buf, BufMut};
