@@ -6,18 +6,16 @@ use core::marker::PhantomData;
 
 /// A trait for computing the various digests of a Merkle-family structure.
 ///
-/// The type parameter `F` determines which Merkle family (MMR, MMB, etc.)
-/// this hasher targets, and consequently which `Position` and `Location` types appear in
-/// method signatures. Default implementations are provided for all methods except `hash()`.
-///
-/// A single type may implement `Hasher<F>` for multiple families.
+/// The type parameter `F` determines which Merkle family (MMR, MMB, etc.) this hasher targets, and
+/// consequently which `Position` and `Location` types appear in method signatures. Default
+/// implementations are provided for all methods except `hash()`.
 pub trait Hasher<F: Family>: Clone + Send + Sync {
     type Digest: Digest;
 
     /// Hash an arbitrary sequence of byte slices into a single digest.
     ///
-    /// The parts are concatenated before hashing (i.e. there is no domain separation
-    /// between parts).
+    /// The parts are concatenated before hashing (i.e. there is no domain separation between
+    /// parts).
     fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest;
 
     /// Computes the digest for a node given its position and the digests of its children.
