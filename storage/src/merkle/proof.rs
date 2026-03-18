@@ -484,7 +484,7 @@ impl<F: Family> Blueprint<F> {
     /// position.
     pub(crate) fn build_proof<D, H, E>(
         self,
-        hasher: &mut H,
+        hasher: &H,
         get_node: impl Fn(Position<F>) -> Option<D>,
         element_pruned: impl Fn(Position<F>) -> E,
     ) -> Result<Proof<F, D>, E>
@@ -697,7 +697,7 @@ mod tests {
     }
 
     /// Build an in-memory Merkle structure with `n` elements (element i = i.to_be_bytes()).
-    fn build_raw<F: Family>(hasher: &mut H, n: u64) -> Mem<F, D> {
+    fn build_raw<F: Family>(hasher: &H, n: u64) -> Mem<F, D> {
         let mut mem = Mem::new(hasher);
         let changeset = {
             let mut batch = mem.new_batch();

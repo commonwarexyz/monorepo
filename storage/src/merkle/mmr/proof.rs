@@ -24,7 +24,7 @@ impl<D: Digest> Proof<Family, D> {
     /// root.
     pub fn verify_range_inclusion_and_extract_digests<H, E>(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         elements: &[E],
         start_loc: Location,
         root: &D,
@@ -64,7 +64,7 @@ impl<D: Digest> Proof<Family, D> {
     /// accounted for. When `start_loc` is 0, `pinned_nodes` must be empty.
     pub fn verify_proof_and_pinned_nodes<H, E>(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         elements: &[E],
         start_loc: Location,
         pinned_nodes: &[D],
@@ -140,7 +140,7 @@ impl<D: Digest> Proof<Family, D> {
 
 /// Build a range proof using the fold-based layout.
 pub(crate) fn build_range_proof<D, H>(
-    hasher: &mut H,
+    hasher: &H,
     leaves: Location,
     range: Range<Location>,
     get_node: impl Fn(Position) -> Option<D>,

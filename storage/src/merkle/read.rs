@@ -30,14 +30,14 @@ pub trait Readable: Send + Sync {
     /// Inclusion proof for the element at `loc`.
     fn proof(
         &self,
-        hasher: &mut impl Hasher<Self::Family, Digest = Self::Digest>,
+        hasher: &impl Hasher<Self::Family, Digest = Self::Digest>,
         loc: Location<Self::Family>,
     ) -> Result<Proof<Self::Family, Self::Digest>, Self::Error>;
 
     /// Inclusion proof for all elements in `range`.
     fn range_proof(
         &self,
-        hasher: &mut impl Hasher<Self::Family, Digest = Self::Digest>,
+        hasher: &impl Hasher<Self::Family, Digest = Self::Digest>,
         range: Range<Location<Self::Family>>,
     ) -> Result<Proof<Self::Family, Self::Digest>, Self::Error>;
 

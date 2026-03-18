@@ -170,12 +170,12 @@ impl<H: HasherTrait<mmr::Family>> GraftedHasher<H> {
 impl<H: HasherTrait<mmr::Family>> HasherTrait<mmr::Family> for GraftedHasher<H> {
     type Digest = H::Digest;
 
-    fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
         self.inner.hash(parts)
     }
 
     fn node_digest(
-        &mut self,
+        &self,
         pos: Position,
         left: &Self::Digest,
         right: &Self::Digest,
@@ -224,12 +224,12 @@ impl<'a, H: CHasher> Verifier<'a, H> {
 impl<H: CHasher> HasherTrait<mmr::Family> for Verifier<'_, H> {
     type Digest = H::Digest;
 
-    fn hash<'a>(&mut self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
+    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
         self.hasher.hash(parts)
     }
 
     fn node_digest(
-        &mut self,
+        &self,
         pos: Position,
         left_digest: &H::Digest,
         right_digest: &H::Digest,
@@ -349,7 +349,7 @@ mod tests {
         if !chunks.is_empty() {
             // Use a separate hasher for leaf digest computation to avoid borrow conflict
             // with grafted_hasher (which borrows standard via fork()).
-            let mut leaf_hasher = StandardHasher::<Sha256>::new();
+            let leaf_hasher = StandardHasher::<Sha256>::new();
             let changeset = {
                 let mut batch = grafted_mmr.new_batch();
                 for (i, chunk) in chunks.iter().enumerate() {
@@ -526,7 +526,7 @@ mod tests {
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
 
         let changeset = {
-            let mut leaf_hasher = StandardHasher::<Sha256>::new();
+            let leaf_hasher = StandardHasher::<Sha256>::new();
             let sub0 = ops_mmr.get_node(pos0).unwrap();
             let batch = grafted
                 .new_batch()

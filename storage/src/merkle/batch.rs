@@ -271,7 +271,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
 
     /// Compute digests for all dirty internal nodes, using the pool for parallelism when
     /// available and beneficial. Uses [`Family::children`] to locate each node's children.
-    pub fn merkleize_dirty(&mut self, hasher: &mut impl Hasher<F, Digest = D>) {
+    pub fn merkleize_dirty(&mut self, hasher: &impl Hasher<F, Digest = D>) {
         let dirty = self.state.take_sorted_by_height();
 
         #[cfg(feature = "std")]
@@ -293,7 +293,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
     /// Compute digests for dirty internal nodes, bottom-up by height.
     fn merkleize_serial(
         &mut self,
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
         dirty: &[(Position<F>, u32)],
     ) {
         for &(pos, height) in dirty {
@@ -310,7 +310,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
     #[cfg(feature = "std")]
     fn merkleize_parallel(
         &mut self,
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
         pool: &ThreadPool,
         dirty: &[(Position<F>, u32)],
     ) {
@@ -343,7 +343,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
     #[cfg(feature = "std")]
     fn compute_height_parallel(
         &mut self,
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
         pool: &ThreadPool,
         same_height: &[Position<F>],
         height: u32,
@@ -382,7 +382,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
     }
 
     /// Hash `element` and add it as a leaf.
-    pub fn add(self, hasher: &mut impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
+    pub fn add(self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
         let digest = hasher.leaf_digest(self.size(), element);
         self.add_leaf_digest(digest)
     }
@@ -395,7 +395,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
     /// Returns [`Error::ElementPruned`] if the leaf has been pruned.
     pub fn update_leaf(
         mut self,
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
         loc: Location<F>,
         element: &[u8],
     ) -> Result<Self, Error<F>> {
@@ -435,7 +435,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
     /// Consume this batch and produce an immutable [`MerkleizedBatch`] with computed root.
     pub fn merkleize(
         mut self,
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
     ) -> MerkleizedBatch<'a, F, D, P> {
         self.merkleize_dirty(hasher);
 
@@ -481,7 +481,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Readable
 
     fn proof(
         &self,
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
         loc: Location<F>,
     ) -> Result<Proof<F, D>, Error<F>> {
         if !loc.is_valid() {
@@ -495,7 +495,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Readable
 
     fn range_proof(
         &self,
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
         range: Range<Location<F>>,
     ) -> Result<Proof<F, D>, Error<F>> {
         crate::merkle::proof::build_range_proof(

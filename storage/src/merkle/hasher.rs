@@ -84,6 +84,15 @@ impl<H: CHasher> Standard<H> {
         }
     }
 
+    /// Hash an arbitrary sequence of byte slices into a single digest.
+    pub fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
+        let mut h = H::new();
+        for part in parts {
+            h.update(part);
+        }
+        h.finalize()
+    }
+
     /// Compute the digest of a byte slice.
     pub fn digest(&self, data: &[u8]) -> H::Digest {
         self.hash(core::iter::once(data))
@@ -116,7 +125,7 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{mem::Mmr, Location, Position, StandardHasher as Standard};
+    use crate::mmr::{Location, Position, StandardHasher as Standard};
     use alloc::vec::Vec;
     use commonware_cryptography::{Hasher as CHasher, Sha256};
 
@@ -136,7 +145,7 @@ mod tests {
     }
 
     fn test_digest<H: CHasher>(value: u8) -> H::Digest {
-        H::hash([&[value][..]])
+        H::hash(&[value])
     }
 
     fn test_leaf_digest<H: CHasher>() {

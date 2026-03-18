@@ -6,7 +6,7 @@ use commonware_cryptography::{Digest, Hasher};
 
 /// Verify that a [Proof] is valid for a range of operations and a target root.
 pub fn verify_proof<Op, H, D>(
-    hasher: &mut Standard<H>,
+    hasher: &Standard<H>,
     proof: &Proof<D>,
     start_loc: Location,
     operations: &[Op],
@@ -26,7 +26,7 @@ where
 /// The `pinned_nodes` are the individual peak digests before the proven range (as returned by
 /// `nodes_to_pin`). When `start_loc` is 0, `pinned_nodes` must be empty.
 pub fn verify_proof_and_pinned_nodes<Op, H, D>(
-    hasher: &mut Standard<H>,
+    hasher: &Standard<H>,
     proof: &Proof<D>,
     start_loc: Location,
     operations: &[Op],
@@ -45,7 +45,7 @@ where
 /// Verify that a [Proof] is valid for a range of operations and extract all digests (and their positions)
 /// in the range of the [Proof].
 pub fn verify_proof_and_extract_digests<Op, H, D>(
-    hasher: &mut Standard<H>,
+    hasher: &Standard<H>,
     proof: &Proof<D>,
     start_loc: Location,
     operations: &[Op],
@@ -62,7 +62,7 @@ where
 
 /// Verify a [Proof] and convert it into a [ProofStore].
 pub fn create_proof_store<Op, H, D>(
-    hasher: &mut Standard<H>,
+    hasher: &Standard<H>,
     proof: &Proof<D>,
     start_loc: Location,
     operations: &[Op],
@@ -95,7 +95,7 @@ pub fn create_multi_proof<D: Digest>(
 
 /// Verify a Multi-Proof for operations at specific locations.
 pub fn verify_multi_proof<Op, H, D>(
-    hasher: &mut Standard<H>,
+    hasher: &Standard<H>,
     proof: &Proof<D>,
     operations: &[(Location, Op)],
     target_root: &D,

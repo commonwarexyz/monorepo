@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn test_add_eight_values_structure() {
-        let (mut hasher, mmb) = build_mmb(8);
+        let (hasher, mmb) = build_mmb(8);
 
         assert_eq!(mmb.bounds().start, Location::new(0));
         assert_eq!(mmb.size(), Position::new(13));

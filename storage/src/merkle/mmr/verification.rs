@@ -44,7 +44,7 @@ impl<D: Digest> ProofStore<D> {
     /// with different fold prefix boundaries can be generated without requiring individual peak
     /// digests.
     pub fn new<H, E>(
-        hasher: &mut H,
+        hasher: &H,
         proof: &Proof<D>,
         elements: &[E],
         start_loc: Location,
@@ -87,7 +87,7 @@ impl<D: Digest> ProofStore<D> {
     /// individually available in the store (original range peaks now preceding the sub-range).
     pub fn range_proof<H: Hasher<Family, Digest = D>>(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
         let leaves = Location::try_from(self.size)?;
@@ -163,7 +163,7 @@ impl<D: Digest> ProofStore<D> {
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
 pub async fn range_proof<D: Digest, H: Hasher<Family, Digest = D>, S: Storage<Digest = D>>(
-    hasher: &mut H,
+    hasher: &H,
     mmr: &S,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
@@ -185,7 +185,7 @@ pub async fn historical_range_proof<
     H: Hasher<Family, Digest = D>,
     S: Storage<Digest = D>,
 >(
-    hasher: &mut H,
+    hasher: &H,
     mmr: &S,
     leaves: Location,
     range: Range<Location>,

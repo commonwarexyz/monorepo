@@ -30,7 +30,7 @@ impl<D: commonware_cryptography::Digest> Mmr<D> {
     pub(crate) fn truncate(
         &mut self,
         new_size: Position,
-        hasher: &mut impl crate::merkle::hasher::Hasher<Family, Digest = D>,
+        hasher: &impl crate::merkle::hasher::Hasher<Family, Digest = D>,
     ) {
         debug_assert!(new_size.is_valid_size());
         debug_assert!(new_size >= self.pruned_to_pos);

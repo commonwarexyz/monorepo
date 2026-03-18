@@ -61,7 +61,7 @@ pub struct Mem<F: Family, D: Digest> {
 
 impl<F: Family, D: Digest> Mem<F, D> {
     /// Create a new, empty structure.
-    pub fn new(hasher: &mut impl Hasher<F, Digest = D>) -> Self {
+    pub fn new(hasher: &impl Hasher<F, Digest = D>) -> Self {
         let root = hasher.root(Location::new(0), core::iter::empty::<&D>());
         Self {
             nodes: VecDeque::new(),
@@ -81,7 +81,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// Returns [`Error::InvalidSize`] if the resulting size is invalid.
     pub fn init(
         config: Config<F, D>,
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
     ) -> Result<Self, Error<F>> {
         let pruned_to_pos = Position::try_from(config.pruned_to)?;
 
@@ -121,7 +121,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ///
     /// Returns [`Error::LocationOverflow`] if `pruned_to` exceeds [`Family::MAX_LOCATION`].
     pub fn from_components(
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
         nodes: Vec<D>,
         pruned_to: Location<F>,
         pinned_nodes: Vec<D>,
@@ -138,7 +138,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
     /// Compute the root digest from the current peaks.
     pub(crate) fn compute_root(
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
         nodes: &VecDeque<D>,
         pinned_nodes: &BTreeMap<Position<F>, D>,
         pruned_to_pos: Position<F>,
@@ -281,7 +281,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// Returns [`Error::ElementPruned`] if a required node is missing.
     pub fn proof(
         &self,
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
         loc: Location<F>,
     ) -> Result<Proof<F, D>, Error<F>> {
         if !loc.is_valid() {
@@ -304,7 +304,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// Returns [`Error::ElementPruned`] if a required node is missing.
     pub fn range_proof(
         &self,
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
         range: Range<Location<F>>,
     ) -> Result<Proof<F, D>, Error<F>> {
         merkle_proof::build_range_proof(
@@ -386,7 +386,7 @@ impl<F: Family, D: Digest> Readable for Mem<F, D> {
 
     fn proof(
         &self,
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
         loc: Location<F>,
     ) -> Result<Proof<F, D>, Error<F>> {
         self.proof(hasher, loc)
@@ -394,7 +394,7 @@ impl<F: Family, D: Digest> Readable for Mem<F, D> {
 
     fn range_proof(
         &self,
-        hasher: &mut impl Hasher<F, Digest = D>,
+        hasher: &impl Hasher<F, Digest = D>,
         range: Range<Location<F>>,
     ) -> Result<Proof<F, D>, Error<F>> {
         self.range_proof(hasher, range)

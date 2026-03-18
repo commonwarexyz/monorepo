@@ -19,11 +19,9 @@ use crate::{
         iterator::nodes_to_pin,
         mem::{Config, Mmr},
         storage::Storage,
-        verification,
         verification, Error, Location, Position, Proof,
     },
 };
-use crate::mmr::Error::*;
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
