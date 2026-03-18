@@ -157,66 +157,6 @@ pub(crate) const fn pos_to_height(pos: Position) -> u32 {
     pos as u32
 }
 
-/// A PathIterator returns a (parent_pos, sibling_pos) tuple for the sibling of each node along the
-/// path from a given perfect binary tree peak to a designated leaf, not including the peak itself.
-///
-/// For example, consider the tree below and the path from the peak to leaf node 3. Nodes on the
-/// path are [6, 5, 3] and tagged with '*' in the diagram):
-///
-/// ```text
-///
-///          6*
-///        /   \
-///       2     5*
-///      / \   / \
-///     0   1 3*  4
-///
-/// A PathIterator for this example yields:
-///    [(6, 2), (5, 4)]
-/// ```
-#[derive(Debug)]
-pub struct PathIterator {
-    leaf_pos: Position, // position of the leaf node in the path
-    node_pos: Position, // current node position in the path from peak to leaf
-    two_h: u64,         // 2^height of the current node
-}
-
-impl PathIterator {
-    /// Return a PathIterator over the siblings of nodes along the path from peak to leaf in the
-    /// perfect binary tree with peak `peak_pos` and having height `height`, not including the peak
-    /// itself.
-    pub const fn new(leaf_pos: Position, peak_pos: Position, height: u32) -> Self {
-        Self {
-            leaf_pos,
-            node_pos: peak_pos,
-            two_h: 1 << height,
-        }
-    }
-}
-
-impl Iterator for PathIterator {
-    type Item = (Position, Position); // (parent_pos, sibling_pos)
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.two_h <= 1 {
-            return None;
-        }
-
-        let left_pos = self.node_pos - self.two_h;
-        let right_pos = self.node_pos - 1;
-        self.two_h >>= 1;
-
-        if left_pos < self.leaf_pos {
-            let r = Some((self.node_pos, left_pos));
-            self.node_pos = right_pos;
-            return r;
-        }
-        let r = Some((self.node_pos, right_pos));
-        self.node_pos = left_pos;
-        r
-    }
-}
-
 /// Return the list of pruned (pos < `start_pos`) node positions that are still required for
 /// proving any retained node.
 ///

@@ -11,6 +11,7 @@ mod location;
 pub mod mem;
 pub mod mmb;
 pub mod mmr;
+pub(super) mod path;
 mod position;
 mod proof;
 mod read;

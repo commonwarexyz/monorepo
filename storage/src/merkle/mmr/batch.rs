@@ -8,9 +8,10 @@ use crate::merkle::{
     batch::{self, Clean, Dirty},
     hasher::Hasher,
     mmr::{
-        iterator::{nodes_needing_parents, PathIterator, PeakIterator},
+        iterator::{nodes_needing_parents, PeakIterator},
         proof, Error, Family, Location, Position, Proof, Readable,
     },
+    path::PathIterator,
 };
 #[cfg(any(feature = "std", test))]
 use crate::mmr::iterator::pos_to_height;
@@ -75,7 +76,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
         }
         let digest = hasher.leaf_digest(pos, element);
         self.store_node(pos, digest);
-        self.mark_dirty(pos);
+        self.mark_dirty(loc);
         Ok(self)
     }
 
@@ -94,7 +95,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
             return Err(Error::NonLeaf(pos));
         }
         self.store_node(pos, digest);
-        self.mark_dirty(pos);
+        self.mark_dirty(loc);
         Ok(self)
     }
 
@@ -114,9 +115,9 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
             }
             positions.push(pos);
         }
-        for ((_, digest), pos) in updates.iter().zip(positions.iter()) {
+        for ((loc, digest), pos) in updates.iter().zip(positions.iter()) {
             self.store_node(*pos, *digest);
-            self.mark_dirty(*pos);
+            self.mark_dirty(*loc);
         }
         Ok(self)
     }
@@ -145,28 +146,27 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
         }
     }
 
-    /// Mark ancestors of `pos` as dirty up to the peak.
-    fn mark_dirty(&mut self, pos: Position) {
-        for (peak_pos, mut height) in PeakIterator::new(self.size()) {
-            if peak_pos < pos {
-                continue;
-            }
-
-            let path = PathIterator::new(pos, peak_pos, height)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev();
-            height = 1;
-            for (parent_pos, _) in path {
-                if !self.state.insert(parent_pos, height) {
-                    break;
+    /// Mark ancestors of the leaf at `loc` as dirty up to its peak.
+    fn mark_dirty(&mut self, loc: Location) {
+        let mut first_leaf = Location::new(0);
+        for (peak_pos, height) in PeakIterator::new(self.size()) {
+            let leaves_in_peak = 1u64 << height;
+            if loc < first_leaf + leaves_in_peak {
+                let path: Vec<_> =
+                    PathIterator::new(peak_pos, height, first_leaf, loc).collect();
+                let mut h = 1;
+                for &(parent_pos, _, _) in path.iter().rev() {
+                    if !self.state.insert(parent_pos, h) {
+                        break;
+                    }
+                    h += 1;
                 }
-                height += 1;
+                return;
             }
-            return;
+            first_leaf = first_leaf + leaves_in_peak;
         }
 
-        panic!("invalid pos {pos}:{}", self.size());
+        panic!("leaf {loc} not found (size: {})", self.size());
     }
 }
 

@@ -8,9 +8,10 @@ use crate::merkle::{
     batch::{self, Clean, Dirty},
     hasher::Hasher,
     mmb::{
-        iterator::{birthed_node_pos, child_leaves, leaf_pos, peak_birth_leaf, PeakIterator},
+        iterator::{leaf_pos, PeakIterator},
         proof, Error, Family, Location, Position,
     },
+    path::PathIterator,
     Proof, Readable,
 };
 use alloc::vec::Vec;
@@ -33,35 +34,6 @@ const fn append_merge_height(loc: Location) -> Option<u32> {
     } else {
         Some((leaf + 1).trailing_ones() + 1)
     }
-}
-
-/// Collect the path of internal nodes from `peak_pos` down to the leaf at `target_loc`,
-/// in top-down order. The leaf itself is not included.
-fn collect_path(
-    mut pos: Position,
-    mut height: u32,
-    mut leaf_start: u64,
-    target_loc: Location,
-) -> Vec<(Position, u32)> {
-    let mut path = Vec::with_capacity(height as usize);
-    while height > 0 {
-        path.push((pos, height));
-        let mid_leaf = leaf_start + (1u64 << (height - 1));
-        let (left_leaf, right_leaf) = child_leaves(
-            peak_birth_leaf(Location::new(leaf_start + (1u64 << height) - 1), height),
-            height,
-        );
-        let is_child_leaf = height == 1;
-        if target_loc.as_u64() < mid_leaf {
-            pos = birthed_node_pos(left_leaf, is_child_leaf);
-            height -= 1;
-        } else {
-            pos = birthed_node_pos(right_leaf, is_child_leaf);
-            height -= 1;
-            leaf_start = mid_leaf;
-        }
-    }
-    path
 }
 
 /// A batch whose root digest has not been computed.
@@ -182,8 +154,9 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
             // Collect the path from peak to leaf (top-down), then insert bottom-up so we
             // can early-exit when we hit a node that was already dirtied by a prior
             // update_leaf.
-            let path = collect_path(peak_pos, height, leaf_start, loc);
-            for &(pos, h) in path.iter().rev() {
+            let path: Vec<_> =
+                PathIterator::new(peak_pos, height, Location::new(leaf_start), loc).collect();
+            for &(pos, _, h) in path.iter().rev() {
                 if !self.state.insert(pos, h) {
                     break; // already dirty from a prior update_leaf, ancestors must be too
                 }
