@@ -208,8 +208,8 @@ mod tests {
             test_digest::<H>(0),
             "root of empty MMR should be non-zero"
         );
-        // Empty MMR root is the hash of size 0 bytes, not the empty hash
-        assert_eq!(empty_out, Mmr::empty_mmr_root(&mut H::new()));
+        // Empty root is deterministic.
+        assert_eq!(empty_out, mmr_hasher.root(Location::new(0), empty_vec.iter()));
 
         let digests = [d1, d2, d3, d4];
         let out = mmr_hasher.root(Location::new(10), digests.iter());

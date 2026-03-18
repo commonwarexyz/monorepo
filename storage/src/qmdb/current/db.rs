@@ -8,12 +8,11 @@ use crate::{
         contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
-    merkle::hasher::Hasher as _,
+    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher as _},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         self,
         iterator::{nodes_to_pin, PeakIterator},
-        mem::MIN_TO_PARALLELIZE,
         storage::Storage as _,
         Location, Position, StandardHasher,
     },
@@ -513,7 +512,7 @@ pub(super) async fn compute_grafted_mmr_root<
     storage: &grafting::Storage<'_, H::Digest, G, S>,
 ) -> Result<H::Digest, Error> {
     let size = storage.size().await;
-    let leaves = Location::try_from(size).map_err(mmr::Error::from)?;
+    let leaves = Location::try_from(size)?;
 
     // Collect peak digests from the grafted storage, which transparently dispatches
     // to the grafted MMR or the ops MMR based on height.
@@ -637,7 +636,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
         let changeset = {
             let mut batch = grafted_mmr.new_batch().with_pool(pool.cloned());
             for &(_ops_pos, digest) in &leaves {
-                batch = batch.add_leaf_digest(digest);
+                batch.add_leaf_digest(digest);
             }
             batch.merkleize(&grafted_hasher).finalize()
         };

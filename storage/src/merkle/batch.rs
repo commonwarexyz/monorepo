@@ -65,9 +65,9 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Minimum number of dirty nodes required to trigger parallel merkleization.
+/// Minimum number of digest computations required to trigger parallelization.
 #[cfg(feature = "std")]
-const MIN_TO_PARALLELIZE: usize = 20;
+pub(crate) const MIN_TO_PARALLELIZE: usize = 20;
 
 // ---------------------------------------------------------------------------
 // State type-state

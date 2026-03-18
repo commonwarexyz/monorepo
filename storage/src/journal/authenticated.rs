@@ -75,15 +75,15 @@ impl<
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, item: Item) -> Self {
         let encoded = item.encode();
-        self.inner = self.inner.add(&self.hasher, &encoded);
+        self.inner.add(&mut self.hasher, &encoded);
         self.items.push(item);
         self
     }
 
     /// Merkleize the batch, computing the root digest.
-    pub fn merkleize(self) -> MerkleizedBatch<'a, H, P, Item> {
+    pub fn merkleize(mut self) -> MerkleizedBatch<'a, H, P, Item> {
         MerkleizedBatch {
-            inner: self.inner.merkleize(&self.hasher),
+            inner: self.inner.merkleize(&mut self.hasher),
             items: Arc::new(self.items),
         }
     }
@@ -126,7 +126,6 @@ impl<
     type Family = crate::mmr::Family;
     type Digest = H::Digest;
     type Error = crate::mmr::Error;
-    type PeakIterator = crate::mmr::iterator::PeakIterator;
 
     fn size(&self) -> Position {
         self.inner.size()
@@ -139,10 +138,6 @@ impl<
     }
     fn pruned_to_pos(&self) -> Position {
         self.inner.pruned_to_pos()
-    }
-
-    fn peak_iterator(&self) -> Self::PeakIterator {
-        self.inner.peak_iterator()
     }
 
     fn proof(
@@ -309,10 +304,10 @@ where
     pub async fn from_components(
         mut mmr: Mmr<E, H::Digest>,
         journal: C,
-        hasher: StandardHasher<H>,
+        mut hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error> {
-        Self::align(&mut mmr, &journal, &hasher, apply_batch_size).await?;
+        Self::align(&mut mmr, &journal, &mut hasher, apply_batch_size).await?;
 
         // Sync the MMR to disk to avoid having to repeat any recovery that may have been performed
         // on next startup.
@@ -331,7 +326,7 @@ where
     async fn align(
         mmr: &mut Mmr<E, H::Digest>,
         journal: &C,
-        hasher: &StandardHasher<H>,
+        hasher: &mut StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<(), Error> {
         // Rewind MMR elements that are ahead of the journal.
@@ -364,7 +359,7 @@ where
                     let mut count = 0u64;
                     while count < apply_batch_size && mmr_size < journal_size {
                         let op = reader.read(*mmr_size).await?;
-                        batch = batch.add(hasher, &op.encode());
+                        batch.add(hasher, &op.encode());
                         mmr_size += 1;
                         count += 1;
                     }
@@ -387,12 +382,11 @@ where
 
         // Append item to the journal, then update the MMR state.
         let loc = self.journal.append(item).await?;
-        let changeset = self
-            .mmr
-            .new_batch()
-            .add(&self.hasher, &encoded_item)
-            .merkleize(&self.hasher)
-            .finalize();
+        let changeset = {
+            let mut batch = self.mmr.new_batch();
+            batch.add(&mut self.hasher, &encoded_item);
+            batch.merkleize(&mut self.hasher).finalize()
+        };
         self.mmr.apply(changeset)?;
 
         Ok(Location::new(loc))
@@ -513,10 +507,10 @@ where
 
         let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
 
-        let hasher = self.hasher.clone();
+        let mut hasher = self.hasher.clone();
         let proof = self
             .mmr
-            .historical_range_proof(&hasher, historical_leaves, start_loc..end_loc)
+            .historical_range_proof(&mut hasher, historical_leaves, start_loc..end_loc)
             .await?;
 
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
@@ -584,9 +578,9 @@ where
         journal.rewind_to(rewind_predicate).await?;
 
         // Align the MMR and journal.
-        let hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &hasher, mmr_cfg).await?;
-        Self::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE).await?;
+        let mut hasher = StandardHasher::<H>::new();
+        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
+        Self::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
@@ -617,8 +611,8 @@ where
         journal_cfg: variable::Config<O::Cfg>,
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
-        let hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &hasher, mmr_cfg).await?;
+        let mut hasher = StandardHasher::<H>::new();
+        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
         let mut journal =
             variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
 
@@ -626,7 +620,7 @@ where
         journal.rewind_to(rewind_predicate).await?;
 
         // Align the MMR and journal.
-        Self::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE).await?;
+        Self::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
 
         // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
@@ -683,7 +677,7 @@ where
         let leaves = *self.mmr.leaves();
         if leaves > size {
             self.mmr
-                .rewind((leaves - size) as usize, &self.hasher)
+                .rewind((leaves - size) as usize, &mut self.hasher)
                 .await
                 .map_err(|error| JournalError::Mmr(anyhow::Error::from(error)))?;
         }
@@ -851,10 +845,10 @@ mod tests {
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         StandardHasher<Sha256>,
     ) {
-        let hasher = StandardHasher::new();
+        let mut hasher = StandardHasher::new();
         let mmr = Mmr::init(
             context.with_label("mmr"),
-            &hasher,
+            &mut hasher,
             mmr_config(suffix, &context),
         )
         .await
@@ -874,7 +868,7 @@ mod tests {
         operations: &[Operation<Digest, Digest>],
         start_loc: Location,
         root: &<Sha256 as commonware_cryptography::Hasher>::Digest,
-        hasher: &StandardHasher<Sha256>,
+        hasher: &mut StandardHasher<Sha256>,
     ) -> bool {
         let encoded_ops: Vec<_> = operations.iter().map(|op| op.encode()).collect();
         proof.verify_range_inclusion(hasher, &encoded_ops, start_loc, root)
@@ -899,9 +893,9 @@ mod tests {
     fn test_align_with_empty_mmr_and_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, journal, hasher) = create_components(context, "align-empty").await;
+            let (mut mmr, journal, mut hasher) = create_components(context, "align-empty").await;
 
-            AuthenticatedJournal::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE)
+            AuthenticatedJournal::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -915,7 +909,7 @@ mod tests {
     fn test_align_when_mmr_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, journal, hasher) = create_components(context, "mmr-ahead").await;
+            let (mut mmr, journal, mut hasher) = create_components(context, "mmr-ahead").await;
 
             // Add 20 operations to both MMR and journal
             {
@@ -924,10 +918,10 @@ mod tests {
                     for i in 0..20 {
                         let op = create_operation(i as u8);
                         let encoded = op.encode();
-                        batch = batch.add(&hasher, &encoded);
+                        batch.add(&mut hasher, &encoded);
                         journal.append(&op).await.unwrap();
                     }
-                    batch.merkleize(&hasher).finalize()
+                    batch.merkleize(&mut hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
             }
@@ -938,7 +932,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            AuthenticatedJournal::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE)
+            AuthenticatedJournal::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -953,7 +947,7 @@ mod tests {
     fn test_align_when_journal_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, journal, hasher) = create_components(context, "journal-ahead").await;
+            let (mut mmr, journal, mut hasher) = create_components(context, "journal-ahead").await;
 
             // Add 20 operations to journal only
             for i in 0..20 {
@@ -967,7 +961,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            AuthenticatedJournal::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE)
+            AuthenticatedJournal::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -1599,9 +1593,15 @@ mod tests {
             }
 
             // Verify the proof is valid
-            let hasher = StandardHasher::new();
+            let mut hasher = StandardHasher::new();
             let root = journal.root();
-            assert!(verify_proof(&proof, &ops, Location::new(0), &root, &hasher));
+            assert!(verify_proof(
+                &proof,
+                &ops,
+                Location::new(0),
+                &root,
+                &mut hasher
+            ));
         });
     }
 
@@ -1625,9 +1625,15 @@ mod tests {
             }
 
             // Verify the proof is valid
-            let hasher = StandardHasher::new();
+            let mut hasher = StandardHasher::new();
             let root = journal.root();
-            assert!(verify_proof(&proof, &ops, Location::new(0), &root, &hasher));
+            assert!(verify_proof(
+                &proof,
+                &ops,
+                Location::new(0),
+                &root,
+                &mut hasher
+            ));
         });
     }
 
@@ -1652,14 +1658,14 @@ mod tests {
             }
 
             // Verify the proof is valid
-            let hasher = StandardHasher::new();
+            let mut hasher = StandardHasher::new();
             let root = journal.root();
             assert!(verify_proof(
                 &proof,
                 &ops,
                 Location::new(40),
                 &root,
-                &hasher
+                &mut hasher
             ));
         });
     }
@@ -1710,7 +1716,7 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "proof_historical", 50).await;
 
             // Capture root at historical state
-            let hasher = StandardHasher::new();
+            let mut hasher = StandardHasher::new();
             let historical_root = journal.root();
             let historical_size = journal.size().await;
 
@@ -1738,7 +1744,7 @@ mod tests {
                 &ops,
                 Location::new(0),
                 &historical_root,
-                &hasher
+                &mut hasher
             ));
         });
     }

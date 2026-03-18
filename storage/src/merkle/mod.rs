@@ -63,8 +63,8 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     fn children(pos: Position<Self>, height: u32) -> (Position<Self>, Position<Self>);
 }
 
-/// Errors from converting between `Position` and `Location`.
-#[derive(Debug, Clone, Copy, Error)]
+/// Errors that can occur when interacting with a Merkle-family data structure.
+#[derive(Debug, Error)]
 pub enum Error<F: Family> {
     /// The position does not correspond to a leaf node.
     #[error("{0} is not a leaf")]
@@ -85,19 +85,72 @@ pub enum Error<F: Family> {
     /// The end of a range is out of bounds.
     #[error("range end out of bounds: {0}")]
     RangeOutOfBounds(Location<F>),
-}
 
-impl<F: Family> PartialEq for Error<F> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::NonLeaf(a), Self::NonLeaf(b)) => a == b,
-            (Self::PositionOverflow(a), Self::PositionOverflow(b)) => a == b,
-            (Self::LocationOverflow(a), Self::LocationOverflow(b)) => a == b,
-            (Self::Empty, Self::Empty) => true,
-            (Self::RangeOutOfBounds(a), Self::RangeOutOfBounds(b)) => a == b,
-            _ => false,
-        }
-    }
-}
+    /// The requested size is invalid.
+    #[error("invalid size: {0}")]
+    InvalidSize(u64),
 
-impl<F: Family> Eq for Error<F> {}
+    /// A requested leaf location exceeds the current leaf count.
+    #[error("leaf location out of bounds: {0}")]
+    LeafOutOfBounds(Location<F>),
+
+    /// A required node was not available (e.g. pruned).
+    #[error("element pruned: {0}")]
+    ElementPruned(Position<F>),
+
+    /// The provided pinned node list does not match the expected pruning boundary.
+    #[error("invalid pinned nodes")]
+    InvalidPinnedNodes,
+
+    /// Changeset was created against a different state.
+    #[error("stale changeset: expected size {expected}, actual {actual}")]
+    StaleChangeset {
+        /// The size the changeset was built against.
+        expected: Position<F>,
+        /// The current size.
+        actual: Position<F>,
+    },
+
+    /// The proof is invalid.
+    #[error("invalid proof")]
+    InvalidProof,
+
+    /// The root does not match the computed root.
+    #[error("root mismatch")]
+    RootMismatch,
+
+    /// A required digest is missing.
+    #[error("missing digest: {0}")]
+    MissingDigest(Position<F>),
+
+    /// A required node is missing.
+    #[cfg(feature = "std")]
+    #[error("metadata error: {0}")]
+    MetadataError(#[from] crate::metadata::Error),
+
+    /// A journal error occurred.
+    #[cfg(feature = "std")]
+    #[error("journal error: {0}")]
+    JournalError(#[from] crate::journal::Error),
+
+    /// A runtime error occurred.
+    #[cfg(feature = "std")]
+    #[error("runtime error: {0}")]
+    Runtime(#[from] commonware_runtime::Error),
+
+    /// A required node is missing.
+    #[error("missing node: {0}")]
+    MissingNode(Position<F>),
+
+    /// Data is corrupted.
+    #[error("data corrupted: {0}")]
+    DataCorrupted(&'static str),
+
+    /// A required grafted leaf digest is missing.
+    #[error("missing grafted leaf digest: {0}")]
+    MissingGraftedLeaf(Position<F>),
+
+    /// Bit offset is out of bounds.
+    #[error("bit offset {0} out of bounds (size: {1})")]
+    BitOutOfBounds(u64, u64),
+}

@@ -30,28 +30,28 @@ fn bench_append_additional(c: &mut Criterion) {
             c.bench_function(&format!("{}/start={} add={}", module_path!(), n, a), |b| {
                 b.iter_batched(
                     || {
-                        let h = StandardHasher::<Sha256>::new();
-                        let mut mmr = Mmr::new(&h);
+                        let mut h = StandardHasher::<Sha256>::new();
+                        let mut mmr = Mmr::new(&mut h);
                         block_on(async {
                             let changeset = {
                                 let mut batch = UnmerkleizedBatch::new(&mmr);
                                 for digest in &elements {
-                                    batch = batch.add(&h, digest);
+                                    batch.add(&mut h, digest);
                                 }
-                                batch.merkleize(&h).finalize()
+                                batch.merkleize(&mut h).finalize()
                             };
                             mmr.apply(changeset).unwrap();
                         });
                         mmr
                     },
                     |mmr| {
-                        let h = StandardHasher::<Sha256>::new();
+                        let mut h = StandardHasher::<Sha256>::new();
                         block_on(async {
                             let mut batch = UnmerkleizedBatch::new(&mmr);
                             for digest in &additional {
-                                batch = batch.add(&h, digest);
+                                batch.add(&mut h, digest);
                             }
-                            batch.merkleize(&h);
+                            batch.merkleize(&mut h);
                         });
                     },
                     criterion::BatchSize::SmallInput,

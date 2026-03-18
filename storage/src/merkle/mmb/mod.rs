@@ -124,6 +124,9 @@ use crate::merkle;
 pub use crate::merkle::Readable;
 pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 
+/// MMB-specific type alias for `merkle::proof::Proof`.
+pub type Proof<D> = merkle::proof::Proof<Family, D>;
+
 /// Marker type for the MMB family.
 #[derive(Copy, Clone, Debug)]
 pub struct Family;
@@ -194,43 +197,4 @@ pub type Location = merkle::Location<Family>;
 pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 
 /// Errors that can occur during MMB operations.
-#[derive(Debug)]
-pub enum Error {
-    /// Empty input where at least one element was required.
-    Empty,
-    /// The requested MMB size is invalid.
-    InvalidSize(u64),
-    /// A range end exceeds the number of leaves.
-    RangeOutOfBounds(Location),
-    /// A requested leaf location exceeds the current leaf count.
-    LeafOutOfBounds(Location),
-    /// A required node was not available (e.g. pruned).
-    ElementPruned(Position),
-    /// The provided pinned node list does not match the expected pruning boundary.
-    InvalidPinnedNodes,
-    /// Location exceeds the valid range.
-    LocationOverflow(Location),
-    /// A non-leaf position was used where a leaf position was required.
-    NonLeaf(Position),
-    /// Position exceeds the valid range for this MMB family.
-    PositionOverflow(Position),
-    /// Changeset was created against a different MMB state.
-    StaleChangeset {
-        /// The size the changeset was built against.
-        expected: Position,
-        /// The current MMB size.
-        actual: Position,
-    },
-}
-
-impl From<merkle::Error<Family>> for Error {
-    fn from(e: merkle::Error<Family>) -> Self {
-        match e {
-            merkle::Error::LocationOverflow(loc) => Self::LocationOverflow(loc),
-            merkle::Error::NonLeaf(pos) => Self::NonLeaf(pos),
-            merkle::Error::PositionOverflow(pos) => Self::PositionOverflow(pos),
-            merkle::Error::Empty => Self::Empty,
-            merkle::Error::RangeOutOfBounds(loc) => Self::RangeOutOfBounds(loc),
-        }
-    }
-}
+pub type Error = merkle::Error<Family>;

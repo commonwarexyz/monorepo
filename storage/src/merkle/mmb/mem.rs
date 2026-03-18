@@ -3,8 +3,8 @@
 use crate::merkle::{
     batch::BatchChainInfo,
     hasher::Hasher,
-    mmb::{iterator::PeakIterator, proof, Error, Family, Location, Position},
-    proof::Proof,
+    mmb::{proof, Error, Family, Location, Position, Proof, Readable},
+    Family as _,
 };
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -44,14 +44,13 @@ pub struct Mmb<D: Digest> {
     /// This is always leaf-aligned, meaning it is the position corresponding to some `Location`.
     pruned_to_pos: Position,
 
-    /// The auxiliary map from node position to the digest of any pinned node.
+    /// The auxiliary map from node position to the digest of any pinned node. Only recomputed when
+    /// `pruned_to_pos` changes; appending nodes can only shrink the required set, so the current
+    /// map is always a valid superset of what is needed.
     pinned_nodes: BTreeMap<Position, D>,
 
     /// The root digest of the MMB.
     root: D,
-
-    /// The number of leaves in the MMB.
-    leaves: Location,
 }
 
 impl<D: Digest> Mmb<D> {
@@ -63,7 +62,6 @@ impl<D: Digest> Mmb<D> {
             pruned_to_pos: Position::new(0),
             pinned_nodes: BTreeMap::new(),
             root,
-            leaves: Location::new(0),
         }
     }
 
@@ -99,15 +97,13 @@ impl<D: Digest> Mmb<D> {
             .zip(config.pinned_nodes)
             .collect();
         let nodes = VecDeque::from(config.nodes);
-        let leaves = Location::try_from(size).map_err(|_| Error::InvalidSize(*size))?;
-        let root = Self::compute_root(hasher, leaves, &nodes, &pinned_nodes, pruned_to_pos);
+        let root = Self::compute_root(hasher, &nodes, &pinned_nodes, pruned_to_pos);
 
         Ok(Self {
             nodes,
             pruned_to_pos,
             pinned_nodes,
             root,
-            leaves,
         })
     }
 
@@ -138,27 +134,22 @@ impl<D: Digest> Mmb<D> {
     /// Compute the root digest from the current peaks.
     fn compute_root(
         hasher: &mut impl Hasher<Family, Digest = D>,
-        leaves: Location,
         nodes: &VecDeque<D>,
         pinned_nodes: &BTreeMap<Position, D>,
         pruned_to_pos: Position,
     ) -> D {
-        let size = Position::try_from(leaves).expect("invalid MMB leaves");
+        let size = Position::new(nodes.len() as u64 + *pruned_to_pos);
+        let leaves = Location::try_from(size).expect("invalid mmb size");
         let get_node = |pos: Position| -> &D {
             if pos < pruned_to_pos {
                 return pinned_nodes
                     .get(&pos)
                     .expect("requested node is pruned and not pinned");
             }
-
             let index = (*pos - *pruned_to_pos) as usize;
             &nodes[index]
         };
-
-        let mut peaks: Vec<&D> = PeakIterator::new(size)
-            .map(|(peak_pos, _)| get_node(peak_pos))
-            .collect();
-        peaks.reverse();
+        let peaks = Family::peaks(size).into_iter().map(|(p, _)| get_node(p));
         hasher.root(leaves, peaks)
     }
 
@@ -168,8 +159,8 @@ impl<D: Digest> Mmb<D> {
     }
 
     /// Return the total number of leaves in the MMB.
-    pub const fn leaves(&self) -> Location {
-        self.leaves
+    pub fn leaves(&self) -> Location {
+        Location::try_from(self.size()).expect("invalid mmb size")
     }
 
     /// Returns [start, end) where `start` is the oldest retained leaf and `end` is the total leaf
@@ -179,8 +170,8 @@ impl<D: Digest> Mmb<D> {
     }
 
     /// Return a new iterator over the peaks of the MMB.
-    pub fn peak_iterator(&self) -> PeakIterator {
-        PeakIterator::new(self.size())
+    pub fn peak_iterator(&self) -> alloc::vec::IntoIter<(Position, u32)> {
+        Family::peaks(self.size()).into_iter()
     }
 
     /// Get the root digest.
@@ -195,7 +186,7 @@ impl<D: Digest> Mmb<D> {
     ///
     /// Panics if the requested node does not exist for any reason such as the node is pruned or
     /// `pos` is out of bounds.
-    fn get_node_unchecked(&self, pos: Position) -> &D {
+    pub(crate) fn get_node_unchecked(&self, pos: Position) -> &D {
         if pos < self.pruned_to_pos {
             return self
                 .pinned_nodes
@@ -220,22 +211,13 @@ impl<D: Digest> Mmb<D> {
         *pos.checked_sub(*self.pruned_to_pos).unwrap() as usize
     }
 
-    /// Return the positions and digests that must remain pinned for the provided pruning boundary.
-    fn collect_pinned_nodes(&self, size: Position, prune_pos: Position) -> BTreeMap<Position, D> {
-        <Family as crate::merkle::Family>::nodes_to_pin(size, prune_pos)
+    /// Get the nodes (position + digest) that need to be pinned (those required for proof
+    /// generation) in this MMB when pruned to position `prune_pos`.
+    pub(crate) fn nodes_to_pin(&self, prune_pos: Position) -> BTreeMap<Position, D> {
+        <Family as crate::merkle::Family>::nodes_to_pin(self.size(), prune_pos)
             .into_iter()
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
-    }
-
-    /// Recompute the pinned node set for the current MMB size.
-    fn refresh_pinned_nodes(&mut self) {
-        if self.pruned_to_pos == 0 {
-            self.pinned_nodes.clear();
-            return;
-        }
-
-        self.pinned_nodes = self.collect_pinned_nodes(self.size(), self.pruned_to_pos);
     }
 
     /// Return the requested node or None if it is not stored in the MMB.
@@ -277,8 +259,6 @@ impl<D: Digest> Mmb<D> {
         }
 
         // 3. Update derived state.
-        self.leaves = Location::try_from(self.size()).expect("invalid mmb size");
-        self.refresh_pinned_nodes();
         self.root = changeset.root;
         Ok(())
     }
@@ -313,7 +293,7 @@ impl<D: Digest> Mmb<D> {
 
     /// Position-based pruning. Assumes `pos` is leaf-aligned.
     fn prune_to_pos(&mut self, pos: Position) {
-        self.pinned_nodes = self.collect_pinned_nodes(self.size(), pos);
+        self.pinned_nodes = self.nodes_to_pin(pos);
         let retained_nodes = self.pos_to_index(pos);
         self.nodes.drain(0..retained_nodes);
         self.pruned_to_pos = pos;
@@ -330,7 +310,7 @@ impl<D: Digest> Mmb<D> {
         &self,
         hasher: &mut impl Hasher<Family, Digest = D>,
         loc: Location,
-    ) -> Result<Proof<Family, D>, Error> {
+    ) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
             return Err(Error::LocationOverflow(loc));
         }
@@ -353,13 +333,13 @@ impl<D: Digest> Mmb<D> {
         &self,
         hasher: &mut impl Hasher<Family, Digest = D>,
         range: Range<Location>,
-    ) -> Result<Proof<Family, D>, Error> {
-        proof::build_range_proof(hasher, self.leaves, range, |pos| self.get_node(pos))
+    ) -> Result<Proof<D>, Error> {
+        proof::build_range_proof(hasher, self.leaves(), range, |pos| self.get_node(pos))
     }
 
     /// Get the digests of nodes that need to be pinned at the provided pruning boundary.
     #[cfg(test)]
-    fn node_digests_to_pin(&self, prune_pos: Position) -> Vec<D> {
+    pub(crate) fn node_digests_to_pin(&self, prune_pos: Position) -> Vec<D> {
         <Family as crate::merkle::Family>::nodes_to_pin(self.size(), prune_pos)
             .into_iter()
             .map(|pos| *self.get_node_unchecked(pos))
@@ -367,11 +347,10 @@ impl<D: Digest> Mmb<D> {
     }
 }
 
-impl<D: Digest> crate::merkle::Readable for Mmb<D> {
+impl<D: Digest> Readable for Mmb<D> {
     type Family = Family;
     type Digest = D;
     type Error = Error;
-    type PeakIterator = PeakIterator;
 
     fn size(&self) -> Position {
         self.size()
@@ -389,15 +368,11 @@ impl<D: Digest> crate::merkle::Readable for Mmb<D> {
         self.pruned_to_pos
     }
 
-    fn peak_iterator(&self) -> Self::PeakIterator {
-        PeakIterator::new(self.size())
-    }
-
     fn proof(
         &self,
         hasher: &mut impl Hasher<Family, Digest = D>,
         loc: Location,
-    ) -> Result<Proof<Family, D>, Error> {
+    ) -> Result<Proof<D>, Error> {
         self.proof(hasher, loc)
     }
 
@@ -405,7 +380,7 @@ impl<D: Digest> crate::merkle::Readable for Mmb<D> {
         &self,
         hasher: &mut impl Hasher<Family, Digest = D>,
         range: Range<Location>,
-    ) -> Result<Proof<Family, D>, Error> {
+    ) -> Result<Proof<D>, Error> {
         self.range_proof(hasher, range)
     }
 }
@@ -482,9 +457,9 @@ mod tests {
         assert_eq!(
             peaks,
             vec![
-                (Position::new(12), 1),
+                (Position::new(7), 2),
                 (Position::new(9), 1),
-                (Position::new(7), 2)
+                (Position::new(12), 1)
             ],
             "MMB peaks not as expected"
         );

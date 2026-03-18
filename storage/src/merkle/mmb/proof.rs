@@ -18,7 +18,7 @@ pub(crate) fn nodes_required_for_multi_proof(
     leaves: Location,
     locations: &[Location],
 ) -> Result<BTreeSet<Position>, Error> {
-    merkle_proof::nodes_required_for_multi_proof(leaves, locations).map_err(Error::from)
+    merkle_proof::nodes_required_for_multi_proof(leaves, locations)
 }
 
 /// Build a range proof from a node-fetching closure.

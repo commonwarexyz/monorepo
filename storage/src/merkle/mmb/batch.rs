@@ -22,6 +22,19 @@ pub type MmbProof<D> = Proof<Family, D>;
 
 pub use batch::BatchChainInfo;
 
+/// Return the height of the single parent birthed when appending `loc`, if any.
+///
+/// MMB appends create exactly one parent unless `loc + 2` is a power of two.
+#[inline]
+const fn append_merge_height(loc: Location) -> Option<u32> {
+    let leaf = loc.as_u64();
+    if (leaf + 2).is_power_of_two() {
+        None
+    } else {
+        Some((leaf + 1).trailing_ones() + 1)
+    }
+}
+
 /// Collect the path of internal nodes from `peak_pos` down to the leaf at `target_loc`,
 /// in top-down order. The leaf itself is not included.
 fn collect_path(
@@ -69,23 +82,10 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
         let pos = leaf_pos(loc);
         debug_assert_eq!(pos, self.size());
 
-        // Capture the merge height BEFORE appending (size is valid here).
-        // Since MMB maintains a constant merge rate and PeakIterator yields from newest
-        // to oldest, we simulate adding a new leaf (height 0) and locate the merge.
-        let mut prev_height = 0;
-        let mut merge_height = None;
-        for (_, height) in PeakIterator::new(self.size()) {
-            if height == prev_height {
-                merge_height = Some(height + 1);
-                break;
-            }
-            prev_height = height;
-        }
-
         self.appended.push(digest);
 
         // Perform the deferred merge, if any.
-        if let Some(height) = merge_height {
+        if let Some(height) = append_merge_height(loc) {
             let parent_pos = Position::new(pos.as_u64() + 1);
             self.appended.push(D::EMPTY); // placeholder
             self.state.insert(parent_pos, height);
@@ -230,7 +230,6 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>> Rea
     type Family = Family;
     type Digest = D;
     type Error = Error;
-    type PeakIterator = PeakIterator;
 
     fn size(&self) -> Position {
         self.size()
@@ -246,10 +245,6 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>> Rea
 
     fn pruned_to_pos(&self) -> Position {
         self.parent.pruned_to_pos()
-    }
-
-    fn peak_iterator(&self) -> Self::PeakIterator {
-        PeakIterator::new(self.size())
     }
 
     fn proof(
@@ -295,6 +290,38 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
             state: Dirty::default(),
             #[cfg(feature = "std")]
             pool: self.pool,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_merge_height;
+    use crate::mmb::Location;
+
+    #[test]
+    fn test_append_merge_height_schedule() {
+        let expected = [
+            None,
+            Some(1),
+            None,
+            Some(1),
+            Some(2),
+            Some(1),
+            None,
+            Some(1),
+            Some(2),
+            Some(1),
+            Some(3),
+            Some(1),
+            Some(2),
+            Some(1),
+            None,
+            Some(1),
+        ];
+
+        for (leaf, height) in expected.into_iter().enumerate() {
+            assert_eq!(append_merge_height(Location::new(leaf as u64)), height);
         }
     }
 }

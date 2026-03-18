@@ -44,7 +44,7 @@ impl<D: Digest> ProofStore<D> {
     /// with different fold prefix boundaries can be generated without requiring individual peak
     /// digests.
     pub fn new<H, E>(
-        hasher: &H,
+        hasher: &mut H,
         proof: &Proof<D>,
         elements: &[E],
         start_loc: Location,
@@ -87,7 +87,7 @@ impl<D: Digest> ProofStore<D> {
     /// individually available in the store (original range peaks now preceding the sub-range).
     pub fn range_proof<H: Hasher<Family, Digest = D>>(
         &self,
-        hasher: &H,
+        hasher: &mut H,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
         let leaves = Location::try_from(self.size)?;
@@ -162,12 +162,8 @@ impl<D: Digest> ProofStore<D> {
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn range_proof<
-    D: Digest,
-    H: Hasher<Family, Digest = D>,
-    S: Storage<Digest = D>,
->(
-    hasher: &H,
+pub async fn range_proof<D: Digest, H: Hasher<Family, Digest = D>, S: Storage<Digest = D>>(
+    hasher: &mut H,
     mmr: &S,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
@@ -189,7 +185,7 @@ pub async fn historical_range_proof<
     H: Hasher<Family, Digest = D>,
     S: Storage<Digest = D>,
 >(
-    hasher: &H,
+    hasher: &mut H,
     mmr: &S,
     leaves: Location,
     range: Range<Location>,
@@ -284,15 +280,15 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
-            let hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = Mmr::new(&mut hasher);
             let elements: Vec<_> = (0..49).map(test_digest).collect();
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
-                    batch = batch.add(&hasher, element);
+                    batch.add(&mut hasher, element);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&mut hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let root = mmr.root();
@@ -303,9 +299,9 @@ mod tests {
             let mut range_end = Location::new(49);
             while range_start < range_end {
                 let range = range_start..range_end;
-                let range_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
+                let range_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
                 let proof_store = ProofStore::new(
-                    &hasher,
+                    &mut hasher,
                     &range_proof,
                     &elements[range.to_usize_range()],
                     range_start,
@@ -321,10 +317,11 @@ mod tests {
                 while subrange_start < subrange_end {
                     // Verify a proof over a sub-range of the original range.
                     let sub_range = subrange_start..subrange_end;
-                    let sub_range_proof =
-                        proof_store.range_proof(&hasher, sub_range.clone()).unwrap();
+                    let sub_range_proof = proof_store
+                        .range_proof(&mut hasher, sub_range.clone())
+                        .unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
-                        &hasher,
+                        &mut hasher,
                         &elements[sub_range.to_usize_range()],
                         sub_range.start,
                         root
@@ -344,15 +341,15 @@ mod tests {
         executor.start(|_| async move {
             // Build MMR with 49 elements. Peaks cover locations 0-31, 32-47, 48.
             // A proof starting at location 32 puts the first peak entirely in the fold prefix.
-            let hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&hasher);
+            let mut hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = Mmr::new(&mut hasher);
             let elements: Vec<_> = (0..49).map(test_digest).collect();
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
-                    batch = batch.add(&hasher, element);
+                    batch.add(&mut hasher, element);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&mut hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let root = mmr.root();
@@ -361,9 +358,9 @@ mod tests {
             // The ProofStore derives the fold accumulator from the proof itself, so
             // sub-proofs should succeed for all sub-ranges without needing peaks.
             let range = Location::new(32)..Location::new(49);
-            let range_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
+            let range_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
             let proof_store = ProofStore::new(
-                &hasher,
+                &mut hasher,
                 &range_proof,
                 &elements[range.to_usize_range()],
                 range.start,
@@ -375,10 +372,12 @@ mod tests {
             for start in 32u64..49 {
                 for end in (start + 1)..=49 {
                     let sub_range = Location::new(start)..Location::new(end);
-                    let sub_proof = proof_store.range_proof(&hasher, sub_range.clone()).unwrap();
+                    let sub_proof = proof_store
+                        .range_proof(&mut hasher, sub_range.clone())
+                        .unwrap();
                     assert!(
                         sub_proof.verify_range_inclusion(
-                            &hasher,
+                            &mut hasher,
                             &elements[sub_range.to_usize_range()],
                             sub_range.start,
                             root,

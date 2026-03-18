@@ -11,13 +11,13 @@
 //! over elements whose activity state is reflected by the bitmap.
 
 use crate::{
-    merkle::hasher::Hasher as MmrHasher,
+    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher as MmrHasher},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         self,
         batch::UnmerkleizedBatch,
         iterator::nodes_to_pin,
-        mem::{Config, Mmr, MIN_TO_PARALLELIZE},
+        mem::{Config, Mmr},
         storage::Storage,
         verification,
         Error::{self, *},
@@ -340,12 +340,12 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
                 error!(?mmr_size, ?pos, "missing pinned node");
-                return Err(MissingNode(pos));
+                return Err(Error::MissingNode(pos));
             };
             let digest = D::decode(bytes.as_ref());
             let Ok(digest) = digest else {
                 error!(?mmr_size, ?pos, "could not convert node bytes to digest");
-                return Err(MissingNode(pos));
+                return Err(Error::MissingNode(pos));
             };
             pinned_nodes.push(digest);
         }
@@ -397,12 +397,12 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             self.metadata.put(key, digest.to_vec());
         }
 
-        self.metadata.sync().await.map_err(MetadataError)
+        self.metadata.sync().await.map_err(Error::MetadataError)
     }
 
     /// Destroy the bitmap metadata from disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.metadata.destroy().await.map_err(MetadataError)
+        self.metadata.destroy().await.map_err(Error::MetadataError)
     }
 
     /// Prune all complete chunks before the chunk containing the given bit.
@@ -564,7 +564,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
         let start = self.authenticated_len;
         let end = self.complete_chunks();
         for i in start..end {
-            batch = batch.add(hasher, self.bitmap.get_chunk(i));
+            batch.add(hasher, self.bitmap.get_chunk(i));
         }
         self.authenticated_len = end;
 
@@ -602,7 +602,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
                     .collect(),
             }
         };
-        batch = batch.update_leaf_batched(&dirty)?;
+        batch.update_leaf_batched(&dirty)?;
 
         // Merkleize and apply.
         let changeset = batch.merkleize(hasher).finalize();

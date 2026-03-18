@@ -74,7 +74,6 @@ pub use super::proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
 use crate::merkle;
 pub use crate::merkle::{hasher, Readable};
 pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
-use thiserror::Error;
 
 /// MMR-specific type alias for `merkle::proof::Proof`.
 pub type Proof<D> = merkle::proof::Proof<Family, D>;
@@ -211,71 +210,7 @@ pub type Location = merkle::Location<Family>;
 pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 
 /// Errors that can occur when interacting with an MMR.
-#[derive(Error, Debug)]
-pub enum Error {
-    #[cfg(feature = "std")]
-    #[error("metadata error: {0}")]
-    MetadataError(#[from] crate::metadata::Error),
-    #[cfg(feature = "std")]
-    #[error("journal error: {0}")]
-    JournalError(#[from] crate::journal::Error),
-    #[cfg(feature = "std")]
-    #[error("runtime error: {0}")]
-    Runtime(#[from] commonware_runtime::Error),
-    #[error("missing node: {0}")]
-    MissingNode(Position),
-    #[error("invalid proof")]
-    InvalidProof,
-    #[error("root mismatch")]
-    RootMismatch,
-    #[error("element pruned: {0}")]
-    ElementPruned(Position),
-    #[error("position is not a leaf: {0}")]
-    PositionNotLeaf(Position),
-    #[error("invalid position: {0}")]
-    InvalidPosition(Position),
-    #[error("missing digest: {0}")]
-    MissingDigest(Position),
-    #[error("missing grafted leaf digest: {0}")]
-    MissingGraftedLeaf(Position),
-    #[error("invalid proof length")]
-    InvalidProofLength,
-    #[error("invalid size: {0}")]
-    InvalidSize(u64),
-    #[error("empty")]
-    Empty,
-    #[error("pruned chunks causes u64 overflow")]
-    PrunedChunksOverflow,
-    #[error("location {0} > MAX_LOCATION")]
-    LocationOverflow(Location),
-    #[error("range out of bounds: end location {0} exceeds MMR size")]
-    RangeOutOfBounds(Location),
-    #[error("leaf location out of bounds: {0}")]
-    LeafOutOfBounds(Location),
-    #[error("bit offset {0} out of bounds (size: {1})")]
-    BitOutOfBounds(u64, u64),
-    #[error("invalid pinned nodes")]
-    InvalidPinnedNodes,
-    #[error("data corrupted: {0}")]
-    DataCorrupted(&'static str),
-    #[error("stale changeset: expected MMR size {expected}, actual {actual}")]
-    StaleChangeset {
-        expected: Position,
-        actual: Position,
-    },
-}
-
-impl From<merkle::Error<Family>> for Error {
-    fn from(err: merkle::Error<Family>) -> Self {
-        match err {
-            merkle::Error::NonLeaf(pos) => Self::PositionNotLeaf(pos),
-            merkle::Error::PositionOverflow(pos) => Self::InvalidPosition(pos),
-            merkle::Error::LocationOverflow(loc) => Self::LocationOverflow(loc),
-            merkle::Error::Empty => Self::Empty,
-            merkle::Error::RangeOutOfBounds(loc) => Self::RangeOutOfBounds(loc),
-        }
-    }
-}
+pub type Error = merkle::Error<Family>;
 
 #[cfg(test)]
 mod tests {
@@ -518,29 +453,29 @@ mod tests {
             Position::new(30),
         ];
         for &pos in CASES {
-            assert_eq!(
+            assert!(matches!(
                 Location::try_from(pos).unwrap_err(),
-                merkle::Error::NonLeaf(pos)
-            );
+                merkle::Error::NonLeaf(p) if p == pos
+            ));
         }
     }
 
     #[test]
     fn test_try_from_position_error_overflow() {
         let overflow_pos = Position::new(u64::MAX);
-        assert_eq!(
+        assert!(matches!(
             Location::try_from(overflow_pos).unwrap_err(),
-            merkle::Error::PositionOverflow(overflow_pos)
-        );
+            merkle::Error::PositionOverflow(p) if p == overflow_pos
+        ));
 
         let loc = Location::try_from(MAX_POSITION).unwrap();
         assert_eq!(loc, MAX_LOCATION);
 
         let overflow_pos = MAX_POSITION + 1;
-        assert_eq!(
+        assert!(matches!(
             Location::try_from(overflow_pos).unwrap_err(),
-            merkle::Error::PositionOverflow(overflow_pos)
-        );
+            merkle::Error::PositionOverflow(p) if p == overflow_pos
+        ));
     }
 
     #[test]
@@ -636,10 +571,10 @@ mod tests {
     fn test_overflow_location_returns_error() {
         let over_loc = Location::new(*MAX_LOCATION + 1);
         assert!(!over_loc.is_valid());
-        assert_eq!(
+        assert!(matches!(
             Position::try_from(over_loc).unwrap_err(),
-            merkle::Error::LocationOverflow(over_loc)
-        );
+            merkle::Error::LocationOverflow(l) if l == over_loc
+        ));
     }
 
     #[test]

@@ -15,9 +15,6 @@ pub trait Readable: Send + Sync {
     /// The error type returned by proof construction.
     type Error;
 
-    /// Iterator over `(peak_position, height)` for this structure's family.
-    type PeakIterator: Iterator<Item = (Position<Self::Family>, u32)>;
-
     /// Total number of nodes (retained + pruned).
     fn size(&self) -> Position<Self::Family>;
 
@@ -29,9 +26,6 @@ pub trait Readable: Send + Sync {
 
     /// Items before this position have been pruned.
     fn pruned_to_pos(&self) -> Position<Self::Family>;
-
-    /// Iterator over the current peaks.
-    fn peak_iterator(&self) -> Self::PeakIterator;
 
     /// Inclusion proof for the element at `loc`.
     fn proof(

@@ -115,7 +115,7 @@ impl Iterator for PeakIterator {
 /// with the given peaks. This set is non-empty only if there is a height-0 (leaf) peak in the MMR.
 /// The result will contain this leaf peak plus the other MMR peaks with contiguously increasing
 /// height. Nodes in the result are ordered by decreasing height.
-pub(crate) fn nodes_needing_parents(peak_iterator: PeakIterator) -> Vec<Position> {
+pub(crate) fn nodes_needing_parents(peak_iterator: impl Iterator<Item = (Position, u32)>) -> Vec<Position> {
     let mut peaks = Vec::new();
     let mut last_height = u32::MAX;
 

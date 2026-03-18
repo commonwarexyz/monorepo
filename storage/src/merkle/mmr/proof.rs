@@ -10,10 +10,9 @@ use crate::merkle::{
     mmr::{iterator::nodes_to_pin, Error, Family, Location, Position},
     proof::{self as merkle_proof, Blueprint, Proof},
 };
-use alloc::{
-    collections::{btree_map::BTreeMap, btree_set::BTreeSet},
-    vec::Vec,
-};
+#[cfg(any(feature = "std", test))]
+use alloc::collections::btree_set::BTreeSet;
+use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -99,7 +98,7 @@ impl<D: Digest> Proof<Family, D> {
         let Ok(bp) = start_loc
             .checked_add(elements.len() as u64)
             .ok_or(Error::LocationOverflow(start_loc))
-            .and_then(|end_loc| Ok(Blueprint::new(self.leaves, start_loc..end_loc)?))
+            .and_then(|end_loc| Blueprint::new(self.leaves, start_loc..end_loc))
         else {
             return false;
         };
@@ -164,7 +163,7 @@ pub(crate) fn nodes_required_for_multi_proof(
     leaves: Location,
     locations: &[Location],
 ) -> Result<BTreeSet<Position>, Error> {
-    merkle_proof::nodes_required_for_multi_proof(leaves, locations).map_err(Error::from)
+    merkle_proof::nodes_required_for_multi_proof(leaves, locations)
 }
 
 #[cfg(test)]

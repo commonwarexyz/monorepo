@@ -340,9 +340,15 @@ impl<F: Family> commonware_codec::Read for Position<F> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{Location, Position};
-    use crate::mmr::{mem::Mmr, StandardHasher as Standard, MAX_LOCATION, MAX_POSITION};
+    use super::{Location as GenericLocation, Position as GenericPosition};
+    use crate::{
+        merkle::Family as _,
+        mmr::{mem::Mmr, Family as MmrFamily, StandardHasher as Standard},
+    };
     use commonware_cryptography::Sha256;
+
+    type Location = GenericLocation<MmrFamily>;
+    type Position = GenericPosition<MmrFamily>;
 
     // Test that the [Position::from] function returns the correct position for leaf locations.
     #[test]
@@ -380,13 +386,17 @@ mod tests {
         assert!(Position::new(u64::MAX).checked_add(1).is_none());
 
         // Exceeding MAX_POSITION returns None
-        assert!(MAX_POSITION.checked_add(1).is_none());
-        assert!(Position::new(*MAX_POSITION - 5).checked_add(10).is_none());
+        assert!(MmrFamily::MAX_POSITION.checked_add(1).is_none());
+        assert!(Position::new(*MmrFamily::MAX_POSITION - 5)
+            .checked_add(10)
+            .is_none());
 
         // At MAX_POSITION is OK
         assert_eq!(
-            Position::new(*MAX_POSITION - 10).checked_add(10).unwrap(),
-            MAX_POSITION
+            Position::new(*MmrFamily::MAX_POSITION - 10)
+                .checked_add(10)
+                .unwrap(),
+            MmrFamily::MAX_POSITION
         );
     }
 
@@ -403,12 +413,21 @@ mod tests {
         assert_eq!(pos.saturating_add(5), 15);
 
         // Saturates at MAX_POSITION, not u64::MAX
-        assert_eq!(Position::new(u64::MAX).saturating_add(1), MAX_POSITION);
-        assert_eq!(MAX_POSITION.saturating_add(1), MAX_POSITION);
-        assert_eq!(MAX_POSITION.saturating_add(1000), MAX_POSITION);
         assert_eq!(
-            Position::new(*MAX_POSITION - 5).saturating_add(10),
-            MAX_POSITION
+            Position::new(u64::MAX).saturating_add(1),
+            MmrFamily::MAX_POSITION
+        );
+        assert_eq!(
+            MmrFamily::MAX_POSITION.saturating_add(1),
+            MmrFamily::MAX_POSITION
+        );
+        assert_eq!(
+            MmrFamily::MAX_POSITION.saturating_add(1000),
+            MmrFamily::MAX_POSITION
+        );
+        assert_eq!(
+            Position::new(*MmrFamily::MAX_POSITION - 5).saturating_add(10),
+            MmrFamily::MAX_POSITION
         );
     }
 
@@ -476,8 +495,8 @@ mod tests {
         // MAX_POSITION = max MMR size = 2^63 - 1 (for 2^62 leaves).
         let max_leaves = 1u64 << 62;
         let max_size = 2 * max_leaves - 1; // 2^63 - 1
-        assert_eq!(*MAX_POSITION, max_size);
-        assert_eq!(*MAX_POSITION, (1u64 << 63) - 1);
+        assert_eq!(*MmrFamily::MAX_POSITION, max_size);
+        assert_eq!(*MmrFamily::MAX_POSITION, (1u64 << 63) - 1);
         assert_eq!(max_size.leading_zeros(), 1); // top bit clear
 
         // One more leaf would overflow: size = 2^63, top bit set.
@@ -485,44 +504,44 @@ mod tests {
         assert_eq!(overflow_size.leading_zeros(), 0);
 
         // MAX_LOCATION converts to MAX_POSITION.
-        let pos = Position::try_from(MAX_LOCATION).unwrap();
-        assert_eq!(pos, MAX_POSITION);
+        let pos = Position::try_from(MmrFamily::MAX_LOCATION).unwrap();
+        assert_eq!(pos, MmrFamily::MAX_POSITION);
         assert!(pos.is_valid());
     }
 
     #[test]
-    fn test_is_mmr_size() {
+    fn test_is_valid_size() {
         // Build an MMR one node at a time and check that the validity check is correct for all
         // sizes up to the current size.
         let mut size_to_check = Position::new(0);
-        let hasher = Standard::<Sha256>::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut hasher = Standard::<Sha256>::new();
+        let mut mmr = Mmr::new(&mut hasher);
         let digest = [1u8; 32];
         for _i in 0..10000 {
             while size_to_check != mmr.size() {
                 assert!(
-                    !size_to_check.is_mmr_size(),
+                    !size_to_check.is_valid_size(),
                     "size_to_check: {} {}",
                     size_to_check,
                     mmr.size()
                 );
                 size_to_check += 1;
             }
-            assert!(size_to_check.is_mmr_size());
-            let changeset = mmr
-                .new_batch()
-                .add(&hasher, &digest)
-                .merkleize(&hasher)
-                .finalize();
+            assert!(size_to_check.is_valid_size());
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                batch.add(&mut hasher, &digest);
+                batch.merkleize(&mut hasher).finalize()
+            };
             mmr.apply(changeset).unwrap();
             size_to_check += 1;
         }
 
         // Test overflow boundaries.
-        assert!(!Position::new(u64::MAX).is_mmr_size());
-        assert!(Position::new(u64::MAX >> 1).is_mmr_size()); // 2^63 - 1 = MAX_POSITION
-        assert!(!Position::new((u64::MAX >> 1) + 1).is_mmr_size());
-        assert!(MAX_POSITION.is_mmr_size()); // MAX_POSITION is the largest valid MMR size
+        assert!(!Position::new(u64::MAX).is_valid_size());
+        assert!(Position::new(u64::MAX >> 1).is_valid_size()); // 2^63 - 1 = MAX_POSITION
+        assert!(!Position::new((u64::MAX >> 1) + 1).is_valid_size());
+        assert!(MmrFamily::MAX_POSITION.is_valid_size()); // MAX_POSITION is the largest valid MMR size
     }
 
     #[test]
@@ -542,7 +561,7 @@ mod tests {
         assert_eq!(decoded, pos);
 
         // Test MAX_POSITION (boundary)
-        let pos = MAX_POSITION;
+        let pos = MmrFamily::MAX_POSITION;
         let encoded = pos.encode();
         let decoded = Position::read(&mut encoded.as_ref()).unwrap();
         assert_eq!(decoded, pos);
@@ -553,7 +572,7 @@ mod tests {
         use commonware_codec::{varint::UInt, Encode, ReadExt};
 
         // Encode MAX_POSITION + 1 as a raw varint, then try to decode as Position
-        let invalid_value = *MAX_POSITION + 1;
+        let invalid_value = *MmrFamily::MAX_POSITION + 1;
         let encoded = UInt(invalid_value).encode();
         let result = Position::read(&mut encoded.as_ref());
         assert!(result.is_err());

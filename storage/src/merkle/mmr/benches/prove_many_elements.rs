@@ -18,8 +18,8 @@ const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000]
 fn bench_prove_many_elements(c: &mut Criterion) {
     for n in N_LEAVES {
         // Populate MMR
-        let hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = Mmr::new(&hasher);
+        let mut hasher = StandardHasher::<Sha256>::new();
+        let mut mmr = Mmr::new(&mut hasher);
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
 
@@ -28,10 +28,10 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                 let mut batch = UnmerkleizedBatch::new(&mmr);
                 for _ in 0..n {
                     let element = sha256::Digest::random(&mut sampler);
-                    batch = batch.add(&hasher, &element);
+                    batch.add(&mut hasher, &element);
                     elements.push(element);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&mut hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
         });
@@ -66,12 +66,13 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                             })
                         },
                         |samples| {
-                            let hasher = StandardHasher::<Sha256>::new();
+                            let mut hasher = StandardHasher::<Sha256>::new();
                             block_on(async {
                                 for range in samples {
-                                    let proof = mmr.range_proof(&hasher, range.clone()).unwrap();
+                                    let proof =
+                                        mmr.range_proof(&mut hasher, range.clone()).unwrap();
                                     assert!(proof.verify_range_inclusion(
-                                        &hasher,
+                                        &mut hasher,
                                         &elements[range.to_usize_range()],
                                         range.start,
                                         root,
