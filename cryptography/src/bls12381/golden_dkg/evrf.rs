@@ -93,7 +93,7 @@ impl PrivateKey {
     /// Without knowing either [`PrivateKey`], the output is indistinguishable from
     /// a random value.
     pub(super) fn vrf(&self, msg: &Summary, receiver: &PublicKey) -> Scalar {
-        let mut transcript = Transcript::resume(msg.clone());
+        let mut transcript = Transcript::resume(*msg);
         self.diffie_hellman(receiver, &mut transcript);
         Scalar::random(&mut transcript.noise(b"vrf"))
     }
@@ -245,7 +245,8 @@ impl VrfCommitments {
     /// For a given message and sender, we can check that the commitments contain
     /// what [`PrivateKey::vrf`] would produce for that receiver.
     pub fn check(self, _msg: &Summary, _sender: &PublicKey) -> Option<Map<PublicKey, G1>> {
-        todo!()
+        // NOTE: when we have a real proof, this function will have meat.
+        Some(self.commitments)
     }
 
     /// Compute [`Self::check`] for an entire batch.
@@ -256,8 +257,16 @@ impl VrfCommitments {
     /// A sender will only appear in the output if their output is correct.
     pub fn check_batch(
         _rng: &mut impl CryptoRngCore,
-        _outputs: impl IntoIterator<Item = (PublicKey, Bytes, Self)>,
+        outputs: impl IntoIterator<Item = (PublicKey, Bytes, Self)>,
     ) -> Map<PublicKey, Map<PublicKey, G1>> {
-        todo!()
+        outputs
+            .into_iter()
+            .filter_map(|(sender, mut msg, commitments)| {
+                let summary: Summary = ReadExt::read(&mut msg).ok()?;
+                let checked = commitments.check(&summary, &sender)?;
+                Some((sender, checked))
+            })
+            .try_collect()
+            .expect("senders must be unique")
     }
 }
