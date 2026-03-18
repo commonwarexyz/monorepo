@@ -362,10 +362,7 @@ impl<
         // Attempt to broadcast a nullify vote for the current view (as many times as required
         // until we exit the view)
         let view = self.state.current_view();
-        let Some(retry) = self
-            .try_broadcast_nullify(batcher, vote_sender, view)
-            .await
-        else {
+        let Some(retry) = self.try_broadcast_nullify(batcher, vote_sender, view).await else {
             return;
         };
 
