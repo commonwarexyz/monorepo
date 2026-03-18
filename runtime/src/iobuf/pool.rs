@@ -399,6 +399,10 @@ unsafe impl Send for SizeClass {}
 unsafe impl Sync for SizeClass {}
 
 impl SizeClass {
+    /// Creates a new size class with the given parameters.
+    ///
+    /// If `prefill` is true, allocates `max` buffers upfront and pushes them
+    /// into the global freelist.
     fn new(class_id: usize, size: usize, alignment: usize, max: usize, prefill: bool) -> Self {
         let freelist = ArrayQueue::new(max);
         let mut created = 0;
@@ -431,6 +435,7 @@ impl SizeClass {
         (max / (2 * effective_threads)).clamp(1, 8)
     }
 
+    /// Returns a tracked buffer to the global freelist.
     #[inline]
     fn push_global(&self, buffer: AlignedBuffer) {
         self.global.push(buffer).unwrap_or_else(|_| {
@@ -438,6 +443,10 @@ impl SizeClass {
         });
     }
 
+    /// Atomically reserves capacity to create one new tracked buffer.
+    ///
+    /// Returns `true` if the reservation succeeded (i.e. `created < max`),
+    /// `false` if the class is at capacity.
     fn try_reserve(&self) -> bool {
         self.created
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
@@ -470,6 +479,7 @@ struct TlsSizeClassCache {
 }
 
 impl TlsSizeClassCache {
+    /// Creates a new empty cache with the given maximum local capacity.
     fn new(local_capacity: usize) -> Self {
         Self {
             entries: Vec::with_capacity(local_capacity),
@@ -477,11 +487,13 @@ impl TlsSizeClassCache {
         }
     }
 
+    /// Returns the number of buffers currently in this local cache.
     #[inline]
     const fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Removes and returns the most recently cached buffer, if any.
     #[inline]
     fn pop(&mut self) -> Option<TlsSizeClassCacheEntry> {
         self.entries.pop()
@@ -564,16 +576,20 @@ static NEXT_SIZE_CLASS_ID: AtomicUsize = AtomicUsize::new(0);
 pub(super) struct TlsCache;
 
 impl TlsCache {
+    /// Pops a cached buffer from the current thread's local cache for the
+    /// given size class. Returns `None` if the local cache is empty.
     #[inline]
     fn pop(class: &Arc<SizeClass>) -> Option<TlsSizeClassCacheEntry> {
-        Self::with_class_cache_mut(class.class_id, class.local_capacity, |cache| cache.pop())
+        Self::with_cache(class.class_id, class.local_capacity, |cache| cache.pop())
     }
 
+    /// Returns a buffer to the current thread's local cache for the given
+    /// size class, spilling to the global freelist if the cache is full.
     #[inline]
     pub(super) fn push(class: Arc<SizeClass>, buffer: AlignedBuffer) {
         let class_id = class.class_id;
         let local_capacity = class.local_capacity;
-        Self::with_class_cache_mut(class_id, local_capacity, |cache| {
+        Self::with_cache(class_id, local_capacity, |cache| {
             cache.push(TlsSizeClassCacheEntry { buffer, class });
         });
     }
@@ -586,7 +602,7 @@ impl TlsCache {
     /// we warm the cache for subsequent local hits when batching is enabled.
     #[inline]
     fn refill(class: &Arc<SizeClass>, target: usize) {
-        Self::with_class_cache_mut(class.class_id, class.local_capacity, |cache| {
+        Self::with_cache(class.class_id, class.local_capacity, |cache| {
             while cache.len() + 1 < target {
                 let Some(buffer) = class.global.pop() else {
                     break;
@@ -599,8 +615,10 @@ impl TlsCache {
         });
     }
 
+    /// Accesses the current thread's local cache for `class_id`, creating it
+    /// lazily on first use, and invokes `f` on it.
     #[inline]
-    fn with_class_cache_mut<R>(
+    fn with_cache<R>(
         class_id: usize,
         local_capacity: usize,
         f: impl FnOnce(&mut TlsSizeClassCache) -> R,
