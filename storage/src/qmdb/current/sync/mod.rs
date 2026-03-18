@@ -145,7 +145,7 @@ where
     Operation<U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
-    let mut hasher = StandardHasher::<H>::new();
+    let hasher = StandardHasher::<H>::new();
     let mmr = mmr::journaled::Mmr::init_sync(
         context.with_label("mmr"),
         mmr::journaled::SyncConfig {
@@ -153,7 +153,7 @@ where
             range: range.clone(),
             pinned_nodes,
         },
-        &mut hasher,
+        &hasher,
     )
     .await?;
     let log =
@@ -214,9 +214,9 @@ where
     };
 
     // Build grafted MMR.
-    let mut hasher = StandardHasher::<H>::new();
+    let hasher = StandardHasher::<H>::new();
     let grafted_mmr = db::build_grafted_mmr::<H, N>(
-        &mut hasher,
+        &hasher,
         &status,
         &grafted_pinned_nodes,
         &any.log.mmr,
@@ -229,14 +229,14 @@ where
     // from the ops).
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let partial = db::partial_chunk(&status);
-    let grafted_mmr_root = db::compute_grafted_mmr_root(&mut hasher, &storage).await?;
+    let grafted_mmr_root = db::compute_grafted_mmr_root(&hasher, &storage).await?;
     let ops_root = any.log.root();
     let partial_digest = partial.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
         (next_bit, digest)
     });
     let root = db::combine_roots(
-        &mut hasher,
+        &hasher,
         &ops_root,
         &grafted_mmr_root,
         partial_digest.as_ref().map(|(nb, d)| (*nb, d)),

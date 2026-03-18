@@ -106,7 +106,7 @@ pub struct Mmr<D: Digest> {
 
 impl<D: Digest> Mmr<D> {
     /// Create a new, empty MMR.
-    pub fn new(hasher: &mut impl Hasher<Digest = D>) -> Self {
+    pub fn new(hasher: &impl Hasher<Digest = D>) -> Self {
         let root = hasher.root(Location::new(0), core::iter::empty::<&D>());
         Self {
             inner: Arc::new(MmrInner {
@@ -126,7 +126,7 @@ impl<D: Digest> Mmr<D> {
     /// count for `config.pruned_to`.
     ///
     /// Returns [Error::InvalidSize] if the MMR size is invalid.
-    pub fn init(config: Config<D>, hasher: &mut impl Hasher<Digest = D>) -> Result<Self, Error> {
+    pub fn init(config: Config<D>, hasher: &impl Hasher<Digest = D>) -> Result<Self, Error> {
         let pruned_to_pos = Position::try_from(config.pruned_to)?;
 
         // Validate that the total size is valid
@@ -174,7 +174,7 @@ impl<D: Digest> Mmr<D> {
     ///
     /// Returns [Error::LocationOverflow] if `pruned_to` exceeds [crate::mmr::MAX_LOCATION].
     pub fn from_components(
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Digest = D>,
         nodes: Vec<D>,
         pruned_to: Location,
         pinned_nodes_vec: Vec<D>,
@@ -245,7 +245,7 @@ impl<D: Digest> Mmr<D> {
 
     /// Compute the root digest from the current peaks.
     fn compute_root(
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Digest = D>,
         nodes: &VecDeque<D>,
         pinned_nodes: &BTreeMap<Position, D>,
         pruned_to_pos: Position,
@@ -410,7 +410,7 @@ impl<D: Digest> Mmr<D> {
     /// Returns [Error::LeafOutOfBounds] if `loc` >= [Self::leaves()].
     pub fn proof(
         &self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Digest = D>,
         loc: Location,
     ) -> Result<Proof<D>, Error> {
         if !loc.is_valid() {
@@ -433,7 +433,7 @@ impl<D: Digest> Mmr<D> {
     /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
     pub fn range_proof(
         &self,
-        hasher: &mut impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Digest = D>,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
         let leaves = self.leaves();
@@ -546,8 +546,8 @@ mod tests {
     fn test_mem_mmr_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mmr = Mmr::new(&mut hasher);
+            let hasher: Standard<Sha256> = Standard::new();
+            let mmr = Mmr::new(&hasher);
             assert_eq!(
                 mmr.peak_iterator().next(),
                 None,
@@ -558,7 +558,7 @@ mod tests {
             assert!(mmr.bounds().is_empty());
             assert_eq!(mmr.get_node(Position::new(0)), None);
             assert_eq!(*mmr.root(), Mmr::empty_mmr_root(&mut Sha256::new()));
-            let mut mmr2 = Mmr::new(&mut hasher);
+            let mut mmr2 = Mmr::new(&hasher);
             mmr2.prune_all();
             assert_eq!(mmr2.size(), 0, "prune_all on empty MMR should do nothing");
 
@@ -573,16 +573,16 @@ mod tests {
     fn test_mem_mmr_add_eleven_values() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&mut hasher);
+            let hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = Mmr::new(&hasher);
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<Position> = Vec::new();
             for _ in 0..11 {
                 let changeset = {
                     let mut batch = mmr.new_batch();
                     leaves.push(Position::try_from(batch.leaves()).unwrap());
-                    batch = batch.add(&mut hasher, &element);
-                    batch.merkleize(&mut hasher).finalize()
+                    batch = batch.add(&hasher, &element);
+                    batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
                 let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
@@ -666,29 +666,29 @@ mod tests {
             // in this case, we actually can still generate a proof for the node with location 7
             // even though it's pruned.)
             assert!(matches!(
-                mmr.proof(&mut hasher, Location::new(0)),
+                mmr.proof(&hasher, Location::new(0)),
                 Err(Error::ElementPruned(_))
             ));
             assert!(matches!(
-                mmr.proof(&mut hasher, Location::new(6)),
+                mmr.proof(&hasher, Location::new(6)),
                 Err(Error::ElementPruned(_))
             ));
 
             // We should still be able to generate a proof for any leaf following the pruning
             // boundary, the first of which is at location 8 and the last location 10.
-            assert!(mmr.proof(&mut hasher, Location::new(8)).is_ok());
-            assert!(mmr.proof(&mut hasher, Location::new(10)).is_ok());
+            assert!(mmr.proof(&hasher, Location::new(8)).is_ok());
+            assert!(mmr.proof(&hasher, Location::new(10)).is_ok());
 
             let root_after_prune = *mmr.root();
             assert_eq!(root, root_after_prune, "root changed after pruning");
 
             assert!(
-                mmr.range_proof(&mut hasher, Location::new(5)..Location::new(9))
+                mmr.range_proof(&hasher, Location::new(5)..Location::new(9))
                     .is_err(),
                 "attempts to range_prove elements at or before the oldest retained should fail"
             );
             assert!(
-                mmr.range_proof(&mut hasher, Location::new(8)..mmr.leaves())
+                mmr.range_proof(&hasher, Location::new(8)..mmr.leaves())
                     .is_ok(),
                 "attempts to range_prove over all elements following oldest retained should succeed"
             );
@@ -703,7 +703,7 @@ mod tests {
                     pruned_to: oldest_loc,
                     pinned_nodes: digests,
                 },
-                &mut hasher,
+                &hasher,
             )
             .unwrap();
             assert_eq!(mmr_copy.size(), 19);
@@ -718,15 +718,15 @@ mod tests {
     fn test_mem_mmr_prune_all() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&mut hasher);
+            let hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = Mmr::new(&hasher);
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1000 {
                 mmr.prune_all();
                 let changeset = {
                     let mut batch = mmr.new_batch();
-                    batch = batch.add(&mut hasher, &element);
-                    batch.merkleize(&mut hasher).finalize()
+                    batch = batch.add(&hasher, &element);
+                    batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
             }
@@ -738,8 +738,8 @@ mod tests {
     fn test_mem_mmr_validity() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&mut hasher);
+            let hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = Mmr::new(&hasher);
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             for _ in 0..1001 {
                 assert!(
@@ -750,8 +750,8 @@ mod tests {
                 let old_size = mmr.size();
                 let changeset = {
                     let mut batch = mmr.new_batch();
-                    batch = batch.add(&mut hasher, &element);
-                    batch.merkleize(&mut hasher).finalize()
+                    batch = batch.add(&hasher, &element);
+                    batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
                 for size in *old_size + 1..*mmr.size() {
@@ -770,22 +770,22 @@ mod tests {
     fn test_mem_mmr_batched_root() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
             const NUM_ELEMENTS: u64 = 199;
-            let mut test_mmr = Mmr::new(&mut hasher);
-            test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
+            let mut test_mmr = Mmr::new(&hasher);
+            test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
-            let mut batched_mmr = Mmr::new(&mut hasher);
+            let mut batched_mmr = Mmr::new(&hasher);
 
             // Add all elements in one batch
             let changeset = {
                 let mut batch = batched_mmr.new_batch();
                 for i in 0..NUM_ELEMENTS {
                     let element = hasher.digest(&i.to_be_bytes());
-                    batch = batch.add(&mut hasher, &element);
+                    batch = batch.add(&hasher, &element);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             batched_mmr.apply(changeset).unwrap();
 
@@ -803,14 +803,14 @@ mod tests {
     fn test_mem_mmr_batched_root_parallel() {
         let executor = tokio::Runner::default();
         executor.start(|context| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
             const NUM_ELEMENTS: u64 = 199;
-            let test_mmr = Mmr::new(&mut hasher);
-            let test_mmr = build_test_mmr(&mut hasher, test_mmr, NUM_ELEMENTS);
+            let test_mmr = Mmr::new(&hasher);
+            let test_mmr = build_test_mmr(&hasher, test_mmr, NUM_ELEMENTS);
             let expected_root = test_mmr.root();
 
             let pool = context.create_thread_pool(NZUsize!(4)).unwrap();
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
 
             let mut mmr = Mmr::init(
                 Config {
@@ -818,7 +818,7 @@ mod tests {
                     pruned_to: Location::new(0),
                     pinned_nodes: vec![],
                 },
-                &mut hasher,
+                &hasher,
             )
             .unwrap();
 
@@ -826,9 +826,9 @@ mod tests {
                 let mut batch = mmr.new_batch().with_pool(Some(pool));
                 for i in 0u64..NUM_ELEMENTS {
                     let element = hasher.digest(&i.to_be_bytes());
-                    batch = batch.add(&mut hasher, &element);
+                    batch = batch.add(&hasher, &element);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             assert_eq!(
@@ -844,25 +844,25 @@ mod tests {
     fn test_mem_mmr_root_with_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut reference_mmr = Mmr::new(&mut hasher);
-            let mut mmr = Mmr::new(&mut hasher);
+            let hasher: Standard<Sha256> = Standard::new();
+            let mut reference_mmr = Mmr::new(&hasher);
+            let mut mmr = Mmr::new(&hasher);
             for i in 0u64..200 {
                 let element = hasher.digest(&i.to_be_bytes());
 
                 // Add to reference MMR
                 let cs = {
                     let mut batch = reference_mmr.new_batch();
-                    batch = batch.add(&mut hasher, &element);
-                    batch.merkleize(&mut hasher).finalize()
+                    batch = batch.add(&hasher, &element);
+                    batch.merkleize(&hasher).finalize()
                 };
                 reference_mmr.apply(cs).unwrap();
 
                 // Add to pruning MMR
                 let cs = {
                     let mut batch = mmr.new_batch();
-                    batch = batch.add(&mut hasher, &element);
-                    batch.merkleize(&mut hasher).finalize()
+                    batch = batch.add(&hasher, &element);
+                    batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(cs).unwrap();
 
@@ -874,13 +874,13 @@ mod tests {
 
     #[test]
     fn test_mem_mmr_update_leaf() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             const NUM_ELEMENTS: u64 = 200;
-            let mmr = Mmr::new(&mut hasher);
-            let mut mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
+            let mmr = Mmr::new(&hasher);
+            let mut mmr = build_test_mmr(&hasher, mmr, NUM_ELEMENTS);
             let root = *mmr.root();
 
             // For a few leaves, update the leaf and ensure the root changes, and the root reverts
@@ -890,9 +890,9 @@ mod tests {
                 let leaf_loc = Location::new(leaf as u64);
                 let batch = mmr
                     .new_batch()
-                    .update_leaf(&mut hasher, leaf_loc, &element)
+                    .update_leaf(&hasher, leaf_loc, &element)
                     .unwrap();
-                mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
                 let updated_root = *mmr.root();
                 assert!(root != updated_root);
 
@@ -900,9 +900,9 @@ mod tests {
                 let element = hasher.digest(&leaf.to_be_bytes());
                 let batch = mmr
                     .new_batch()
-                    .update_leaf(&mut hasher, leaf_loc, &element)
+                    .update_leaf(&hasher, leaf_loc, &element)
                     .unwrap();
-                mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
                 let restored_root = *mmr.root();
                 assert_eq!(root, restored_root);
             }
@@ -914,26 +914,26 @@ mod tests {
                 let leaf_loc = Location::new(leaf);
                 let batch = mmr
                     .new_batch()
-                    .update_leaf(&mut hasher, leaf_loc, &element)
+                    .update_leaf(&hasher, leaf_loc, &element)
                     .unwrap();
-                mmr.apply(batch.merkleize(&mut hasher).finalize()).unwrap();
+                mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
             }
         });
     }
 
     #[test]
     fn test_mem_mmr_update_leaf_error_out_of_bounds() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = Mmr::new(&mut hasher);
-            let mmr = build_test_mmr(&mut hasher, mmr, 200);
+            let mmr = Mmr::new(&hasher);
+            let mmr = build_test_mmr(&hasher, mmr, 200);
             let invalid_loc = mmr.leaves();
             let batch = mmr.new_batch();
             assert!(matches!(
-                batch.update_leaf(&mut hasher, invalid_loc, &element),
+                batch.update_leaf(&hasher, invalid_loc, &element),
                 Err(Error::LeafOutOfBounds(_))
             ));
         });
@@ -941,28 +941,28 @@ mod tests {
 
     #[test]
     fn test_mem_mmr_update_leaf_error_pruned() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
         let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = Mmr::new(&mut hasher);
-            let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
+            let mmr = Mmr::new(&hasher);
+            let mut mmr = build_test_mmr(&hasher, mmr, 100);
             mmr.prune_all();
             let batch = mmr.new_batch();
-            let result = batch.update_leaf(&mut hasher, Location::new(0), &element);
+            let result = batch.update_leaf(&hasher, Location::new(0), &element);
             assert!(matches!(result, Err(Error::ElementPruned(_))));
         });
     }
 
     #[test]
     fn test_mem_mmr_batch_update_leaf() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mmr = Mmr::new(&mut hasher);
-            let mmr = build_test_mmr(&mut hasher, mmr, 200);
-            do_batch_update(&mut hasher, mmr, None);
+            let mmr = Mmr::new(&hasher);
+            let mmr = build_test_mmr(&hasher, mmr, 200);
+            do_batch_update(&hasher, mmr, None);
         });
     }
 
@@ -970,7 +970,7 @@ mod tests {
     /// tokio runtime instead of the deterministic one.
     #[test]
     fn test_mem_mmr_batch_parallel_update_leaf() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
         let executor = tokio::Runner::default();
         executor.start(|ctx| async move {
             let mmr = Mmr::init(
@@ -979,23 +979,23 @@ mod tests {
                     pruned_to: Location::new(0),
                     pinned_nodes: Vec::new(),
                 },
-                &mut hasher,
+                &hasher,
             )
             .unwrap();
-            let mmr = build_test_mmr(&mut hasher, mmr, 200);
+            let mmr = build_test_mmr(&hasher, mmr, 200);
             let pool = ctx.create_thread_pool(NZUsize!(4)).unwrap();
-            do_batch_update(&mut hasher, mmr, Some(pool));
+            do_batch_update(&hasher, mmr, Some(pool));
         });
     }
 
     #[test]
     fn test_update_leaf_digest() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             const NUM_ELEMENTS: u64 = 200;
-            let mmr = Mmr::new(&mut hasher);
-            let mut mmr = build_test_mmr(&mut hasher, mmr, NUM_ELEMENTS);
+            let mmr = Mmr::new(&hasher);
+            let mut mmr = build_test_mmr(&hasher, mmr, NUM_ELEMENTS);
             let root = *mmr.root();
 
             let updated_digest = Sha256::fill(0xFF);
@@ -1010,7 +1010,7 @@ mod tests {
                 .new_batch()
                 .update_leaf_digest(loc, updated_digest)
                 .unwrap()
-                .merkleize(&mut hasher)
+                .merkleize(&hasher)
                 .finalize();
             mmr.apply(changeset).unwrap();
             assert_ne!(*mmr.root(), root);
@@ -1020,7 +1020,7 @@ mod tests {
                 .new_batch()
                 .update_leaf_digest(loc, original_digest)
                 .unwrap()
-                .merkleize(&mut hasher)
+                .merkleize(&hasher)
                 .finalize();
             mmr.apply(changeset).unwrap();
             assert_eq!(*mmr.root(), root);
@@ -1033,7 +1033,7 @@ mod tests {
                         .update_leaf_digest(Location::new(i), updated_digest)
                         .unwrap();
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             assert_ne!(*mmr.root(), root);
@@ -1042,13 +1042,13 @@ mod tests {
 
     #[test]
     fn test_update_leaf_digest_errors() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             {
                 // Out of bounds: location >= leaf count.
-                let mmr = Mmr::new(&mut hasher);
-                let mmr = build_test_mmr(&mut hasher, mmr, 100);
+                let mmr = Mmr::new(&hasher);
+                let mmr = build_test_mmr(&hasher, mmr, 100);
                 let Err(err) = mmr
                     .new_batch()
                     .update_leaf_digest(Location::new(100), Sha256::fill(0))
@@ -1060,8 +1060,8 @@ mod tests {
 
             {
                 // Pruned leaf.
-                let mmr = Mmr::new(&mut hasher);
-                let mut mmr = build_test_mmr(&mut hasher, mmr, 100);
+                let mmr = Mmr::new(&hasher);
+                let mut mmr = build_test_mmr(&hasher, mmr, 100);
                 mmr.prune(Location::new(27)).unwrap();
                 let Err(err) = mmr
                     .new_batch()
@@ -1075,7 +1075,7 @@ mod tests {
     }
 
     fn do_batch_update(
-        hasher: &mut Standard<Sha256>,
+        hasher: &Standard<Sha256>,
         mut mmr: Mmr<sha256::Digest>,
         pool: Option<ThreadPool>,
     ) {
@@ -1117,14 +1117,14 @@ mod tests {
     fn test_init_pinned_nodes_validation() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
             // Test with empty config - should succeed
             let config = Config::<sha256::Digest> {
                 nodes: vec![],
                 pruned_to: Location::new(0),
                 pinned_nodes: vec![],
             };
-            assert!(Mmr::init(config, &mut hasher).is_ok());
+            assert!(Mmr::init(config, &hasher).is_ok());
 
             // Test with too few pinned nodes - should fail
             // 64 leaves = 127 nodes (complete tree)
@@ -1134,7 +1134,7 @@ mod tests {
                 pinned_nodes: vec![],
             };
             assert!(matches!(
-                Mmr::init(config, &mut hasher),
+                Mmr::init(config, &hasher),
                 Err(Error::InvalidPinnedNodes)
             ));
 
@@ -1145,19 +1145,19 @@ mod tests {
                 pinned_nodes: vec![Sha256::hash(b"dummy")],
             };
             assert!(matches!(
-                Mmr::init(config, &mut hasher),
+                Mmr::init(config, &hasher),
                 Err(Error::InvalidPinnedNodes)
             ));
 
             // Test with correct number of pinned nodes - should succeed
             // Build a small MMR to get valid pinned nodes
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(&hasher);
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..50 {
-                    batch = batch.add(&mut hasher, &i.to_be_bytes());
+                    batch = batch.add(&hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let pinned_nodes = mmr.node_digests_to_pin(Position::new(50));
@@ -1166,7 +1166,7 @@ mod tests {
                 pruned_to: Location::new(27),
                 pinned_nodes,
             };
-            assert!(Mmr::init(config, &mut hasher).is_ok());
+            assert!(Mmr::init(config, &hasher).is_ok());
         });
     }
 
@@ -1174,14 +1174,14 @@ mod tests {
     fn test_init_size_validation() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut hasher: Standard<Sha256> = Standard::new();
+            let hasher: Standard<Sha256> = Standard::new();
             // Test with valid size 0 - should succeed
             let config = Config::<sha256::Digest> {
                 nodes: vec![],
                 pruned_to: Location::new(0),
                 pinned_nodes: vec![],
             };
-            assert!(Mmr::init(config, &mut hasher).is_ok());
+            assert!(Mmr::init(config, &hasher).is_ok());
 
             // Test with invalid size 2 - should fail
             // Size 2 is invalid (can't have just one parent node + one leaf)
@@ -1191,7 +1191,7 @@ mod tests {
                 pinned_nodes: vec![],
             };
             assert!(matches!(
-                Mmr::init(config, &mut hasher),
+                Mmr::init(config, &hasher),
                 Err(Error::InvalidSize(_))
             ));
 
@@ -1205,17 +1205,17 @@ mod tests {
                 pruned_to: Location::new(0),
                 pinned_nodes: vec![],
             };
-            assert!(Mmr::init(config, &mut hasher).is_ok());
+            assert!(Mmr::init(config, &hasher).is_ok());
 
             // Test with large valid size (127 = 2^7 - 1, a complete tree) - should succeed
             // Build a real MMR to get the correct structure
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(&hasher);
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..64 {
-                    batch = batch.add(&mut hasher, &i.to_be_bytes());
+                    batch = batch.add(&hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             assert_eq!(mmr.size(), 127); // Verify we have the expected size
@@ -1228,17 +1228,17 @@ mod tests {
                 pruned_to: Location::new(0),
                 pinned_nodes: vec![],
             };
-            assert!(Mmr::init(config, &mut hasher).is_ok());
+            assert!(Mmr::init(config, &hasher).is_ok());
 
             // Test with non-zero pruned_to - should succeed
             // Build a small MMR (11 leaves -> 19 nodes), prune it, then init from that state
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(&hasher);
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..11 {
-                    batch = batch.add(&mut hasher, &i.to_be_bytes());
+                    batch = batch.add(&hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             assert_eq!(mmr.size(), 19); // 11 leaves = 19 total nodes
@@ -1255,7 +1255,7 @@ mod tests {
                 pruned_to: Location::new(4),
                 pinned_nodes: pinned_nodes.clone(),
             };
-            assert!(Mmr::init(config, &mut hasher).is_ok());
+            assert!(Mmr::init(config, &hasher).is_ok());
 
             // Same nodes but wrong pruned_to - should fail
             // Location(5) -> Position(8), 8 + 12 nodes = size 20 (invalid)
@@ -1265,7 +1265,7 @@ mod tests {
                 pinned_nodes: pinned_nodes.clone(),
             };
             assert!(matches!(
-                Mmr::init(config, &mut hasher),
+                Mmr::init(config, &hasher),
                 Err(Error::InvalidSize(_))
             ));
 
@@ -1277,7 +1277,7 @@ mod tests {
                 pinned_nodes,
             };
             assert!(matches!(
-                Mmr::init(config, &mut hasher),
+                Mmr::init(config, &hasher),
                 Err(Error::InvalidSize(_))
             ));
         });
@@ -1285,37 +1285,37 @@ mod tests {
 
     #[test]
     fn test_mem_mmr_range_proof_out_of_bounds() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Range end > leaves errors on empty MMR
-            let mmr = Mmr::new(&mut hasher);
+            let mmr = Mmr::new(&hasher);
             assert_eq!(mmr.leaves(), Location::new(0));
-            let result = mmr.range_proof(&mut hasher, Location::new(0)..Location::new(1));
+            let result = mmr.range_proof(&hasher, Location::new(0)..Location::new(1));
             assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
 
             // Range end > leaves errors on non-empty MMR
-            let mmr = build_test_mmr(&mut hasher, mmr, 10);
+            let mmr = build_test_mmr(&hasher, mmr, 10);
             assert_eq!(mmr.leaves(), Location::new(10));
-            let result = mmr.range_proof(&mut hasher, Location::new(5)..Location::new(11));
+            let result = mmr.range_proof(&hasher, Location::new(5)..Location::new(11));
             assert!(matches!(result, Err(Error::RangeOutOfBounds(_))));
 
             // Range end == leaves succeeds
-            let result = mmr.range_proof(&mut hasher, Location::new(5)..Location::new(10));
+            let result = mmr.range_proof(&hasher, Location::new(5)..Location::new(10));
             assert!(result.is_ok());
         });
     }
 
     #[test]
     fn test_mem_mmr_proof_out_of_bounds() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // Test on empty MMR - should return error, not panic
-            let mmr = Mmr::new(&mut hasher);
-            let result = mmr.proof(&mut hasher, Location::new(0));
+            let mmr = Mmr::new(&hasher);
+            let result = mmr.proof(&hasher, Location::new(0));
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),
                 "expected LeafOutOfBounds, got {:?}",
@@ -1323,8 +1323,8 @@ mod tests {
             );
 
             // Test on non-empty MMR with location >= leaves
-            let mmr = build_test_mmr(&mut hasher, mmr, 10);
-            let result = mmr.proof(&mut hasher, Location::new(10));
+            let mmr = build_test_mmr(&hasher, mmr, 10);
+            let result = mmr.proof(&hasher, Location::new(10));
             assert!(
                 matches!(result, Err(Error::LeafOutOfBounds(_))),
                 "expected LeafOutOfBounds, got {:?}",
@@ -1332,29 +1332,29 @@ mod tests {
             );
 
             // location < leaves should succeed
-            let result = mmr.proof(&mut hasher, Location::new(9));
+            let result = mmr.proof(&hasher, Location::new(9));
             assert!(result.is_ok(), "expected Ok, got {:?}", result);
         });
     }
 
     #[test]
     fn test_stale_changeset_sibling() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(&hasher);
 
             // Create two batches from the same base.
             let changeset_a = mmr
                 .new_batch()
-                .add(&mut hasher, b"leaf-a")
-                .merkleize(&mut hasher)
+                .add(&hasher, b"leaf-a")
+                .merkleize(&hasher)
                 .finalize();
             let changeset_b = mmr
                 .new_batch()
-                .add(&mut hasher, b"leaf-b")
-                .merkleize(&mut hasher)
+                .add(&hasher, b"leaf-b")
+                .merkleize(&hasher)
                 .finalize();
 
             // Apply A -- should succeed.
@@ -1371,38 +1371,29 @@ mod tests {
 
     #[test]
     fn test_stale_changeset_chained() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(&hasher);
 
             // Seed with one element.
             let changeset = mmr
                 .new_batch()
-                .add(&mut hasher, b"leaf-0")
-                .merkleize(&mut hasher)
+                .add(&hasher, b"leaf-0")
+                .merkleize(&hasher)
                 .finalize();
             mmr.apply(changeset).unwrap();
 
             // Parent batch, then fork two children.
-            let parent = mmr
-                .new_batch()
-                .add(&mut hasher, b"leaf-1")
-                .merkleize(&mut hasher);
+            let parent = mmr.new_batch().add(&hasher, b"leaf-1").merkleize(&hasher);
             let child_a = {
                 let batch = parent.new_batch();
-                batch
-                    .add(&mut hasher, b"leaf-2a")
-                    .merkleize(&mut hasher)
-                    .finalize()
+                batch.add(&hasher, b"leaf-2a").merkleize(&hasher).finalize()
             };
             let child_b = {
                 let batch = parent.new_batch();
-                batch
-                    .add(&mut hasher, b"leaf-2b")
-                    .merkleize(&mut hasher)
-                    .finalize()
+                batch.add(&hasher, b"leaf-2b").merkleize(&hasher).finalize()
             };
 
             // Apply child_a, then child_b should be stale.
@@ -1417,21 +1408,18 @@ mod tests {
 
     #[test]
     fn test_stale_changeset_parent_before_child() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(&hasher);
 
             // Create parent, then child.
-            let parent = mmr
-                .new_batch()
-                .add(&mut hasher, b"leaf-0")
-                .merkleize(&mut hasher);
+            let parent = mmr.new_batch().add(&hasher, b"leaf-0").merkleize(&hasher);
             let child = parent
                 .new_batch()
-                .add(&mut hasher, b"leaf-1")
-                .merkleize(&mut hasher)
+                .add(&hasher, b"leaf-1")
+                .merkleize(&hasher)
                 .finalize();
             let parent = parent.finalize();
 
@@ -1447,21 +1435,18 @@ mod tests {
 
     #[test]
     fn test_stale_changeset_child_before_parent() {
-        let mut hasher: Standard<Sha256> = Standard::new();
+        let hasher: Standard<Sha256> = Standard::new();
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
-            let mut mmr = Mmr::new(&mut hasher);
+            let mut mmr = Mmr::new(&hasher);
 
             // Create parent, then child.
-            let parent = mmr
-                .new_batch()
-                .add(&mut hasher, b"leaf-0")
-                .merkleize(&mut hasher);
+            let parent = mmr.new_batch().add(&hasher, b"leaf-0").merkleize(&hasher);
             let child = parent
                 .new_batch()
-                .add(&mut hasher, b"leaf-1")
-                .merkleize(&mut hasher)
+                .add(&hasher, b"leaf-1")
+                .merkleize(&hasher)
                 .finalize();
             let parent = parent.finalize();
 

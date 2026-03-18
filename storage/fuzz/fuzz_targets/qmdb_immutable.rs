@@ -135,7 +135,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .unwrap();
 
-        let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
+        let hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
         let mut keys_set = Vec::new();
         let mut set_locations = Vec::new(); // Track locations that contain Set operations
         let mut last_commit_loc = None;
@@ -245,7 +245,7 @@ fn fuzz(input: FuzzInput) {
                         last_commit_loc = Some(db.bounds().await.end - 1);
                         if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
                             let root = db.root();
-                            let _ = verify_proof(&mut hasher, &proof, safe_start, &ops, &root);
+                            let _ = verify_proof(&hasher, &proof, safe_start, &ops, &root);
                         }
                     }
                 }

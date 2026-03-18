@@ -89,7 +89,7 @@ async fn commit_pending(
 }
 
 fn fuzz(data: FuzzInput) {
-    let mut hasher = Standard::<Sha256>::new();
+    let hasher = Standard::<Sha256>::new();
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
@@ -177,7 +177,7 @@ fn fuzz(data: FuzzInput) {
 
                         assert!(
                             verify_proof(
-                                &mut hasher,
+                                &hasher,
                                 &proof,
                                 adjusted_start,
                                 &log,
@@ -208,7 +208,7 @@ fn fuzz(data: FuzzInput) {
                             .proof(adjusted_start, *max_ops)
                             .await {
                                 let _ = verify_proof(
-                                    &mut hasher,
+                                    &hasher,
                                     &proof,
                                     adjusted_start,
                                     &res.1,

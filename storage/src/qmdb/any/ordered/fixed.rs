@@ -360,7 +360,7 @@ pub(crate) mod test {
         // confirm that the end state of the db matches that of an identically updated hashmap.
         const ELEMENTS: u64 = 1000;
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.with_label("first")).await;
 
             let mut map = HashMap::<Digest, Digest>::default();
@@ -446,7 +446,7 @@ pub(crate) mod test {
             for i in start_loc.as_u64()..end_loc.as_u64() {
                 let loc = Location::from(i);
                 let (proof, log) = db.proof(loc, max_ops).await.unwrap();
-                assert!(verify_proof(&mut hasher, &proof, loc, &log, &root));
+                assert!(verify_proof(&hasher, &proof, loc, &log, &root));
             }
 
             db.destroy().await.unwrap();
@@ -720,7 +720,7 @@ pub(crate) mod test {
             let mut db = create_test_db(context.clone()).await;
             let ops = create_test_ops(20);
             apply_ops(&mut db, ops.clone()).await;
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let root_hash = db.root();
             let original_op_count = db.bounds().await.end;
 
@@ -736,7 +736,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
             assert!(verify_proof(
-                &mut hasher,
+                &hasher,
                 &historical_proof,
                 Location::new(5),
                 &historical_ops,
@@ -759,7 +759,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
             assert!(verify_proof(
-                &mut hasher,
+                &hasher,
                 &historical_proof,
                 Location::new(5),
                 &historical_ops,
@@ -774,7 +774,7 @@ pub(crate) mod test {
     fn test_ordered_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let ops = create_test_ops(50);
 
             let mut db = create_test_db(context.with_label("first")).await;
@@ -787,7 +787,7 @@ pub(crate) mod test {
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
             assert!(verify_proof(
-                &mut hasher,
+                &hasher,
                 &proof,
                 Location::new(1),
                 &proof_ops,
@@ -829,7 +829,7 @@ pub(crate) mod test {
             let ops = create_test_ops(100);
             apply_ops(&mut db, ops.clone()).await;
 
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let root = db.root();
 
             let start_loc = Location::new(20);
@@ -854,7 +854,7 @@ pub(crate) mod test {
 
                 // Verify proof against reference root
                 assert!(verify_proof(
-                    &mut hasher,
+                    &hasher,
                     &historical_proof,
                     start_loc,
                     &historical_ops,

@@ -24,14 +24,14 @@ fn bench_append(c: &mut Criterion) {
         c.bench_function(&format!("{}/n={}", module_path!(), n), |b| {
             b.iter(|| {
                 block_on(async {
-                    let mut h = StandardHasher::<Sha256>::new();
-                    let mut mmr = Mmr::new(&mut h);
+                    let h = StandardHasher::<Sha256>::new();
+                    let mut mmr = Mmr::new(&h);
                     let changeset = {
                         let mut batch = mmr.new_batch();
                         for digest in &elements {
-                            batch = batch.add(&mut h, digest);
+                            batch = batch.add(&h, digest);
                         }
-                        batch.merkleize(&mut h).finalize()
+                        batch.merkleize(&h).finalize()
                     };
                     mmr.apply(changeset).unwrap();
                     mmr

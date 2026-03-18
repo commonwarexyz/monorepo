@@ -43,8 +43,8 @@ impl<D: Digest> RangeProof<D> {
         range: Range<Location>,
         ops_root: D,
     ) -> Result<Self, Error> {
-        let mut mmr_hasher = crate::mmr::StandardHasher::<H>::new();
-        let proof = verification::range_proof(&mut mmr_hasher, storage, range).await?;
+        let mmr_hasher = crate::mmr::StandardHasher::<H>::new();
+        let proof = verification::range_proof(&mmr_hasher, storage, range).await?;
 
         let (last_chunk, next_bit) = status.last_chunk();
         let partial_chunk_digest = if next_bit != BitMap::<N>::CHUNK_SIZE_BITS {
@@ -171,7 +171,7 @@ impl<D: Digest> RangeProof<D> {
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let start_chunk_idx = *start_loc / BitMap::<N>::CHUNK_SIZE_BITS;
-        let mut verifier =
+        let verifier =
             grafting::Verifier::<H>::new(grafting::height::<N>(), start_chunk_idx, chunk_vec);
 
         let next_bit = *leaves % BitMap::<N>::CHUNK_SIZE_BITS;
@@ -202,10 +202,7 @@ impl<D: Digest> RangeProof<D> {
         }
 
         // Reconstruct the grafted MMR root from the proof.
-        let mmr_root = match self
-            .proof
-            .reconstruct_root(&mut verifier, &elements, start_loc)
-        {
+        let mmr_root = match self.proof.reconstruct_root(&verifier, &elements, start_loc) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");

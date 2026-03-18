@@ -41,7 +41,7 @@ pub trait Readable: Send + Sync {
     /// Inclusion proof for the element at `loc`.
     fn proof(
         &self,
-        hasher: &mut impl Hasher<Digest = Self::Digest>,
+        hasher: &impl Hasher<Digest = Self::Digest>,
         loc: Location,
     ) -> Result<Proof<Self::Digest>, Error> {
         if !loc.is_valid() {
@@ -56,7 +56,7 @@ pub trait Readable: Send + Sync {
     /// Inclusion proof for all elements in `range`.
     fn range_proof(
         &self,
-        hasher: &mut impl Hasher<Digest = Self::Digest>,
+        hasher: &impl Hasher<Digest = Self::Digest>,
         range: Range<Location>,
     ) -> Result<Proof<Self::Digest>, Error> {
         let leaves = self.leaves();

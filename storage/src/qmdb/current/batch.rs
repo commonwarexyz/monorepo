@@ -642,9 +642,9 @@ where
         .chain(bitmap.dirty_chunks.iter().copied())
         .map(|i| (i, bitmap.get_chunk(i)));
     let ops_mmr_adapter = BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.mmr);
-    let mut hasher = StandardHasher::<H>::new();
+    let hasher = StandardHasher::<H>::new();
     let new_leaves = compute_grafted_leaves::<H, N>(
-        &mut hasher,
+        &hasher,
         &ops_mmr_adapter,
         chunks_to_update,
         current_db.thread_pool.as_ref(),
@@ -668,8 +668,8 @@ where
                 grafted_batch = grafted_batch.add_leaf_digest(digest);
             }
         }
-        let mut gh = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
-        grafted_batch.merkleize(&mut gh)
+        let gh = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
+        grafted_batch.merkleize(&gh)
     };
 
     // 7. Compute canonical root using the grafted batch directly.
@@ -677,7 +677,7 @@ where
     let grafted_storage = grafting::Storage::new(&grafted_batch, grafting_height, &ops_mmr_adapter);
     let partial = partial_chunk(&bitmap);
     let canonical_root =
-        compute_db_root::<H, _, _, N>(&mut hasher, &grafted_storage, partial, &ops_root).await?;
+        compute_db_root::<H, _, _, N>(&hasher, &grafted_storage, partial, &ops_root).await?;
 
     // 8. Extract diff data and build COW bitmap layer + push/clear chain.
     let (parent_len, pushed_bits, cleared_bits) = bitmap.into_parts();

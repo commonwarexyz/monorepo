@@ -15,8 +15,8 @@ const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000]
 fn bench_prove_single_element(c: &mut Criterion) {
     for n in N_LEAVES {
         // Populate MMR
-        let mut hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher = StandardHasher::<Sha256>::new();
+        let mut mmr = Mmr::new(&hasher);
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
         block_on(async {
@@ -24,10 +24,10 @@ fn bench_prove_single_element(c: &mut Criterion) {
                 let mut batch = mmr.new_batch();
                 for i in 0..n {
                     let element = sha256::Digest::random(&mut sampler);
-                    batch = batch.add(&mut hasher, &element);
+                    batch = batch.add(&hasher, &element);
                     elements.push((i, element));
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
         });
@@ -48,15 +48,12 @@ fn bench_prove_single_element(c: &mut Criterion) {
                     },
                     |samples| {
                         block_on(async {
-                            let mut hasher = StandardHasher::<Sha256>::new();
+                            let hasher = StandardHasher::<Sha256>::new();
                             for (loc, element) in samples {
-                                let proof = mmr.proof(&mut hasher, loc).unwrap();
-                                assert!(proof.verify_element_inclusion(
-                                    &mut hasher,
-                                    &element,
-                                    loc,
-                                    root,
-                                ));
+                                let proof = mmr.proof(&hasher, loc).unwrap();
+                                assert!(
+                                    proof.verify_element_inclusion(&hasher, &element, loc, root,)
+                                );
                             }
                         });
                     },
