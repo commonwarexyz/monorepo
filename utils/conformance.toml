@@ -6,6 +6,14 @@ hash = "c49f13e5df245eb2343e64a24eaa4dc9d9b6f698dcc50622953216a44302dc86"
 n_cases = 65536
 hash = "07161626ba27702dd0c4699ac8bc20bf0d2c8fb6e378644b7899af0d4a060dbd"
 
+["commonware_utils::fuse::tests::conformance::CodecConformance<BinaryFuseFilter<u16>>"]
+n_cases = 65536
+hash = "642a7b3896faebffedb5319b97b433ebdf2c0737adcfcc78f7b3c64bfe048177"
+
+["commonware_utils::fuse::tests::conformance::CodecConformance<BinaryFuseFilter<u8>>"]
+n_cases = 65536
+hash = "d3b61facbcc0d372f1981cf1f9e31bbab7935c1b76b836f66681c25199385373"
+
 ["commonware_utils::hostname::tests::conformance::CodecConformance<Hostname>"]
 n_cases = 65536
 hash = "7e48234785aa28a959d63b7e477ac404cc07930c159501b2f7303ff461036fd0"
