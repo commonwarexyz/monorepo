@@ -11,7 +11,7 @@ use crate::merkle::{
         iterator::{leaf_pos, PeakIterator},
         proof, Error, Family, Location, Position,
     },
-    path::PathIterator,
+    path::{PathIterator, MAX_PATH_LEN},
     Proof, Readable,
 };
 use alloc::vec::Vec;
@@ -154,9 +154,13 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
             // Collect the path from peak to leaf (top-down), then insert bottom-up so we
             // can early-exit when we hit a node that was already dirtied by a prior
             // update_leaf.
-            let path: Vec<_> =
-                PathIterator::new(peak_pos, height, Location::new(leaf_start), loc).collect();
-            for &(pos, _, h) in path.iter().rev() {
+            let mut buf = [(Position::new(0), Position::new(0), 0u32); MAX_PATH_LEN];
+            let mut len = 0;
+            for item in PathIterator::new(peak_pos, height, Location::new(leaf_start), loc) {
+                buf[len] = item;
+                len += 1;
+            }
+            for &(pos, _, h) in buf[..len].iter().rev() {
                 if !self.state.insert(pos, h) {
                     break; // already dirty from a prior update_leaf, ancestors must be too
                 }

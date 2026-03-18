@@ -311,7 +311,7 @@ where
             metadata.put(key, digest.to_vec());
         }
 
-        metadata.sync().await.map_err(mmr::Error::MetadataError)?;
+        metadata.sync().await.map_err(mmr::Error::Metadata)?;
 
         Ok(())
     }

@@ -397,12 +397,12 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             self.metadata.put(key, digest.to_vec());
         }
 
-        self.metadata.sync().await.map_err(Error::MetadataError)
+        self.metadata.sync().await.map_err(Error::Metadata)
     }
 
     /// Destroy the bitmap metadata from disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.metadata.destroy().await.map_err(Error::MetadataError)
+        self.metadata.destroy().await.map_err(Error::Metadata)
     }
 
     /// Prune all complete chunks before the chunk containing the given bit.

@@ -125,15 +125,15 @@ pub enum Error<F: Family> {
     #[error("missing digest: {0}")]
     MissingDigest(Position<F>),
 
-    /// A required node is missing.
+    /// A metadata error occurred.
     #[cfg(feature = "std")]
     #[error("metadata error: {0}")]
-    MetadataError(#[from] crate::metadata::Error),
+    Metadata(#[from] crate::metadata::Error),
 
     /// A journal error occurred.
     #[cfg(feature = "std")]
     #[error("journal error: {0}")]
-    JournalError(#[from] crate::journal::Error),
+    Journal(#[from] crate::journal::Error),
 
     /// A runtime error occurred.
     #[cfg(feature = "std")]

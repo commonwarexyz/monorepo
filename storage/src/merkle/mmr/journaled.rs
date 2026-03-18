@@ -165,7 +165,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
                 error!(?pos, "node is missing from metadata and journal");
                 Err(Error::MissingNode(pos))
             }
-            Err(e) => Err(Error::JournalError(e)),
+            Err(e) => Err(Error::Journal(e)),
         }
     }
 
@@ -523,7 +523,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
                 .into(),
         );
 
-        self.metadata.sync().await.map_err(Error::MetadataError)?;
+        self.metadata.sync().await.map_err(Error::Metadata)?;
 
         Ok(pinned_nodes)
     }
@@ -539,7 +539,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         match self.journal.reader().await.read(*position).await {
             Ok(item) => Ok(Some(item)),
             Err(JError::ItemPruned(_)) => Ok(None),
-            Err(e) => Err(Error::JournalError(e)),
+            Err(e) => Err(Error::Journal(e)),
         }
     }
 

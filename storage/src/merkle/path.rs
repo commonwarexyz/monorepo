@@ -7,6 +7,10 @@
 
 use crate::merkle::{Family, Location, Position};
 
+/// Maximum number of items a [`PathIterator`] can yield. A peak of height `h` has `2^h`
+/// leaves, and leaf counts are stored as `u64`, so the maximum peak height is `u64::BITS - 1`.
+pub(super) const MAX_PATH_LEN: usize = u64::BITS as usize - 1;
+
 /// Yields `(parent_pos, sibling_pos, height)` for each internal node on the path from a peak
 /// to a designated leaf, in top-down order (peak first). The peak itself is the first parent
 /// yielded; the leaf is never yielded.

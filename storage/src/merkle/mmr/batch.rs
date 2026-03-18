@@ -11,7 +11,7 @@ use crate::merkle::{
         iterator::{nodes_needing_parents, PeakIterator},
         proof, Error, Family, Location, Position, Proof, Readable,
     },
-    path::PathIterator,
+    path::{PathIterator, MAX_PATH_LEN},
 };
 #[cfg(any(feature = "std", test))]
 use crate::mmr::iterator::pos_to_height;
@@ -152,10 +152,14 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
         for (peak_pos, height) in PeakIterator::new(self.size()) {
             let leaves_in_peak = 1u64 << height;
             if loc < first_leaf + leaves_in_peak {
-                let path: Vec<_> =
-                    PathIterator::new(peak_pos, height, first_leaf, loc).collect();
+                let mut buf = [(Position::new(0), Position::new(0), 0u32); MAX_PATH_LEN];
+                let mut len = 0;
+                for item in PathIterator::new(peak_pos, height, first_leaf, loc) {
+                    buf[len] = item;
+                    len += 1;
+                }
                 let mut h = 1;
-                for &(parent_pos, _, _) in path.iter().rev() {
+                for &(parent_pos, _, _) in buf[..len].iter().rev() {
                     if !self.state.insert(parent_pos, h) {
                         break;
                     }
@@ -163,7 +167,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
                 }
                 return;
             }
-            first_leaf = first_leaf + leaves_in_peak;
+            first_leaf += leaves_in_peak;
         }
 
         panic!("leaf {loc} not found (size: {})", self.size());
