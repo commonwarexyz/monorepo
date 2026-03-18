@@ -1163,42 +1163,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_drop_before_buffer() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
-
-        let buf = pool.try_alloc(page).unwrap();
-        assert!(buf.is_pooled());
-        drop(pool);
-        drop(buf);
-    }
-
-    #[test]
-    fn test_pool_exhaustion() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
-
-        // Allocate max buffers
-        let _buf1 = pool.try_alloc(page).expect("first alloc should succeed");
-        let _buf2 = pool.try_alloc(page).expect("second alloc should succeed");
-
-        // Third allocation should fail
-        assert!(pool.try_alloc(page).is_err());
-    }
-
-    #[test]
-    fn test_pool_oversized() {
-        let page = page_size();
-        let mut registry = test_registry();
-        let pool = BufferPool::new(test_config(page, page * 2, 10), &mut registry);
-
-        // Request larger than max_size
-        assert!(pool.try_alloc(page * 4).is_err());
-    }
-
-    #[test]
     fn test_pool_size_classes() {
         let page = page_size();
         let mut registry = test_registry();
@@ -1268,6 +1232,7 @@ mod tests {
 
     #[test]
     fn test_storage_config_supports_default_allocations() {
+        // The storage preset's max_size (8 MB) should be allocatable out of the box.
         let mut registry = test_registry();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
 
@@ -1345,6 +1310,8 @@ mod tests {
 
     #[test]
     fn test_config_invalid_range_edge_paths() {
+        // max_size < min_size should yield zero size classes, and budget_bytes
+        // should leave max_per_class unchanged (no division by zero).
         let invalid_order = BufferPoolConfig {
             pool_min_size: 0,
             min_size: NZUsize!(8),
@@ -1357,6 +1324,7 @@ mod tests {
         let unchanged = invalid_order.clone().with_budget_bytes(NZUsize!(128));
         assert_eq!(unchanged.max_per_class, invalid_order.max_per_class);
 
+        // Non-power-of-two max_size should make the size unreachable via class_index.
         let non_power_two_max = BufferPoolConfig {
             pool_min_size: 0,
             min_size: NZUsize!(8),
@@ -1370,6 +1338,7 @@ mod tests {
 
     #[test]
     fn test_pool_debug_and_config_accessor() {
+        // Debug formatting and config accessor should be consistent.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
@@ -1520,9 +1489,12 @@ mod tests {
 
     #[test]
     fn test_pooled_debug_and_empty_into_bytes_paths() {
+        // Debug formatting for pooled mutable/immutable wrappers, and empty
+        // into_bytes should detach without retaining the pool allocation.
         let page = page_size();
         let class = test_size_class(page, page);
 
+        // Mutable pooled debug should include cursor position.
         let pooled_mut_debug = {
             let pooled_mut = PooledBufMut::new(AlignedBuffer::new(page, page), Arc::clone(&class));
             format!("{pooled_mut:?}")
@@ -1530,9 +1502,11 @@ mod tests {
         assert!(pooled_mut_debug.contains("PooledBufMut"));
         assert!(pooled_mut_debug.contains("cursor"));
 
+        // Empty mutable buffer converts to empty Bytes without retaining pool memory.
         let empty_from_mut = PooledBufMut::new(AlignedBuffer::new(page, page), Arc::clone(&class));
         assert!(empty_from_mut.into_bytes().is_empty());
 
+        // Immutable pooled debug should include capacity.
         let pooled = PooledBufMut::new(AlignedBuffer::new(page, page), class).into_pooled();
         let pooled_debug = format!("{pooled:?}");
         assert!(pooled_debug.contains("PooledBuf"));
@@ -1684,20 +1658,25 @@ mod tests {
 
     #[test]
     fn test_iobuf_to_iobufmut_conversion_preserves_full_unique_view() {
+        // IoBuf -> IoBufMut via From should preserve data and keep pooled
+        // ownership for a fully-written unique view.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
+        // Fill a pooled buffer completely and freeze.
         let mut buf = pool.try_alloc(page).unwrap();
         buf.put_slice(&vec![0xEE; page]);
         let iobuf = buf.freeze();
 
+        // Convert back to mutable; should reuse pooled storage.
         let iobufmut: IoBufMut = iobuf.into();
         assert_eq!(iobufmut.len(), page);
         assert!(iobufmut.as_ref().iter().all(|&b| b == 0xEE));
         assert_eq!(get_allocated(&pool, page), 1);
         assert_eq!(get_available(&pool, page), 0);
 
+        // Dropping returns the buffer to the pool.
         drop(iobufmut);
         assert_eq!(get_allocated(&pool, page), 0);
         assert_eq!(get_available(&pool, page), 1);
@@ -1705,6 +1684,8 @@ mod tests {
 
     #[test]
     fn test_iobuf_try_into_mut_recycles_full_unique_view() {
+        // try_into_mut on a uniquely-owned full-view pooled IoBuf should recover
+        // mutable ownership without copying, preserving data and pool tracking.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
@@ -1714,6 +1695,7 @@ mod tests {
         let iobuf = buf.freeze();
         assert_eq!(get_allocated(&pool, page), 1);
 
+        // Unique full view should recycle.
         let recycled = iobuf
             .try_into_mut()
             .expect("unique full-view pooled buffer should recycle");
@@ -1863,10 +1845,13 @@ mod tests {
 
     #[test]
     fn test_thread_exit_flushes_local_bin() {
+        // When a thread exits, its TLS cache Drop flushes buffers back to the
+        // global freelist, making them available to other threads.
         let page = page_size();
         let mut registry = test_registry();
         let pool = Arc::new(BufferPool::new(test_config(page, page, 1), &mut registry));
 
+        // Allocate and return a buffer on a worker thread, then let it exit.
         let worker_pool = pool.clone();
         thread::spawn(move || {
             let buf = worker_pool
@@ -1877,6 +1862,8 @@ mod tests {
         .join()
         .expect("worker thread should exit cleanly");
 
+        // After thread exit, the buffer should be in the global freelist (not
+        // stuck in a dead thread's local cache).
         let class_index = pool
             .inner
             .config
@@ -1885,6 +1872,7 @@ mod tests {
         assert_eq!(pool.inner.classes[class_index].global.len(), 1);
         assert_eq!(get_local_len(&pool.inner.classes[class_index]), 0);
 
+        // The flushed buffer should be reusable from the main thread.
         let _buf = pool
             .try_alloc(page)
             .expect("thread-exited local buffer should be reusable");
@@ -1914,9 +1902,9 @@ mod tests {
         // No assertion here - we just want to make sure it doesn't panic
     }
 
-    /// Test pool exhaustion and recovery.
     #[test]
     fn test_pool_exhaustion_and_recovery() {
+        // Test pool exhaustion and recovery.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 3), &mut registry);
@@ -1947,9 +1935,9 @@ mod tests {
         assert_eq!(get_available(&pool, page), 2);
     }
 
-    /// Test try_alloc error variants.
     #[test]
     fn test_try_alloc_errors() {
+        // Test try_alloc error variants.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
@@ -1967,24 +1955,25 @@ mod tests {
 
     #[test]
     fn test_try_alloc_zeroed_errors() {
+        // try_alloc_zeroed should return the same error variants as try_alloc.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
-        // Oversized request
+        // Oversized request.
         let result = pool.try_alloc_zeroed(page * 10);
         assert_eq!(result.unwrap_err(), PoolError::Oversized);
 
-        // Exhaust pool
+        // Exhaust pool, then verify Exhausted error.
         let _buf1 = pool.try_alloc_zeroed(page).unwrap();
         let _buf2 = pool.try_alloc_zeroed(page).unwrap();
         let result = pool.try_alloc_zeroed(page);
         assert_eq!(result.unwrap_err(), PoolError::Exhausted);
     }
 
-    /// Test fallback allocation when pool is exhausted or oversized.
     #[test]
     fn test_fallback_allocation() {
+        // Test fallback allocation when pool is exhausted or oversized.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
@@ -2019,9 +2008,10 @@ mod tests {
         assert_eq!(get_allocated(&pool, page), 0);
     }
 
-    /// Test is_pooled method.
     #[test]
     fn test_is_pooled() {
+        // IoBufMut from the pool should report is_pooled, while heap-backed
+        // buffers should not.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);

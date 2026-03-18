@@ -731,12 +731,13 @@ mod tests {
 
     #[test]
     fn test_aligned_buffer() {
+        // Page-aligned allocation should report correct capacity and alignment.
         let page = page_size();
         let buf = AlignedBuffer::new(4096, page);
         assert_eq!(buf.capacity(), 4096);
         assert!((buf.as_ptr() as usize).is_multiple_of(page));
 
-        // Test with cache-line alignment
+        // Cache-line-aligned allocation should also satisfy its alignment.
         let cache_line = BufferPoolConfig::for_network().alignment.get();
         let buf2 = AlignedBuffer::new(4096, cache_line);
         assert_eq!(buf2.capacity(), 4096);
@@ -845,24 +846,24 @@ mod tests {
 
     #[test]
     fn test_pooled_buf_mut_freeze() {
+        // Freeze a pooled mutable buffer and verify content is preserved in the
+        // resulting immutable view, including slices.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
 
-        // Allocate and initialize a buffer
+        // Write data into a pooled buffer.
         let mut buf = pool.try_alloc(11).unwrap();
         buf.put_slice(&[0u8; 11]);
         assert_eq!(buf.len(), 11);
-
-        // Write some data
         buf.as_mut()[..5].copy_from_slice(&[1, 2, 3, 4, 5]);
 
-        // Freeze preserves the content
+        // Freeze preserves the content.
         let iobuf = buf.freeze();
         assert_eq!(iobuf.len(), 11);
         assert_eq!(&iobuf.as_ref()[..5], &[1, 2, 3, 4, 5]);
 
-        // IoBuf can be sliced
+        // Slicing the frozen buffer works.
         let slice = iobuf.slice(0..5);
         assert_eq!(slice.len(), 5);
     }
@@ -878,9 +879,9 @@ mod tests {
         let _ = pooled.slice((Bound::Excluded(usize::MAX), Bound::<usize>::Unbounded));
     }
 
-    /// Verify pooled IoBuf matches Bytes semantics for Buf trait methods.
     #[test]
     fn test_bytes_parity_iobuf_buf_trait() {
+        // Verify pooled IoBuf matches Bytes semantics for Buf trait methods.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
@@ -927,9 +928,9 @@ mod tests {
         assert!(!Buf::has_remaining(&pooled));
     }
 
-    /// Verify pooled IoBuf slice behavior matches Bytes for content semantics.
     #[test]
     fn test_bytes_parity_iobuf_slice() {
+        // Verify pooled IoBuf slice behavior matches Bytes for content semantics.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
@@ -949,6 +950,7 @@ mod tests {
 
     #[test]
     fn test_bytes_parity_iobuf_split_to() {
+        // Verify pooled IoBuf split_to matches Bytes split_to semantics.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 1), &mut registry);
@@ -988,9 +990,9 @@ mod tests {
         let _ = pooled.split_to(4);
     }
 
-    /// Verify PooledBufMut matches BytesMut semantics for Buf trait.
     #[test]
     fn test_bytesmut_parity_buf_trait() {
+        // Verify PooledBufMut matches BytesMut semantics for Buf trait.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
@@ -1022,9 +1024,9 @@ mod tests {
         assert!(!Buf::has_remaining(&pooled));
     }
 
-    /// Verify PooledBufMut matches BytesMut semantics for BufMut trait.
     #[test]
     fn test_bytesmut_parity_bufmut_trait() {
+        // Verify PooledBufMut matches BytesMut semantics for BufMut trait.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
@@ -1055,6 +1057,8 @@ mod tests {
 
     #[test]
     fn test_bytesmut_parity_after_advance_paths() {
+        // Verify PooledBufMut matches BytesMut after advance for truncate,
+        // clear, set_len, and put operations.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page * 4, 10), &mut registry);
@@ -1128,11 +1132,12 @@ mod tests {
 
     #[test]
     fn test_alloc_and_freeze_view_paths() {
+        // Allocation edge cases and freeze behavior after advance/clear.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
 
-        // Allocation edges
+        // Zero-capacity request should round up to the minimum size class.
         let buf = pool.try_alloc(0).expect("zero capacity should succeed");
         assert_eq!(buf.capacity(), page);
         assert_eq!(buf.len(), 0);
@@ -1164,6 +1169,8 @@ mod tests {
 
     #[test]
     fn test_interleaved_advance_and_write() {
+        // Writing after advancing should append beyond the initialized tail,
+        // with the read cursor keeping both old and new data visible.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(test_config(page, page, 10), &mut registry);
@@ -1177,6 +1184,7 @@ mod tests {
 
     #[test]
     fn test_alignment_after_advance() {
+        // Advancing breaks base-pointer alignment, which is expected.
         let page = page_size();
         let mut registry = test_registry();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);

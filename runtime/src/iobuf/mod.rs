@@ -2301,6 +2301,7 @@ mod tests {
 
     #[test]
     fn test_iobuf_split_to_consistent_across_backings() {
+        // split_to on pooled and Bytes-backed IoBufs should produce identical results.
         let pool = test_pool();
         let mut pooled = pool.try_alloc(256).expect("pooled allocation");
         pooled.put_slice(b"hello world");
@@ -3024,6 +3025,7 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_default() {
+        // Default IoBufsMut should be a single empty chunk.
         let bufs = IoBufsMut::default();
         assert!(bufs.is_single());
         assert!(bufs.is_empty());
@@ -3032,6 +3034,7 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_from_array() {
+        // From<[u8; N]> should create a single-chunk container with the array data.
         let bufs = IoBufsMut::from([1u8, 2, 3, 4, 5]);
         assert!(bufs.is_single());
         assert_eq!(bufs.len(), 5);
@@ -3040,6 +3043,7 @@ mod tests {
 
     #[test]
     fn test_iobufmut_buf_trait() {
+        // Buf trait on IoBufMut: remaining/chunk/advance should work like BytesMut.
         let mut buf = IoBufMut::from(b"hello world");
         assert_eq!(buf.remaining(), 11);
         assert_eq!(buf.chunk(), b"hello world");
@@ -3198,6 +3202,8 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_advance_skips_leading_writable_empty_chunk() {
+        // A leading chunk with capacity but no readable bytes (len == 0) should
+        // be skipped during advance, reaching the next readable chunk.
         let empty_writable = IoBufMut::with_capacity(4);
         let payload = IoBufMut::from(b"xy");
         let mut bufs = IoBufsMut::from(vec![empty_writable, payload]);
@@ -3209,12 +3215,21 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_coalesce_after_advance() {
+        // Advance mid-chunk: advance 3 of 11 bytes
         let buf1 = IoBufMut::from(b"hello");
         let buf2 = IoBufMut::from(b" world");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
 
         bufs.advance(3);
         assert_eq!(bufs.coalesce(), b"lo world");
+
+        // Advance to exact chunk boundary: advance 5 of 11 bytes
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" world");
+        let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
+
+        bufs.advance(5);
+        assert_eq!(bufs.coalesce(), b" world");
     }
 
     #[test]
@@ -3559,27 +3574,23 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_freeze_after_advance() {
+        // Partial advance: advance 3 of 11 bytes
         let buf1 = IoBufMut::from(b"hello");
         let buf2 = IoBufMut::from(b" world");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
 
-        // Advance partway through first buffer
         bufs.advance(3);
         assert_eq!(bufs.len(), 8);
 
-        // Freeze and verify only remaining data is preserved
         let frozen = bufs.freeze();
         assert_eq!(frozen.len(), 8);
         assert_eq!(frozen.coalesce(), b"lo world");
-    }
 
-    #[test]
-    fn test_iobufsmut_freeze_after_advance_to_boundary() {
+        // Exact boundary advance: advance 5 of 11 bytes (first buf is 5 bytes)
         let buf1 = IoBufMut::from(b"hello");
         let buf2 = IoBufMut::from(b" world");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
 
-        // Advance exactly to first buffer boundary
         bufs.advance(5);
         assert_eq!(bufs.len(), 6);
 
@@ -3588,19 +3599,6 @@ mod tests {
         let frozen = bufs.freeze();
         assert!(frozen.is_single());
         assert_eq!(frozen.coalesce(), b" world");
-    }
-
-    #[test]
-    fn test_iobufsmut_coalesce_after_advance_to_boundary() {
-        let buf1 = IoBufMut::from(b"hello");
-        let buf2 = IoBufMut::from(b" world");
-        let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
-
-        // Advance exactly past first buffer
-        bufs.advance(5);
-
-        // Coalesce should only include second buffer's data
-        assert_eq!(bufs.coalesce(), b" world");
     }
 
     #[test]
@@ -3718,6 +3716,9 @@ mod tests {
 
     #[test]
     fn test_iobuf_aligned_public_paths() {
+        // Exercise the public IoBuf/IoBufMut API through the untracked aligned
+        // backing: write, advance, copy_to_bytes, freeze, slice, split_to,
+        // try_into_mut, and From/Into conversions.
         static ARRAY: &[u8; 4] = b"wxyz";
 
         let alignment = NonZeroUsize::new(64).expect("non-zero alignment");
