@@ -124,9 +124,6 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     /// without scanning all tracked rounds.
     nullification_views: BTreeSet<View>,
 
-    /// Views that are notarized only through a descendant's notarization certificate.
-    indirect_notarized: BTreeSet<View>,
-
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
 
@@ -139,14 +136,6 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
 impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
     State<E, S, L, D>
 {
-    const fn optimistic_validation_enabled(&self) -> bool {
-        self.term_length.get() > 1 && self.optimistic_depth > 0
-    }
-
-    fn optimistic_validation_enabled_for(&self, view: View) -> bool {
-        self.optimistic_validation_enabled() && view != view.term_start(self.term_length)
-    }
-
     fn direct_anchor(&self, view: View) -> View {
         self.views
             .range(..view)
@@ -156,7 +145,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     fn within_optimistic_depth(&self, view: View) -> bool {
-        if !self.optimistic_validation_enabled_for(view) {
+        if self.optimistic_depth == 0 || view == view.term_start(self.term_length) {
             return false;
         }
         let anchor = self.direct_anchor(view);
@@ -196,7 +185,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             views: BTreeMap::new(),
             nullify_views: BTreeSet::new(),
             nullification_views: BTreeSet::new(),
-            indirect_notarized: BTreeSet::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
             current_view,
@@ -426,9 +414,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
         self.set_leader(view.next(), Some(&notarization.certificate));
         let result = self.create_round(view).add_notarization(notarization);
-        if result.0 {
-            self.mark_indirect_ancestors(view);
-        }
         if result.0 && view > self.last_finalized && self.views.contains_key(&view) {
             self.certification_candidates.insert(view);
         }
@@ -543,7 +528,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
 
         let round = self.views.get(&view)?;
-        if !self.is_notarized(view) || !round.is_certified() {
+        if !round.is_certified() {
             return None;
         }
         if view != view.term_start(self.term_length) {
@@ -617,9 +602,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Replays a journaled artifact into the appropriate round during recovery.
     ///
     /// Restores round-level broadcast flags (via [`Round::replay`]) and
-    /// tracking sets (`nullify_views`, `nullification_views`, and indirect
-    /// notarization state) so recovery preserves the same optimistic ancestry
-    /// decisions as the pre-restart node.
+    /// tracking sets (`nullify_views`, `nullification_views`) so recovery
+    /// preserves the same optimistic ancestry decisions as the pre-restart node.
     pub fn replay(&mut self, artifact: &Artifact<S, D>) {
         if let Artifact::Nullify(n) = artifact {
             self.nullify_views.insert(n.view());
@@ -628,12 +612,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             self.nullification_views.insert(n.view());
         }
         self.create_round(artifact.view()).replay(artifact);
-        if matches!(
-            artifact,
-            Artifact::Notarization(_) | Artifact::Finalization(_)
-        ) {
-            self.rebuild_indirect_views();
-        }
     }
 
     /// Returns the leader index for `view` if we already entered it.
@@ -834,7 +812,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .cloned()
             .expect("notarization must exist for certified view");
 
-        if is_success && !self.optimistic_validation_enabled_for(view.next()) {
+        if is_success && !self.within_optimistic_depth(view.next()) {
             self.enter_view(view.next());
         }
 
@@ -853,7 +831,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         // so pruned entries could never affect that decision.
         self.nullification_views = self.nullification_views.split_off(&min);
         self.nullify_views = self.nullify_views.split_off(&min);
-        self.indirect_notarized = self.indirect_notarized.split_off(&min);
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
@@ -903,39 +880,26 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         })
     }
 
-    /// Returns true if the view is notarized, directly or through a descendant.
-    fn is_notarized(&self, view: View) -> bool {
-        view == GENESIS_VIEW
-            || self.is_directly_notarized(view)
-            || (self.optimistic_validation_enabled() && self.indirect_notarized.contains(&view))
-    }
-
     /// Returns the payload of a parent we can safely use for optimistic validation.
     fn notarized_parent_payload(&self, view: View) -> Option<&D> {
         if view == GENESIS_VIEW {
             return Some(self.genesis.as_ref().expect("genesis must be present"));
         }
 
-        if !self.within_optimistic_depth(view.next()) && !self.is_notarized(view) {
+        if self.is_directly_notarized(view) {
+            let round = self.views.get(&view)?;
+            return round.proposal().map(|proposal| &proposal.payload);
+        }
+
+        if !self.within_optimistic_depth(view.next()) {
             return None;
         }
 
-        if self.is_notarized(view) {
-            let round = self.views.get(&view)?;
-            if !self.is_directly_notarized(view)
-                && (!round.has_unequivocated_proposal() || !round.is_verified())
-            {
-                return None;
-            }
-            return self
-                .views
-                .get(&view)
-                .and_then(|round| round.proposal())
-                .map(|proposal| &proposal.payload);
-        }
-
         let round = self.views.get(&view)?;
-        if !round.broadcast_notarize() || !round.is_verified() {
+        if !round.has_unequivocated_proposal()
+            || !round.broadcast_notarize()
+            || !round.is_verified()
+        {
             return None;
         }
 
@@ -951,60 +915,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         Some(&proposal.payload)
     }
 
-    /// Marks ancestors of a directly notarized proposal as indirectly notarized.
-    ///
-    /// Only ancestors we locally verified and voted to notarize without
-    /// equivocation are eligible for indirect notarization.
-    fn mark_indirect_ancestors(&mut self, view: View) {
-        if !self.optimistic_validation_enabled() {
-            return;
-        }
-        let mut cursor = self
-            .views
-            .get(&view)
-            .and_then(|round| round.proposal())
-            .map(|proposal| proposal.parent);
-        while let Some(parent) = cursor {
-            if parent == GENESIS_VIEW || self.is_directly_notarized(parent) {
-                break;
-            }
-            let Some(round) = self.views.get(&parent) else {
-                break;
-            };
-            if !round.has_unequivocated_proposal()
-                || !round.is_verified()
-                || !round.broadcast_notarize()
-            {
-                break;
-            }
-            let Some(proposal) = round.proposal() else {
-                break;
-            };
-            self.indirect_notarized.insert(parent);
-            cursor = Some(proposal.parent);
-        }
-    }
-
-    /// Rebuilds the indirect notarization cache from currently tracked direct certificates.
-    fn rebuild_indirect_views(&mut self) {
-        self.indirect_notarized.clear();
-        let directly_notarized = self
-            .views
-            .iter()
-            .filter_map(|(&view, round)| {
-                (round.notarization().is_some() || round.finalization().is_some()).then_some(view)
-            })
-            .collect::<Vec<_>>();
-        for view in directly_notarized {
-            self.mark_indirect_ancestors(view);
-        }
-    }
-
     /// Prepares the next round within the same term so stable leaders can chain proposals.
     fn prepare_optimistic_successor(&mut self, view: View) {
-        if !self.optimistic_validation_enabled() {
-            return;
-        }
         let next = view.next();
         if next.term_start(self.term_length) != view.term_start(self.term_length)
             || !self.within_optimistic_depth(next)
@@ -1058,7 +970,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             let parent = view
                 .previous()
                 .expect("non-genesis views must have a previous view");
-            let payload = if self.optimistic_validation_enabled_for(view) {
+            let payload = if self.within_optimistic_depth(view) {
                 self.notarized_parent_payload(parent)
             } else {
                 self.explicit_parent_payload(parent)
@@ -1139,7 +1051,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         // May return `None` if the parent view is not yet either:
         // - notarized and certified
         // - finalized
-        let payload = if self.optimistic_validation_enabled_for(view) {
+        let payload = if self.within_optimistic_depth(view) {
             self.notarized_parent_payload(parent)
         } else {
             self.explicit_parent_payload(parent)
@@ -2270,7 +2182,10 @@ mod tests {
             let (added, equivocator) = state.add_notarization(notarization);
             assert!(added);
             assert!(equivocator.is_none());
-            assert!(state.indirect_notarized.contains(&View::new(1)));
+            assert_eq!(
+                state.notarized_parent_payload(View::new(1)).copied(),
+                Some(Sha256Digest::from([101u8; 32]))
+            );
             let round = state.views.get(&View::new(1)).expect("ancestor round");
             assert!(round.proposal().is_some());
             assert!(round.is_verified());
@@ -2343,7 +2258,7 @@ mod tests {
                 Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap();
             assert!(state.add_notarization(notarization).0);
 
-            assert!(!state.indirect_notarized.contains(&View::new(2)));
+            assert!(state.notarized_parent_payload(View::new(2)).is_none());
         });
     }
 
@@ -2852,7 +2767,10 @@ mod tests {
             let notarization =
                 Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap();
             assert!(state.add_notarization(notarization.clone()).0);
-            assert!(state.indirect_notarized.contains(&View::new(1)));
+            assert_eq!(
+                state.notarized_parent_payload(View::new(1)).copied(),
+                Some(Sha256Digest::from([121u8; 32]))
+            );
 
             let mut restarted = State::new(
                 context.with_label("restarted"),
@@ -2875,7 +2793,6 @@ mod tests {
             restarted.add_notarization(notarization.clone());
             restarted.replay(&Artifact::Notarization(notarization));
 
-            assert!(restarted.indirect_notarized.contains(&View::new(1)));
             assert_eq!(
                 restarted.notarized_parent_payload(View::new(1)).copied(),
                 Some(Sha256Digest::from([121u8; 32]))
