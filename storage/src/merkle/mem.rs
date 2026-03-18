@@ -410,3 +410,754 @@ impl<F: Family, D: Digest> BatchChainInfo<F> for Mem<F, D> {
 
     fn collect_overwrites(&self, _into: &mut BTreeMap<Position<F>, D>) {}
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::merkle::{hasher::Standard, Error, Location, Position};
+    use commonware_cryptography::{sha256, Sha256};
+    use commonware_runtime::{deterministic, Runner as _, ThreadPooler};
+
+    type D = sha256::Digest;
+    type H = Standard<Sha256>;
+
+    fn build<F: Family>(hasher: &mut H, n: u64) -> Mem<F, D> {
+        let mut mem = Mem::new(hasher);
+        let changeset = {
+            let mut batch = mem.new_batch();
+            for i in 0u64..n {
+                let element = hasher.digest(&i.to_be_bytes());
+                batch = batch.add(hasher, &element);
+            }
+            batch.merkleize(hasher).finalize()
+        };
+        mem.apply(changeset).unwrap();
+        mem
+    }
+
+    /// Like [`build`] but uses raw `i.to_be_bytes()` as elements instead of hashing them first.
+    /// Tests that verify proof inclusion against `&i.to_be_bytes()` need this variant.
+    fn build_raw<F: Family>(hasher: &mut H, n: u64) -> Mem<F, D> {
+        let mut mem = Mem::new(hasher);
+        let changeset = {
+            let mut batch = mem.new_batch();
+            for i in 0u64..n {
+                batch = batch.add(hasher, &i.to_be_bytes());
+            }
+            batch.merkleize(hasher).finalize()
+        };
+        mem.apply(changeset).unwrap();
+        mem
+    }
+
+    fn empty<F: Family>() {
+        let mut hasher: H = Standard::new();
+        let mem = Mem::<F, D>::new(&mut hasher);
+        assert_eq!(*mem.leaves(), 0);
+        assert_eq!(*mem.size(), 0);
+        assert!(mem.bounds().is_empty());
+    }
+
+    fn validity<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher: H = Standard::new();
+            let mut mem = Mem::<F, D>::new(&mut hasher);
+            for i in 0u64..256 {
+                assert!(
+                    mem.size().is_valid_size(),
+                    "size should be valid at step {i}"
+                );
+                let old_size = mem.size();
+                let changeset = mem
+                    .new_batch()
+                    .add(&mut hasher, &i.to_be_bytes())
+                    .merkleize(&mut hasher)
+                    .finalize();
+                mem.apply(changeset).unwrap();
+                for size in *old_size + 1..*mem.size() {
+                    assert!(
+                        !Position::<F>::new(size).is_valid_size(),
+                        "size {size} should not be valid"
+                    );
+                }
+            }
+        });
+    }
+
+    fn prune_all_then_append<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher: H = Standard::new();
+            let mut mem = Mem::<F, D>::new(&mut hasher);
+            for i in 0u64..256 {
+                mem.prune_all();
+                let changeset = mem
+                    .new_batch()
+                    .add(&mut hasher, &i.to_be_bytes())
+                    .merkleize(&mut hasher)
+                    .finalize();
+                mem.apply(changeset).unwrap();
+                assert_eq!(*mem.leaves(), i + 1);
+            }
+        });
+    }
+
+    fn range_proof_out_of_bounds<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher: H = Standard::new();
+            let mem = Mem::<F, D>::new(&mut hasher);
+            assert!(matches!(
+                mem.range_proof(&mut hasher, Location::new(0)..Location::new(1)),
+                Err(Error::RangeOutOfBounds(_))
+            ));
+            let mem = build::<F>(&mut hasher, 10);
+            assert!(matches!(
+                mem.range_proof(&mut hasher, Location::new(5)..Location::new(11)),
+                Err(Error::RangeOutOfBounds(_))
+            ));
+            assert!(mem
+                .range_proof(&mut hasher, Location::new(5)..Location::new(10))
+                .is_ok());
+        });
+    }
+
+    fn proof_out_of_bounds<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher: H = Standard::new();
+            let mem = Mem::<F, D>::new(&mut hasher);
+            assert!(matches!(
+                mem.proof(&mut hasher, Location::new(0)),
+                Err(Error::LeafOutOfBounds(_))
+            ));
+            let mem = build::<F>(&mut hasher, 10);
+            assert!(matches!(
+                mem.proof(&mut hasher, Location::new(10)),
+                Err(Error::LeafOutOfBounds(_))
+            ));
+            assert!(mem.proof(&mut hasher, Location::new(9)).is_ok());
+        });
+    }
+
+    fn init_pinned_nodes_validation<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher: H = Standard::new();
+
+            // Empty config succeeds.
+            assert!(Mem::<F, D>::init(
+                Config {
+                    nodes: vec![],
+                    pruned_to: Location::new(0),
+                    pinned_nodes: vec![],
+                },
+                &mut hasher,
+            )
+            .is_ok());
+
+            // Pruned but no pinned nodes fails.
+            assert!(matches!(
+                Mem::<F, D>::init(
+                    Config {
+                        nodes: vec![],
+                        pruned_to: Location::new(8),
+                        pinned_nodes: vec![],
+                    },
+                    &mut hasher,
+                ),
+                Err(Error::InvalidPinnedNodes)
+            ));
+
+            // Extra pinned nodes with no pruning fails.
+            assert!(matches!(
+                Mem::<F, D>::init(
+                    Config {
+                        nodes: vec![],
+                        pruned_to: Location::new(0),
+                        pinned_nodes: vec![hasher.digest(b"dummy")],
+                    },
+                    &mut hasher,
+                ),
+                Err(Error::InvalidPinnedNodes)
+            ));
+
+            // Correct pinned nodes from a built structure succeed.
+            let mem = build::<F>(&mut hasher, 50);
+            let prune_loc = Location::<F>::new(25);
+            let prune_pos = Position::try_from(prune_loc).unwrap();
+            let pinned_nodes = mem.node_digests_to_pin(prune_pos);
+            assert!(Mem::<F, D>::init(
+                Config {
+                    nodes: vec![],
+                    pruned_to: prune_loc,
+                    pinned_nodes,
+                },
+                &mut hasher,
+            )
+            .is_ok());
+        });
+    }
+
+    fn root_stable_under_pruning<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher: H = Standard::new();
+            let mut reference = Mem::<F, D>::new(&mut hasher);
+            let mut pruned = Mem::<F, D>::new(&mut hasher);
+            for i in 0u64..200 {
+                let element = hasher.digest(&i.to_be_bytes());
+                let cs = reference
+                    .new_batch()
+                    .add(&mut hasher, &element)
+                    .merkleize(&mut hasher)
+                    .finalize();
+                reference.apply(cs).unwrap();
+                let cs = pruned
+                    .new_batch()
+                    .add(&mut hasher, &element)
+                    .merkleize(&mut hasher)
+                    .finalize();
+                pruned.apply(cs).unwrap();
+                pruned.prune_all();
+                assert_eq!(pruned.root(), reference.root());
+            }
+        });
+    }
+
+    fn do_batch_update<F: Family>(
+        hasher: &mut H,
+        mut mem: Mem<F, D>,
+        pool: Option<commonware_parallel::ThreadPool>,
+    ) {
+        let element = D::from(*b"01234567012345670123456701234567");
+        let root = *mem.root();
+
+        let changeset = {
+            let mut batch = mem.new_batch();
+            if let Some(ref pool) = pool {
+                batch = batch.with_pool(Some(pool.clone()));
+            }
+            for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
+                batch = batch
+                    .update_leaf(hasher, Location::new(leaf), &element)
+                    .unwrap();
+            }
+            batch.merkleize(hasher).finalize()
+        };
+        mem.apply(changeset).unwrap();
+        assert_ne!(*mem.root(), root);
+
+        let changeset = {
+            let mut batch = mem.new_batch();
+            for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
+                let element = hasher.digest(&leaf.to_be_bytes());
+                batch = batch
+                    .update_leaf(hasher, Location::new(leaf), &element)
+                    .unwrap();
+            }
+            batch.merkleize(hasher).finalize()
+        };
+        mem.apply(changeset).unwrap();
+        assert_eq!(*mem.root(), root);
+    }
+
+    fn batch_update_leaf<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let mut hasher: H = Standard::new();
+            let mem = build::<F>(&mut hasher, 200);
+            do_batch_update(&mut hasher, mem, None);
+        });
+    }
+
+    fn batch_parallel_update_leaf<F: Family>() {
+        let executor = commonware_runtime::tokio::Runner::default();
+        executor.start(|ctx| async move {
+            let mut hasher: H = Standard::new();
+            let mem = build::<F>(&mut hasher, 200);
+            let pool = ctx
+                .create_thread_pool(commonware_utils::NZUsize!(4))
+                .unwrap();
+            do_batch_update(&mut hasher, mem, Some(pool));
+        });
+    }
+
+    fn root_changes_with_each_append<F: Family>() {
+        let mut hasher: H = Standard::new();
+        let mut mem = Mem::<F, D>::new(&mut hasher);
+        let mut prev_root = *mem.root();
+        for i in 0u64..16 {
+            let changeset = {
+                let batch = mem.new_batch();
+                let batch = batch.add(&mut hasher, &i.to_be_bytes());
+                batch.merkleize(&mut hasher).finalize()
+            };
+            mem.apply(changeset).unwrap();
+            assert_ne!(
+                *mem.root(),
+                prev_root,
+                "root should change after append {i}"
+            );
+            prev_root = *mem.root();
+        }
+    }
+
+    fn single_element_proof_roundtrip<F: Family>() {
+        let mut hasher: H = Standard::new();
+        let mem = build_raw::<F>(&mut hasher, 16);
+        let root = *mem.root();
+        for i in 0u64..16 {
+            let proof = mem
+                .proof(&mut hasher, Location::new(i))
+                .unwrap_or_else(|e| panic!("loc={i}: {e:?}"));
+            assert!(
+                proof.verify_element_inclusion(
+                    &mut hasher,
+                    &i.to_be_bytes(),
+                    Location::new(i),
+                    &root
+                ),
+                "loc={i}: proof should verify"
+            );
+        }
+    }
+
+    fn range_proof_roundtrip_exhaustive<F: Family>() {
+        for n in 1u64..=24 {
+            let mut hasher: H = Standard::new();
+            let mem = build_raw::<F>(&mut hasher, n);
+            let root = *mem.root();
+
+            for start in 0..n {
+                for end in start + 1..=n {
+                    let range = Location::new(start)..Location::new(end);
+                    let proof = mem
+                        .range_proof(&mut hasher, range.clone())
+                        .unwrap_or_else(|e| panic!("n={n}, range={start}..{end}: {e:?}"));
+                    let elements: Vec<_> = (start..end).map(|i| i.to_be_bytes()).collect();
+
+                    assert!(
+                        proof.verify_range_inclusion(&mut hasher, &elements, range.start, &root),
+                        "n={n}, range={start}..{end}: range proof should verify"
+                    );
+                }
+            }
+        }
+    }
+
+    fn root_with_repeated_pruning<F: Family>() {
+        let mut hasher: H = Standard::new();
+        let mut mem = build::<F>(&mut hasher, 32);
+        let root = *mem.root();
+
+        for prune_leaf in 1..*mem.leaves() {
+            let prune_loc = Location::new(prune_leaf);
+            mem.prune(prune_loc).unwrap();
+            assert_eq!(
+                *mem.root(),
+                root,
+                "root changed after pruning to {prune_loc}"
+            );
+            assert_eq!(mem.bounds().start, prune_loc);
+            assert!(
+                mem.proof(&mut hasher, prune_loc).is_ok(),
+                "boundary leaf {prune_loc} should remain provable"
+            );
+            assert!(
+                mem.proof(&mut hasher, mem.leaves() - 1).is_ok(),
+                "latest leaf should remain provable after pruning to {prune_loc}"
+            );
+        }
+
+        mem.prune_all();
+        assert_eq!(*mem.root(), root, "root changed after prune_all");
+        assert!(mem.bounds().is_empty(), "prune_all should retain no leaves");
+    }
+
+    fn append_after_partial_prune<F: Family>() {
+        let mut hasher: H = Standard::new();
+        let mut mem = build_raw::<F>(&mut hasher, 20);
+        mem.prune(Location::new(7)).unwrap();
+
+        let changeset = {
+            let mut batch = mem.new_batch();
+            for i in 20u64..48 {
+                batch = batch.add(&mut hasher, &i.to_be_bytes());
+            }
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mem.apply(changeset).unwrap();
+
+        let root = *mem.root();
+        for loc in *mem.bounds().start..*mem.leaves() {
+            let proof = mem
+                .proof(&mut hasher, Location::new(loc))
+                .unwrap_or_else(|e| panic!("loc={loc}: {e:?}"));
+            assert!(
+                proof.verify_element_inclusion(
+                    &mut hasher,
+                    &loc.to_be_bytes(),
+                    Location::new(loc),
+                    &root
+                ),
+                "loc={loc}: proof should verify after append on pruned structure"
+            );
+        }
+    }
+
+    fn update_leaf<F: Family>() {
+        let mut hasher: H = Standard::new();
+        let mut mem = build_raw::<F>(&mut hasher, 11);
+        let root_before = *mem.root();
+
+        // Update leaf 5 with new data.
+        let changeset = {
+            let batch = mem.new_batch();
+            let batch = batch
+                .update_leaf(&mut hasher, Location::new(5), b"updated-5")
+                .unwrap();
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mem.apply(changeset).unwrap();
+
+        // Root should change.
+        assert_ne!(*mem.root(), root_before, "root should change after update");
+
+        // Size and leaves should not change.
+        assert_eq!(*mem.leaves(), 11);
+
+        // The updated leaf should be provable with the new data.
+        let proof = mem.proof(&mut hasher, Location::new(5)).unwrap();
+        assert!(
+            proof.verify_element_inclusion(&mut hasher, b"updated-5", Location::new(5), mem.root()),
+            "updated leaf should verify with new data"
+        );
+
+        // The old data should no longer verify.
+        assert!(
+            !proof.verify_element_inclusion(
+                &mut hasher,
+                &5u64.to_be_bytes(),
+                Location::new(5),
+                mem.root()
+            ),
+            "old data should not verify"
+        );
+
+        // Other leaves should still verify with their original data.
+        for i in [0u64, 3, 7, 10] {
+            let p = mem.proof(&mut hasher, Location::new(i)).unwrap();
+            assert!(
+                p.verify_element_inclusion(
+                    &mut hasher,
+                    &i.to_be_bytes(),
+                    Location::new(i),
+                    mem.root()
+                ),
+                "leaf {i} should still verify with original data"
+            );
+        }
+    }
+
+    fn update_leaf_every_position<F: Family>() {
+        // Update each leaf one at a time and verify the entire tree after each update.
+        let n = 20u64;
+        let mut hasher: H = Standard::new();
+        let mut mem = build::<F>(&mut hasher, n);
+
+        for update_loc in 0..n {
+            let changeset = {
+                let batch = mem.new_batch();
+                let batch = batch
+                    .update_leaf(&mut hasher, Location::new(update_loc), b"new-value")
+                    .unwrap();
+                batch.merkleize(&mut hasher).finalize()
+            };
+            mem.apply(changeset).unwrap();
+
+            // The updated leaf should verify.
+            let proof = mem.proof(&mut hasher, Location::new(update_loc)).unwrap();
+            assert!(
+                proof.verify_element_inclusion(
+                    &mut hasher,
+                    b"new-value",
+                    Location::new(update_loc),
+                    mem.root()
+                ),
+                "update at {update_loc} should verify"
+            );
+        }
+    }
+
+    fn update_leaf_errors<F: Family>() {
+        let mut hasher: H = Standard::new();
+        let mut mem = build::<F>(&mut hasher, 10);
+
+        // Out of bounds.
+        {
+            let batch = mem.new_batch();
+            assert!(matches!(
+                batch.update_leaf(&mut hasher, Location::new(10), b"x"),
+                Err(Error::LeafOutOfBounds(_))
+            ));
+        }
+
+        // Pruned leaf.
+        mem.prune(Location::new(5)).unwrap();
+        {
+            let batch = mem.new_batch();
+            assert!(matches!(
+                batch.update_leaf(&mut hasher, Location::new(3), b"x"),
+                Err(Error::ElementPruned(_))
+            ));
+            // Boundary leaf should succeed.
+            let batch = mem.new_batch();
+            assert!(batch
+                .update_leaf(&mut hasher, Location::new(5), b"x")
+                .is_ok());
+        }
+    }
+
+    fn update_leaf_with_append<F: Family>() {
+        let mut hasher: H = Standard::new();
+        let mut mem = build::<F>(&mut hasher, 8);
+
+        // Update an existing leaf and append new ones in the same batch.
+        let changeset = {
+            let batch = mem.new_batch();
+            let batch = batch
+                .update_leaf(&mut hasher, Location::new(3), b"updated-3")
+                .unwrap();
+            let batch = batch.add(&mut hasher, &100u64.to_be_bytes());
+            let batch = batch.add(&mut hasher, &101u64.to_be_bytes());
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mem.apply(changeset).unwrap();
+
+        assert_eq!(*mem.leaves(), 10);
+
+        // Updated leaf verifies.
+        let proof = mem.proof(&mut hasher, Location::new(3)).unwrap();
+        assert!(proof.verify_element_inclusion(
+            &mut hasher,
+            b"updated-3",
+            Location::new(3),
+            mem.root()
+        ));
+
+        // New leaves verify.
+        let proof = mem.proof(&mut hasher, Location::new(8)).unwrap();
+        assert!(proof.verify_element_inclusion(
+            &mut hasher,
+            &100u64.to_be_bytes(),
+            Location::new(8),
+            mem.root()
+        ));
+    }
+
+    /// Regression: add then update_leaf in the same batch where the updated leaf falls within the
+    /// merge parent's subtree.
+    fn update_leaf_under_merge_parent<F: Family>() {
+        // Start with 2 leaves so the next add triggers a merge of the two height-0 peaks.
+        // After adding leaf 2, the merge creates a height-1 parent. Then we update leaf 0,
+        // which is a child of that merge parent.
+        let mut hasher: H = Standard::new();
+        let mut mem = build::<F>(&mut hasher, 2);
+        let changeset = {
+            let batch = mem.new_batch();
+            let batch = batch.add(&mut hasher, &2u64.to_be_bytes());
+            let batch = batch
+                .update_leaf(&mut hasher, Location::new(0), b"updated-0")
+                .unwrap();
+            batch.merkleize(&mut hasher).finalize()
+        };
+        mem.apply(changeset).unwrap();
+
+        // Build a reference structure with the same operations applied separately.
+        let mut ref_hasher: H = Standard::new();
+        let mut ref_mem = build::<F>(&mut ref_hasher, 2);
+        let cs = {
+            let batch = ref_mem.new_batch();
+            let batch = batch.add(&mut ref_hasher, &2u64.to_be_bytes());
+            batch.merkleize(&mut ref_hasher).finalize()
+        };
+        ref_mem.apply(cs).unwrap();
+        let cs = {
+            let batch = ref_mem.new_batch();
+            let batch = batch
+                .update_leaf(&mut ref_hasher, Location::new(0), b"updated-0")
+                .unwrap();
+            batch.merkleize(&mut ref_hasher).finalize()
+        };
+        ref_mem.apply(cs).unwrap();
+
+        assert_eq!(*mem.root(), *ref_mem.root(), "roots must match");
+
+        // Updated leaf should verify.
+        let proof = mem.proof(&mut hasher, Location::new(0)).unwrap();
+        assert!(
+            proof.verify_element_inclusion(&mut hasher, b"updated-0", Location::new(0), mem.root()),
+            "updated leaf should verify"
+        );
+    }
+
+    // --- MMR tests ---
+
+    #[test]
+    fn mmr_empty() {
+        empty::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_validity() {
+        validity::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_prune_all_then_append() {
+        prune_all_then_append::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_range_proof_oob() {
+        range_proof_out_of_bounds::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_proof_oob() {
+        proof_out_of_bounds::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_init_pinned_nodes() {
+        init_pinned_nodes_validation::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_root_stable_under_pruning() {
+        root_stable_under_pruning::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_batch_update_leaf() {
+        batch_update_leaf::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_batch_parallel_update_leaf() {
+        batch_parallel_update_leaf::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_root_changes_with_each_append() {
+        root_changes_with_each_append::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_single_element_proof_roundtrip() {
+        single_element_proof_roundtrip::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_range_proof_roundtrip_exhaustive() {
+        range_proof_roundtrip_exhaustive::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_root_with_repeated_pruning() {
+        root_with_repeated_pruning::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_append_after_partial_prune() {
+        append_after_partial_prune::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_update_leaf() {
+        update_leaf::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_update_leaf_every_position() {
+        update_leaf_every_position::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_update_leaf_errors() {
+        update_leaf_errors::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_update_leaf_with_append() {
+        update_leaf_with_append::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_update_leaf_under_merge_parent() {
+        update_leaf_under_merge_parent::<crate::mmr::Family>();
+    }
+
+    // --- MMB tests ---
+
+    #[test]
+    fn mmb_empty() {
+        empty::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_validity() {
+        validity::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_prune_all_then_append() {
+        prune_all_then_append::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_range_proof_oob() {
+        range_proof_out_of_bounds::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_proof_oob() {
+        proof_out_of_bounds::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_init_pinned_nodes() {
+        init_pinned_nodes_validation::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_root_stable_under_pruning() {
+        root_stable_under_pruning::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_batch_update_leaf() {
+        batch_update_leaf::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_batch_parallel_update_leaf() {
+        batch_parallel_update_leaf::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_root_changes_with_each_append() {
+        root_changes_with_each_append::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_single_element_proof_roundtrip() {
+        single_element_proof_roundtrip::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_range_proof_roundtrip_exhaustive() {
+        range_proof_roundtrip_exhaustive::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_root_with_repeated_pruning() {
+        root_with_repeated_pruning::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_append_after_partial_prune() {
+        append_after_partial_prune::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_update_leaf() {
+        update_leaf::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_update_leaf_every_position() {
+        update_leaf_every_position::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_update_leaf_errors() {
+        update_leaf_errors::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_update_leaf_with_append() {
+        update_leaf_with_append::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_update_leaf_under_merge_parent() {
+        update_leaf_under_merge_parent::<crate::mmb::Family>();
+    }
+}

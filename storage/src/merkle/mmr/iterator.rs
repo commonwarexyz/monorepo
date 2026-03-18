@@ -3,7 +3,6 @@
 //! new MMR variants or extensions.
 
 use crate::merkle::mmr::{Family, Position};
-use alloc::vec::Vec;
 
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
 /// in decreasing order of height.
@@ -109,32 +108,6 @@ impl Iterator for PeakIterator {
         }
         None
     }
-}
-
-/// Returns the set of peaks that will require a new parent after adding the next leaf to an MMR
-/// with the given peaks. This set is non-empty only if there is a height-0 (leaf) peak in the MMR.
-/// The result will contain this leaf peak plus the other MMR peaks with contiguously increasing
-/// height. Nodes in the result are ordered by decreasing height.
-pub(crate) fn nodes_needing_parents(
-    peak_iterator: impl Iterator<Item = (Position, u32)>,
-) -> Vec<Position> {
-    let mut peaks = Vec::new();
-    let mut last_height = u32::MAX;
-
-    for (peak_pos, height) in peak_iterator {
-        assert!(last_height > 0);
-        assert!(height < last_height);
-        if height != last_height - 1 {
-            peaks.clear();
-        }
-        peaks.push(peak_pos);
-        last_height = height;
-    }
-    if last_height != 0 {
-        // there is no peak that is a leaf
-        peaks.clear();
-    }
-    peaks
 }
 
 /// Returns the height of the node at position `pos` in an MMR.

@@ -183,6 +183,17 @@ impl merkle::Family for Family {
     fn is_valid_size(size: Position) -> bool {
         iterator::leaves_for_size(size).is_some()
     }
+
+    fn append_parents(size: Position) -> impl Iterator<Item = u32> {
+        let loc = Location::try_from(size).expect("invalid mmb size");
+        let leaf = loc.as_u64();
+        let height = if (leaf + 2).is_power_of_two() {
+            None
+        } else {
+            Some((leaf + 1).trailing_ones() + 1)
+        };
+        height.into_iter()
+    }
 }
 
 /// A node index or node count in an MMB.
@@ -195,3 +206,41 @@ pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 
 /// Errors that can occur during MMB operations.
 pub type Error = merkle::Error<Family>;
+
+#[cfg(test)]
+mod tests {
+    use super::Position;
+
+    /// Verify the MMB merge schedule via `Family::append_parents`.
+    #[test]
+    fn test_append_parents_schedule() {
+        let expected: [Option<u32>; 16] = [
+            None,    // loc=0:  0+2=2=2^1
+            Some(1), // loc=1
+            None,    // loc=2:  2+2=4=2^2
+            Some(1), // loc=3
+            Some(2), // loc=4
+            Some(1), // loc=5
+            None,    // loc=6:  6+2=8=2^3
+            Some(1), // loc=7
+            Some(2), // loc=8
+            Some(1), // loc=9
+            Some(3), // loc=10
+            Some(1), // loc=11
+            Some(2), // loc=12
+            Some(1), // loc=13
+            None,    // loc=14: 14+2=16=2^4
+            Some(1), // loc=15
+        ];
+
+        for (i, expected) in expected.iter().enumerate() {
+            let size = if i == 0 {
+                Position::new(0)
+            } else {
+                Position::new(2 * i as u64 - (i as u64 + 1).ilog2() as u64)
+            };
+            let height: Option<u32> = crate::merkle::Family::append_parents(size).next();
+            assert_eq!(height, *expected, "mismatch at loc={i}");
+        }
+    }
+}
