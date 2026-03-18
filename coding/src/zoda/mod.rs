@@ -127,6 +127,7 @@ use commonware_math::{
 };
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{Builder as BmtBuilder, Error as BmtError, Proof};
+use commonware_utils::bitmap::BitMap;
 use rand::seq::SliceRandom as _;
 use std::{marker::PhantomData, sync::Arc};
 use thiserror::Error;
@@ -663,20 +664,26 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         let data_bytes = topology.data_bytes;
         let min_shards = topology.min_shards;
         let mut evaluation = EvaluationVector::<F>::empty(encoded_rows.ilog2() as usize, data_cols);
-        let mut shard_count = 0usize;
+        let mut seen_indices: BitMap = BitMap::zeroes(topology.total_shards as u64);
+        let mut unique_shards = 0usize;
         for shard in shards {
-            shard_count += 1;
             if shard.commitment != *commitment {
                 return Err(Error::BadShard);
             }
+            let shard_index = shard.index as u64;
+            if seen_indices.get(shard_index) {
+                continue;
+            }
+            seen_indices.set(shard_index, true);
+            unique_shards += 1;
             let indices =
                 &checking_data.shuffled_indices[shard.index * samples..(shard.index + 1) * samples];
             for (&i, row) in indices.iter().zip(shard.shard.iter()) {
                 evaluation.fill_row(u64::from(i) as usize, row);
             }
         }
-        if shard_count < min_shards {
-            return Err(Error::InsufficientShards(shard_count, min_shards));
+        if unique_shards < min_shards {
+            return Err(Error::InsufficientShards(unique_shards, min_shards));
         }
         // This should never happen, because we check each shard, and the shards
         // should have distinct rows. But, as a sanity check, this doesn't hurt.
@@ -714,7 +721,36 @@ mod tests {
     const STRATEGY: Sequential = Sequential;
 
     #[test]
-    fn decode_rejects_duplicate_indices() {
+    fn decode_ignores_duplicate_indices() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let data = b"duplicate shard coverage";
+        let (commitment, shards) = Zoda::<Sha256>::encode(&config, &data[..], &STRATEGY).unwrap();
+        let shard0 = shards[0].clone();
+        let (checking_data, checked_shard0, _weak_shard0) =
+            Zoda::<Sha256>::weaken(&config, &commitment, 0, shard0).unwrap();
+        let (_, checked_shard1, _weak_shard1) =
+            Zoda::<Sha256>::weaken(&config, &commitment, 1, shards[1].clone()).unwrap();
+        let duplicate = CheckedShard {
+            index: checked_shard0.index,
+            shard: checked_shard0.shard.clone(),
+            commitment: checked_shard0.commitment,
+        };
+        let shards = [checked_shard0, duplicate, checked_shard1];
+        let decoded = Zoda::<Sha256>::decode(
+            &config,
+            &commitment,
+            checking_data,
+            shards.iter(),
+            &STRATEGY,
+        )
+        .unwrap();
+        assert_eq!(decoded, data);
+    }
+    #[test]
+    fn decode_requires_unique_shards() {
         let config = Config {
             minimum_shards: NZU16!(2),
             extra_shards: NZU16!(1),
@@ -738,12 +774,7 @@ mod tests {
             shards.iter(),
             &STRATEGY,
         );
-        match result {
-            Err(Error::InsufficientUniqueRows(actual, expected)) => {
-                assert!(actual < expected);
-            }
-            other => panic!("expected insufficient unique rows error, got {other:?}"),
-        }
+        assert!(matches!(result, Err(Error::InsufficientShards(1, 2))));
     }
 
     #[test]
