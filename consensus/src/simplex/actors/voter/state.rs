@@ -302,10 +302,11 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Constructs a nullify vote for `view`, if eligible.
     pub fn construct_nullify(&mut self, view: View) -> Option<(bool, Nullify<S>)> {
-        if !self
-            .views
-            .get(&view)
-            .is_some_and(|round| round.has_timeout_reason())
+        if view != self.view
+            && !self
+                .views
+                .get(&view)
+                .is_some_and(|round| round.has_timeout_reason())
         {
             return None;
         }

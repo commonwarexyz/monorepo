@@ -4316,8 +4316,8 @@ mod tests {
             };
 
             assert!(
-                emitted_nullify,
-                "expected nullify vote when exiting view via nullification certificate"
+                !emitted_nullify,
+                "should not emit a nullify vote when exiting view via nullification certificate"
             );
         });
     }
