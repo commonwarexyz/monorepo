@@ -375,6 +375,123 @@ pub(crate) use dispatch_arm;
 pub(crate) use with_fixed_db;
 pub(crate) use with_variable_db;
 
+/// Internal helper: construct a db from a pre-built config, bind it, execute body.
+macro_rules! dispatch_arm_with_cfg {
+    ($ctx:expr, $db:ident, $body:expr, $DbType:ty, $cfg:expr) => {{
+        #[allow(unused_mut)]
+        let mut $db = <$DbType>::init($ctx.clone(), $cfg.clone()).await.unwrap();
+        $body
+    }};
+}
+
+/// Like `with_fixed_db!` but takes pre-built configs to avoid rebuilding them each call.
+macro_rules! with_fixed_db_cfg {
+    ($ctx:expr, $variant:expr, $any_fixed:expr, $current_fixed:expr,
+     $any_var:expr, $current_var:expr, |mut $db:ident| $body:expr) => {{
+        use $crate::common::FixedVariant::*;
+        match $variant {
+            AnyUnorderedFixed => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::UFixedDb,
+                $any_fixed
+            ),
+            AnyOrderedFixed => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::OFixedDb,
+                $any_fixed
+            ),
+            AnyUnorderedVariable => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::UVAnyDb,
+                $any_var
+            ),
+            AnyOrderedVariable => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::OVAnyDb,
+                $any_var
+            ),
+            CurrentUnorderedFixed => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::UCFixedDb,
+                $current_fixed
+            ),
+            CurrentOrderedFixed => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::OCFixedDb,
+                $current_fixed
+            ),
+            CurrentUnorderedVariable => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::UCVFixedDb,
+                $current_var
+            ),
+            CurrentOrderedVariable => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::OCVFixedDb,
+                $current_var
+            ),
+        }
+    }};
+}
+
+/// Like `with_variable_db!` but takes pre-built configs to avoid rebuilding them each call.
+macro_rules! with_variable_db_cfg {
+    ($ctx:expr, $variant:expr, $any_var:expr, $current_var:expr,
+     |mut $db:ident| $body:expr) => {{
+        use $crate::common::VariableVariant::*;
+        match $variant {
+            AnyUnordered => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::UVarDb,
+                $any_var
+            ),
+            AnyOrdered => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::OVarDb,
+                $any_var
+            ),
+            CurrentUnordered => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::UCVarDb,
+                $current_var
+            ),
+            CurrentOrdered => $crate::common::dispatch_arm_with_cfg!(
+                $ctx,
+                $db,
+                $body,
+                $crate::common::OCVarDb,
+                $current_var
+            ),
+        }
+    }};
+}
+
+pub(crate) use dispatch_arm_with_cfg;
+pub(crate) use with_fixed_db_cfg;
+pub(crate) use with_variable_db_cfg;
+
 // -- Data generation --
 
 /// Seed a database with `num_elements` entries, then perform `num_operations` random

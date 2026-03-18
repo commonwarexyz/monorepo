@@ -4,7 +4,9 @@
 //! from the generation benchmarks so they can be filtered easily.
 
 use crate::common::{
-    gen_random_kv, make_fixed_value, make_variable_value, with_fixed_db, with_variable_db, Digest,
+    any_fixed_cfg, current_fixed_cfg, gen_random_kv, make_fixed_value, make_variable_value,
+    variable_any_cfg, variable_any_vec_cfg, variable_current_cfg, variable_current_vec_cfg,
+    with_fixed_db, with_fixed_db_cfg, with_variable_db, with_variable_db_cfg, Digest,
     FIXED_VARIANTS, VARIABLE_VARIANTS,
 };
 use commonware_runtime::{
@@ -65,9 +67,13 @@ fn bench_fixed_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
+                            let af = any_fixed_cfg(&ctx);
+                            let cf = current_fixed_cfg(&ctx);
+                            let av = variable_any_cfg(&ctx);
+                            let cv = variable_current_cfg(&ctx);
                             let start = Instant::now();
                             for _ in 0..iters {
-                                with_fixed_db!(ctx, variant, |mut db| {
+                                with_fixed_db_cfg!(ctx, variant, af, cf, av, cv, |mut db| {
                                     assert_ne!(db.bounds().await.end, 0);
                                 });
                             }
@@ -110,9 +116,11 @@ fn bench_variable_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
+                            let av = variable_any_vec_cfg(&ctx);
+                            let cv = variable_current_vec_cfg(&ctx);
                             let start = Instant::now();
                             for _ in 0..iters {
-                                with_variable_db!(ctx, variant, |mut db| {
+                                with_variable_db_cfg!(ctx, variant, av, cv, |mut db| {
                                     assert_ne!(db.bounds().await.end, 0);
                                 });
                             }
