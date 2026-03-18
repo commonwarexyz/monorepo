@@ -543,7 +543,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
 
         let round = self.views.get(&view)?;
-        if !self.is_notarized(view) || !round.can_construct_finalize() || !round.is_certified() {
+        if !self.is_notarized(view) || !round.is_certified() {
             return None;
         }
         if view != view.term_start(self.term_length) {
@@ -554,11 +554,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 return None;
             }
         }
-        let candidate = round.proposal().cloned()?;
-        self.views
+        let candidate = self
+            .views
             .get_mut(&view)
             .expect("view must exist")
-            .mark_finalize_broadcast();
+            .construct_finalize()?
+            .clone();
 
         // Signing can only fail if we are a verifier, so we don't need to worry about
         // unwinding our broadcast toggle.

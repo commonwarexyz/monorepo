@@ -522,9 +522,17 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns a proposal candidate for finalization if we're ready to vote.
     ///
     /// Marks that we've broadcast our finalize vote to prevent duplicates.
-    #[cfg(test)]
     pub fn construct_finalize(&mut self) -> Option<&Proposal<D>> {
-        if !self.can_construct_finalize() {
+        // Ensure we haven't already broadcast a finalize vote or nullify vote.
+        if self.broadcast_finalize || self.broadcast_nullify {
+            return None;
+        }
+        // Even if we've already seen a finalization, we are still willing to broadcast
+        // our finalize vote in case someone is recording our activity.
+
+        // If we have a proposal and we have not yet detected equivocation, we are willing
+        // to consider constructing a finalize vote.
+        if !self.proposal.has_unequivocated_proposal() {
             return None;
         }
 
@@ -535,29 +543,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
         self.broadcast_finalize = true;
         self.proposal.proposal()
-    }
-
-    /// Returns true if this round may emit a finalize vote.
-    pub fn can_construct_finalize(&self) -> bool {
-        // Ensure we haven't already broadcast a finalize vote or nullify vote.
-        if self.broadcast_finalize || self.broadcast_nullify {
-            return false;
-        }
-        // Even if we've already seen a finalization, we are still willing to broadcast
-        // our finalize vote in case someone is recording our activity.
-
-        // If we have a proposal and we have not yet detected equivocation, we are willing
-        // to consider constructing a finalize vote.
-        if !self.proposal.has_unequivocated_proposal() {
-            return false;
-        }
-
-        true
-    }
-
-    /// Marks that we broadcast a finalize vote.
-    pub const fn mark_finalize_broadcast(&mut self) {
-        self.broadcast_finalize = true;
     }
 
     pub fn replay(&mut self, artifact: &Artifact<S, D>) {
