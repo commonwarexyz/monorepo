@@ -1,9 +1,11 @@
 use crate::{
     bls12381::primitives::group::{Scalar, G1},
-    ed25519, Secret,
+    ed25519,
+    transcript::Transcript,
+    Secret,
 };
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, Write};
+use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
 use commonware_utils::{hex, ordered::Map, union_unique, Array, Span};
 use core::{
@@ -11,8 +13,10 @@ use core::{
     hash::Hash,
     ops::Deref,
 };
+use curve25519_dalek::edwards::CompressedEdwardsY;
 use ed25519_consensus::VerificationKey;
 use rand_core::CryptoRngCore;
+use sha2::{Digest, Sha512};
 
 const PUBLIC_KEY_LENGTH: usize = 32;
 
@@ -41,8 +45,10 @@ impl crate::Signer for PrivateKey {
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
         let payload = union_unique(namespace, msg);
-        self.inner
-            .expose(|key| ed25519::Signature::from(key.sign(&payload)))
+        self.inner.expose(|key| {
+            let sig = key.sign(&payload);
+            ed25519::Signature::read(&mut &sig.to_bytes()[..]).expect("valid 64-byte signature")
+        })
     }
 }
 
@@ -50,6 +56,31 @@ impl PrivateKey {
     /// Get the [`PublicKey`] associated with this private key.
     pub fn public(&self) -> PublicKey {
         crate::Signer::public_key(self)
+    }
+
+    fn diffie_hellman(&self, public: &PublicKey, transcript: &mut Transcript) {
+        // Convert our ed25519 seed to an x25519 static secret.
+        // Ed25519 derives the scalar via SHA-512(seed)[0..32]; x25519 StaticSecret
+        // applies its own clamping on top of these bytes.
+        let x25519_secret = self.inner.expose(|key| {
+            let hash = Sha512::digest(key.as_bytes());
+            let mut scalar_bytes = [0u8; 32];
+            scalar_bytes.copy_from_slice(&hash[..32]);
+            x25519_dalek::StaticSecret::from(scalar_bytes)
+        });
+
+        // Convert the ed25519 public key (compressed Edwards Y) to an x25519
+        // public key (Montgomery U-coordinate).
+        let edwards =
+            CompressedEdwardsY::from_slice(public.as_ref()).expect("public key is 32 bytes");
+        let montgomery = edwards
+            .decompress()
+            .expect("valid ed25519 public key decompresses")
+            .to_montgomery();
+        let x25519_public = x25519_dalek::PublicKey::from(montgomery.to_bytes());
+
+        let shared = x25519_secret.diffie_hellman(&x25519_public);
+        transcript.commit(shared.as_bytes().as_slice());
     }
 
     /// Compute the VRF output between ourselves and the receiver, for a given message.
