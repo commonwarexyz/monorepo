@@ -173,6 +173,7 @@ impl<
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
                 term_length: cfg.term_length,
+                optimistic_depth: cfg.optimistic_depth,
             },
         );
         (
@@ -363,10 +364,7 @@ impl<
         // Attempt to broadcast a nullify vote for the current view (as many times as required
         // until we exit the view)
         let view = self.state.current_view();
-        let Some(retry) = self
-            .try_broadcast_nullify(batcher, vote_sender, view, true)
-            .await
-        else {
+        let Some(retry) = self.try_broadcast_nullify(batcher, vote_sender, view).await else {
             return;
         };
 
@@ -533,17 +531,13 @@ impl<
     }
 
     /// Broadcast a nullify vote for `view` if the state machine allows it.
-    ///
-    /// When `timeout` is true, this uses timeout semantics (current view only, retries allowed).
-    /// When `timeout` is false, this uses certificate semantics (requires nullification for `view`).
     async fn try_broadcast_nullify<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
-        timeout: bool,
     ) -> Option<bool> {
-        let (was_retry, nullify) = self.state.construct_nullify(view, timeout)?;
+        let (was_retry, nullify) = self.state.construct_nullify(view)?;
         self.broadcast_nullify(batcher, vote_sender, was_retry, nullify)
             .await;
         Some(was_retry)
@@ -676,8 +670,7 @@ impl<
             .await;
         self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
             .await;
-        self.try_broadcast_nullify(batcher, vote_sender, view, false)
-            .await;
+        self.try_broadcast_nullify(batcher, vote_sender, view).await;
         self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
             .await;
         self.try_broadcast_finalize(batcher, vote_sender, view)

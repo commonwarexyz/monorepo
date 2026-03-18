@@ -330,6 +330,7 @@ where
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
                 term_length: commonware_utils::NZU64!(1),
+                optimistic_depth: 0,
                 forwarding: simplex::ForwardingPolicy::Disabled,
             },
         );

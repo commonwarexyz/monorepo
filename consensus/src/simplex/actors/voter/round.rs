@@ -219,6 +219,21 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         matches!(self.certify, CertifyState::Certified(true))
     }
 
+    /// Returns true if the proposal is locally verified.
+    pub fn is_verified(&self) -> bool {
+        self.proposal.status() == ProposalStatus::Verified
+    }
+
+    /// Returns true if we already broadcast a notarize vote for this round.
+    pub const fn broadcast_notarize(&self) -> bool {
+        self.broadcast_notarize
+    }
+
+    /// Returns true if we already broadcast a finalize vote for this round.
+    pub const fn broadcast_finalize(&self) -> bool {
+        self.broadcast_finalize
+    }
+
     /// Returns true if certification was aborted due to finalization.
     #[cfg(test)]
     pub const fn is_certify_aborted(&self) -> bool {
@@ -291,6 +306,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.proposal()
     }
 
+    /// Returns true if the round contains a proposal and no equivocation.
+    pub fn has_unequivocated_proposal(&self) -> bool {
+        self.proposal.has_unequivocated_proposal()
+    }
+
     pub const fn set_deadlines(
         &mut self,
         leader_deadline: SystemTime,
@@ -317,6 +337,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 (reason, true)
             }
         }
+    }
+
+    /// Returns true if this round has been marked as timed out.
+    pub const fn has_timeout_reason(&self) -> bool {
+        self.timeout_reason.is_some()
     }
 
     /// Returns a nullify vote if we should timeout/retry.
