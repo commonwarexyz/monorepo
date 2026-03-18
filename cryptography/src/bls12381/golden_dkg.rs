@@ -10,9 +10,12 @@ use crate::{
             variant::MinPk,
         },
     },
+    ed25519,
     transcript::Summary,
+    Signer as _, Verifier as _,
 };
 use bytes::Bytes;
+use commonware_codec::{Encode, EncodeSize, Write};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Space},
     poly::{Interpolator, Poly},
@@ -25,6 +28,8 @@ use commonware_utils::{
 pub use evrf::{PrivateKey, PublicKey};
 use rand_core::CryptoRngCore;
 use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU32};
+
+const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_GOLDEN_DKG";
 
 #[derive(Debug)]
 pub enum Error {
@@ -316,11 +321,22 @@ pub fn play<M: Faults>(
     Ok((sharing, share))
 }
 
-pub struct SignedDealerLog {}
+pub struct SignedDealerLog {
+    dealer: PublicKey,
+    signature: ed25519::Signature,
+    log: DealerLog,
+}
 
 impl SignedDealerLog {
+    /// Verify the signature and extract the dealer's public key and log.
+    ///
+    /// Returns `None` if the signature is invalid.
     pub fn identify(self) -> Option<(PublicKey, DealerLog)> {
-        todo!()
+        let msg = self.log.encode();
+        if !self.dealer.verify(NAMESPACE, &msg, &self.signature) {
+            return None;
+        }
+        Some((self.dealer, self.log))
     }
 }
 
@@ -328,6 +344,19 @@ impl SignedDealerLog {
 pub struct DealerLog {
     commitments: VrfCommitments,
     dealing: Dealing,
+}
+
+impl Write for DealerLog {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.dealing.write(buf);
+        self.commitments.write(buf);
+    }
+}
+
+impl EncodeSize for DealerLog {
+    fn encode_size(&self) -> usize {
+        self.dealing.encode_size() + self.commitments.encode_size()
+    }
 }
 
 #[allow(dead_code)]
@@ -365,8 +394,15 @@ impl DealerLog {
             .collect()
     }
 
-    fn sign(self, _priv: &PrivateKey) -> SignedDealerLog {
-        todo!()
+    fn sign(self, signer: &PrivateKey) -> SignedDealerLog {
+        let dealer = signer.public();
+        let msg = self.encode();
+        let signature = signer.sign(NAMESPACE, &msg);
+        SignedDealerLog {
+            dealer,
+            signature,
+            log: self,
+        }
     }
 }
 
@@ -374,6 +410,20 @@ struct Dealing {
     nonce: Summary,
     poly: Poly<G1>,
     masked_shares: Map<PublicKey, Scalar>,
+}
+
+impl Write for Dealing {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.nonce.write(buf);
+        self.poly.write(buf);
+        self.masked_shares.write(buf);
+    }
+}
+
+impl EncodeSize for Dealing {
+    fn encode_size(&self) -> usize {
+        self.nonce.encode_size() + self.poly.encode_size() + self.masked_shares.encode_size()
+    }
 }
 
 impl Dealing {
