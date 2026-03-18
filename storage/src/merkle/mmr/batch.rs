@@ -606,9 +606,10 @@ impl<D: Digest> MerkleizedBatch<D> {
         // Collect pinned nodes (peaks at the prune boundary).
         let mut pinned_nodes = BTreeMap::new();
         for pos in crate::mmr::iterator::nodes_to_pin(pruned_to_pos) {
-            if let Some(d) = self.get_node(pos) {
-                pinned_nodes.insert(pos, d);
-            }
+            let d = self
+                .get_node(pos)
+                .expect("pinned node must exist in batch chain");
+            pinned_nodes.insert(pos, d);
         }
 
         // Collect retained nodes above the prune boundary.
