@@ -6,8 +6,8 @@ use crate::{
 };
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_math::algebra::Random;
-use commonware_utils::{hex, ordered::Map, union_unique, Array, Span};
+use commonware_math::algebra::{CryptoGroup, Random};
+use commonware_utils::{hex, ordered::Map, union_unique, Array, Span, TryCollect};
 use core::{
     fmt::{Debug, Display},
     hash::Hash,
@@ -105,10 +105,29 @@ impl PrivateKey {
     /// We also produce [`VrfCommitments`], which contain commitments
     pub(super) fn vrf_batch_checked(
         &self,
-        _msg: &Summary,
-        _receivers: impl IntoIterator<Item = PublicKey>,
+        msg: &Summary,
+        receivers: impl IntoIterator<Item = PublicKey>,
     ) -> (Map<PublicKey, Scalar>, VrfCommitments) {
-        todo!()
+        let scalars: Map<PublicKey, Scalar> = receivers
+            .into_iter()
+            .map(|receiver| {
+                let s = self.vrf(msg, &receiver);
+                (receiver, s)
+            })
+            .try_collect()
+            .expect("receivers must be unique");
+        let commitments: Map<PublicKey, G1> = scalars
+            .iter_pairs()
+            .map(|(pk, s)| (pk.clone(), G1::generator() * s))
+            .try_collect()
+            .expect("keys are unique");
+        (
+            scalars,
+            VrfCommitments {
+                proof: Proof {},
+                commitments,
+            },
+        )
     }
 }
 
@@ -225,7 +244,7 @@ impl VrfCommitments {
     ///
     /// For a given message and sender, we can check that the commitments contain
     /// what [`PrivateKey::vrf`] would produce for that receiver.
-    pub fn check(self, _msg: &[u8], _sender: &PublicKey) -> Option<Map<PublicKey, G1>> {
+    pub fn check(self, _msg: &Summary, _sender: &PublicKey) -> Option<Map<PublicKey, G1>> {
         todo!()
     }
 
