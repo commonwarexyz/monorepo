@@ -1,7 +1,7 @@
 use crate::{
     bls12381::primitives::group::{Scalar, G1},
     ed25519,
-    transcript::Transcript,
+    transcript::{Summary, Transcript},
     Secret,
 };
 use bytes::{Buf, BufMut, Bytes};
@@ -92,8 +92,10 @@ impl PrivateKey {
     ///
     /// Without knowing either [`PrivateKey`], the output is indistinguishable from
     /// a random value.
-    pub(super) fn vrf(&self, _msg: &[u8], _receiver: &PublicKey) -> Scalar {
-        todo!()
+    pub(super) fn vrf(&self, msg: &Summary, receiver: &PublicKey) -> Scalar {
+        let mut transcript = Transcript::resume(msg.clone());
+        self.diffie_hellman(receiver, &mut transcript);
+        Scalar::random(&mut transcript.noise(b"vrf"))
     }
 
     /// Compute several [`Self::vrf`] outputs, along with commitments to these outputs.
@@ -103,7 +105,7 @@ impl PrivateKey {
     /// We also produce [`VrfCommitments`], which contain commitments
     pub(super) fn vrf_batch_checked(
         &self,
-        _msg: &[u8],
+        _msg: &Summary,
         _receivers: impl IntoIterator<Item = PublicKey>,
     ) -> (Map<PublicKey, Scalar>, VrfCommitments) {
         todo!()
