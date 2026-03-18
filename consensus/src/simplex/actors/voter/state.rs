@@ -1195,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn construct_nullify_current_or_nullified_view() {
+    fn construct_nullify_current_view_only() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
