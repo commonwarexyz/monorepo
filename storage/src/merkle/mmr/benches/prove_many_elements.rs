@@ -1,8 +1,8 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::{
-    merkle::LocationRangeExt as _,
     mmr::{batch::UnmerkleizedBatch, mem::Mmr, Location, StandardHasher},
+    LocationRangeExt as _,
 };
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;

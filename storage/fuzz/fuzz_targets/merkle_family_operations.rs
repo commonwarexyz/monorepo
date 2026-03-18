@@ -4,9 +4,9 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{deterministic, Runner};
 use commonware_storage::{
-    merkle::{self, hasher::Standard, Family as MerkleFamily, Position},
     mmb::{self, mem::Mmb},
-    mmr::{self, mem::Mmr},
+    mmr::{self, hasher::Standard, mem::Mmr},
+    Location, MerkleFamily, Position,
 };
 use core::{fmt::Debug, ops::Range};
 use libfuzzer_sys::fuzz_target;
@@ -34,26 +34,25 @@ trait FuzzMerkle: Sized {
     const NAME: &'static str;
 
     fn new(hasher: &mut Standard<Sha256>) -> Self;
-    fn size(&self) -> merkle::Position<Self::Family>;
-    fn leaves(&self) -> merkle::Location<Self::Family>;
-    fn retained_bounds(&self) -> Range<merkle::Location<Self::Family>>;
-    fn get_node(&self, pos: merkle::Position<Self::Family>) -> Option<Digest>;
+    fn size(&self) -> Position<Self::Family>;
+    fn leaves(&self) -> Location<Self::Family>;
+    fn retained_bounds(&self) -> Range<Location<Self::Family>>;
+    fn get_node(&self, pos: Position<Self::Family>) -> Option<Digest>;
     fn root(&self) -> Digest;
-    fn add(&mut self, hasher: &mut Standard<Sha256>, data: &[u8])
-        -> merkle::Location<Self::Family>;
+    fn add(&mut self, hasher: &mut Standard<Sha256>, data: &[u8]) -> Location<Self::Family>;
     fn update_leaf(
         &mut self,
         hasher: &mut Standard<Sha256>,
-        loc: merkle::Location<Self::Family>,
+        loc: Location<Self::Family>,
         data: &[u8],
     ) -> Result<(), Self::Error>;
     fn verify_element_proof(
         &self,
         hasher: &mut Standard<Sha256>,
-        loc: merkle::Location<Self::Family>,
+        loc: Location<Self::Family>,
         element: &[u8],
     ) -> Result<bool, Self::Error>;
-    fn prune(&mut self, loc: merkle::Location<Self::Family>) -> Result<(), Self::Error>;
+    fn prune(&mut self, loc: Location<Self::Family>) -> Result<(), Self::Error>;
     fn prune_all(&mut self);
 }
 
@@ -67,19 +66,19 @@ impl FuzzMerkle for Mmr<Digest> {
         Self::new(hasher)
     }
 
-    fn size(&self) -> merkle::Position<Self::Family> {
+    fn size(&self) -> Position<Self::Family> {
         self.size()
     }
 
-    fn leaves(&self) -> merkle::Location<Self::Family> {
+    fn leaves(&self) -> Location<Self::Family> {
         self.leaves()
     }
 
-    fn retained_bounds(&self) -> Range<merkle::Location<Self::Family>> {
+    fn retained_bounds(&self) -> Range<Location<Self::Family>> {
         self.bounds()
     }
 
-    fn get_node(&self, pos: merkle::Position<Self::Family>) -> Option<Digest> {
+    fn get_node(&self, pos: Position<Self::Family>) -> Option<Digest> {
         self.get_node(pos)
     }
 
@@ -87,11 +86,7 @@ impl FuzzMerkle for Mmr<Digest> {
         *self.root()
     }
 
-    fn add(
-        &mut self,
-        hasher: &mut Standard<Sha256>,
-        data: &[u8],
-    ) -> merkle::Location<Self::Family> {
+    fn add(&mut self, hasher: &mut Standard<Sha256>, data: &[u8]) -> Location<Self::Family> {
         let (loc, changeset) = {
             let batch = self.new_batch();
             let loc = batch.leaves();
@@ -105,7 +100,7 @@ impl FuzzMerkle for Mmr<Digest> {
     fn update_leaf(
         &mut self,
         hasher: &mut Standard<Sha256>,
-        loc: merkle::Location<Self::Family>,
+        loc: Location<Self::Family>,
         data: &[u8],
     ) -> Result<(), Self::Error> {
         let batch = self.new_batch();
@@ -117,7 +112,7 @@ impl FuzzMerkle for Mmr<Digest> {
     fn verify_element_proof(
         &self,
         hasher: &mut Standard<Sha256>,
-        loc: merkle::Location<Self::Family>,
+        loc: Location<Self::Family>,
         element: &[u8],
     ) -> Result<bool, Self::Error> {
         let proof = self.proof(hasher, loc)?;
@@ -125,7 +120,7 @@ impl FuzzMerkle for Mmr<Digest> {
         Ok(proof.verify_element_inclusion(hasher, element, loc, &root))
     }
 
-    fn prune(&mut self, loc: merkle::Location<Self::Family>) -> Result<(), Self::Error> {
+    fn prune(&mut self, loc: Location<Self::Family>) -> Result<(), Self::Error> {
         self.prune(loc)
     }
 
@@ -144,19 +139,19 @@ impl FuzzMerkle for Mmb<Digest> {
         Self::new(hasher)
     }
 
-    fn size(&self) -> merkle::Position<Self::Family> {
+    fn size(&self) -> Position<Self::Family> {
         self.size()
     }
 
-    fn leaves(&self) -> merkle::Location<Self::Family> {
+    fn leaves(&self) -> Location<Self::Family> {
         self.leaves()
     }
 
-    fn retained_bounds(&self) -> Range<merkle::Location<Self::Family>> {
+    fn retained_bounds(&self) -> Range<Location<Self::Family>> {
         self.bounds()
     }
 
-    fn get_node(&self, pos: merkle::Position<Self::Family>) -> Option<Digest> {
+    fn get_node(&self, pos: Position<Self::Family>) -> Option<Digest> {
         self.get_node(pos)
     }
 
@@ -164,11 +159,7 @@ impl FuzzMerkle for Mmb<Digest> {
         *self.root()
     }
 
-    fn add(
-        &mut self,
-        hasher: &mut Standard<Sha256>,
-        data: &[u8],
-    ) -> merkle::Location<Self::Family> {
+    fn add(&mut self, hasher: &mut Standard<Sha256>, data: &[u8]) -> Location<Self::Family> {
         let (loc, changeset) = {
             let batch = self.new_batch();
             let loc = batch.leaves();
@@ -182,7 +173,7 @@ impl FuzzMerkle for Mmb<Digest> {
     fn update_leaf(
         &mut self,
         hasher: &mut Standard<Sha256>,
-        loc: merkle::Location<Self::Family>,
+        loc: Location<Self::Family>,
         data: &[u8],
     ) -> Result<(), Self::Error> {
         let batch = self.new_batch();
@@ -194,7 +185,7 @@ impl FuzzMerkle for Mmb<Digest> {
     fn verify_element_proof(
         &self,
         hasher: &mut Standard<Sha256>,
-        loc: merkle::Location<Self::Family>,
+        loc: Location<Self::Family>,
         element: &[u8],
     ) -> Result<bool, Self::Error> {
         let proof = self.proof(hasher, loc)?;
@@ -202,7 +193,7 @@ impl FuzzMerkle for Mmb<Digest> {
         Ok(proof.verify_element_inclusion(hasher, element, loc, &root))
     }
 
-    fn prune(&mut self, loc: merkle::Location<Self::Family>) -> Result<(), Self::Error> {
+    fn prune(&mut self, loc: Location<Self::Family>) -> Result<(), Self::Error> {
         self.prune(loc)
     }
 
@@ -212,9 +203,9 @@ impl FuzzMerkle for Mmb<Digest> {
 }
 
 struct ReferenceMerkle<F: MerkleFamily> {
-    leaf_locations: Vec<merkle::Location<F>>,
+    leaf_locations: Vec<Location<F>>,
     leaf_data: Vec<Vec<u8>>,
-    pruned_to_loc: merkle::Location<F>,
+    pruned_to_loc: Location<F>,
 }
 
 impl<F: MerkleFamily> ReferenceMerkle<F> {
@@ -222,11 +213,11 @@ impl<F: MerkleFamily> ReferenceMerkle<F> {
         Self {
             leaf_locations: Vec::new(),
             leaf_data: Vec::new(),
-            pruned_to_loc: merkle::Location::new(0),
+            pruned_to_loc: Location::new(0),
         }
     }
 
-    fn add(&mut self, leaf_loc: merkle::Location<F>, data: Vec<u8>) {
+    fn add(&mut self, leaf_loc: Location<F>, data: Vec<u8>) {
         self.leaf_locations.push(leaf_loc);
         self.leaf_data.push(data);
     }
@@ -241,26 +232,26 @@ impl<F: MerkleFamily> ReferenceMerkle<F> {
         self.leaf_locations.len()
     }
 
-    fn expected_size(&self) -> merkle::Position<F> {
-        let leaves = merkle::Location::new(self.leaf_count() as u64);
-        merkle::Position::try_from(leaves).expect("valid size for reference leaf count")
+    fn expected_size(&self) -> Position<F> {
+        let leaves = Location::new(self.leaf_count() as u64);
+        Position::try_from(leaves).expect("valid size for reference leaf count")
     }
 
     fn prune_all(&mut self) {
-        self.pruned_to_loc = merkle::Location::new(self.leaf_count() as u64);
+        self.pruned_to_loc = Location::new(self.leaf_count() as u64);
     }
 
-    fn prune(&mut self, loc: merkle::Location<F>) {
-        if loc <= merkle::Location::new(self.leaf_count() as u64) && loc > self.pruned_to_loc {
+    fn prune(&mut self, loc: Location<F>) {
+        if loc <= Location::new(self.leaf_count() as u64) && loc > self.pruned_to_loc {
             self.pruned_to_loc = loc;
         }
     }
 
-    fn is_leaf_pruned(&self, leaf_loc: merkle::Location<F>) -> bool {
+    fn is_leaf_pruned(&self, leaf_loc: Location<F>) -> bool {
         leaf_loc < self.pruned_to_loc
     }
 
-    fn pruned_to_loc(&self) -> merkle::Location<F> {
+    fn pruned_to_loc(&self) -> Location<F> {
         self.pruned_to_loc
     }
 }
@@ -435,7 +426,7 @@ fn fuzz_family<T: FuzzMerkle>(operations: &[MerkleOperation]) {
                         continue;
                     }
 
-                    let loc = merkle::Location::new(*pos_idx % (*merkle.leaves() + 1));
+                    let loc = Location::new(*pos_idx % (*merkle.leaves() + 1));
                     let retained_before = merkle.retained_bounds().start;
 
                     if loc <= retained_before || loc > merkle.leaves() {

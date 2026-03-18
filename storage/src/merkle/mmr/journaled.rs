@@ -332,11 +332,11 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             // Recover the orphaned leaf and any missing parents.
             let pos = mem_mmr.size();
             warn!(?pos, "recovering orphaned leaf");
-            let changeset = {
-                let mut batch = mem_mmr.new_batch();
-                batch = batch.add_leaf_digest(leaf);
-                batch.merkleize(hasher).finalize()
-            };
+            let changeset = mem_mmr
+                .new_batch()
+                .add_leaf_digest(leaf)
+                .merkleize(hasher)
+                .finalize();
             mem_mmr.apply(changeset)?;
             assert_eq!(pos, journal_size);
 
@@ -1065,11 +1065,11 @@ mod tests {
                 Err(Error::Empty)
             ));
 
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch = batch.add(&mut hasher, &test_digest(0));
-                batch.merkleize(&mut hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&mut hasher, &test_digest(0))
+                .merkleize(&mut hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
             assert_eq!(mmr.size(), 1);
             mmr.sync().await.unwrap();
@@ -1103,11 +1103,11 @@ mod tests {
             ));
 
             // Confirm empty proof no longer verifies after adding an element.
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch = batch.add(&mut hasher, &test_digest(0));
-                batch.merkleize(&mut hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&mut hasher, &test_digest(0))
+                .merkleize(&mut hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
             let root = mmr.root();
             assert!(!empty_proof.verify_range_inclusion(
@@ -1139,11 +1139,11 @@ mod tests {
             .await
             .unwrap();
 
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch = batch.add(&mut hasher, &test_digest(0));
-                batch.merkleize(&mut hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&mut hasher, &test_digest(0))
+                .merkleize(&mut hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
 
             assert!(matches!(
@@ -1593,17 +1593,17 @@ mod tests {
 
             // Close MMR after adding a new node without syncing and make sure state is as expected
             // on reopening.
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch = batch.add(&mut hasher, &test_digest(LEAF_COUNT));
-                batch.merkleize(&mut hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&mut hasher, &test_digest(LEAF_COUNT))
+                .merkleize(&mut hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
-            let changeset = {
-                let mut batch = pruned_mmr.new_batch();
-                batch = batch.add(&mut hasher, &test_digest(LEAF_COUNT));
-                batch.merkleize(&mut hasher).finalize()
-            };
+            let changeset = pruned_mmr
+                .new_batch()
+                .add(&mut hasher, &test_digest(LEAF_COUNT))
+                .merkleize(&mut hasher)
+                .finalize();
             pruned_mmr.apply(changeset).unwrap();
             assert!(*pruned_mmr.size() % cfg_pruned.items_per_blob != 0);
             pruned_mmr.sync().await.unwrap();
@@ -1982,11 +1982,11 @@ mod tests {
             let mut mmr = Mmr::init(context, &mut hasher, cfg).await.unwrap();
 
             let element = test_digest(0);
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch = batch.add(&mut hasher, &element);
-                batch.merkleize(&mut hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&mut hasher, &element)
+                .merkleize(&mut hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
 
             // Test single element proof at historical position
@@ -2037,11 +2037,11 @@ mod tests {
 
             // Should be able to add new elements
             let new_element = test_digest(999);
-            let changeset = {
-                let mut batch = sync_mmr.new_batch();
-                batch = batch.add(&mut hasher, &new_element);
-                batch.merkleize(&mut hasher).finalize()
-            };
+            let changeset = sync_mmr
+                .new_batch()
+                .add(&mut hasher, &new_element)
+                .merkleize(&mut hasher)
+                .finalize();
             sync_mmr.apply(changeset).unwrap();
 
             // Root should be computable
@@ -2491,12 +2491,12 @@ mod tests {
             let range = Location::new(2)..Location::new(8);
 
             // Appends should remain allowed while historical proofs are available.
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch = batch.add(&mut hasher, &test_digest(100));
-                batch = batch.add(&mut hasher, &test_digest(101));
-                batch.merkleize(&mut hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&mut hasher, &test_digest(100))
+                .add(&mut hasher, &test_digest(101))
+                .merkleize(&mut hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
 
             let proof = mmr
@@ -3093,16 +3093,16 @@ mod tests {
             .unwrap();
 
             // Create two batches from the same base.
-            let changeset_a = {
-                let mut batch = mmr.new_batch();
-                batch = batch.add(&mut hasher, b"leaf-a");
-                batch.merkleize(&mut hasher).finalize()
-            };
-            let changeset_b = {
-                let mut batch = mmr.new_batch();
-                batch = batch.add(&mut hasher, b"leaf-b");
-                batch.merkleize(&mut hasher).finalize()
-            };
+            let changeset_a = mmr
+                .new_batch()
+                .add(&mut hasher, b"leaf-a")
+                .merkleize(&mut hasher)
+                .finalize();
+            let changeset_b = mmr
+                .new_batch()
+                .add(&mut hasher, b"leaf-b")
+                .merkleize(&mut hasher)
+                .finalize();
 
             // Apply A -- should succeed.
             mmr.apply(changeset_a).unwrap();

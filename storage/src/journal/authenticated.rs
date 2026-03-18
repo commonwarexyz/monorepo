@@ -381,11 +381,12 @@ where
 
         // Append item to the journal, then update the MMR state.
         let loc = self.journal.append(item).await?;
-        let changeset = {
-            let batch = self.mmr.new_batch();
-            let batch = batch.add(&mut self.hasher, &encoded_item);
-            batch.merkleize(&mut self.hasher).finalize()
-        };
+        let changeset = self
+            .mmr
+            .new_batch()
+            .add(&mut self.hasher, &encoded_item)
+            .merkleize(&mut self.hasher)
+            .finalize();
         self.mmr.apply(changeset)?;
 
         Ok(Location::new(loc))

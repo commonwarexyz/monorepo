@@ -93,9 +93,10 @@ fn bench_update(c: &mut Criterion) {
                             match strategy {
                                 Strategy::NoBatching => {
                                     for (loc, element) in &leaf_map {
-                                        let batch = mmr.new_batch();
-                                        let batch =
-                                            batch.update_leaf(&mut h, *loc, element).unwrap();
+                                        let batch = mmr
+                                            .new_batch()
+                                            .update_leaf(&mut h, *loc, element)
+                                            .unwrap();
                                         mmr.apply(batch.merkleize(&mut h).finalize()).unwrap();
                                     }
                                 }
@@ -109,7 +110,7 @@ fn bench_update(c: &mut Criterion) {
                                         if let Some(ref p) = pool {
                                             batch = batch.with_pool(Some(p.clone()));
                                         }
-                                        let batch = batch.update_leaf_batched(&updates).unwrap();
+                                        batch = batch.update_leaf_batched(&updates).unwrap();
                                         batch.merkleize(&mut h).finalize()
                                     };
                                     mmr.apply(changeset).unwrap();

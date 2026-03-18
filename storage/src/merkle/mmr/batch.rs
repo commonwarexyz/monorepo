@@ -501,8 +501,7 @@ mod tests {
             let updated_digest = Sha256::fill(0xFF);
 
             // Update leaf and verify root changes.
-            let batch = UnmerkleizedBatch::new(&base);
-            let batch = batch
+            let batch = UnmerkleizedBatch::new(&base)
                 .update_leaf_digest(Location::new(5), updated_digest)
                 .unwrap();
             let merkleized = batch.merkleize(&mut hasher);
@@ -511,8 +510,7 @@ mod tests {
             // Restore original digest and verify root reverts.
             let leaf_5_pos = Position::try_from(Location::new(5)).unwrap();
             let original_digest = base.get_node(leaf_5_pos).unwrap();
-            let batch2 = UnmerkleizedBatch::new(&base);
-            let batch2 = batch2
+            let batch2 = UnmerkleizedBatch::new(&base)
                 .update_leaf_digest(Location::new(5), original_digest)
                 .unwrap();
             let merkleized_batch2 = batch2.merkleize(&mut hasher);
@@ -530,16 +528,15 @@ mod tests {
             let base_root = *base.root();
 
             let updated_digest = Sha256::fill(0xAA);
-            let mut batch = UnmerkleizedBatch::new(&base);
+            let mut batch = UnmerkleizedBatch::new(&base)
+                .update_leaf_digest(Location::new(10), updated_digest)
+                .unwrap();
 
             // Add more leaves.
             for i in 50u64..55 {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(&mut hasher, &element);
             }
-            let batch = batch
-                .update_leaf_digest(Location::new(10), updated_digest)
-                .unwrap();
             let merkleized = batch.merkleize(&mut hasher);
             assert_ne!(merkleized.root(), base_root);
 
@@ -574,8 +571,9 @@ mod tests {
                 .map(|&i| (Location::new(i), updated_digest))
                 .collect();
 
-            let batch = UnmerkleizedBatch::new(&base);
-            let batch = batch.update_leaf_batched(&updates).unwrap();
+            let batch = UnmerkleizedBatch::new(&base)
+                .update_leaf_batched(&updates)
+                .unwrap();
             let merkleized = batch.merkleize(&mut hasher);
 
             assert_ne!(merkleized.root(), base_root);
@@ -597,8 +595,9 @@ mod tests {
                 let original = base.get_node(pos).unwrap();
                 restore_updates.push((Location::new(loc_val), original));
             }
-            let batch2 = UnmerkleizedBatch::new(&base);
-            let batch2 = batch2.update_leaf_batched(&restore_updates).unwrap();
+            let batch2 = UnmerkleizedBatch::new(&base)
+                .update_leaf_batched(&restore_updates)
+                .unwrap();
             let merkleized_batch2 = batch2.merkleize(&mut hasher);
             assert_eq!(merkleized_batch2.root(), base_root);
         });
@@ -774,8 +773,7 @@ mod tests {
             let updated_digest = Sha256::fill(0xCC);
 
             // Layer A: overwrite leaf 5.
-            let batch_a = UnmerkleizedBatch::new(&base);
-            let batch_a = batch_a
+            let batch_a = UnmerkleizedBatch::new(&base)
                 .update_leaf_digest(Location::new(5), updated_digest)
                 .unwrap();
             let merkleized_a = batch_a.merkleize(&mut hasher);
@@ -814,15 +812,14 @@ mod tests {
             let digest_b = Sha256::fill(0xEE);
 
             // Layer A: overwrite leaf 5.
-            let batch_a = UnmerkleizedBatch::new(&base);
-            let batch_a = batch_a
+            let batch_a = UnmerkleizedBatch::new(&base)
                 .update_leaf_digest(Location::new(5), digest_a)
                 .unwrap();
             let merkleized_a = batch_a.merkleize(&mut hasher);
 
             // Layer B on A: overwrite leaf 10.
-            let batch_b = merkleized_a.new_batch();
-            let batch_b = batch_b
+            let batch_b = merkleized_a
+                .new_batch()
                 .update_leaf_digest(Location::new(10), digest_b)
                 .unwrap();
             let merkleized_b = batch_b.merkleize(&mut hasher);
@@ -848,17 +845,15 @@ mod tests {
             // overwritten, then 10 new elements.
             let mut reference = build_reference(&mut hasher, 100);
             let changeset = {
-                let mut batch = UnmerkleizedBatch::new(&reference);
+                let mut batch = UnmerkleizedBatch::new(&reference)
+                    .update_leaf_digest(Location::new(5), digest_a)
+                    .unwrap()
+                    .update_leaf_digest(Location::new(10), digest_b)
+                    .unwrap();
                 for i in 300u64..310 {
                     let element = hasher.digest(&i.to_be_bytes());
                     batch = batch.add(&mut hasher, &element);
                 }
-                let batch = batch
-                    .update_leaf_digest(Location::new(5), digest_a)
-                    .unwrap();
-                let batch = batch
-                    .update_leaf_digest(Location::new(10), digest_b)
-                    .unwrap();
                 batch.merkleize(&mut hasher).finalize()
             };
             reference.apply(changeset).unwrap();
@@ -887,15 +882,14 @@ mod tests {
             let digest_y = Sha256::fill(0xBB);
 
             // Layer A: overwrite leaf 5 with X.
-            let batch_a = UnmerkleizedBatch::new(&base);
-            let batch_a = batch_a
+            let batch_a = UnmerkleizedBatch::new(&base)
                 .update_leaf_digest(Location::new(5), digest_x)
                 .unwrap();
             let merkleized_a = batch_a.merkleize(&mut hasher);
 
             // Layer B on A: overwrite leaf 5 with Y.
-            let batch_b = merkleized_a.new_batch();
-            let batch_b = batch_b
+            let batch_b = merkleized_a
+                .new_batch()
                 .update_leaf_digest(Location::new(5), digest_y)
                 .unwrap();
             let merkleized_b = batch_b.merkleize(&mut hasher);
@@ -940,11 +934,11 @@ mod tests {
             // Build reference the same way: 60 elements, then update leaf 52.
             let mut reference = build_reference(&mut hasher, 60);
             let changeset = {
-                let batch = UnmerkleizedBatch::new(&reference);
-                let batch = batch
+                UnmerkleizedBatch::new(&reference)
                     .update_leaf_digest(Location::new(52), updated_digest)
-                    .unwrap();
-                batch.merkleize(&mut hasher).finalize()
+                    .unwrap()
+                    .merkleize(&mut hasher)
+                    .finalize()
             };
             reference.apply(changeset).unwrap();
             assert_eq!(merkleized.root(), *reference.root());
@@ -962,8 +956,7 @@ mod tests {
             let base_root = *base.root();
 
             let element = b"updated-element";
-            let batch = UnmerkleizedBatch::new(&base);
-            let batch = batch
+            let batch = UnmerkleizedBatch::new(&base)
                 .update_leaf(&mut hasher, Location::new(5), element)
                 .unwrap();
             let merkleized = batch.merkleize(&mut hasher);
@@ -971,8 +964,8 @@ mod tests {
 
             // Reference: same update on Mmr.
             let mut reference = base.clone();
-            let batch = reference.new_batch();
-            let batch = batch
+            let batch = reference
+                .new_batch()
                 .update_leaf(&mut hasher, Location::new(5), element)
                 .unwrap();
             reference
