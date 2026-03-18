@@ -215,6 +215,22 @@ impl<F: Fingerprint> Read for BinaryFuseFilter<F> {
                 "array_length overflow",
             ))?;
 
+        // Reject before allocating: the buffer must contain at least array_length
+        // fingerprints. Without this check a 16-byte payload with large segment_count
+        // and segment_length values would trigger a multi-gigabyte allocation.
+        let expected_bytes = array_length
+            .checked_mul(F::SIZE)
+            .ok_or(CodecError::Invalid(
+                "BinaryFuseFilter",
+                "fingerprint data size overflow",
+            ))?;
+        if buf.remaining() < expected_bytes {
+            return Err(CodecError::Invalid(
+                "BinaryFuseFilter",
+                "buffer too small for declared array_length",
+            ));
+        }
+
         let mut data = Vec::with_capacity(array_length);
         for _ in 0..array_length {
             data.push(F::read_cfg(buf, &())?);
@@ -484,6 +500,19 @@ mod tests {
         1u64.write(&mut buf); // seed
         4u32.write(&mut buf); // segment_length
         0u32.write(&mut buf); // segment_count (invalid: must be >= 1)
+        assert!(BinaryFuseFilter::<u8>::decode(bytes::Bytes::from(buf)).is_err());
+    }
+
+    #[test]
+    fn test_decode_rejects_oversized_allocation() {
+        // A crafted 16-byte payload with max segment_count and segment_length would
+        // request a ~16 GB allocation before reading any fingerprint data. The decoder
+        // must reject this without allocating.
+        let mut buf = Vec::new();
+        1u64.write(&mut buf);       // seed
+        (1u32 << 18).write(&mut buf); // segment_length = 262144 (max allowed power of 2)
+        u32::MAX.write(&mut buf);   // segment_count = 4294967295
+        // no fingerprint data follows
         assert!(BinaryFuseFilter::<u8>::decode(bytes::Bytes::from(buf)).is_err());
     }
 
