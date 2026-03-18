@@ -1,7 +1,10 @@
 TRACES_ROOT ?= ../fuzz/artifacts/traces
+CORPUS_ROOT ?= ../fuzz/corpus
 TEST_DIR ?= traces
 
-.PHONY: test typecheck repl check clean build_traces
+FUZZ_RUNS ?= 100
+
+.PHONY: test typecheck repl check clean get_traces build_traces test_traces clean_traces tv
 
 typecheck:
 	quint typecheck types.qnt
@@ -37,6 +40,10 @@ run:
 	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
     	--invariant=all_invariants twins_n4f1b1.qnt
 
+
+get_traces:
+	cargo +nightly fuzz run simplex_ed25519_quint -- -runs=$(FUZZ_RUNS)
+
 build_traces:
 	@for dir in $(TRACES_ROOT)/*/; do \
 		[ -d "$$dir" ] || continue; \
@@ -46,6 +53,13 @@ build_traces:
 
 test_traces:
 	./scripts/test_traces.sh
+
+clean_traces:
+	rm -rf $(TRACES_ROOT)
+	rm -rf $(TEST_DIR)/trace_*.qnt
+	rm -rf $(CORPUS_ROOT)
+
+tv: clean_traces get_traces build_traces test_traces
 
 clean:
 	./scripts/verify.sh clean
