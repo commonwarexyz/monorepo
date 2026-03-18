@@ -102,7 +102,11 @@ impl PrivateKey {
     ///
     /// We take in several receivers now, and associate each of them with their output.
     ///
-    /// We also produce [`VrfCommitments`], which contain commitments
+    /// We also produce [`VrfCommitments`], which contain commitments.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `receivers` contains duplicate public keys.
     pub(super) fn vrf_batch_checked(
         &self,
         msg: &Summary,
@@ -255,6 +259,10 @@ impl VrfCommitments {
     /// faster than checking each value in isolation.
     ///
     /// A sender will only appear in the output if their output is correct.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `outputs` contains duplicate sender public keys.
     pub fn check_batch(
         _rng: &mut impl CryptoRngCore,
         outputs: impl IntoIterator<Item = (PublicKey, Bytes, Self)>,
