@@ -145,7 +145,9 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
     };
-    use commonware_utils::{channel::mpsc, test_rng_seeded, NZUsize, NZU16, NZU64};
+    use commonware_utils::{
+        channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64,
+    };
     use rand::RngCore as _;
     use rstest::rstest;
     use std::{
@@ -277,7 +279,7 @@ mod tests {
                 fetch_batch_size,
                 target: Target {
                     root: target_root,
-                    range: target_oldest_retained_loc..target_op_count,
+                    range: non_empty_range!(target_oldest_retained_loc, target_op_count),
                 },
                 context: context.with_label("client"),
                 resolver: target_db.clone(),
@@ -355,7 +357,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
-                    range: target_oldest_retained_loc..target_op_count,
+                    range: non_empty_range!(target_oldest_retained_loc, target_op_count),
                 },
                 context: context.with_label("client"),
                 resolver: target_db.clone(),
@@ -404,7 +406,7 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: target_root,
-                    range: lower_bound..op_count,
+                    range: non_empty_range!(lower_bound, op_count),
                 },
                 context: client_context.clone(),
                 resolver: target_db.clone(),
@@ -488,7 +490,7 @@ mod tests {
                     ),
                     target: Target {
                         root: initial_root,
-                        range: initial_lower_bound..initial_upper_bound,
+                        range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                     },
                     resolver: target_db.clone(),
                     fetch_batch_size: NZU64!(2), // Very small batch size to ensure multiple batches needed
@@ -515,7 +517,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: final_root,
-                    range: initial_lower_bound..final_upper_bound,
+                    range: non_empty_range!(initial_lower_bound, final_upper_bound),
                 })
                 .await
                 .unwrap();
@@ -551,41 +553,6 @@ mod tests {
         });
     }
 
-    /// Test that invalid bounds are rejected
-    #[test]
-    fn test_sync_invalid_bounds() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let target_db = create_test_db(context.with_label("target")).await;
-            let db_config =
-                create_sync_config(&format!("invalid_bounds_{}", context.next_u64()), &context);
-            let config = Config {
-                db_config,
-                fetch_batch_size: NZU64!(10),
-                target: Target {
-                    root: sha256::Digest::from([1u8; 32]),
-                    range: Location::new(31)..Location::new(31),
-                },
-                context: context.with_label("client"),
-                resolver: Arc::new(target_db),
-                apply_batch_size: 1024,
-                max_outstanding_requests: 1,
-                update_rx: None,
-            };
-            let result: Result<ImmutableSyncTest, _> = sync::sync(config).await;
-            match result {
-                Err(sync::Error::Engine(sync::EngineError::InvalidTarget {
-                    lower_bound_pos,
-                    upper_bound_pos,
-                })) => {
-                    assert_eq!(lower_bound_pos, Location::new(31));
-                    assert_eq!(upper_bound_pos, Location::new(31));
-                }
-                _ => panic!("Expected InvalidTarget error"),
-            }
-        });
-    }
-
     /// Test that sync works when target database has operations beyond the requested range
     /// of operations to sync.
     #[test]
@@ -611,7 +578,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
-                    range: lower_bound..op_count,
+                    range: non_empty_range!(lower_bound, op_count),
                 },
                 context: context.with_label("client"),
                 resolver: target_db.clone(),
@@ -672,7 +639,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root,
-                    range: lower_bound..upper_bound,
+                    range: non_empty_range!(lower_bound, upper_bound),
                 },
                 context: context.with_label("sync"),
                 resolver: target_db.clone(),
@@ -729,7 +696,7 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root,
-                    range: lower_bound..upper_bound,
+                    range: non_empty_range!(lower_bound, upper_bound),
                 },
                 context: context.with_label("sync"),
                 resolver: resolver.clone(),
@@ -776,7 +743,7 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    range: initial_lower_bound..initial_upper_bound,
+                    range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -789,7 +756,10 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    range: initial_lower_bound.checked_sub(1).unwrap()..initial_upper_bound,
+                    range: non_empty_range!(
+                        initial_lower_bound.checked_sub(1).unwrap(),
+                        initial_upper_bound
+                    ),
                 })
                 .await
                 .unwrap();
@@ -833,7 +803,7 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    range: initial_lower_bound..initial_upper_bound,
+                    range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -846,7 +816,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    range: initial_lower_bound..(initial_upper_bound - 1),
+                    range: non_empty_range!(initial_lower_bound, initial_upper_bound - 1),
                 })
                 .await
                 .unwrap();
@@ -911,7 +881,7 @@ mod tests {
                 fetch_batch_size: NZU64!(1),
                 target: Target {
                     root: initial_root,
-                    range: initial_lower_bound..initial_upper_bound,
+                    range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -923,7 +893,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: final_root,
-                    range: final_lower_bound..final_upper_bound,
+                    range: non_empty_range!(final_lower_bound, final_upper_bound),
                 })
                 .await
                 .unwrap();
@@ -940,64 +910,6 @@ mod tests {
             synced_db.destroy().await.unwrap();
             let target_db = Arc::try_unwrap(target_db)
                 .unwrap_or_else(|_| panic!("Failed to unwrap Arc - still has references"));
-            target_db.destroy().await.unwrap();
-        });
-    }
-
-    /// Test that the client fails to sync with invalid bounds (lower > upper)
-    #[test_traced("WARN")]
-    fn test_target_update_invalid_bounds() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create and populate target database
-            let mut target_db = create_test_db(context.with_label("target")).await;
-            let target_ops = create_test_ops(25);
-            apply_ops(&mut target_db, target_ops, None).await;
-
-            // Capture initial target state
-            let bounds = target_db.bounds().await;
-            let initial_lower_bound = bounds.start;
-            let initial_upper_bound = bounds.end;
-            let initial_root = target_db.root();
-
-            // Create client with initial target
-            let (update_sender, update_receiver) = mpsc::channel(1);
-            let target_db = Arc::new(target_db);
-            let config = Config {
-                context: context.with_label("client"),
-                db_config: create_sync_config(
-                    &format!("invalid_update_{}", context.next_u64()),
-                    &context,
-                ),
-                fetch_batch_size: NZU64!(5),
-                target: Target {
-                    root: initial_root,
-                    range: initial_lower_bound..initial_upper_bound,
-                },
-                resolver: target_db.clone(),
-                apply_batch_size: 1024,
-                max_outstanding_requests: 10,
-                update_rx: Some(update_receiver),
-            };
-            let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
-
-            // Send target update with invalid bounds (lower > upper)
-            update_sender
-                .send(Target {
-                    root: initial_root,
-                    range: initial_upper_bound..initial_lower_bound,
-                })
-                .await
-                .unwrap();
-
-            let result = client.step().await;
-            assert!(matches!(
-                result,
-                Err(sync::Error::Engine(sync::EngineError::InvalidTarget { .. }))
-            ));
-
-            let target_db =
-                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
             target_db.destroy().await.unwrap();
         });
     }
@@ -1027,7 +939,7 @@ mod tests {
                 fetch_batch_size: NZU64!(20),
                 target: Target {
                     root,
-                    range: lower_bound..upper_bound,
+                    range: non_empty_range!(lower_bound, upper_bound),
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
@@ -1042,7 +954,7 @@ mod tests {
             let _ = update_sender
                 .send(Target {
                     root: sha256::Digest::from([2u8; 32]),
-                    range: lower_bound + 1..upper_bound + 1,
+                    range: non_empty_range!(lower_bound + 1, upper_bound + 1),
                 })
                 .await;
 

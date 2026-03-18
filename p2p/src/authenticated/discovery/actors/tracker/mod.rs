@@ -2,7 +2,6 @@
 
 use crate::{authenticated::discovery::config::Bootstrapper, Ingress};
 use commonware_cryptography::Signer;
-use commonware_runtime::Quota;
 use std::time::Duration;
 
 mod actor;
@@ -30,7 +29,7 @@ pub struct Config<C: Signer> {
     pub synchrony_bound: Duration,
     pub tracked_peer_sets: usize,
     pub max_peer_set_size: u64,
-    pub allowed_connection_rate_per_peer: Quota,
+    pub peer_connection_cooldown: Duration,
     pub peer_gossip_max_count: usize,
     pub dial_fail_limit: usize,
     pub block_duration: Duration,

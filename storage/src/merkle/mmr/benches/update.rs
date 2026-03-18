@@ -69,9 +69,9 @@ fn bench_update(c: &mut Criterion) {
                                 for _ in 0..leaves {
                                     let digest = sha256::Digest::random(&mut sampler);
                                     elements.push(digest);
-                                    let pos = batch.add(&h, &digest);
-                                    let loc = Location::try_from(pos).expect("leaf position");
+                                    let loc = batch.leaves();
                                     leaf_locations.push(loc);
+                                    batch = batch.add(&h, &digest);
                                 }
                                 batch.merkleize(&h).finalize()
                             };
@@ -93,8 +93,8 @@ fn bench_update(c: &mut Criterion) {
                             match strategy {
                                 Strategy::NoBatching => {
                                     for (loc, element) in &leaf_map {
-                                        let mut batch = mmr.new_batch();
-                                        batch.update_leaf(&h, *loc, element).unwrap();
+                                        let batch =
+                                            mmr.new_batch().update_leaf(&h, *loc, element).unwrap();
                                         mmr.apply(batch.merkleize(&h).finalize()).unwrap();
                                     }
                                 }
@@ -108,7 +108,7 @@ fn bench_update(c: &mut Criterion) {
                                         if let Some(ref p) = pool {
                                             batch = batch.with_pool(Some(p.clone()));
                                         }
-                                        batch.update_leaf_batched(&updates).unwrap();
+                                        batch = batch.update_leaf_batched(&updates).unwrap();
                                         batch.merkleize(&h).finalize()
                                     };
                                     mmr.apply(changeset).unwrap();

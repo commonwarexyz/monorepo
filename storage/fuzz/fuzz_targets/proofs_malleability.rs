@@ -128,7 +128,7 @@ fn fuzz(input: FuzzInput) {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for digest in &digests {
-                    batch.add(&hasher, digest);
+                    batch = batch.add(&hasher, digest);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -157,7 +157,7 @@ fn fuzz(input: FuzzInput) {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for digest in &digests {
-                    batch.add(&hasher, digest);
+                    batch = batch.add(&hasher, digest);
                 }
                 batch.merkleize(&hasher).finalize()
             };

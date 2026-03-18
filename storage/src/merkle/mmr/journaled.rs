@@ -82,7 +82,7 @@ pub struct Config {
 /// Determines how to handle existing persistent data based on sync boundaries:
 /// - **Fresh Start**: Existing data < range start → discard and start fresh
 /// - **Prune and Reuse**: range contains existing data → prune and reuse
-/// - **Prune and Rewind**: existing data > range end → prune and rewind to range end
+/// - **Error**: existing data > range end
 pub struct SyncConfig<D: Digest> {
     /// Base MMR configuration (journal, metadata, etc.)
     pub config: Config,
@@ -334,11 +334,11 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             // Recover the orphaned leaf and any missing parents.
             let pos = mem_mmr.size();
             warn!(?pos, "recovering orphaned leaf");
-            let changeset = {
-                let mut batch = mem_mmr.new_batch();
-                batch.add_leaf_digest(leaf);
-                batch.merkleize(hasher).finalize()
-            };
+            let changeset = mem_mmr
+                .new_batch()
+                .add_leaf_digest(leaf)
+                .merkleize(hasher)
+                .finalize();
             mem_mmr.apply(changeset)?;
             assert_eq!(pos, journal_size);
 
@@ -401,20 +401,33 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             page_cache: cfg.config.page_cache.clone(),
         };
 
-        // Open the journal, handling existing data vs sync range.
-        assert!(!cfg.range.is_empty(), "range must not be empty");
+        // Open the journal, performing a rewind if necessary for crash recovery.
         let journal: Journal<E, D> =
             Journal::init(context.with_label("mmr_journal"), journal_cfg).await?;
-        let size = journal.size().await;
+        let mut journal_size = Position::new(journal.size().await);
 
-        if size > *end_pos {
-            return Err(crate::journal::Error::ItemOutOfRange(size).into());
+        // If a crash left the journal at an invalid MMR size (e.g., a leaf was written
+        // but its parent nodes were not), rewind to the last valid size.
+        let last_valid_size = PeakIterator::to_nearest_size(journal_size);
+        if last_valid_size != journal_size {
+            warn!(
+                ?last_valid_size,
+                "init_sync: encountered invalid MMR structure, recovering from last valid size"
+            );
+            journal.rewind(*last_valid_size).await?;
+            journal.sync().await?;
+            journal_size = last_valid_size;
         }
-        if size <= *prune_pos && *prune_pos != 0 {
+
+        // Handle existing data vs sync range.
+        assert!(!cfg.range.is_empty(), "range must not be empty");
+        if journal_size > *end_pos {
+            return Err(crate::journal::Error::ItemOutOfRange(*journal_size).into());
+        }
+        if journal_size <= *prune_pos && *prune_pos != 0 {
             journal.clear_to_size(*prune_pos).await?;
+            journal_size = Position::new(journal.size().await);
         }
-
-        let journal_size = Position::new(journal.size().await);
 
         // Open the metadata.
         let metadata_cfg = MConfig {
@@ -882,6 +895,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     }
 }
 
+/// The [`Readable`] implementation for the journaled MMR operates only on the in-memory
+/// portion of the MMR. After [`Mmr::sync`], nodes that have been flushed to the journal
+/// are no longer accessible through this interface. In particular, [`Readable::get_node`]
+/// returns `None` for flushed positions, and [`Readable::pruned_to_pos`] reflects the
+/// in-memory boundary (which may be tighter than the journal's prune boundary reported by
+/// [`Mmr::bounds`]). This means batch operations like `update_leaf` will correctly reject
+/// leaves that have been synced out of memory with [`Error::ElementPruned`].
 impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
     type Digest = D;
 
@@ -898,7 +918,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
     }
 
     fn pruned_to_pos(&self) -> Position {
-        self.inner.read().pruned_to_pos
+        self.inner.read().mem_mmr.pruned_to_pos()
     }
 }
 
@@ -983,7 +1003,7 @@ mod tests {
                 let mut batch = journaled_mmr.new_batch();
                 for i in 0u64..NUM_ELEMENTS {
                     let element = hasher.digest(&i.to_be_bytes());
-                    batch.add(&hasher, &element);
+                    batch = batch.add(&hasher, &element);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1012,11 +1032,11 @@ mod tests {
             assert!(mmr.sync().await.is_ok());
             assert!(matches!(mmr.rewind(1, &hasher).await, Err(Error::Empty)));
 
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, &test_digest(0));
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&hasher, &test_digest(0))
+                .merkleize(&hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
             assert_eq!(mmr.size(), 1);
             mmr.sync().await.unwrap();
@@ -1046,11 +1066,11 @@ mod tests {
             ));
 
             // Confirm empty proof no longer verifies after adding an element.
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, &test_digest(0));
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&hasher, &test_digest(0))
+                .merkleize(&hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
             let root = mmr.root();
             assert!(!empty_proof.verify_range_inclusion(
@@ -1082,11 +1102,11 @@ mod tests {
             .await
             .unwrap();
 
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, &test_digest(0));
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&hasher, &test_digest(0))
+                .merkleize(&hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
 
             assert!(matches!(
@@ -1114,7 +1134,7 @@ mod tests {
                 for i in 0u64..NUM_ELEMENTS {
                     c_hasher.update(&i.to_be_bytes());
                     let element = c_hasher.finalize();
-                    batch.add(&hasher, &element);
+                    batch = batch.add(&hasher, &element);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1130,7 +1150,7 @@ mod tests {
                     for j in 0..i {
                         c_hasher.update(&j.to_be_bytes());
                         let element = c_hasher.finalize();
-                        batch.add(&hasher, &element);
+                        batch = batch.add(&hasher, &element);
                     }
                     batch.merkleize(&hasher).finalize()
                 };
@@ -1152,7 +1172,7 @@ mod tests {
                     for i in 0u64..NUM_ELEMENTS {
                         c_hasher.update(&i.to_be_bytes());
                         let element = c_hasher.finalize();
-                        batch.add(&hasher, &element);
+                        batch = batch.add(&hasher, &element);
                         if i == 101 {
                             // We can't sync mid-batch, so finalize and apply the first part,
                             // sync, then start a new batch for the rest.
@@ -1168,7 +1188,7 @@ mod tests {
                     for i in 102u64..NUM_ELEMENTS {
                         c_hasher.update(&i.to_be_bytes());
                         let element = c_hasher.finalize();
-                        batch.add(&hasher, &element);
+                        batch = batch.add(&hasher, &element);
                     }
                     batch.merkleize(&hasher).finalize()
                 };
@@ -1195,7 +1215,7 @@ mod tests {
                     for i in 0u64..102 {
                         c_hasher.update(&i.to_be_bytes());
                         let element = c_hasher.finalize();
-                        batch.add(&hasher, &element);
+                        batch = batch.add(&hasher, &element);
                     }
                     batch.merkleize(&hasher).finalize()
                 };
@@ -1206,7 +1226,7 @@ mod tests {
                     for i in 102u64..NUM_ELEMENTS {
                         c_hasher.update(&i.to_be_bytes());
                         let element = c_hasher.finalize();
-                        batch.add(&hasher, &element);
+                        batch = batch.add(&hasher, &element);
                     }
                     batch.merkleize(&hasher).finalize()
                 };
@@ -1254,7 +1274,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..32 {
-                    batch.add(&hasher, &i.to_be_bytes());
+                    batch = batch.add(&hasher, &i.to_be_bytes());
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1276,7 +1296,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..8 {
-                    batch.add(&hasher, &i.to_be_bytes());
+                    batch = batch.add(&hasher, &i.to_be_bytes());
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1305,7 +1325,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for leaf in &leaves {
-                    batch.add(&hasher, leaf);
+                    batch = batch.add(&hasher, leaf);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1347,9 +1367,9 @@ mod tests {
         });
     }
 
-    #[test_traced]
     /// Generates a stateful MMR, simulates various partial-write scenarios, and confirms we
     /// appropriately recover to a valid state.
+    #[test_traced]
     fn test_journaled_mmr_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1368,7 +1388,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for leaf in &leaves {
-                    batch.add(&hasher, leaf);
+                    batch = batch.add(&hasher, leaf);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1442,7 +1462,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for leaf in &leaves {
-                    batch.add(&hasher, leaf);
+                    batch = batch.add(&hasher, leaf);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1450,7 +1470,7 @@ mod tests {
             let changeset = {
                 let mut batch = pruned_mmr.new_batch();
                 for leaf in &leaves {
-                    batch.add(&hasher, leaf);
+                    batch = batch.add(&hasher, leaf);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1470,13 +1490,13 @@ mod tests {
                 let last_leaf = leaves.last().unwrap();
                 let changeset = {
                     let mut batch = pruned_mmr.new_batch();
-                    batch.add(&hasher, last_leaf);
+                    batch = batch.add(&hasher, last_leaf);
                     batch.merkleize(&hasher).finalize()
                 };
                 pruned_mmr.apply(changeset).unwrap();
                 let changeset = {
                     let mut batch = mmr.new_batch();
-                    batch.add(&hasher, last_leaf);
+                    batch = batch.add(&hasher, last_leaf);
                     batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
@@ -1509,17 +1529,17 @@ mod tests {
 
             // Close MMR after adding a new node without syncing and make sure state is as expected
             // on reopening.
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, &test_digest(LEAF_COUNT));
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&hasher, &test_digest(LEAF_COUNT))
+                .merkleize(&hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
-            let changeset = {
-                let mut batch = pruned_mmr.new_batch();
-                batch.add(&hasher, &test_digest(LEAF_COUNT));
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset = pruned_mmr
+                .new_batch()
+                .add(&hasher, &test_digest(LEAF_COUNT))
+                .merkleize(&hasher)
+                .finalize();
             pruned_mmr.apply(changeset).unwrap();
             assert!(*pruned_mmr.size() % cfg_pruned.items_per_blob != 0);
             pruned_mmr.sync().await.unwrap();
@@ -1548,7 +1568,7 @@ mod tests {
             while *pruned_mmr.size() % cfg_pruned.items_per_blob != 0 {
                 let changeset = {
                     let mut batch = pruned_mmr.new_batch();
-                    batch.add(&hasher, &test_digest(LEAF_COUNT));
+                    batch = batch.add(&hasher, &test_digest(LEAF_COUNT));
                     batch.merkleize(&hasher).finalize()
                 };
                 pruned_mmr.apply(changeset).unwrap();
@@ -1561,8 +1581,8 @@ mod tests {
         });
     }
 
-    #[test_traced("WARN")]
     /// Simulate partial writes after pruning, making sure we recover to a valid state.
+    #[test_traced("WARN")]
     fn test_journaled_mmr_recovery_with_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1579,7 +1599,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for leaf in &leaves {
-                    batch.add(&hasher, leaf);
+                    batch = batch.add(&hasher, leaf);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1609,8 +1629,8 @@ mod tests {
                     leaves.push(digest);
                     let changeset = {
                         let mut batch = mmr.new_batch();
-                        batch.add(&hasher, leaves.last().unwrap());
-                        batch.add(&hasher, leaves.last().unwrap());
+                        batch = batch.add(&hasher, leaves.last().unwrap());
+                        batch = batch.add(&hasher, leaves.last().unwrap());
                         batch.merkleize(&hasher).finalize()
                     };
                     mmr.apply(changeset).unwrap();
@@ -1618,8 +1638,8 @@ mod tests {
                     leaves.push(digest);
                     let changeset = {
                         let mut batch = mmr.new_batch();
-                        batch.add(&hasher, leaves.last().unwrap());
-                        batch.add(&hasher, leaves.last().unwrap());
+                        batch = batch.add(&hasher, leaves.last().unwrap());
+                        batch = batch.add(&hasher, leaves.last().unwrap());
                         batch.merkleize(&hasher).finalize()
                     };
                     mmr.apply(changeset).unwrap();
@@ -1654,7 +1674,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for elt in &elements {
-                    batch.add(&hasher, elt);
+                    batch = batch.add(&hasher, elt);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1692,7 +1712,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for elt in &elements[10..20] {
-                    batch.add(&hasher, elt);
+                    batch = batch.add(&hasher, elt);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1729,7 +1749,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for elt in &elements {
-                    batch.add(&hasher, elt);
+                    batch = batch.add(&hasher, elt);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1758,7 +1778,7 @@ mod tests {
             let changeset = {
                 let mut batch = ref_mmr.new_batch();
                 for elt in elements.iter().take(41) {
-                    batch.add(&hasher, elt);
+                    batch = batch.add(&hasher, elt);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1819,7 +1839,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for elt in &elements {
-                    batch.add(&hasher, elt);
+                    batch = batch.add(&hasher, elt);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1847,7 +1867,7 @@ mod tests {
             let changeset = {
                 let mut batch = ref_mmr.new_batch();
                 for elt in elements.iter().take(*range.end as usize) {
-                    batch.add(&hasher, elt);
+                    batch = batch.add(&hasher, elt);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1882,11 +1902,11 @@ mod tests {
             let mut mmr = Mmr::init(context, &hasher, cfg).await.unwrap();
 
             let element = test_digest(0);
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, &element);
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&hasher, &element)
+                .merkleize(&hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
 
             // Test single element proof at historical position
@@ -1937,11 +1957,11 @@ mod tests {
 
             // Should be able to add new elements
             let new_element = test_digest(999);
-            let changeset = {
-                let mut batch = sync_mmr.new_batch();
-                batch.add(&hasher, &new_element);
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset = sync_mmr
+                .new_batch()
+                .add(&hasher, &new_element)
+                .merkleize(&hasher)
+                .finalize();
             sync_mmr.apply(changeset).unwrap();
 
             // Root should be computable
@@ -1965,7 +1985,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..50 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2033,7 +2053,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..30 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2128,7 +2148,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..50 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2193,7 +2213,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..50 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2254,7 +2274,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..100 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2302,7 +2322,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..64 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2329,7 +2349,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..8 {
-                    batch.add(&hasher, &test_digest(10_000 + i));
+                    batch = batch.add(&hasher, &test_digest(10_000 + i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2357,7 +2377,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..20 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2367,12 +2387,12 @@ mod tests {
             let range = Location::new(2)..Location::new(8);
 
             // Appends should remain allowed while historical proofs are available.
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, &test_digest(100));
-                batch.add(&hasher, &test_digest(101));
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&hasher, &test_digest(100))
+                .add(&hasher, &test_digest(101))
+                .merkleize(&hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
 
             let proof = mmr
@@ -2402,7 +2422,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..64 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2448,7 +2468,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..30 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2504,7 +2524,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..20 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2534,7 +2554,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..11 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2573,7 +2593,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..8 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2608,7 +2628,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..32 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2689,7 +2709,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0..16 {
-                    batch.add(&hasher, &test_digest(i));
+                    batch = batch.add(&hasher, &test_digest(i));
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2745,7 +2765,7 @@ mod tests {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..10 {
                     let element = hasher.digest(&i.to_be_bytes());
-                    batch.add(&hasher, &element);
+                    batch = batch.add(&hasher, &element);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -2756,7 +2776,7 @@ mod tests {
             let mut batch_a = mmr.new_batch();
             for i in 10u64..15 {
                 let element = hasher.digest(&i.to_be_bytes());
-                batch_a.add(&hasher, &element);
+                batch_a = batch_a.add(&hasher, &element);
             }
             let merkleized_a = batch_a.merkleize(&hasher);
 
@@ -2764,7 +2784,7 @@ mod tests {
             let mut batch_b = merkleized_a.new_batch();
             for i in 15u64..20 {
                 let element = hasher.digest(&i.to_be_bytes());
-                batch_b.add(&hasher, &element);
+                batch_b = batch_b.add(&hasher, &element);
             }
             let merkleized_b = batch_b.merkleize(&hasher);
             let expected_root = merkleized_b.root();
@@ -2784,6 +2804,151 @@ mod tests {
         });
     }
 
+    /// Regression: init_sync must recover from a journal left at an invalid MMR size
+    /// (e.g., a crash wrote a leaf but not its parent nodes).
+    #[test_traced]
+    fn test_init_sync_recovers_from_invalid_journal_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let hasher = Standard::<Sha256>::new();
+
+            // Build an MMR with 3 leaves (valid size = 4), sync, and drop.
+            let mut mmr = Mmr::init(context.with_label("init"), &hasher, test_config(&context))
+                .await
+                .unwrap();
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                for i in 0..3 {
+                    batch = batch.add(&hasher, &test_digest(i));
+                }
+                batch.merkleize(&hasher).finalize()
+            };
+            mmr.apply(changeset).unwrap();
+            assert_eq!(mmr.size(), 4);
+            let valid_size = mmr.size();
+            let valid_root = mmr.root();
+            mmr.sync().await.unwrap();
+            drop(mmr);
+
+            // Append one extra digest to the journal, simulating a crash that wrote a
+            // leaf (for the 4th element) but not its parent nodes. This makes the
+            // journal size = 5, which is not a valid MMR size (4 is valid for 3 leaves,
+            // 7 is valid for 4 leaves).
+            {
+                let journal: Journal<_, Digest> = Journal::init(
+                    context.with_label("corrupt"),
+                    JConfig {
+                        partition: "journal-partition".into(),
+                        items_per_blob: NZU64!(7),
+                        write_buffer: NZUsize!(1024),
+                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(journal.size().await, valid_size);
+                journal.append(&Sha256::hash(b"orphan")).await.unwrap();
+                journal.sync().await.unwrap();
+                assert_eq!(journal.size().await, valid_size + 1);
+            }
+
+            // init_sync should recover by rewinding to the last valid size.
+            let sync_cfg = SyncConfig::<Digest> {
+                config: test_config(&context),
+                range: Location::new(0)..Location::new(100),
+                pinned_nodes: None,
+            };
+            let sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &hasher)
+                .await
+                .unwrap();
+
+            assert_eq!(sync_mmr.size(), valid_size);
+            assert_eq!(sync_mmr.root(), valid_root);
+
+            sync_mmr.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: init_sync's "fresh start" path (journal data entirely before sync range)
+    /// calls clear_to_size which changes the journal size, but journal_size must be re-read
+    /// afterward. Without the re-read, nodes_to_pin and the mem_mmr are initialized with a
+    /// stale size, causing incorrect pinned nodes or init failure.
+    #[test_traced]
+    fn test_init_sync_fresh_start_updates_journal_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let hasher = Standard::<Sha256>::new();
+
+            // Build an MMR with 5 leaves (size 8), sync, drop.
+            let mut mmr = Mmr::init(context.with_label("init"), &hasher, test_config(&context))
+                .await
+                .unwrap();
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                for i in 0..5 {
+                    batch = batch.add(&hasher, &test_digest(i));
+                }
+                batch.merkleize(&hasher).finalize()
+            };
+            mmr.apply(changeset).unwrap();
+            mmr.sync().await.unwrap();
+            drop(mmr);
+
+            // Build a reference MMR to 100 leaves to get valid pinned nodes for the
+            // sync boundary.
+            let ref_cfg = Config {
+                journal_partition: "ref-journal".into(),
+                metadata_partition: "ref-metadata".into(),
+                items_per_blob: NZU64!(7),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let mut ref_mmr = Mmr::init(context.with_label("ref"), &hasher, ref_cfg)
+                .await
+                .unwrap();
+            let changeset = {
+                let mut batch = ref_mmr.new_batch();
+                for i in 0..100 {
+                    batch = batch.add(&hasher, &test_digest(i));
+                }
+                batch.merkleize(&hasher).finalize()
+            };
+            ref_mmr.apply(changeset).unwrap();
+            let expected_size = ref_mmr.size();
+            let prune_pos = Position::try_from(Location::new(100)).unwrap();
+            let mut pinned = Vec::new();
+            for pos in nodes_to_pin(prune_pos) {
+                pinned.push(ref_mmr.get_node(pos).await.unwrap().unwrap());
+            }
+            ref_mmr.destroy().await.unwrap();
+
+            // init_sync with range starting beyond the existing data triggers the
+            // "fresh start" path (clear_to_size).
+            let sync_cfg = SyncConfig::<Digest> {
+                config: test_config(&context),
+                range: Location::new(100)..Location::new(200),
+                pinned_nodes: Some(pinned),
+            };
+            let mut sync_mmr = Mmr::init_sync(context.with_label("sync"), sync_cfg, &hasher)
+                .await
+                .unwrap();
+
+            // The MMR should have size matching the prune boundary position.
+            assert_eq!(sync_mmr.size(), expected_size);
+
+            // Should be able to add new elements without panic.
+            let changeset = {
+                let mut batch = sync_mmr.new_batch();
+                batch = batch.add(&hasher, &test_digest(999));
+                batch.merkleize(&hasher).finalize()
+            };
+            sync_mmr.apply(changeset).unwrap();
+
+            sync_mmr.destroy().await.unwrap();
+        });
+    }
+
     #[test]
     fn test_stale_changeset() {
         let executor = deterministic::Runner::default();
@@ -2798,16 +2963,16 @@ mod tests {
             .unwrap();
 
             // Create two batches from the same base.
-            let changeset_a = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, b"leaf-a");
-                batch.merkleize(&hasher).finalize()
-            };
-            let changeset_b = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, b"leaf-b");
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset_a = mmr
+                .new_batch()
+                .add(&hasher, b"leaf-a")
+                .merkleize(&hasher)
+                .finalize();
+            let changeset_b = mmr
+                .new_batch()
+                .add(&hasher, b"leaf-b")
+                .merkleize(&hasher)
+                .finalize();
 
             // Apply A -- should succeed.
             mmr.apply(changeset_a).unwrap();
@@ -2818,6 +2983,39 @@ mod tests {
                 matches!(result, Err(Error::StaleChangeset { .. })),
                 "expected StaleChangeset, got {result:?}"
             );
+
+            mmr.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: update_leaf on a synced-out leaf must return ElementPruned, not panic.
+    /// Before the fix, Readable::pruned_to_pos returned the journal's prune boundary
+    /// (which could be 0), so the batch accepted the update. During merkleize, get_node
+    /// returned None for the synced-out sibling and hit an expect panic.
+    #[test_traced]
+    fn test_update_leaf_after_sync_returns_pruned() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let hasher = Standard::<Sha256>::new();
+            let mut mmr = Mmr::init(context.clone(), &hasher, test_config(&context))
+                .await
+                .unwrap();
+
+            // Add 50 elements and sync (flushes all nodes to journal, prunes mem_mmr).
+            let changeset = {
+                let mut batch = mmr.new_batch();
+                for i in 0..50 {
+                    batch = batch.add(&hasher, &test_digest(i));
+                }
+                batch.merkleize(&hasher).finalize()
+            };
+            mmr.apply(changeset).unwrap();
+            mmr.sync().await.unwrap();
+
+            // Attempt to update leaf 0 which has been synced out of memory.
+            let batch = mmr.new_batch();
+            let result = batch.update_leaf(&hasher, Location::new(0), b"updated");
+            assert!(matches!(result, Err(Error::ElementPruned(_))));
 
             mmr.destroy().await.unwrap();
         });

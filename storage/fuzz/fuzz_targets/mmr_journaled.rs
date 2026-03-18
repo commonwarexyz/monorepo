@@ -97,7 +97,7 @@ fn historical_root(
     let changeset = {
         let mut batch = mmr.new_batch();
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
-            batch.add(&hasher, element);
+            batch = batch.add(&hasher, element);
         }
         batch.merkleize(&hasher).finalize()
     };
@@ -137,16 +137,15 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     let size_before = mmr.size();
-                    let (pos, changeset) = {
-                        let mut batch = mmr.new_batch();
-                        let pos = batch.add(&hasher, limited_data);
-                        (pos, batch.merkleize(&hasher).finalize())
-                    };
+                    let changeset = mmr
+                        .new_batch()
+                        .add(&hasher, limited_data)
+                        .merkleize(&hasher)
+                        .finalize();
                     mmr.apply(changeset).unwrap();
                     leaves.push(limited_data.to_vec());
                     historical_sizes.push(mmr.leaves());
                     assert!(mmr.size() > size_before);
-                    assert_eq!(Position::try_from(mmr.leaves() - 1).unwrap(), pos);
                 }
 
                 MmrJournaledOperation::AddBatched { items } => {
@@ -167,25 +166,21 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     let size_before = mmr.size();
-                    let (positions, changeset) = {
+                    let leaves_before = mmr.leaves();
+                    let changeset = {
                         let mut batch = mmr.new_batch();
-                        let positions: Vec<_> =
-                            items.iter().map(|item| batch.add(&hasher, item)).collect();
-                        (positions, batch.merkleize(&hasher).finalize())
+                        for item in &items {
+                            batch = batch.add(&hasher, item);
+                        }
+                        batch.merkleize(&hasher).finalize()
                     };
                     mmr.apply(changeset).unwrap();
                     assert!(mmr.size() > size_before);
 
-                    for (item, pos) in items.iter().zip(&positions) {
+                    for (i, item) in items.iter().enumerate() {
                         leaves.push(item.to_vec());
-                        // Convert leaf position to location, then +1 for count.
-                        let loc = Location::try_from(*pos).unwrap();
-                        historical_sizes.push(loc + 1);
+                        historical_sizes.push(leaves_before + i as u64 + 1);
                     }
-                    assert_eq!(
-                        Position::try_from(mmr.leaves() - 1).unwrap(),
-                        *positions.last().unwrap()
-                    );
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {

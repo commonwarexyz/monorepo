@@ -131,24 +131,19 @@ fn fuzz(input: FuzzInput) {
                     };
 
                     let size_before = mmr.size();
-                    let (mmr_pos, changeset) = {
-                        let mut batch = mmr.new_batch();
-                        let mmr_pos_inner = batch.add(&hasher, limited_data);
-                        (mmr_pos_inner, batch.merkleize(&hasher).finalize())
-                    };
+                    let changeset = mmr
+                        .new_batch()
+                        .add(&hasher, limited_data)
+                        .merkleize(&hasher)
+                        .finalize();
                     mmr.apply(changeset).unwrap();
+                    let mmr_pos = Position::try_from(mmr.leaves() - 1).unwrap();
                     reference.add(mmr_pos, limited_data.to_vec());
 
                     // Basic checks
                     assert!(
                         mmr.size() > size_before,
                         "Operation {op_idx}: Size should increase after add"
-                    );
-
-                    assert_eq!(
-                        Some(Position::try_from(mmr.leaves() - 1).unwrap()),
-                        Some(mmr_pos),
-                        "Operation {op_idx}: Last leaf position should be the added position"
                     );
 
                     assert!(
@@ -177,8 +172,10 @@ fn fuzz(input: FuzzInput) {
 
                         let leaf_loc =
                             Location::try_from(pos).expect("leaf position should map to location");
-                        let mut batch = mmr.new_batch();
-                        batch.update_leaf(&hasher, leaf_loc, limited_data).unwrap();
+                        let batch = mmr
+                            .new_batch()
+                            .update_leaf(&hasher, leaf_loc, limited_data)
+                            .unwrap();
                         mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
                         reference.update_leaf(location, limited_data.to_vec());
 

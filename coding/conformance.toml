@@ -1,11 +1,3 @@
-["commonware_coding::no_coding::conformance::CodecConformance<StrongShard>"]
-n_cases = 65536
-hash = "edc22446bb2952609d0c8daccf2d22f8ad2b71eedfcf45296c3f4db49d78404a"
-
-["commonware_coding::no_coding::conformance::CodecConformance<WeakShard>"]
-n_cases = 65536
-hash = "07854d2fef297a06ba81685e660c332de36d5d18d546927d30daad6d7fda1541"
-
 ["commonware_coding::reed_solomon::tests::conformance::CodecConformance<Chunk<Sha256Digest>>"]
 n_cases = 65536
 hash = "45545e4d4aeb18b8bdb019e630fb9a1fa6dda9ed32b2d529a9213ec07ccab07c"

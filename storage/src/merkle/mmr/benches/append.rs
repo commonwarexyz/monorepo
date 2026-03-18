@@ -29,7 +29,7 @@ fn bench_append(c: &mut Criterion) {
                     let changeset = {
                         let mut batch = UnmerkleizedBatch::new(&mmr);
                         for digest in &elements {
-                            batch.add(&h, digest);
+                            batch = batch.add(&h, digest);
                         }
                         batch.merkleize(&h).finalize()
                     };

@@ -32,6 +32,7 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod bitmap;
     pub mod ordered;
+    pub mod range;
 
     use bytes::Buf;
     use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};

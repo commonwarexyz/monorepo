@@ -5,7 +5,7 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{elector::Config as Elector, types::Activity},
+    simplex::{elector::Config as Elector, types::Activity, Plan},
     types::{Epoch, ViewDelta},
     CertifiableAutomaton, Relay, Reporter,
 };
@@ -24,7 +24,7 @@ pub struct Config<
     B: Blocker,
     D: Digest,
     A: CertifiableAutomaton,
-    R: Relay<Digest = D>,
+    R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
     pub scheme: S,
@@ -395,6 +395,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -424,6 +425,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(101));
                         assert_eq!(finalized, View::new(100));
@@ -481,6 +483,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(301));
                         assert_eq!(finalized, View::new(300));
@@ -636,6 +639,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -673,6 +677,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(51));
                         assert_eq!(finalized, View::new(50));
@@ -767,6 +772,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(101));
                         assert_eq!(finalized, View::new(100));
@@ -857,6 +863,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -984,6 +991,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -1503,6 +1511,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -1530,6 +1539,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(2));
                         assert_eq!(finalized, View::new(1));
@@ -1709,6 +1719,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -1799,6 +1810,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(3));
                     assert_eq!(finalized, View::new(2));
@@ -2077,6 +2089,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -2184,6 +2197,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -5895,8 +5909,8 @@ mod tests {
         proposal_clears_leader_timeout_before_certification_timeout::<_, _>(secp256r1::fixture);
     }
 
-    /// Regression: when a proposal is first observed through a notarization certificate,
-    /// leader timeout must still be cleared for the current view.
+    /// Regression: proposals recovered from notarization certificates must clear the
+    /// current view's leader timeout without emitting a local notarize vote.
     ///
     /// We require:
     /// 1. No nullify before `certification_timeout` even though `leader_timeout` has elapsed.
@@ -5964,30 +5978,18 @@ mod tests {
                 .recovered(Certificate::Notarization(notarization))
                 .await;
 
-            // Ensure certificate processing happened and proposal from certificate
-            // is treated as verified by checking that we notarize.
-            loop {
+            // `leader_timeout` is 1s and `certification_timeout` is 5s. We should not
+            // emit a notarize vote or nullify in this 2s window after certificate handling,
+            // even though leader timeout has elapsed.
+            let quiet_deadline = context.current() + Duration::from_secs(2);
+            while context.current() < quiet_deadline {
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Notarize(v)) if v.view() == target_view => {
-                            break;
+                            panic!(
+                                "unexpected notarize for view {target_view} from recovered certificate"
+                            );
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
-                        _ => {}
-                    },
-                    _ = context.sleep(Duration::from_secs(2)) => {
-                        panic!("expected notarize vote for view {target_view} from recovered certificate");
-                    },
-                }
-            }
-
-            // `leader_timeout` is 1s and `certification_timeout` is 5s. We should not
-            // see nullify in this 2s window after certificate handling, even though
-            // leader timeout has elapsed.
-            let no_nullify_deadline = context.current() + Duration::from_secs(2);
-            while context.current() < no_nullify_deadline {
-                select! {
-                    msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -6050,7 +6052,9 @@ mod tests {
     ///
     /// We require:
     /// 1. No `nullify(1)` is emitted while quorum certificates arrive promptly.
-    /// 2. The voter emits `notarize(1)` and `finalize(1)`, then advances to view 2.
+    /// 2. The voter emits `notarize(1)`.
+    /// 3. After successful certification, the voter emits `finalize(1)` before
+    ///    advancing to view 2.
     fn first_view_progress_without_timeout<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -6157,34 +6161,62 @@ mod tests {
                 .resolved(Certificate::Notarization(notarization))
                 .await;
 
-            let mut saw_finalize = false;
-            let mut reached_view2 = false;
             let deadline = context.current() + Duration::from_secs(3);
-            while context.current() < deadline && !(saw_finalize && reached_view2) {
+            let reached_view2 = loop {
+                if context.current() >= deadline {
+                    break false;
+                }
                 select! {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Finalize(finalize))
                             if finalize.view() == View::new(1) =>
                         {
-                            saw_finalize = true;
+                            break false;
                         }
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == View::new(1) =>
                         {
                             panic!("unexpected nullify for view 1 while peers are online");
                         }
-                        batcher::Message::Update { current, response, .. } => {
-                            if current >= View::new(2) {
-                                reached_view2 = true;
-                            }
+                        batcher::Message::Update {
+                            current, response, ..
+                        } => {
                             response.send(None).unwrap();
+                            if current >= View::new(2) {
+                                break true;
+                            }
                         }
                         _ => {}
                     },
-                    _ = context.sleep(Duration::from_millis(10)) => {}
+                    _ = context.sleep(Duration::from_millis(10)) => {},
                 }
-            }
-            assert!(saw_finalize, "expected finalize for view 1");
+            };
+            assert!(!reached_view2, "view advanced before finalize for view 1");
+
+            let reached_view2 = loop {
+                if context.current() >= deadline {
+                    break false;
+                }
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(1) =>
+                        {
+                            panic!("unexpected nullify for view 1 while peers are online");
+                        }
+                        batcher::Message::Update {
+                            current, response, ..
+                        } => {
+                            response.send(None).unwrap();
+                            if current >= View::new(2) {
+                                break true;
+                            }
+                        }
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_millis(10)) => {},
+                }
+            };
             assert!(reached_view2, "expected progress to view 2 from view 1");
 
             // Give the reporter a moment to receive any late events and verify no first-view nullify artifacts.

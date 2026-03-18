@@ -549,7 +549,8 @@ mod tests {
             for _ in 0..11 {
                 let changeset = {
                     let mut batch = mmr.new_batch();
-                    leaves.push(batch.add(&hasher, &element));
+                    leaves.push(Position::try_from(batch.leaves()).unwrap());
+                    batch = batch.add(&hasher, &element);
                     batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
@@ -692,7 +693,7 @@ mod tests {
                 mmr.prune_all();
                 let changeset = {
                     let mut batch = mmr.new_batch();
-                    batch.add(&hasher, &element);
+                    batch = batch.add(&hasher, &element);
                     batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
@@ -717,7 +718,7 @@ mod tests {
                 let old_size = mmr.size();
                 let changeset = {
                     let mut batch = mmr.new_batch();
-                    batch.add(&hasher, &element);
+                    batch = batch.add(&hasher, &element);
                     batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
@@ -750,7 +751,7 @@ mod tests {
                 let mut batch = batched_mmr.new_batch();
                 for i in 0..NUM_ELEMENTS {
                     let element = hasher.digest(&i.to_be_bytes());
-                    batch.add(&hasher, &element);
+                    batch = batch.add(&hasher, &element);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -793,7 +794,7 @@ mod tests {
                 let mut batch = mmr.new_batch().with_pool(Some(pool));
                 for i in 0u64..NUM_ELEMENTS {
                     let element = hasher.digest(&i.to_be_bytes());
-                    batch.add(&hasher, &element);
+                    batch = batch.add(&hasher, &element);
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -820,7 +821,7 @@ mod tests {
                 // Add to reference MMR
                 let cs = {
                     let mut batch = reference_mmr.new_batch();
-                    batch.add(&hasher, &element);
+                    batch = batch.add(&hasher, &element);
                     batch.merkleize(&hasher).finalize()
                 };
                 reference_mmr.apply(cs).unwrap();
@@ -828,7 +829,7 @@ mod tests {
                 // Add to pruning MMR
                 let cs = {
                     let mut batch = mmr.new_batch();
-                    batch.add(&hasher, &element);
+                    batch = batch.add(&hasher, &element);
                     batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(cs).unwrap();
@@ -855,16 +856,20 @@ mod tests {
             for leaf in [0usize, 1, 10, 50, 100, 150, 197, 198] {
                 // Change the leaf.
                 let leaf_loc = Location::new(leaf as u64);
-                let mut batch = mmr.new_batch();
-                batch.update_leaf(&hasher, leaf_loc, &element).unwrap();
+                let batch = mmr
+                    .new_batch()
+                    .update_leaf(&hasher, leaf_loc, &element)
+                    .unwrap();
                 mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
                 let updated_root = *mmr.root();
                 assert!(root != updated_root);
 
                 // Restore the leaf to its original value, ensure the root is as before.
                 let element = hasher.digest(&leaf.to_be_bytes());
-                let mut batch = mmr.new_batch();
-                batch.update_leaf(&hasher, leaf_loc, &element).unwrap();
+                let batch = mmr
+                    .new_batch()
+                    .update_leaf(&hasher, leaf_loc, &element)
+                    .unwrap();
                 mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
                 let restored_root = *mmr.root();
                 assert_eq!(root, restored_root);
@@ -875,8 +880,10 @@ mod tests {
             for leaf in 100u64..=190 {
                 mmr.prune(Location::new(leaf)).unwrap();
                 let leaf_loc = Location::new(leaf);
-                let mut batch = mmr.new_batch();
-                batch.update_leaf(&hasher, leaf_loc, &element).unwrap();
+                let batch = mmr
+                    .new_batch()
+                    .update_leaf(&hasher, leaf_loc, &element)
+                    .unwrap();
                 mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
             }
         });
@@ -892,7 +899,7 @@ mod tests {
             let mmr = Mmr::new(&hasher);
             let mmr = build_test_mmr(&hasher, mmr, 200);
             let invalid_loc = mmr.leaves();
-            let mut batch = mmr.new_batch();
+            let batch = mmr.new_batch();
             assert!(matches!(
                 batch.update_leaf(&hasher, invalid_loc, &element),
                 Err(Error::LeafOutOfBounds(_))
@@ -910,7 +917,7 @@ mod tests {
             let mmr = Mmr::new(&hasher);
             let mut mmr = build_test_mmr(&hasher, mmr, 100);
             mmr.prune_all();
-            let mut batch = mmr.new_batch();
+            let batch = mmr.new_batch();
             let result = batch.update_leaf(&hasher, Location::new(0), &element);
             assert!(matches!(result, Err(Error::ElementPruned(_))));
         });
@@ -967,20 +974,22 @@ mod tests {
             let original_digest = mmr.get_node(leaf_pos).unwrap();
 
             // Update a leaf via batch update_leaf_digest.
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch.update_leaf_digest(loc, updated_digest).unwrap();
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .update_leaf_digest(loc, updated_digest)
+                .unwrap()
+                .merkleize(&hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
             assert_ne!(*mmr.root(), root);
 
             // Restore the original digest and confirm the root reverts.
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch.update_leaf_digest(loc, original_digest).unwrap();
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .update_leaf_digest(loc, original_digest)
+                .unwrap()
+                .merkleize(&hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
             assert_eq!(*mmr.root(), root);
 
@@ -988,7 +997,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in [0u64, 1, 50, 100, 199] {
-                    batch
+                    batch = batch
                         .update_leaf_digest(Location::new(i), updated_digest)
                         .unwrap();
                 }
@@ -1008,9 +1017,13 @@ mod tests {
                 // Out of bounds: location >= leaf count.
                 let mmr = Mmr::new(&hasher);
                 let mmr = build_test_mmr(&hasher, mmr, 100);
-                let mut batch = mmr.new_batch();
-                let result = batch.update_leaf_digest(Location::new(100), Sha256::fill(0));
-                assert!(matches!(result, Err(Error::InvalidPosition(_))));
+                let Err(err) = mmr
+                    .new_batch()
+                    .update_leaf_digest(Location::new(100), Sha256::fill(0))
+                else {
+                    panic!("expected error");
+                };
+                assert!(matches!(err, Error::InvalidPosition(_)));
             }
 
             {
@@ -1018,9 +1031,13 @@ mod tests {
                 let mmr = Mmr::new(&hasher);
                 let mut mmr = build_test_mmr(&hasher, mmr, 100);
                 mmr.prune(Location::new(27)).unwrap();
-                let mut batch = mmr.new_batch();
-                let result = batch.update_leaf_digest(Location::new(0), Sha256::fill(0));
-                assert!(matches!(result, Err(Error::ElementPruned(_))));
+                let Err(err) = mmr
+                    .new_batch()
+                    .update_leaf_digest(Location::new(0), Sha256::fill(0))
+                else {
+                    panic!("expected error");
+                };
+                assert!(matches!(err, Error::ElementPruned(_)));
             }
         });
     }
@@ -1041,7 +1058,7 @@ mod tests {
             }
             for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
                 let leaf_loc = Location::new(leaf);
-                batch.update_leaf(hasher, leaf_loc, &element).unwrap();
+                batch = batch.update_leaf(hasher, leaf_loc, &element).unwrap();
             }
             batch.merkleize(hasher).finalize()
         };
@@ -1055,7 +1072,7 @@ mod tests {
             for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
                 let element = hasher.digest(&leaf.to_be_bytes());
                 let leaf_loc = Location::new(leaf);
-                batch.update_leaf(hasher, leaf_loc, &element).unwrap();
+                batch = batch.update_leaf(hasher, leaf_loc, &element).unwrap();
             }
             batch.merkleize(hasher).finalize()
         };
@@ -1106,7 +1123,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..50 {
-                    batch.add(&hasher, &i.to_be_bytes());
+                    batch = batch.add(&hasher, &i.to_be_bytes());
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1164,7 +1181,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..64 {
-                    batch.add(&hasher, &i.to_be_bytes());
+                    batch = batch.add(&hasher, &i.to_be_bytes());
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1187,7 +1204,7 @@ mod tests {
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..11 {
-                    batch.add(&hasher, &i.to_be_bytes());
+                    batch = batch.add(&hasher, &i.to_be_bytes());
                 }
                 batch.merkleize(&hasher).finalize()
             };
@@ -1297,16 +1314,16 @@ mod tests {
             let mut mmr = Mmr::new(&hasher);
 
             // Create two batches from the same base.
-            let changeset_a = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, b"leaf-a");
-                batch.merkleize(&hasher).finalize()
-            };
-            let changeset_b = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, b"leaf-b");
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset_a = mmr
+                .new_batch()
+                .add(&hasher, b"leaf-a")
+                .merkleize(&hasher)
+                .finalize();
+            let changeset_b = mmr
+                .new_batch()
+                .add(&hasher, b"leaf-b")
+                .merkleize(&hasher)
+                .finalize();
 
             // Apply A -- should succeed.
             mmr.apply(changeset_a).unwrap();
@@ -1329,28 +1346,22 @@ mod tests {
             let mut mmr = Mmr::new(&hasher);
 
             // Seed with one element.
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, b"leaf-0");
-                batch.merkleize(&hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&hasher, b"leaf-0")
+                .merkleize(&hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
 
             // Parent batch, then fork two children.
-            let parent = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, b"leaf-1");
-                batch.merkleize(&hasher)
-            };
+            let parent = mmr.new_batch().add(&hasher, b"leaf-1").merkleize(&hasher);
             let child_a = {
-                let mut batch = parent.new_batch();
-                batch.add(&hasher, b"leaf-2a");
-                batch.merkleize(&hasher).finalize()
+                let batch = parent.new_batch();
+                batch.add(&hasher, b"leaf-2a").merkleize(&hasher).finalize()
             };
             let child_b = {
-                let mut batch = parent.new_batch();
-                batch.add(&hasher, b"leaf-2b");
-                batch.merkleize(&hasher).finalize()
+                let batch = parent.new_batch();
+                batch.add(&hasher, b"leaf-2b").merkleize(&hasher).finalize()
             };
 
             // Apply child_a, then child_b should be stale.
@@ -1372,16 +1383,12 @@ mod tests {
             let mut mmr = Mmr::new(&hasher);
 
             // Create parent, then child.
-            let parent = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, b"leaf-0");
-                batch.merkleize(&hasher)
-            };
-            let child = {
-                let mut batch = parent.new_batch();
-                batch.add(&hasher, b"leaf-1");
-                batch.merkleize(&hasher).finalize()
-            };
+            let parent = mmr.new_batch().add(&hasher, b"leaf-0").merkleize(&hasher);
+            let child = parent
+                .new_batch()
+                .add(&hasher, b"leaf-1")
+                .merkleize(&hasher)
+                .finalize();
             let parent = parent.finalize();
 
             // Apply parent first -- child should now be stale.
@@ -1403,16 +1410,12 @@ mod tests {
             let mut mmr = Mmr::new(&hasher);
 
             // Create parent, then child.
-            let parent = {
-                let mut batch = mmr.new_batch();
-                batch.add(&hasher, b"leaf-0");
-                batch.merkleize(&hasher)
-            };
-            let child = {
-                let mut batch = parent.new_batch();
-                batch.add(&hasher, b"leaf-1");
-                batch.merkleize(&hasher).finalize()
-            };
+            let parent = mmr.new_batch().add(&hasher, b"leaf-0").merkleize(&hasher);
+            let child = parent
+                .new_batch()
+                .add(&hasher, b"leaf-1")
+                .merkleize(&hasher)
+                .finalize();
             let parent = parent.finalize();
 
             // Apply child first -- parent should now be stale.

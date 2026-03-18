@@ -356,7 +356,7 @@ mod tests {
                     let ops_subtree_root = ops_mmr
                         .get_node(ops_pos)
                         .expect("ops MMR missing node at mapped position");
-                    batch.add_leaf_digest(
+                    batch = batch.add_leaf_digest(
                         leaf_hasher.hash([chunk.as_ref(), ops_subtree_root.as_ref()]),
                     );
                 }
@@ -509,7 +509,7 @@ mod tests {
         let changeset = {
             let mut batch = ops_mmr.new_batch();
             for i in 0u8..4 {
-                batch.add(&standard, &Sha256::fill(i));
+                batch = batch.add(&standard, &Sha256::fill(i));
             }
             batch.merkleize(&standard).finalize()
         };
@@ -525,15 +525,17 @@ mod tests {
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
 
         let changeset = {
-            let mut batch = grafted.new_batch();
             let leaf_hasher = StandardHasher::<Sha256>::new();
             let sub0 = ops_mmr.get_node(pos0).unwrap();
-            batch.add_leaf_digest(leaf_hasher.hash([c1.as_ref(), sub0.as_ref()]));
+            let batch = grafted
+                .new_batch()
+                .add_leaf_digest(leaf_hasher.hash([c1.as_ref(), sub0.as_ref()]));
 
             let sub1 = ops_mmr.get_node(pos1).unwrap();
-            batch.add_leaf_digest(leaf_hasher.hash([c2.as_ref(), sub1.as_ref()]));
-
-            batch.merkleize(&grafted_hasher).finalize()
+            batch
+                .add_leaf_digest(leaf_hasher.hash([c2.as_ref(), sub1.as_ref()]))
+                .merkleize(&grafted_hasher)
+                .finalize()
         };
         grafted.apply(changeset).unwrap();
 
@@ -563,12 +565,13 @@ mod tests {
             let mut ops_mmr = Mmr::new(&standard);
             let changeset = {
                 let mut batch = ops_mmr.new_batch();
-                batch.add(&standard, &b1);
-                batch.add(&standard, &b2);
-                batch.add(&standard, &b3);
-                batch.add(&standard, &b4);
+                batch = batch.add(&standard, &b1);
+                batch = batch.add(&standard, &b2);
+                batch = batch.add(&standard, &b3);
+                batch = batch.add(&standard, &b4);
                 batch.merkleize(&standard).finalize()
             };
+
             ops_mmr.apply(changeset).unwrap();
 
             // Bitmap chunk elements (one per grafted leaf).
@@ -698,9 +701,10 @@ mod tests {
             let b5 = Sha256::fill(0x05);
             let changeset = {
                 let mut batch = ops_mmr.new_batch();
-                batch.add(&standard, &b5);
+                batch = batch.add(&standard, &b5);
                 batch.merkleize(&standard).finalize()
             };
+
             ops_mmr.apply(changeset).unwrap();
 
             let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
@@ -750,12 +754,12 @@ mod tests {
         let d1 = Sha256::fill(0x02);
         let grafted_hasher = GraftedHasher::new(standard, grafting_height);
         let mut grafted = Mmr::new(&grafted_hasher);
-        let changeset = {
-            let mut batch = grafted.new_batch();
-            batch.add_leaf_digest(d0);
-            batch.add_leaf_digest(d1);
-            batch.merkleize(&grafted_hasher).finalize()
-        };
+        let changeset = grafted
+            .new_batch()
+            .add_leaf_digest(d0)
+            .add_leaf_digest(d1)
+            .merkleize(&grafted_hasher)
+            .finalize();
         grafted.apply(changeset).unwrap();
 
         // Check that grafted leaves are retrievable via grafted-space positions.
@@ -796,11 +800,11 @@ mod tests {
             vec![pinned_digest],
         )
         .unwrap();
-        let changeset = {
-            let mut batch = grafted.new_batch();
-            batch.add_leaf_digest(d4);
-            batch.merkleize(&grafted_hasher).finalize()
-        };
+        let changeset = grafted
+            .new_batch()
+            .add_leaf_digest(d4)
+            .merkleize(&grafted_hasher)
+            .finalize();
         grafted.apply(changeset).unwrap();
 
         // The pinned peak should be at grafted position 6.

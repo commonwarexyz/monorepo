@@ -127,11 +127,11 @@ async fn run_operations(
     for op in operations.iter() {
         let failed = match op {
             MmrOperation::Add { data } => {
-                let changeset = {
-                    let mut batch = mmr.new_batch();
-                    batch.add(hasher, data);
-                    batch.merkleize(hasher).finalize()
-                };
+                let changeset = mmr
+                    .new_batch()
+                    .add(hasher, data)
+                    .merkleize(hasher)
+                    .finalize();
                 mmr.apply(changeset).unwrap();
                 max_size = max_size.max(mmr.size().as_u64());
                 max_leaves = max_leaves.max(mmr.leaves().as_u64());
@@ -336,11 +336,11 @@ fn fuzz(input: FuzzInput) {
 
         // Verify we can add new data after recovery
         let test_data = [0xABu8; DATA_SIZE];
-        let changeset = {
-            let mut batch = mmr.new_batch();
-            batch.add(&hasher, &test_data);
-            batch.merkleize(&hasher).finalize()
-        };
+        let changeset = mmr
+            .new_batch()
+            .add(&hasher, &test_data)
+            .merkleize(&hasher)
+            .finalize();
         mmr.apply(changeset).unwrap();
         mmr.destroy().await.expect("Should be able to destroy MMR");
     });
