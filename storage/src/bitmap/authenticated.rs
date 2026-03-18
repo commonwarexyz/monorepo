@@ -20,10 +20,10 @@ use crate::{
         mem::{Config, Mmr},
         storage::Storage,
         verification,
-        Error::{self, *},
-        Location, Position, Proof,
+        verification, Error, Location, Position, Proof,
     },
 };
+use crate::mmr::Error::*;
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;

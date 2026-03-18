@@ -1,292 +1,24 @@
 //! A basic, no_std compatible MMR where all nodes are stored in-memory.
 
-use crate::merkle::{
-    batch::BatchChainInfo,
-    hasher::Hasher,
-    mmr::{proof, Error, Family, Location, Position, Proof, Readable},
-    Family as _,
-};
-use alloc::{
-    collections::{BTreeMap, VecDeque},
-    vec::Vec,
-};
-use commonware_cryptography::Digest;
-use core::ops::Range;
+/// A basic MMR where all nodes are stored in-memory.
+pub type Mmr<D> = crate::merkle::mem::Mem<super::Family, D>;
 
 /// Configuration for initializing an [Mmr].
-pub struct Config<D: Digest> {
-    /// The retained nodes of the MMR.
-    pub nodes: Vec<D>,
+pub type Config<D> = crate::merkle::mem::Config<super::Family, D>;
 
-    /// The leaf location up to which this MMR has been pruned, or 0 if this MMR has never been
-    /// pruned.
-    pub pruned_to: Location,
+#[cfg(any(feature = "std", test))]
+use super::{Family, Position};
+#[cfg(any(feature = "std", test))]
+use alloc::collections::BTreeMap;
 
-    /// The pinned nodes of the MMR, in the order expected by `nodes_to_pin`.
-    pub pinned_nodes: Vec<D>,
-}
-
-/// A basic MMR where all nodes are stored in-memory.
-///
-/// # Terminology
-///
-/// Nodes in this structure are either _retained_, _pruned_, or _pinned_. Retained nodes are nodes
-/// that have not yet been pruned, and have digests stored explicitly within the tree structure.
-/// Pruned nodes are those whose positions precede that of the _oldest retained_ node, for which no
-/// digests are maintained. Pinned nodes are nodes that would otherwise be pruned based on their
-/// position, but whose digests remain required for proof generation. The digests for pinned nodes
-/// are stored in an auxiliary map, and are at most O(log2(n)) in number.
-///
-/// # Max Capacity
-///
-/// The maximum number of elements that can be stored is usize::MAX (u32::MAX on 32-bit
-/// architectures).
-///
-/// # Mutation
-///
-/// The MMR is always merkleized (its root is always computed). Mutations go through the
-/// batch API: create an [`super::batch::UnmerkleizedBatch`] via [`Self::new_batch`],
-/// accumulate changes, then apply the resulting [`super::batch::Changeset`] via [`Self::apply`].
-#[derive(Clone, Debug)]
-pub struct Mmr<D: Digest> {
-    /// The nodes of the MMR, laid out according to a post-order traversal of the MMR trees,
-    /// starting from the from tallest tree to shortest.
-    nodes: VecDeque<D>,
-
-    /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
-    /// pruned.
-    ///
-    /// # Invariant
-    ///
-    /// This position is always that of a leaf when the MMR is non-empty.
-    pruned_to_pos: Position,
-
-    /// The auxiliary map from node position to the digest of any pinned node. Only recomputed when
-    /// `pruned_to_pos` changes; appending nodes can only shrink the required set, so the current
-    /// map is always a valid superset of what is needed.
-    pinned_nodes: BTreeMap<Position, D>,
-
-    /// The root digest of the MMR.
-    root: D,
-}
-
-impl<D: Digest> Mmr<D> {
-    /// Create a new, empty MMR.
-    pub fn new(hasher: &mut impl Hasher<Family, Digest = D>) -> Self {
-        let root = hasher.root(Location::new(0), core::iter::empty::<&D>());
-        Self {
-            nodes: VecDeque::new(),
-            pruned_to_pos: Position::new(0),
-            pinned_nodes: BTreeMap::new(),
-            root,
-        }
-    }
-
-    /// Return an [Mmr] initialized with the given `config`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::InvalidPinnedNodes] if the number of pinned nodes doesn't match the expected
-    /// count for `config.pruned_to`.
-    ///
-    /// Returns [Error::InvalidSize] if the MMR size is invalid.
-    pub fn init(
-        config: Config<D>,
-        hasher: &mut impl Hasher<Family, Digest = D>,
-    ) -> Result<Self, Error> {
-        let pruned_to_pos = Position::try_from(config.pruned_to)?;
-
-        // Validate that the total size is valid
-        let Some(size) = pruned_to_pos.checked_add(config.nodes.len() as u64) else {
-            return Err(Error::InvalidSize(u64::MAX));
-        };
-        if !size.is_valid_size() {
-            return Err(Error::InvalidSize(*size));
-        }
-
-        // Validate and populate pinned nodes
-        let expected_pinned_positions =
-            <Family as crate::merkle::Family>::nodes_to_pin(size, pruned_to_pos);
-        if config.pinned_nodes.len() != expected_pinned_positions.len() {
-            return Err(Error::InvalidPinnedNodes);
-        }
-
-        let pinned_nodes = expected_pinned_positions
-            .into_iter()
-            .zip(config.pinned_nodes)
-            .collect();
-
-        let nodes = VecDeque::from(config.nodes);
-        let root = Self::compute_root(hasher, &nodes, &pinned_nodes, pruned_to_pos);
-        Ok(Self {
-            nodes,
-            pruned_to_pos,
-            pinned_nodes,
-            root,
-        })
-    }
-
-    /// Re-initialize the MMR with the given nodes, pruned_to location, and pinned_nodes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::InvalidPinnedNodes] if the length of `pinned_nodes_vec` does not match the
-    /// number of nodes required to be pinned at the pruning boundary.
-    ///
-    /// Returns [Error::LocationOverflow] if `pruned_to` exceeds [crate::merkle::Family::MAX_LOCATION].
-    pub fn from_components(
-        hasher: &mut impl Hasher<Family, Digest = D>,
-        nodes: Vec<D>,
-        pruned_to: Location,
-        pinned_nodes: Vec<D>,
-    ) -> Result<Self, Error> {
-        Self::init(
-            Config {
-                nodes,
-                pruned_to,
-                pinned_nodes,
-            },
-            hasher,
-        )
-    }
-
-    /// Compute the root digest from the current peaks.
-    fn compute_root(
-        hasher: &mut impl Hasher<Family, Digest = D>,
-        nodes: &VecDeque<D>,
-        pinned_nodes: &BTreeMap<Position, D>,
-        pruned_to_pos: Position,
-    ) -> D {
-        let size = Position::new(nodes.len() as u64 + *pruned_to_pos);
-        let leaves = Location::try_from(size).expect("invalid mmr size");
-        let get_node = |pos: Position| -> &D {
-            if pos < pruned_to_pos {
-                return pinned_nodes
-                    .get(&pos)
-                    .expect("requested node is pruned and not pinned");
-            }
-            let index = (*pos - *pruned_to_pos) as usize;
-            &nodes[index]
-        };
-        let peaks = Family::peaks(size).into_iter().map(|(p, _)| get_node(p));
-        hasher.root(leaves, peaks)
-    }
-
-    /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
-    /// element's position will have this value.
-    pub fn size(&self) -> Position {
-        Position::new(self.nodes.len() as u64 + *self.pruned_to_pos)
-    }
-
-    /// Return the total number of leaves in the MMR.
-    pub fn leaves(&self) -> Location {
-        Location::try_from(self.size()).expect("invalid mmr size")
-    }
-
-    /// Returns [start, end) where `start` is the oldest retained leaf and `end` is the total leaf
-    /// count.
-    pub fn bounds(&self) -> Range<Location> {
-        Location::try_from(self.pruned_to_pos).expect("valid pruned_to_pos")..self.leaves()
-    }
-
-    /// Return a new iterator over the peaks of the MMR.
-    pub fn peak_iterator(&self) -> alloc::vec::IntoIter<(Position, u32)> {
-        Family::peaks(self.size()).into_iter()
-    }
-
-    /// Return the requested node if it is either retained or present in the pinned_nodes map, and
-    /// panic otherwise. Use `get_node` instead if you require a non-panicking getter.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the requested node does not exist for any reason such as the node is pruned or
-    /// `pos` is out of bounds.
-    pub(crate) fn get_node_unchecked(&self, pos: Position) -> &D {
-        if pos < self.pruned_to_pos {
-            return self
-                .pinned_nodes
-                .get(&pos)
-                .expect("requested node is pruned and not pinned");
-        }
-
-        &self.nodes[self.pos_to_index(pos)]
-    }
-
-    /// Return the index of the element in the current nodes vector given its position in the MMR.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `pos` precedes the oldest retained position.
-    fn pos_to_index(&self, pos: Position) -> usize {
-        assert!(
-            pos >= self.pruned_to_pos,
-            "pos precedes oldest retained position"
-        );
-
-        *pos.checked_sub(*self.pruned_to_pos).unwrap() as usize
-    }
-
-    /// Utility used by stores that build on the mem MMR to pin extra nodes if needed. It's up to
-    /// the caller to ensure that this set of pinned nodes is valid for their use case.
+#[cfg(any(feature = "std", test))]
+impl<D: commonware_cryptography::Digest> Mmr<D> {
+    /// Pin extra nodes. It's up to the caller to ensure this set is valid.
     #[cfg(any(feature = "std", test))]
     pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position, D>) {
         for (pos, node) in pinned_nodes.into_iter() {
             self.pinned_nodes.insert(pos, node);
         }
-    }
-
-    /// Return the requested node or None if it is not stored in the MMR.
-    pub fn get_node(&self, pos: Position) -> Option<D> {
-        if pos < self.pruned_to_pos {
-            return self.pinned_nodes.get(&pos).copied();
-        }
-
-        self.nodes.get(self.pos_to_index(pos)).copied()
-    }
-
-    /// Get the nodes (position + digest) that need to be pinned (those required for proof
-    /// generation) in this MMR when pruned to position `prune_pos`.
-    pub(crate) fn nodes_to_pin(&self, prune_pos: Position) -> BTreeMap<Position, D> {
-        <Family as crate::merkle::Family>::nodes_to_pin(self.size(), prune_pos)
-            .into_iter()
-            .map(|pos| (pos, *self.get_node_unchecked(pos)))
-            .collect()
-    }
-
-    /// Prune all nodes up to but not including the given leaf location, and pin the O(log2(n))
-    /// number of them required for proof generation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::LocationOverflow] if `loc` exceeds [crate::merkle::Family::MAX_LOCATION].
-    /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
-    pub fn prune(&mut self, loc: Location) -> Result<(), Error> {
-        if loc > self.leaves() {
-            return Err(Error::LeafOutOfBounds(loc));
-        }
-        let pos = Position::try_from(loc)?;
-        if pos <= self.pruned_to_pos {
-            return Ok(());
-        }
-        self.prune_to_pos(pos);
-        Ok(())
-    }
-
-    /// Prune all nodes and pin the O(log2(n)) number of them required for proof generation going
-    /// forward.
-    pub fn prune_all(&mut self) {
-        if !self.nodes.is_empty() {
-            self.prune_to_pos(self.size());
-        }
-    }
-
-    /// Position-based pruning. Assumes `pos` is the position of a leaf since the pruning boundary
-    /// must be leaf aligned.
-    fn prune_to_pos(&mut self, pos: Position) {
-        self.pinned_nodes = self.nodes_to_pin(pos);
-        let retained_nodes = self.pos_to_index(pos);
-        self.nodes.drain(0..retained_nodes);
-        self.pruned_to_pos = pos;
     }
 
     /// Truncate the MMR to a smaller valid size, discarding all nodes beyond that size.
@@ -298,7 +30,7 @@ impl<D: Digest> Mmr<D> {
     pub(crate) fn truncate(
         &mut self,
         new_size: Position,
-        hasher: &mut impl Hasher<Family, Digest = D>,
+        hasher: &mut impl crate::merkle::hasher::Hasher<Family, Digest = D>,
     ) {
         debug_assert!(new_size.is_valid_size());
         debug_assert!(new_size >= self.pruned_to_pos);
@@ -307,149 +39,11 @@ impl<D: Digest> Mmr<D> {
         self.root = Self::compute_root(hasher, &self.nodes, &self.pinned_nodes, self.pruned_to_pos);
     }
 
-    /// Get the root digest of the MMR.
-    pub const fn root(&self) -> &D {
-        &self.root
-    }
-
-    /// Return an inclusion proof for the element at location `loc`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::LocationOverflow] if `loc` > [crate::merkle::Family::MAX_LOCATION].
-    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    /// Returns [Error::LeafOutOfBounds] if `loc` >= [Self::leaves()].
-    pub fn proof(
-        &self,
-        hasher: &mut impl Hasher<Family, Digest = D>,
-        loc: Location,
-    ) -> Result<Proof<D>, Error> {
-        if !loc.is_valid() {
-            return Err(Error::LocationOverflow(loc));
-        }
-        // loc is valid so it won't overflow from + 1
-        self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
-            Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
-            _ => e,
-        })
-    }
-
-    /// Return an inclusion proof for all elements within the provided `range` of locations.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::Empty] if the range is empty.
-    /// Returns [Error::LocationOverflow] if any location in `range` exceeds [crate::merkle::Family::MAX_LOCATION].
-    /// Returns [Error::RangeOutOfBounds] if `range.end` > [Self::leaves()].
-    /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned.
-    pub fn range_proof(
-        &self,
-        hasher: &mut impl Hasher<Family, Digest = D>,
-        range: Range<Location>,
-    ) -> Result<Proof<D>, Error> {
-        let leaves = self.leaves();
-        proof::build_range_proof(hasher, leaves, range, |pos| self.get_node(pos))
-    }
-
-    /// Get the digests of nodes that need to be pinned (those required for proof generation) in
-    /// this MMR when pruned to position `prune_pos`.
-    #[cfg(test)]
-    pub(crate) fn node_digests_to_pin(&self, start_pos: Position) -> Vec<D> {
-        <Family as crate::merkle::Family>::nodes_to_pin(self.size(), start_pos)
-            .into_iter()
-            .map(|pos| *self.get_node_unchecked(pos))
-            .collect()
-    }
-
-    /// Return the nodes this MMR currently has pinned. Pinned nodes are nodes that would otherwise
-    /// be pruned, but whose digests remain required for proof generation.
+    /// Return the nodes this MMR currently has pinned.
     #[cfg(test)]
     pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
         self.pinned_nodes.clone()
     }
-
-    /// Create a new speculative batch with this MMR as its parent.
-    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<'_, D, Self> {
-        super::batch::UnmerkleizedBatch::new(self)
-    }
-
-    /// Apply a changeset produced by [`super::batch::MerkleizedBatch::finalize`].
-    ///
-    /// A changeset is only valid if the MMR has not been modified since the
-    /// batch that produced it was created. Multiple batches can be forked from
-    /// the same parent for speculative execution, but only one may be applied.
-    /// Applying a stale changeset returns [`super::Error::StaleChangeset`].
-    pub fn apply(&mut self, changeset: super::batch::Changeset<D>) -> Result<(), super::Error> {
-        if changeset.base_size != self.size() {
-            return Err(super::Error::StaleChangeset {
-                expected: changeset.base_size,
-                actual: self.size(),
-            });
-        }
-
-        // 1. Overwrite: write modified digests into surviving base nodes.
-        for (pos, digest) in changeset.overwrites {
-            let index = self.pos_to_index(pos);
-            self.nodes[index] = digest;
-        }
-
-        // 2. Append: push new nodes onto the end.
-        for digest in changeset.appended {
-            self.nodes.push_back(digest);
-        }
-
-        // 3. Root: set the pre-computed root from the batch.
-        self.root = changeset.root;
-        Ok(())
-    }
-}
-
-impl<D: Digest> Readable for Mmr<D> {
-    type Family = Family;
-    type Digest = D;
-    type Error = Error;
-
-    fn size(&self) -> Position {
-        self.size()
-    }
-
-    fn get_node(&self, pos: Position) -> Option<D> {
-        self.get_node(pos)
-    }
-
-    fn root(&self) -> D {
-        *self.root()
-    }
-
-    fn pruned_to_pos(&self) -> Position {
-        self.pruned_to_pos
-    }
-
-    fn proof(
-        &self,
-        hasher: &mut impl Hasher<Family, Digest = D>,
-        loc: Location,
-    ) -> Result<Proof<D>, Error> {
-        self.proof(hasher, loc)
-    }
-
-    fn range_proof(
-        &self,
-        hasher: &mut impl Hasher<Family, Digest = D>,
-        range: core::ops::Range<Location>,
-    ) -> Result<Proof<D>, Error> {
-        self.range_proof(hasher, range)
-    }
-}
-
-impl<D: Digest> BatchChainInfo<Family> for Mmr<D> {
-    type Digest = D;
-
-    fn base_size(&self) -> Position {
-        self.size()
-    }
-
-    fn collect_overwrites(&self, _into: &mut BTreeMap<Position, D>) {}
 }
 
 #[cfg(test)]
@@ -458,7 +52,7 @@ mod tests {
     use crate::{
         merkle::hasher::Hasher as _,
         mmr::{
-            conformance::build_test_mmr, iterator::nodes_needing_parents,
+            conformance::build_test_mmr, iterator::nodes_needing_parents, Error, Location,
             StandardHasher as Standard,
         },
     };

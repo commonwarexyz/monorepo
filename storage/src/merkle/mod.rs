@@ -8,6 +8,7 @@
 pub mod batch;
 pub mod hasher;
 mod location;
+pub mod mem;
 pub mod mmb;
 pub mod mmr;
 mod position;

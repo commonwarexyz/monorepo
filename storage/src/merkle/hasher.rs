@@ -209,7 +209,10 @@ mod tests {
             "root of empty MMR should be non-zero"
         );
         // Empty root is deterministic.
-        assert_eq!(empty_out, mmr_hasher.root(Location::new(0), empty_vec.iter()));
+        assert_eq!(
+            empty_out,
+            mmr_hasher.root(Location::new(0), empty_vec.iter())
+        );
 
         let digests = [d1, d2, d3, d4];
         let out = mmr_hasher.root(Location::new(10), digests.iter());
