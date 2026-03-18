@@ -852,7 +852,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for _ in 0..11 {
-                batch.add(&mut hasher, &element);
+                batch = batch.add(&mut hasher, &element);
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -943,7 +943,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch = batch.add(&mut hasher, element);
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -1072,7 +1072,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch = batch.add(&mut hasher, element);
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -1111,7 +1111,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch = batch.add(&mut hasher, element);
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -1149,7 +1149,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &new_elements {
-                batch.add(&mut hasher, element);
+                batch = batch.add(&mut hasher, element);
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -1181,7 +1181,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch = batch.add(&mut hasher, element);
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -1255,7 +1255,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch = batch.add(&mut hasher, element);
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -1377,7 +1377,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch = batch.add(&mut hasher, element);
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -1523,7 +1523,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch.add(&mut hasher, element);
+                batch = batch.add(&mut hasher, element);
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -1716,7 +1716,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for e in &elements {
-                batch.add(&mut hasher, e);
+                batch = batch.add(&mut hasher, e);
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -1792,7 +1792,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for e in &elements {
-                batch.add(&mut hasher, e);
+                batch = batch.add(&mut hasher, e);
             }
             batch.merkleize(&mut hasher).finalize()
         };
@@ -1850,7 +1850,7 @@ mod tests {
         let changeset = {
             let mut batch = mmr.new_batch();
             for e in &elements {
-                batch.add(&mut hasher, e);
+                batch = batch.add(&mut hasher, e);
             }
             batch.merkleize(&mut hasher).finalize()
         };

@@ -170,10 +170,10 @@ where
 {
     /// Create a new sync engine with the given configuration
     pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
-        if config.target.range.is_empty() || !config.target.range.end.is_valid() {
+        if !config.target.range.end().is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
-                lower_bound_pos: config.target.range.start,
-                upper_bound_pos: config.target.range.end,
+                lower_bound_pos: config.target.range.start(),
+                upper_bound_pos: config.target.range.end(),
             }));
         }
 
@@ -181,7 +181,7 @@ where
         let journal = <DB::Journal as Journal>::new(
             config.context.with_label("journal"),
             config.db_config.journal_config(),
-            config.target.range.clone(),
+            config.target.range.clone().into(),
         )
         .await?;
 
@@ -206,12 +206,12 @@ where
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
-        let target_size = self.target.range.end;
+        let target_size = self.target.range.end();
 
         // Special case: If we don't have pinned nodes, we need to get them from the resolver
         // for the lower sync bound.
         if self.pinned_nodes.is_none() {
-            let start_loc = self.target.range.start;
+            let start_loc = self.target.range.start();
             let resolver = self.resolver.clone();
             self.outstanding_requests.add(
                 start_loc,
@@ -241,7 +241,7 @@ where
 
             // Find the next gap in the sync range that needs to be fetched.
             let Some(gap_range) = crate::qmdb::sync::gaps::find_next(
-                Location::new(log_size)..self.target.range.end,
+                Location::new(log_size)..self.target.range.end(),
                 &operation_counts,
                 self.outstanding_requests.locations(),
                 self.fetch_batch_size,
@@ -278,7 +278,7 @@ where
         mut self,
         new_target: Target<DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
-        self.journal.resize(new_target.range.start).await?;
+        self.journal.resize(new_target.range.start()).await?;
 
         Ok(Self {
             outstanding_requests: Requests::new(),
@@ -373,7 +373,7 @@ where
     /// Check if sync is complete based on the current journal size and target
     pub async fn is_complete(&self) -> Result<bool, Error<DB, R>> {
         let journal_size = self.journal.size().await;
-        let target_journal_size = self.target.range.end;
+        let target_journal_size = self.target.range.end();
 
         // Check if we've completed sync
         if journal_size >= target_journal_size {
@@ -420,7 +420,7 @@ where
         }
 
         // Verify the proof (and pinned nodes if this is the sync boundary batch).
-        let need_pinned = self.pinned_nodes.is_none() && start_loc == self.target.range.start;
+        let need_pinned = self.pinned_nodes.is_none() && start_loc == self.target.range.start();
         let valid = if need_pinned {
             let elements: Vec<_> = operations
                 .iter()
@@ -488,7 +488,7 @@ where
                 self.config,
                 self.journal,
                 self.pinned_nodes,
-                self.target.range.clone(),
+                self.target.range.clone().into(),
                 self.apply_batch_size,
             )
             .await?;

@@ -27,7 +27,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                 let mut batch = mmr.new_batch();
                 for _ in 0..n {
                     let element = sha256::Digest::random(&mut sampler);
-                    batch.add(&mut hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                     elements.push(element);
                 }
                 batch.merkleize(&mut hasher).finalize()

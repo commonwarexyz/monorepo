@@ -5,8 +5,8 @@
 //!
 //! ```ignore
 //! // Simple mode: apply a batch, then durably commit it.
-//! let mut batch = db.new_batch();
-//! let loc = batch.append(value);  // returns the location
+//! let loc = db.new_batch().size();  // location of the next append
+//! let batch = db.new_batch().append(value);
 //! let merkleized = batch.merkleize(None);
 //! let finalized = merkleized.finalize();
 //! db.apply_batch(finalized).await?;
@@ -15,16 +15,15 @@
 //!
 //! ```ignore
 //! // Batches can still fork before you apply them.
-//! let mut parent = db.new_batch();
-//! let _ = parent.append(value_a);
+//! let parent = db.new_batch().append(value_a);
 //! let parent = parent.merkleize(None);
 //!
-//! let mut child_a = parent.new_batch();
-//! let _ = child_a.append(value_b);
+//! let child_a = parent.new_batch();
+//! let child_a = child_a.append(value_b);
 //! let child_a = child_a.merkleize(None);
 //!
-//! let mut child_b = parent.new_batch();
-//! let _ = child_b.append(value_c);
+//! let child_b = parent.new_batch();
+//! let child_b = child_b.append(value_c);
 //! let child_b = child_b.merkleize(None);
 //!
 //! db.apply_batch(child_a.finalize()).await?;
@@ -34,15 +33,13 @@
 //! ```ignore
 //! // Advanced mode: while the previous batch is being committed, build one child batch from the
 //! // the newly published state.
-//! let mut parent = db.new_batch();
-//! let _ = parent.append(value_a);
+//! let parent = db.new_batch().append(value_a);
 //! let parent_finalized = parent.merkleize(None).finalize();
 //! db.apply_batch(parent_finalized).await?;
 //!
 //! let (child_finalized, commit_result) = futures::join!(
 //!     async {
-//!         let mut child = db.new_batch();
-//!         let _ = child.append(value_b);
+//!         let child = db.new_batch().append(value_b);
 //!         child.merkleize(None).finalize()
 //!     },
 //!     db.commit(),
@@ -383,8 +380,7 @@ mod test {
             let v1 = vec![1u8; 8];
             let root = db.root();
             {
-                let mut batch = db.new_batch();
-                batch.append(v1);
+                db.new_batch().append(v1);
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
             drop(db);
@@ -428,9 +424,11 @@ mod test {
             let v2 = vec![2u8; 20];
 
             let finalized = {
-                let mut batch = db.new_batch();
-                let loc1 = batch.append(v1.clone());
-                let loc2 = batch.append(v2.clone());
+                let batch = db.new_batch();
+                let loc1 = batch.size();
+                let batch = batch.append(v1.clone());
+                let loc2 = batch.size();
+                let batch = batch.append(v2.clone());
                 assert_eq!(loc1, Location::new(1));
                 assert_eq!(loc2, Location::new(2));
                 batch.merkleize(None).finalize()
@@ -454,8 +452,7 @@ mod test {
             assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
 
             {
-                let mut batch = db.new_batch();
-                batch.append(v2);
+                let batch = db.new_batch().append(v2);
                 batch.append(v1);
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -495,7 +492,7 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for value in generate_values(&mut context, ELEMENTS) {
-                    batch.append(value);
+                    batch = batch.append(value);
                 }
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -508,7 +505,7 @@ mod test {
             let finalized = {
                 let mut batch = db.new_batch();
                 for value in generate_values(&mut context, ELEMENTS) {
-                    batch.append(value);
+                    batch = batch.append(value);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -520,7 +517,7 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for value in generate_values(&mut context, ELEMENTS) {
-                    batch.append(value);
+                    batch = batch.append(value);
                 }
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -533,7 +530,7 @@ mod test {
             let finalized = {
                 let mut batch = db.new_batch();
                 for value in generate_values(&mut context, ELEMENTS) {
-                    batch.append(value);
+                    batch = batch.append(value);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -564,7 +561,7 @@ mod test {
             let finalized = {
                 let mut batch = db.new_batch();
                 for value in generate_values(&mut context, ELEMENTS) {
-                    batch.append(value);
+                    batch = batch.append(value);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -594,7 +591,7 @@ mod test {
                 {
                     let mut batch = db.new_batch();
                     for value in generate_values(&mut context, ELEMENTS) {
-                        batch.append(value);
+                        batch = batch.append(value);
                     }
                     // Don't merkleize/finalize/apply -- simulate failed commit
                 }
@@ -621,7 +618,7 @@ mod test {
             let finalized = {
                 let mut batch = db.new_batch();
                 for value in generate_values(&mut context, ELEMENTS) {
-                    batch.append(value);
+                    batch = batch.append(value);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -662,7 +659,7 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for v in build_values() {
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -675,7 +672,7 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for v in build_values() {
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -688,13 +685,13 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for v in build_values() {
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 for v in build_values() {
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 for v in build_values() {
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -708,7 +705,7 @@ mod test {
             let finalized = {
                 let mut batch = db.new_batch();
                 for v in build_values() {
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -737,7 +734,7 @@ mod test {
                 for i in 0u64..ELEMENTS {
                     let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                     values.push(v.clone());
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -839,7 +836,7 @@ mod test {
                 for i in 0u64..ELEMENTS {
                     let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                     values.push(v.clone());
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -851,7 +848,7 @@ mod test {
                 for i in ELEMENTS..ELEMENTS * 2 {
                     let v = vec![(i % 255) as u8; ((i % 17) + 5) as usize];
                     values.push(v.clone());
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -973,7 +970,7 @@ mod test {
                 let mut batch = db.new_batch();
                 for i in 0..10 {
                     let v = vec![i as u8; 10];
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -984,8 +981,7 @@ mod test {
 
             // Add exactly one more append (uncommitted)
             {
-                let mut batch = db.new_batch();
-                batch.append(vec![99u8; 20]);
+                db.new_batch().append(vec![99u8; 20]);
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
 
@@ -1011,8 +1007,9 @@ mod test {
             // Verify we can append and commit new data without issues
             let new_value = vec![77u8; 15];
             let finalized = {
-                let mut batch = db.new_batch();
-                let loc = batch.append(new_value.clone());
+                let batch = db.new_batch();
+                let loc = batch.size();
+                let batch = batch.append(new_value.clone());
                 assert_eq!(
                     loc, committed_size,
                     "New append should get the expected location"
@@ -1033,7 +1030,7 @@ mod test {
                 let mut batch = db.new_batch();
                 for i in 0..5 {
                     let v = vec![(200 + i) as u8; 10];
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -1076,12 +1073,12 @@ mod test {
             // Add some values
             let v1 = vec![1u8; 8];
             let v2 = vec![2u8; 8];
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(v1.clone());
-                batch.append(v2.clone());
-                batch.merkleize(None).finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .append(v1.clone())
+                .append(v2.clone())
+                .merkleize(None)
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
 
             // Test getting valid locations - should succeed
@@ -1118,12 +1115,12 @@ mod test {
             let v1 = vec![1u8; 8];
             let v2 = vec![2u8; 8];
             let v3 = vec![3u8; 8];
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(v1.clone());
-                batch.append(v2.clone());
-                batch.merkleize(None).finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .append(v1.clone())
+                .append(v2.clone())
+                .merkleize(None)
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
 
             // op_count is 4 (initial_commit, v1, v2, commit), last_commit_loc is 3
@@ -1131,8 +1128,7 @@ mod test {
             assert_eq!(last_commit, Location::new(3));
 
             let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(v3.clone());
+                let batch = db.new_batch().append(v3.clone());
                 batch.merkleize(None).finalize()
             };
             db.apply_batch(finalized).await.unwrap();
@@ -1176,14 +1172,16 @@ mod test {
             let finalized = {
                 let mut batch = db.new_batch();
                 for v in &base_vals {
-                    base_locs.push(batch.append(v.clone()));
+                    let loc = batch.size();
+                    batch = batch.append(v.clone());
+                    base_locs.push(loc);
                 }
                 batch.merkleize(None).finalize()
             };
             db.apply_batch(finalized).await.unwrap();
 
             // Second batch: read base DB values through the batch.
-            let mut batch = db.new_batch();
+            let batch = db.new_batch();
             for (i, loc) in base_locs.iter().enumerate() {
                 assert_eq!(
                     batch.get(*loc, &db).await.unwrap(),
@@ -1194,7 +1192,8 @@ mod test {
 
             // Pending append is visible.
             let new_val = vec![99u8; 16];
-            let new_loc = batch.append(new_val.clone());
+            let new_loc = batch.size();
+            let batch = batch.append(new_val.clone());
             assert_eq!(batch.get(new_loc, &db).await.unwrap(), Some(new_val));
 
             // Location past the end returns None.
@@ -1216,16 +1215,18 @@ mod test {
             let v2 = vec![2u8; 16];
 
             // Parent batch appends v1.
-            let mut parent = db.new_batch();
-            let loc1 = parent.append(v1.clone());
+            let parent = db.new_batch();
+            let loc1 = parent.size();
+            let parent = parent.append(v1.clone());
             let parent_m = parent.merkleize(None);
 
             // Child reads v1 from parent chain.
-            let mut child = parent_m.new_batch::<Sha256>();
+            let child = parent_m.new_batch::<Sha256>();
             assert_eq!(child.get(loc1, &db).await.unwrap(), Some(v1));
 
             // Child appends v2.
-            let loc2 = child.append(v2.clone());
+            let loc2 = child.size();
+            let child = child.append(v2.clone());
             assert_eq!(child.get(loc2, &db).await.unwrap(), Some(v2));
 
             // Nonexistent location.
@@ -1245,11 +1246,11 @@ mod test {
 
             // Batch with metadata.
             let metadata = vec![42u8; 32];
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(vec![1u8; 8]);
-                batch.merkleize(Some(metadata.clone())).finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .append(vec![1u8; 8])
+                .merkleize(Some(metadata.clone()))
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
@@ -1272,7 +1273,7 @@ mod test {
             let merkleized = {
                 let mut batch = db.new_batch();
                 for i in 0u8..10 {
-                    batch.append(vec![i; 16]);
+                    batch = batch.append(vec![i; 16]);
                 }
                 batch.merkleize(None)
             };
@@ -1286,11 +1287,10 @@ mod test {
 
             // Second batch: verify again with metadata.
             let metadata = vec![55u8; 8];
-            let merkleized = {
-                let mut batch = db.new_batch();
-                batch.append(vec![0xAA; 20]);
-                batch.merkleize(Some(metadata))
-            };
+            let merkleized = db
+                .new_batch()
+                .append(vec![0xAA; 20])
+                .merkleize(Some(metadata));
             let speculative = merkleized.root();
             let finalized = merkleized.finalize();
             db.apply_batch(finalized).await.unwrap();
@@ -1310,19 +1310,17 @@ mod test {
 
             // Pre-populate base DB.
             let base_val = vec![10u8; 12];
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(base_val.clone());
-                batch.merkleize(None).finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .append(base_val.clone())
+                .merkleize(None)
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             // Locations: 0=initial commit, 1=append, 2=commit
 
             // Create a merkleized batch with new appends.
             let new_val = vec![20u8; 16];
-            let mut batch = db.new_batch();
-            batch.append(new_val.clone());
-            let merkleized = batch.merkleize(None);
+            let merkleized = db.new_batch().append(new_val.clone()).merkleize(None);
             // Locations: 3=append, 4=commit
 
             // Read base DB value through merkleized batch.
@@ -1360,15 +1358,18 @@ mod test {
             let v3 = vec![3u8; 24];
 
             // Parent batch.
-            let mut parent = db.new_batch();
-            let loc1 = parent.append(v1.clone());
+            let parent = db.new_batch();
+            let loc1 = parent.size();
+            let parent = parent.append(v1.clone());
             let parent_m = parent.merkleize(None);
             let parent_root = parent_m.root();
 
             // Child batch built on top of parent.
-            let mut child = parent_m.new_batch::<Sha256>();
-            let loc2 = child.append(v2.clone());
-            let loc3 = child.append(v3.clone());
+            let child = parent_m.new_batch::<Sha256>();
+            let loc2 = child.size();
+            let child = child.append(v2.clone());
+            let loc3 = child.size();
+            let child = child.append(v3.clone());
             let child_m = child.merkleize(None);
             let child_root = child_m.root();
 
@@ -1404,8 +1405,9 @@ mod test {
             let v2 = vec![2u8; 16];
 
             // Parent batch.
-            let mut parent = db.new_batch();
-            let loc1 = parent.append(v1.clone());
+            let parent = db.new_batch();
+            let loc1 = parent.size();
+            let parent = parent.append(v1.clone());
             let parent_m = parent.merkleize(None);
             let parent_root = parent_m.root();
 
@@ -1416,8 +1418,9 @@ mod test {
             assert_eq!(db.get(loc1).await.unwrap(), Some(v1));
 
             // Now create a second (independent) batch.
-            let mut batch2 = db.new_batch();
-            let loc2 = batch2.append(v2.clone());
+            let batch2 = db.new_batch();
+            let loc2 = batch2.size();
+            let batch2 = batch2.append(v2.clone());
             let batch2_m = batch2.merkleize(None);
             let batch2_root = batch2_m.root();
             let batch2_finalized = batch2_m.finalize();
@@ -1448,7 +1451,8 @@ mod test {
                     let mut batch = db.new_batch();
                     for j in 0..APPENDS_PER_BATCH {
                         let v = vec![(batch_idx * 10 + j) as u8; 8];
-                        let loc = batch.append(v.clone());
+                        let loc = batch.size();
+                        batch = batch.append(v.clone());
                         all_values.push(v);
                         all_locs.push(loc);
                     }
@@ -1493,11 +1497,11 @@ mod test {
             let mut db = open_db(context.with_label("db")).await;
 
             // Apply a non-empty batch first so the DB has some state.
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(vec![1u8; 8]);
-                batch.merkleize(None).finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .append(vec![1u8; 8])
+                .merkleize(None)
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             let root_before = db.root();
             let size_before = db.bounds().await.end;
@@ -1527,24 +1531,26 @@ mod test {
 
             // Pre-populate base DB.
             let base_val = vec![10u8; 12];
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(base_val.clone());
-                batch.merkleize(None).finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .append(base_val.clone())
+                .merkleize(None)
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             let base_loc = Location::new(1);
 
             // Parent batch appends v1.
             let v1 = vec![1u8; 8];
-            let mut parent = db.new_batch();
-            let loc1 = parent.append(v1.clone());
+            let parent = db.new_batch();
+            let loc1 = parent.size();
+            let parent = parent.append(v1.clone());
             let parent_m = parent.merkleize(None);
 
             // Child batch appends v2.
             let v2 = vec![2u8; 16];
-            let mut child = parent_m.new_batch::<Sha256>();
-            let loc2 = child.append(v2.clone());
+            let child = parent_m.new_batch::<Sha256>();
+            let loc2 = child.size();
+            let child = child.append(v2.clone());
             let child_m = child.merkleize(None);
 
             // Child's MerkleizedBatch can read all three layers:
@@ -1587,7 +1593,9 @@ mod test {
                 let mut batch = db.new_batch();
                 for i in 0..N {
                     let v = vec![(i % 256) as u8; ((i % 29) + 3) as usize];
-                    locs.push(batch.append(v.clone()));
+                    let loc = batch.size();
+                    batch = batch.append(v.clone());
+                    locs.push(loc);
                     values.push(v);
                 }
                 batch.merkleize(None).finalize()
@@ -1628,16 +1636,8 @@ mod test {
             let mut db = open_db(context.with_label("db")).await;
 
             // Create two batches from the same DB state.
-            let changeset_a = {
-                let mut batch = db.new_batch();
-                batch.append(vec![10]);
-                batch.merkleize(None).finalize()
-            };
-            let changeset_b = {
-                let mut batch = db.new_batch();
-                batch.append(vec![20]);
-                batch.merkleize(None).finalize()
-            };
+            let changeset_a = db.new_batch().append(vec![10]).merkleize(None).finalize();
+            let changeset_b = db.new_batch().append(vec![20]).merkleize(None).finalize();
 
             // Apply the first -- should succeed.
             db.apply_batch(changeset_a).await.unwrap();
@@ -1670,21 +1670,19 @@ mod test {
             let mut db = open_db(context.with_label("db")).await;
 
             // Parent batch.
-            let mut parent = db.new_batch();
-            parent.append(vec![1]);
-            let parent_m = parent.merkleize(None);
+            let parent = db.new_batch().append(vec![1]).merkleize(None);
 
             // Fork two children from the same parent.
-            let child_a = {
-                let mut batch = parent_m.new_batch::<Sha256>();
-                batch.append(vec![2]);
-                batch.merkleize(None).finalize()
-            };
-            let child_b = {
-                let mut batch = parent_m.new_batch::<Sha256>();
-                batch.append(vec![3]);
-                batch.merkleize(None).finalize()
-            };
+            let child_a = parent
+                .new_batch::<Sha256>()
+                .append(vec![2])
+                .merkleize(None)
+                .finalize();
+            let child_b = parent
+                .new_batch::<Sha256>()
+                .append(vec![3])
+                .merkleize(None)
+                .finalize();
 
             // Apply child A.
             db.apply_batch(child_a).await.unwrap();
@@ -1707,17 +1705,17 @@ mod test {
             let mut db = open_db(context.with_label("db")).await;
 
             // Parent batch.
-            let mut parent = db.new_batch();
-            parent.append(vec![1]);
-            let parent_m = parent.merkleize(None);
+            let parent = db.new_batch().append(vec![1]).merkleize(None);
 
             // Child batch.
-            let mut child = parent_m.new_batch::<Sha256>();
-            child.append(vec![2]);
-            let child_changeset = child.merkleize(None).finalize();
+            let child_changeset = parent
+                .new_batch::<Sha256>()
+                .append(vec![2])
+                .merkleize(None)
+                .finalize();
 
             // Apply parent first.
-            let parent_changeset = parent_m.finalize();
+            let parent_changeset = parent.finalize();
             db.apply_batch(parent_changeset).await.unwrap();
 
             // Child is stale because it expected to be applied on top of the
@@ -1740,13 +1738,15 @@ mod test {
             let mut db = open_db(context.with_label("db")).await;
 
             // Parent batch.
-            let mut parent = db.new_batch();
-            let parent_loc = parent.append(vec![1]);
+            let parent = db.new_batch();
+            let parent_loc = parent.size();
+            let parent = parent.append(vec![1]);
             let parent_m = parent.merkleize(None);
 
             // Child batch built on parent.
-            let mut child = parent_m.new_batch::<Sha256>();
-            let child_loc = child.append(vec![2]);
+            let child = parent_m.new_batch::<Sha256>();
+            let child_loc = child.size();
+            let child = child.append(vec![2]);
             let child_m = child.merkleize(None);
 
             // Apply parent first.
@@ -1773,16 +1773,16 @@ mod test {
             let mut db = open_db(context.with_label("db")).await;
 
             // Parent batch.
-            let mut parent = db.new_batch();
-            parent.append(vec![1]);
-            let parent_m = parent.merkleize(None);
+            let parent = db.new_batch().append(vec![1]).merkleize(None);
 
             // Child batch. Finalize both before applying either so the
-            // borrow on `db` through `parent_m` is released.
-            let mut child = parent_m.new_batch::<Sha256>();
-            child.append(vec![2]);
-            let child_changeset = child.merkleize(None).finalize();
-            let parent_changeset = parent_m.finalize();
+            // borrow on `db` through `parent` is released.
+            let child_changeset = parent
+                .new_batch::<Sha256>()
+                .append(vec![2])
+                .merkleize(None)
+                .finalize();
+            let parent_changeset = parent.finalize();
 
             // Apply child first (it carries all parent ops too).
             db.apply_batch(child_changeset).await.unwrap();
@@ -1807,8 +1807,9 @@ mod test {
             let mut db = open_db(context.with_label("db")).await;
 
             // Populate.
-            let mut batch = db.new_batch();
-            let loc1 = batch.append(vec![10]);
+            let batch = db.new_batch();
+            let loc1 = batch.size();
+            let batch = batch.append(vec![10]);
             db.apply_batch(batch.merkleize(None).finalize())
                 .await
                 .unwrap();
@@ -1818,8 +1819,9 @@ mod test {
             assert_eq!(snapshot.root(), db.root());
 
             // Chain a child from the snapshot, apply it.
-            let mut child_batch = snapshot.new_batch::<Sha256>();
-            let loc2 = child_batch.append(vec![20]);
+            let child_batch = snapshot.new_batch::<Sha256>();
+            let loc2 = child_batch.size();
+            let child_batch = child_batch.append(vec![20]);
             let child = child_batch.merkleize(None);
             db.apply_batch(child.finalize()).await.unwrap();
 

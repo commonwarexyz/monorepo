@@ -661,11 +661,11 @@ where
             let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
             if grafted_pos < grafted_batch.size() {
                 let loc = Location::try_from(grafted_pos).expect("grafted_pos overflow");
-                grafted_batch
+                grafted_batch = grafted_batch
                     .update_leaf_digest(loc, digest)
                     .expect("update_leaf_digest failed");
             } else {
-                grafted_batch.add_leaf_digest(digest);
+                grafted_batch = grafted_batch.add_leaf_digest(digest);
             }
         }
         let mut gh = grafting::GraftedHasher::new(hasher.clone(), grafting_height);

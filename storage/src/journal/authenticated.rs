@@ -50,10 +50,12 @@ pub struct UnmerkleizedBatch<H: Hasher, Item: Send + Sync> {
 
 impl<H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<H, Item> {
     /// Add an item to the batch.
-    pub fn add(&mut self, item: Item) {
+    #[allow(clippy::should_implement_trait)]
+    pub fn add(mut self, item: Item) -> Self {
         let encoded = item.encode();
-        self.inner.add(&mut self.hasher, &encoded);
+        self.inner = self.inner.add(&mut self.hasher, &encoded);
         self.items.push(item);
+        self
     }
 
     /// Merkleize the batch, computing the root digest.
@@ -306,7 +308,7 @@ where
                     let mut count = 0u64;
                     while count < apply_batch_size && mmr_size < journal_size {
                         let op = reader.read(*mmr_size).await?;
-                        batch.add(hasher, &op.encode());
+                        batch = batch.add(hasher, &op.encode());
                         mmr_size += 1;
                         count += 1;
                     }
@@ -329,11 +331,12 @@ where
 
         // Append item to the journal, then update the MMR state.
         let loc = self.journal.append(item).await?;
-        let changeset = {
-            let mut batch = self.mmr.new_batch();
-            batch.add(&mut self.hasher, &encoded_item);
-            batch.merkleize(&mut self.hasher).finalize()
-        };
+        let changeset = self
+            .mmr
+            .new_batch()
+            .add(&mut self.hasher, &encoded_item)
+            .merkleize(&mut self.hasher)
+            .finalize();
         self.mmr.apply(changeset)?;
 
         Ok(Location::new(loc))
@@ -865,7 +868,7 @@ mod tests {
                     for i in 0..20 {
                         let op = create_operation(i as u8);
                         let encoded = op.encode();
-                        batch.add(&mut hasher, &encoded);
+                        batch = batch.add(&mut hasher, &encoded);
                         journal.append(&op).await.unwrap();
                     }
                     batch.merkleize(&mut hasher).finalize()
@@ -1783,14 +1786,14 @@ mod tests {
             let original_root = journal.root();
 
             // Fork two independent speculative batches.
-            let mut b1 = journal.new_batch();
-            let mut b2 = journal.new_batch();
+            let b1 = journal.new_batch();
+            let b2 = journal.new_batch();
 
             // Add different items to each batch.
             let op_a = create_operation(100);
             let op_b = create_operation(200);
-            b1.add(op_a.clone());
-            b2.add(op_b);
+            let b1 = b1.add(op_a.clone());
+            let b2 = b2.add(op_b);
 
             // Merkleize and verify independent roots.
             let m1 = b1.merkleize();
@@ -1825,13 +1828,11 @@ mod tests {
             let op_b = create_operation(200);
 
             let (expected_root, finalized) = {
-                let mut batch_a = journal.new_batch();
-                batch_a.add(op_a.clone());
-                let merkleized_a = batch_a.merkleize();
+                let batch_a = journal.new_batch();
+                let merkleized_a = batch_a.add(op_a.clone()).merkleize();
 
-                let mut batch_b = merkleized_a.new_batch::<Sha256>();
-                batch_b.add(op_b.clone());
-                let merkleized_b = batch_b.merkleize();
+                let batch_b = merkleized_a.new_batch::<Sha256>();
+                let merkleized_b = batch_b.add(op_b.clone()).merkleize();
 
                 let root = merkleized_b.root();
                 (root, merkleized_b.finalize())
@@ -1859,16 +1860,8 @@ mod tests {
             let op_b = create_operation(2);
 
             // Create two batches from the same base.
-            let finalized_a = {
-                let mut batch = journal.new_batch();
-                batch.add(op_a.clone());
-                batch.merkleize().finalize()
-            };
-            let finalized_b = {
-                let mut batch = journal.new_batch();
-                batch.add(op_b);
-                batch.merkleize().finalize()
-            };
+            let finalized_a = journal.new_batch().add(op_a.clone()).merkleize().finalize();
+            let finalized_b = journal.new_batch().add(op_b).merkleize().finalize();
 
             // Apply A -- should succeed.
             journal.apply_batch(finalized_a).await.unwrap();
@@ -1900,21 +1893,18 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "stale-chained", 5).await;
 
             // Parent batch, then fork two children.
-            let parent = {
-                let mut batch = journal.new_batch();
-                batch.add(create_operation(10));
-                batch.merkleize()
-            };
-            let child_a = {
-                let mut batch = parent.new_batch::<Sha256>();
-                batch.add(create_operation(20));
-                batch.merkleize().finalize()
-            };
-            let child_b = {
-                let mut batch = parent.new_batch::<Sha256>();
-                batch.add(create_operation(30));
-                batch.merkleize().finalize()
-            };
+            let parent = journal.new_batch().add(create_operation(10)).merkleize();
+            let child_a = parent
+                .new_batch::<Sha256>()
+                .add(create_operation(20))
+                .merkleize()
+                .finalize();
+            let child_b = parent
+                .new_batch::<Sha256>()
+                .add(create_operation(30))
+                .merkleize()
+                .finalize();
+            drop(parent);
 
             // Apply child_a, then child_b should be stale.
             journal.apply_batch(child_a).await.unwrap();
@@ -1937,14 +1927,12 @@ mod tests {
 
             // Create parent, then child.
             let (parent_finalized, child_finalized) = {
-                let mut batch = journal.new_batch();
-                batch.add(create_operation(1));
-                let parent = batch.merkleize();
-
-                let mut batch = parent.new_batch::<Sha256>();
-                batch.add(create_operation(2));
-                let child = batch.merkleize().finalize();
-
+                let parent = journal.new_batch().add(create_operation(1)).merkleize();
+                let child = parent
+                    .new_batch::<Sha256>()
+                    .add(create_operation(2))
+                    .merkleize()
+                    .finalize();
                 (parent.finalize(), child)
             };
 
@@ -1969,14 +1957,12 @@ mod tests {
 
             // Create parent, then child.
             let (parent_finalized, child_finalized) = {
-                let mut batch = journal.new_batch();
-                batch.add(create_operation(1));
-                let parent = batch.merkleize();
-
-                let mut batch = parent.new_batch::<Sha256>();
-                batch.add(create_operation(2));
-                let child = batch.merkleize().finalize();
-
+                let parent = journal.new_batch().add(create_operation(1)).merkleize();
+                let child = parent
+                    .new_batch::<Sha256>()
+                    .add(create_operation(2))
+                    .merkleize()
+                    .finalize();
                 (parent.finalize(), child)
             };
 
@@ -2000,9 +1986,10 @@ mod tests {
         executor.start(|context| async move {
             let journal = create_journal_with_ops(context, "ff-skip0", 5).await;
 
-            let mut batch = journal.new_batch();
-            batch.add(create_operation(10));
-            batch.add(create_operation(11));
+            let batch = journal
+                .new_batch()
+                .add(create_operation(10))
+                .add(create_operation(11));
             let merkleized = batch.merkleize();
 
             let normal = merkleized.clone().finalize();
@@ -2025,21 +2012,19 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "ff-skip", 3).await;
 
             // Parent: 2 items.
-            let parent = {
-                let mut batch = journal.new_batch();
-                batch.add(create_operation(10));
-                batch.add(create_operation(11));
-                batch.merkleize()
-            };
+            let parent = journal
+                .new_batch()
+                .add(create_operation(10))
+                .add(create_operation(11))
+                .merkleize();
 
             // Child: 3 more items.
-            let child = {
-                let mut batch = parent.new_batch::<Sha256>();
-                batch.add(create_operation(20));
-                batch.add(create_operation(21));
-                batch.add(create_operation(22));
-                batch.merkleize()
-            };
+            let child = parent
+                .new_batch::<Sha256>()
+                .add(create_operation(20))
+                .add(create_operation(21))
+                .add(create_operation(22))
+                .merkleize();
 
             // Commit parent.
             journal.apply_batch(parent.finalize()).await.unwrap();
@@ -2068,28 +2053,25 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "ff-cross", 2).await;
 
             // Grandparent: 3 items (segment 1).
-            let grandparent = {
-                let mut batch = journal.new_batch();
-                batch.add(create_operation(3));
-                batch.add(create_operation(4));
-                batch.add(create_operation(5));
-                batch.merkleize()
-            };
+            let grandparent = journal
+                .new_batch()
+                .add(create_operation(3))
+                .add(create_operation(4))
+                .add(create_operation(5))
+                .merkleize();
 
             // Parent: 2 items (segment 2).
-            let parent = {
-                let mut batch = grandparent.new_batch::<Sha256>();
-                batch.add(create_operation(6));
-                batch.add(create_operation(7));
-                batch.merkleize()
-            };
+            let parent = grandparent
+                .new_batch::<Sha256>()
+                .add(create_operation(6))
+                .add(create_operation(7))
+                .merkleize();
 
             // Child: 1 item (segment 3).
-            let child = {
-                let mut batch = parent.new_batch::<Sha256>();
-                batch.add(create_operation(8));
-                batch.merkleize()
-            };
+            let child = parent
+                .new_batch::<Sha256>()
+                .add(create_operation(8))
+                .merkleize();
 
             // Commit grandparent (3 items).
             journal.apply_batch(grandparent.finalize()).await.unwrap();
@@ -2126,9 +2108,7 @@ mod tests {
         executor.start(|context| async move {
             let journal = create_journal_with_ops(context, "ff-panic", 5).await;
 
-            let mut batch = journal.new_batch();
-            batch.add(create_operation(10));
-            let merkleized = batch.merkleize();
+            let merkleized = journal.new_batch().add(create_operation(10)).merkleize();
 
             // items has 1 item, but we try to skip 5.
             let _ = merkleized.finalize_from(journal.mmr.size(), 5);

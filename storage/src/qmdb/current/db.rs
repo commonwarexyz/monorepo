@@ -686,7 +686,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
         let changeset = {
             let mut batch = grafted_mmr.new_batch().with_pool(pool.cloned());
             for &(_ops_pos, digest) in &leaves {
-                batch.add_leaf_digest(digest);
+                batch = batch.add_leaf_digest(digest);
             }
             batch.merkleize(&mut grafted_hasher).finalize()
         };

@@ -13,7 +13,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{non_empty_range, sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{num::NonZeroU16, sync::Arc};
 
@@ -229,7 +229,7 @@ fn fuzz(mut input: FuzzInput) {
                     db.commit().await.expect("Commit should not fail");
                     let target = sync::Target {
                         root: db.root(),
-                        range: db.inactivity_floor_loc()..db.bounds().await.end,
+                        range: non_empty_range!(db.inactivity_floor_loc(), db.bounds().await.end),
                     };
 
                     let wrapped_src = Arc::new(db);

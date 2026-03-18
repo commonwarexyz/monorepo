@@ -80,12 +80,15 @@ where
         }
     }
 
+    /// The location that the next appended value will be placed at.
+    pub const fn size(&self) -> Location {
+        Location::new(self.base_size + self.appends.len() as u64)
+    }
+
     /// Append a value.
-    /// Returns the uncommitted location where this value will be placed.
-    pub fn append(&mut self, value: V) -> Location {
-        let loc = Location::new(self.base_size + self.appends.len() as u64);
+    pub fn append(mut self, value: V) -> Self {
         self.appends.push(value);
-        loc
+        self
     }
 
     /// Read a value at `loc`.
@@ -135,7 +138,7 @@ where
         // Add operations to the journal batch and merkleize.
         let mut journal_batch = self.journal_batch;
         for op in &ops {
-            journal_batch.add(op.clone());
+            journal_batch = journal_batch.add(op.clone());
         }
         let journal = journal_batch.merkleize();
 

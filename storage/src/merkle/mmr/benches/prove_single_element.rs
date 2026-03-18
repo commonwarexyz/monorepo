@@ -24,7 +24,7 @@ fn bench_prove_single_element(c: &mut Criterion) {
                 let mut batch = mmr.new_batch();
                 for i in 0..n {
                     let element = sha256::Digest::random(&mut sampler);
-                    batch.add(&mut hasher, &element);
+                    batch = batch.add(&mut hasher, &element);
                     elements.push((i, element));
                 }
                 batch.merkleize(&mut hasher).finalize()

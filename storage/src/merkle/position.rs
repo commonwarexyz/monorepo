@@ -518,11 +518,11 @@ mod tests {
                 size_to_check += 1;
             }
             assert!(size_to_check.is_mmr_size());
-            let changeset = {
-                let mut batch = mmr.new_batch();
-                batch.add(&mut hasher, &digest);
-                batch.merkleize(&mut hasher).finalize()
-            };
+            let changeset = mmr
+                .new_batch()
+                .add(&mut hasher, &digest)
+                .merkleize(&mut hasher)
+                .finalize();
             mmr.apply(changeset).unwrap();
             size_to_check += 1;
         }
