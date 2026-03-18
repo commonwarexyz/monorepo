@@ -932,7 +932,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
             <Self as Readable>::get_node(self, pos)
         })
         .map_err(|e| match e {
-            Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
+            Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
             _ => e,
         })
     }

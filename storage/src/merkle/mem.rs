@@ -154,7 +154,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
             let index = (*pos - *pruned_to_pos) as usize;
             &nodes[index]
         };
-        let peaks = F::peaks(size).into_iter().map(|(p, _)| get_node(p));
+        let peaks = F::peaks(size).map(|(p, _)| get_node(p));
         hasher.root(leaves, peaks)
     }
 
@@ -176,8 +176,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
     }
 
     /// Return a new iterator over the peaks.
-    pub fn peak_iterator(&self) -> alloc::vec::IntoIter<(Position<F>, u32)> {
-        F::peaks(self.size()).into_iter()
+    pub fn peak_iterator(&self) -> impl Iterator<Item = (Position<F>, u32)> {
+        F::peaks(self.size())
     }
 
     /// Get the root digest.

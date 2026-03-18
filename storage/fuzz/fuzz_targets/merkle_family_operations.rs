@@ -3,10 +3,10 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{deterministic, Runner};
-use commonware_storage::{
+use commonware_storage::merkle::{
     mmb::{self, mem::Mmb},
     mmr::{self, hasher::Standard, mem::Mmr},
-    Location, MerkleFamily, Position,
+    Family as MerkleFamily, Location, Position,
 };
 use core::{fmt::Debug, ops::Range};
 use libfuzzer_sys::fuzz_target;

@@ -153,8 +153,8 @@ impl merkle::Family for Family {
         iterator::PeakIterator::to_nearest_size(size)
     }
 
-    fn peaks(size: Position) -> alloc::vec::Vec<(Position, u32)> {
-        iterator::PeakIterator::new(size).collect()
+    fn peaks(size: Position) -> impl Iterator<Item = (Position, u32)> {
+        iterator::PeakIterator::new(size)
     }
 
     fn nodes_to_pin(_size: Position, prune_pos: Position) -> alloc::vec::Vec<Position> {

@@ -11,7 +11,6 @@ use crate::merkle::{
         iterator::{leaf_pos, PeakIterator},
         proof, Error, Family, Location, Position,
     },
-    path::{PathIterator, MAX_PATH_LEN},
     Proof, Readable,
 };
 use alloc::vec::Vec;
@@ -136,41 +135,6 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
         Ok(self)
     }
 
-    /// Mark ancestors of the leaf at `loc` as dirty up to its peak.
-    fn mark_dirty(&mut self, loc: Location) {
-        let size = self.size();
-        let peaks = PeakIterator::new(size);
-        let mut end_leaf_cursor = peaks.leaves().as_u64();
-
-        for (peak_pos, height) in peaks {
-            let leaves_in_peak = 1u64 << height;
-            let leaf_start = end_leaf_cursor - leaves_in_peak;
-            end_leaf_cursor = leaf_start;
-
-            if loc.as_u64() < leaf_start || loc.as_u64() >= leaf_start + leaves_in_peak {
-                continue;
-            }
-
-            // Collect the path from peak to leaf (top-down), then insert bottom-up so we
-            // can early-exit when we hit a node that was already dirtied by a prior
-            // update_leaf.
-            let mut buf = [(Position::new(0), Position::new(0), 0u32); MAX_PATH_LEN];
-            let mut len = 0;
-            for item in PathIterator::new(peak_pos, height, Location::new(leaf_start), loc) {
-                buf[len] = item;
-                len += 1;
-            }
-            for &(pos, _, h) in buf[..len].iter().rev() {
-                if !self.state.insert(pos, h) {
-                    break; // already dirty from a prior update_leaf, ancestors must be too
-                }
-            }
-            return;
-        }
-
-        panic!("leaf {loc} not found in any peak (size: {size})");
-    }
-
     /// Consume this batch and produce an immutable [`MerkleizedBatch`] with a computed root.
     pub fn merkleize(
         mut self,
@@ -180,10 +144,9 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
 
         // Compute root from peaks.
         let leaves = Location::try_from(self.size()).expect("invalid mmb size");
-        let mut peaks: Vec<D> = PeakIterator::new(self.size())
+        let peaks: Vec<D> = PeakIterator::new(self.size())
             .map(|(peak_pos, _)| self.get_node(peak_pos).expect("peak missing"))
             .collect();
-        peaks.reverse(); // oldest to newest for root fold
         let root = hasher.root(leaves, peaks.iter());
 
         batch::Batch {

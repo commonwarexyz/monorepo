@@ -51,7 +51,11 @@
 //! mmr.apply(changeset).unwrap();
 //! ```
 
-use crate::merkle::{hasher::Hasher, Family, Position, Readable};
+use crate::merkle::{
+    hasher::Hasher,
+    path::{PathIterator, MAX_PATH_LEN},
+    Family, Location, Position, Readable,
+};
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec::Vec,
@@ -208,6 +212,37 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
     pub fn with_pool(mut self, pool: Option<ThreadPool>) -> Self {
         self.pool = pool;
         self
+    }
+
+    /// Mark ancestors of the leaf at `loc` as dirty up to its peak.
+    ///
+    /// Walks from peak to leaf (top-down) using [`PathIterator`], then inserts dirty markers
+    /// bottom-up so that an early exit is possible when hitting a node that was already
+    /// dirtied by a prior `update_leaf`.
+    pub(crate) fn mark_dirty(&mut self, loc: Location<F>) {
+        let mut first_leaf = Location::new(0);
+        for (peak_pos, height) in F::peaks(self.size()) {
+            let leaves_in_peak = 1u64 << height;
+            if loc >= first_leaf + leaves_in_peak {
+                first_leaf += leaves_in_peak;
+                continue;
+            }
+
+            let mut buf = [(Position::new(0), Position::new(0), 0u32); MAX_PATH_LEN];
+            let mut len = 0;
+            for item in PathIterator::new(peak_pos, height, first_leaf, loc) {
+                buf[len] = item;
+                len += 1;
+            }
+            for &(parent_pos, _, h) in buf[..len].iter().rev() {
+                if !self.state.insert(parent_pos, h) {
+                    break;
+                }
+            }
+            return;
+        }
+
+        panic!("leaf {loc} not found (size: {})", self.size());
     }
 
     /// Compute digests for all dirty internal nodes, using the pool for parallelism when

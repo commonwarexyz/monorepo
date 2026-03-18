@@ -11,7 +11,6 @@ use crate::merkle::{
         iterator::{nodes_needing_parents, PeakIterator},
         proof, Error, Family, Location, Position, Proof, Readable,
     },
-    path::{PathIterator, MAX_PATH_LEN},
 };
 #[cfg(any(feature = "std", test))]
 use crate::mmr::iterator::pos_to_height;
@@ -145,33 +144,6 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>>
             pool: self.pool,
         }
     }
-
-    /// Mark ancestors of the leaf at `loc` as dirty up to its peak.
-    fn mark_dirty(&mut self, loc: Location) {
-        let mut first_leaf = Location::new(0);
-        for (peak_pos, height) in PeakIterator::new(self.size()) {
-            let leaves_in_peak = 1u64 << height;
-            if loc < first_leaf + leaves_in_peak {
-                let mut buf = [(Position::new(0), Position::new(0), 0u32); MAX_PATH_LEN];
-                let mut len = 0;
-                for item in PathIterator::new(peak_pos, height, first_leaf, loc) {
-                    buf[len] = item;
-                    len += 1;
-                }
-                let mut h = 1;
-                for &(parent_pos, _, _) in buf[..len].iter().rev() {
-                    if !self.state.insert(parent_pos, h) {
-                        break;
-                    }
-                    h += 1;
-                }
-                return;
-            }
-            first_leaf += leaves_in_peak;
-        }
-
-        panic!("leaf {loc} not found (size: {})", self.size());
-    }
 }
 
 impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>> Readable
@@ -206,7 +178,7 @@ impl<'a, D: Digest, P: Readable<Family = Family, Digest = D, Error = Error>> Rea
             return Err(Error::LocationOverflow(loc));
         }
         self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {
-            Error::RangeOutOfBounds(loc) => Error::LeafOutOfBounds(loc),
+            Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
             _ => e,
         })
     }

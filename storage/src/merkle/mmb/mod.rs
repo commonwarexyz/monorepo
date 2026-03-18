@@ -52,9 +52,8 @@
 //! Unlike the MMR (whose trees occupy contiguous, non-overlapping regions of the array), an MMB's
 //! tree nodes may be interleaved in the array. A merge parent is appended after the leaf that
 //! triggered the merge, so it may sit between nodes of different logical trees. Consequently, [peak
-//! positions](iterator::PeakIterator) are yielded from newest to oldest (non-decreasing height),
-//! NOT by physical position. Code must not assume peak positions are monotonically increasing. The
-//! root fold (oldest to newest) therefore requires reversing the iterator.
+//! positions](iterator::PeakIterator) are NOT monotonically ordered by physical position even
+//! though they are yielded in oldest-to-newest order (non-increasing height).
 //!
 //! # Comparison with MMR
 //!
@@ -169,10 +168,8 @@ impl merkle::Family for Family {
         iterator::PeakIterator::to_nearest_size(size)
     }
 
-    fn peaks(size: Position) -> alloc::vec::Vec<(Position, u32)> {
-        let mut peaks: alloc::vec::Vec<_> = iterator::PeakIterator::new(size).collect();
-        peaks.reverse();
-        peaks
+    fn peaks(size: Position) -> impl Iterator<Item = (Position, u32)> {
+        iterator::PeakIterator::new(size)
     }
 
     fn nodes_to_pin(size: Position, prune_pos: Position) -> alloc::vec::Vec<Position> {

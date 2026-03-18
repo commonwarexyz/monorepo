@@ -45,10 +45,10 @@ pub(crate) fn leaves_for_size(size: Position) -> Option<Location> {
 }
 
 /// A PeakIterator yields `(position, height)` for each peak in an MMB with the given size, in
-/// order from **newest** (rightmost) to **oldest** (leftmost). Heights are always non-decreasing.
+/// order from **oldest** (leftmost) to **newest** (rightmost). Heights are always non-increasing.
 ///
 /// The number of peaks after N leaves is always exactly `ilog2(N+1)`, and their heights are
-/// non-decreasing in this iteration order.
+/// non-increasing in this iteration order.
 ///
 /// # Physical index ordering
 ///
@@ -58,19 +58,18 @@ pub(crate) fn leaves_for_size(size: Position) -> Option<Location> {
 /// merge per leaf.
 ///
 /// As a result, older, taller peaks may be appended to the MMB *after* newer, shorter
-/// peaks. For example, at `N=11` leaves, the Iterator yields peaks at positions `[17, 16, 18]`:
+/// peaks. For example, at `N=11` leaves, the Iterator yields peaks at positions `[18, 16, 17]`:
+/// - `18`: The oldest height-3 peak (its merge was delayed by 3 steps).
+/// - `16`: A height-1 peak (appended at step 9).
 /// - `17`: The newest height-0 peak (a bare leaf added at step 10).
-/// - `16`: An older height-1 peak (appended at step 9).
-/// - `18`: The oldest height-3 peak (its merge was delayed by 3 steps and thus appended
-///   *after* the leaf at position 17).
 ///
 /// Code iterating through peaks must not assume their positions are sorted in any direction.
 #[derive(Default)]
 pub struct PeakIterator {
-    n: Location,               // The exact number of leaves in the MMB
-    current_i: u32,            // The bit index being evaluated, moving from 0 up to (L-1)
-    num_peaks: u32,            // The total number of peaks (L-1)
-    end_leaf_cursor: Location, // One past the last leaf covered by the next (rightward) peak
+    n: Location,                 // The exact number of leaves in the MMB
+    current_i: u32,              // Bit index, counting down from (num_peaks-1) to 0
+    remaining: u32,              // Number of peaks left to yield
+    start_leaf_cursor: Location, // First leaf of the next (rightward) peak
 }
 
 impl PeakIterator {
@@ -90,9 +89,9 @@ impl PeakIterator {
 
         Self {
             n,
-            current_i: 0,
-            num_peaks,
-            end_leaf_cursor: n,
+            current_i: num_peaks - 1,
+            remaining: num_peaks,
+            start_leaf_cursor: Location::new(0),
         }
     }
 
@@ -139,28 +138,31 @@ impl Iterator for PeakIterator {
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = (self.num_peaks - self.current_i) as usize;
+        let len = self.remaining as usize;
         (len, Some(len))
     }
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_i >= self.num_peaks {
+        if self.remaining == 0 {
             return None;
         }
 
         let i = self.current_i;
         let n_val = self.n.as_u64();
 
-        // Calculate the height of this peak: h_i = i + b_i
+        // Height formula: h_i = i + b_i where b_i = ((n+1) >> i) & 1.
+        // Index `i` corresponds to the original newest-to-oldest numbering; we iterate
+        // from the highest `i` (oldest) down to 0 (newest).
         let height = (i as u64) + (((n_val + 1) >> i) & 1);
-
-        // The last leaf in this peak's tree (using the backward cursor)
         let leaves_in_peak = 1u64 << height;
-        let last_leaf = Location::new(self.end_leaf_cursor.as_u64() - 1);
 
-        // Step the cursor leftward for the next (older) peak
-        self.end_leaf_cursor = Location::new(self.end_leaf_cursor.as_u64() - leaves_in_peak);
-        self.current_i += 1;
+        // The last leaf in this peak's subtree.
+        let last_leaf = Location::new(self.start_leaf_cursor.as_u64() + leaves_in_peak - 1);
+
+        // Advance the cursor rightward for the next (newer) peak.
+        self.start_leaf_cursor = Location::new(self.start_leaf_cursor.as_u64() + leaves_in_peak);
+        self.current_i = self.current_i.wrapping_sub(1);
+        self.remaining -= 1;
 
         let n_birth = peak_birth_leaf(last_leaf, height as u32);
         Some((birthed_node_pos(n_birth, height == 0), height as u32))
@@ -290,24 +292,22 @@ pub(crate) const fn leaf_pos(leaf_index: Location) -> Position {
 /// mutations), pinning only peaks would suffice and be cheaper.
 pub(crate) fn nodes_to_pin(mmb_size: Position, prune_pos: Position) -> alloc::vec::Vec<Position> {
     let mut pinned = alloc::vec::Vec::new();
-    let peaks = PeakIterator::new(mmb_size);
-    let mut end_leaf_cursor = peaks.leaves().as_u64();
+    let mut first_leaf = 0u64;
 
-    for (peak_pos, height) in peaks {
+    for (peak_pos, height) in PeakIterator::new(mmb_size) {
         let leaves_in_peak = 1u64 << height;
-        let leaf_start = end_leaf_cursor - leaves_in_peak;
 
         if peak_pos < prune_pos {
             pinned.push(peak_pos);
         } else if height > 0 {
             // If the oldest leaf is pruned, the peak spans the prune boundary, so we must traverse
             // its children.
-            if leaf_pos(Location::new(leaf_start)) < prune_pos {
-                collect_pruned_children(peak_pos, height, leaf_start, prune_pos, &mut pinned);
+            if leaf_pos(Location::new(first_leaf)) < prune_pos {
+                collect_pruned_children(peak_pos, height, first_leaf, prune_pos, &mut pinned);
             }
         }
 
-        end_leaf_cursor = leaf_start;
+        first_leaf += leaves_in_peak;
     }
 
     pinned
@@ -451,14 +451,14 @@ mod tests {
         // Verify birthed_node_pos matches PeakIterator output for all peaks.
         for n in 1u64..=256 {
             let size = size_for_leaves(Location::new(n));
-            let mut end_leaf_cursor = n;
+            let mut first_leaf = 0u64;
             for (pos, height) in PeakIterator::new(size) {
                 let leaves_in_peak = 1u64 << height;
-                let last_leaf = end_leaf_cursor - 1;
+                let last_leaf = first_leaf + leaves_in_peak - 1;
                 let leaf = peak_birth_leaf(Location::new(last_leaf), height);
                 let computed_pos = birthed_node_pos(leaf, height == 0);
                 assert_eq!(computed_pos, pos, "n={n}, height={height}");
-                end_leaf_cursor -= leaves_in_peak;
+                first_leaf += leaves_in_peak;
             }
         }
     }
@@ -543,14 +543,14 @@ mod tests {
         // Verify peak_birth_leaf matches the inline computation used in test_birthed_node_pos.
         for n in 1u64..=256 {
             let size = size_for_leaves(Location::new(n));
-            let mut end_leaf_cursor = n;
+            let mut first_leaf = 0u64;
             for (pos, height) in PeakIterator::new(size) {
                 let leaves_in_peak = 1u64 << height;
-                let last_leaf = end_leaf_cursor - 1;
+                let last_leaf = first_leaf + leaves_in_peak - 1;
                 let leaf = peak_birth_leaf(Location::new(last_leaf), height);
                 let computed_pos = birthed_node_pos(leaf, height == 0);
                 assert_eq!(computed_pos, pos, "n={n}, height={height}");
-                end_leaf_cursor -= leaves_in_peak;
+                first_leaf += leaves_in_peak;
             }
         }
     }
