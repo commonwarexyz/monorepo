@@ -49,6 +49,11 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     /// Returns the largest valid size that is no greater than `size`.
     fn to_nearest_size(size: Position<Self>) -> Position<Self>;
 
+    /// Return the peaks of a structure with the given `size` as `(position, height)` pairs
+    /// in canonical oldest-to-newest order (suitable for
+    /// [`Hasher::root`](crate::merkle::hasher::Hasher::root)).
+    fn peaks(size: Position<Self>) -> Vec<(Position<Self>, u32)>;
+
     /// Compute positions of nodes that must be pinned when pruning to `prune_pos`
     /// in a structure of the given `size`.
     fn nodes_to_pin(size: Position<Self>, prune_pos: Position<Self>) -> Vec<Position<Self>>;
@@ -72,6 +77,14 @@ pub enum Error<F: Family> {
     /// The location exceeds the valid range.
     #[error("{0} > MAX_LOCATION")]
     LocationOverflow(Location<F>),
+
+    /// The range is empty but must contain at least one element.
+    #[error("range is empty")]
+    Empty,
+
+    /// The end of a range is out of bounds.
+    #[error("range end out of bounds: {0}")]
+    RangeOutOfBounds(Location<F>),
 }
 
 impl<F: Family> PartialEq for Error<F> {
@@ -80,6 +93,8 @@ impl<F: Family> PartialEq for Error<F> {
             (Self::NonLeaf(a), Self::NonLeaf(b)) => a == b,
             (Self::PositionOverflow(a), Self::PositionOverflow(b)) => a == b,
             (Self::LocationOverflow(a), Self::LocationOverflow(b)) => a == b,
+            (Self::Empty, Self::Empty) => true,
+            (Self::RangeOutOfBounds(a), Self::RangeOutOfBounds(b)) => a == b,
             _ => false,
         }
     }

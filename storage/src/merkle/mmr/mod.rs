@@ -70,10 +70,10 @@ pub mod iterator;
 pub mod mem;
 pub mod proof;
 
+pub use super::proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
 use crate::merkle;
 pub use crate::merkle::{hasher, Readable};
 pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
-pub use proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
 use thiserror::Error;
 
 /// MMR-specific type alias for `merkle::proof::Proof`.
@@ -152,6 +152,10 @@ impl merkle::Family for Family {
 
     fn to_nearest_size(size: Position) -> Position {
         iterator::PeakIterator::to_nearest_size(size)
+    }
+
+    fn peaks(size: Position) -> alloc::vec::Vec<(Position, u32)> {
+        iterator::PeakIterator::new(size).collect()
     }
 
     fn nodes_to_pin(_size: Position, prune_pos: Position) -> alloc::vec::Vec<Position> {
@@ -267,6 +271,8 @@ impl From<merkle::Error<Family>> for Error {
             merkle::Error::NonLeaf(pos) => Self::PositionNotLeaf(pos),
             merkle::Error::PositionOverflow(pos) => Self::InvalidPosition(pos),
             merkle::Error::LocationOverflow(loc) => Self::LocationOverflow(loc),
+            merkle::Error::Empty => Self::Empty,
+            merkle::Error::RangeOutOfBounds(loc) => Self::RangeOutOfBounds(loc),
         }
     }
 }

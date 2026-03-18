@@ -39,11 +39,8 @@ trait FuzzMerkle: Sized {
     fn retained_bounds(&self) -> Range<merkle::Location<Self::Family>>;
     fn get_node(&self, pos: merkle::Position<Self::Family>) -> Option<Digest>;
     fn root(&self) -> Digest;
-    fn add(
-        &mut self,
-        hasher: &mut Standard<Sha256>,
-        data: &[u8],
-    ) -> merkle::Location<Self::Family>;
+    fn add(&mut self, hasher: &mut Standard<Sha256>, data: &[u8])
+        -> merkle::Location<Self::Family>;
     fn update_leaf(
         &mut self,
         hasher: &mut Standard<Sha256>,

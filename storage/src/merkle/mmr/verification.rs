@@ -16,6 +16,7 @@ use crate::merkle::{
     mmr::{
         iterator::PeakIterator, proof, storage::Storage, Error, Family, Location, Position, Proof,
     },
+    proof::Blueprint,
 };
 use commonware_cryptography::Digest;
 use core::ops::Range;
@@ -90,7 +91,7 @@ impl<D: Digest> ProofStore<D> {
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
         let leaves = Location::try_from(self.size)?;
-        let bp = proof::blueprint(leaves, range)?;
+        let bp = Blueprint::new(leaves, range)?;
 
         let mut digests: Vec<D> = Vec::new();
         if !bp.fold_prefix.is_empty() {
@@ -193,7 +194,7 @@ pub async fn historical_range_proof<
     leaves: Location,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    let bp = proof::blueprint(leaves, range)?;
+    let bp = Blueprint::new(leaves, range)?;
 
     let mut digests: Vec<D> = Vec::new();
     if !bp.fold_prefix.is_empty() {

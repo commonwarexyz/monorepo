@@ -166,6 +166,12 @@ impl merkle::Family for Family {
         iterator::PeakIterator::to_nearest_size(size)
     }
 
+    fn peaks(size: Position) -> alloc::vec::Vec<(Position, u32)> {
+        let mut peaks: alloc::vec::Vec<_> = iterator::PeakIterator::new(size).collect();
+        peaks.reverse();
+        peaks
+    }
+
     fn nodes_to_pin(size: Position, prune_pos: Position) -> alloc::vec::Vec<Position> {
         iterator::nodes_to_pin(size, prune_pos)
     }
@@ -223,6 +229,8 @@ impl From<merkle::Error<Family>> for Error {
             merkle::Error::LocationOverflow(loc) => Self::LocationOverflow(loc),
             merkle::Error::NonLeaf(pos) => Self::NonLeaf(pos),
             merkle::Error::PositionOverflow(pos) => Self::PositionOverflow(pos),
+            merkle::Error::Empty => Self::Empty,
+            merkle::Error::RangeOutOfBounds(loc) => Self::RangeOutOfBounds(loc),
         }
     }
 }
