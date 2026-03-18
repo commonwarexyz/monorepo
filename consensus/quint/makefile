@@ -1,4 +1,7 @@
-.PHONY: test typecheck repl check clean
+TRACES_ROOT ?= ../fuzz/artifacts/traces
+TEST_DIR ?= traces
+
+.PHONY: test typecheck repl check clean build_traces
 
 typecheck:
 	quint typecheck types.qnt
@@ -33,6 +36,16 @@ run:
 		--invariant=all_invariants main_n5f1b1.qnt
 	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
     	--invariant=all_invariants twins_n4f1b1.qnt
+
+build_traces:
+	@for dir in $(TRACES_ROOT)/*/; do \
+		[ -d "$$dir" ] || continue; \
+		echo "Converting traces from $$dir"; \
+		cargo run -p commonware-consensus-fuzz --bin trace_to_quint -- "$$dir" $(TEST_DIR); \
+	done
+
+test_traces:
+	./scripts/test_traces.sh
 
 clean:
 	./scripts/verify.sh clean

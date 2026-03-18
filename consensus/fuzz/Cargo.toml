@@ -21,6 +21,9 @@ commonware-runtime.workspace = true
 commonware-utils = { workspace = true, features = ["arbitrary"] }
 futures.workspace = true
 libfuzzer-sys.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha1.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 tracing.workspace = true
@@ -131,6 +134,20 @@ bench = false
 [[bin]]
 name = "simplex_secp256r1"
 path = "fuzz_targets/simplex_secp256r1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_quint"
+path = "fuzz_targets/simplex_ed25519_quint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trace_to_quint"
+path = "src/bin/trace_to_quint.rs"
 test = false
 doc = false
 bench = false
