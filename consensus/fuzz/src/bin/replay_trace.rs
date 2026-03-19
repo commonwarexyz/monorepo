@@ -43,14 +43,11 @@ fn main() {
     for (i, state) in states.iter().enumerate() {
         let node_idx = i + trace.faults;
         println!(
-            "  n{}: {} notarizations, {} nullifications, {} finalizations, {} notarize_votes, {} nullify_votes, {} finalize_votes",
+            "  n{}: notarizations={:?}, nullifications={:?}, finalizations={:?}",
             node_idx,
-            state.notarizations.len(),
-            state.nullifications.len(),
-            state.finalizations.len(),
-            state.notarize_votes.len(),
-            state.nullify_votes.len(),
-            state.finalize_votes.len(),
+            state.notarizations.keys().collect::<Vec<_>>(),
+            state.nullifications.keys().collect::<Vec<_>>(),
+            state.finalizations.keys().collect::<Vec<_>>(),
         );
     }
 

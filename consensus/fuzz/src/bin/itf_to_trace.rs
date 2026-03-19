@@ -77,13 +77,10 @@ fn main() {
     );
     for (node, state) in &expected_state.nodes {
         println!(
-            "  {node}: {} notarizations, {} nullifications, {} finalizations, {} notarize_votes, {} nullify_votes, {} finalize_votes, last_finalized={}",
-            state.notarizations.len(),
-            state.nullifications.len(),
-            state.finalizations.len(),
-            state.notarize_votes.len(),
-            state.nullify_votes.len(),
-            state.finalize_votes.len(),
+            "  {node}: notarizations={:?}, nullifications={:?}, finalizations={:?}, last_finalized={}",
+            state.notarizations.keys().collect::<Vec<_>>(),
+            state.nullifications.iter().collect::<Vec<_>>(),
+            state.finalizations.keys().collect::<Vec<_>>(),
             state.last_finalized,
         );
     }

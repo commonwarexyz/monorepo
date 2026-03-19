@@ -221,7 +221,6 @@ where
 /// Extract replayed state including individual votes (for replayer comparison).
 pub fn extract_replayed<E, S, L>(
     reporters: &[Reporter<E, S, L, Sha256Digest>],
-    participants: &[S::PublicKey],
     max_participants: usize,
 ) -> Vec<ReplayedReplicaState>
 where
@@ -229,74 +228,13 @@ where
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
 {
-    // Build pk -> node ID mapping
-    let pk_to_id: HashMap<S::PublicKey, String> = participants
-        .iter()
-        .enumerate()
-        .map(|(i, pk)| (pk.clone(), format!("n{i}")))
-        .collect();
-
     reporters
         .iter()
         .map(|reporter| {
-            let notarizations = extract_notarizations::<S>(reporter, max_participants);
-            let nullifications = extract_nullifications::<S>(reporter, max_participants);
-            let finalizations = extract_finalizations::<S>(reporter, max_participants);
-
-            // Extract notarize votes: HashMap<View, HashMap<D, HashSet<PK>>> -> HashMap<u64, HashSet<String>>
-            let notarize_votes = {
-                let votes = reporter.notarizes.lock();
-                votes
-                    .iter()
-                    .map(|(view, by_digest)| {
-                        let signers: HashSet<String> = by_digest
-                            .values()
-                            .flat_map(|pks| pks.iter())
-                            .filter_map(|pk| pk_to_id.get(pk).cloned())
-                            .collect();
-                        (view.get(), signers)
-                    })
-                    .collect()
-            };
-
-            // Extract nullify votes: HashMap<View, HashSet<PK>> -> HashMap<u64, HashSet<String>>
-            let nullify_votes = {
-                let votes = reporter.nullifies.lock();
-                votes
-                    .iter()
-                    .map(|(view, pks)| {
-                        let signers: HashSet<String> = pks
-                            .iter()
-                            .filter_map(|pk| pk_to_id.get(pk).cloned())
-                            .collect();
-                        (view.get(), signers)
-                    })
-                    .collect()
-            };
-
-            // Extract finalize votes: HashMap<View, HashMap<D, HashSet<PK>>> -> HashMap<u64, HashSet<String>>
-            let finalize_votes = {
-                let votes = reporter.finalizes.lock();
-                votes
-                    .iter()
-                    .map(|(view, by_digest)| {
-                        let signers: HashSet<String> = by_digest
-                            .values()
-                            .flat_map(|pks| pks.iter())
-                            .filter_map(|pk| pk_to_id.get(pk).cloned())
-                            .collect();
-                        (view.get(), signers)
-                    })
-                    .collect()
-            };
-
             ReplayedReplicaState {
-                notarizations,
-                nullifications,
-                finalizations,
-                notarize_votes,
-                nullify_votes,
-                finalize_votes,
+                notarizations: extract_notarizations::<S>(reporter, max_participants),
+                nullifications: extract_nullifications::<S>(reporter, max_participants),
+                finalizations: extract_finalizations::<S>(reporter, max_participants),
             }
         })
         .collect()

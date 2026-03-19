@@ -372,7 +372,6 @@ fn extract_expected_state(
     block_map: &HashMap<String, String>,
 ) -> ExpectedState {
     let store_cert_map = collect_store_certificate(state);
-    let store_vote_map = collect_store_vote(state);
     let replica_state_entries = parse_map(get_var(state, "replica_state"));
     let committed_entries = parse_map(get_var(state, "ghost_committed_blocks"));
 
@@ -407,40 +406,6 @@ fn extract_expected_state(
                         let block_name = inner["block"].as_str().unwrap_or("");
                         let hex = block_map.get(block_name).cloned().unwrap_or_default();
                         finalizations.insert(view, hex);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Extract votes from store_vote
-        let mut notarize_votes: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
-        let mut nullify_votes: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
-        let mut finalize_votes: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
-
-        if let Some(votes) = store_vote_map.get(node) {
-            for vote_val in votes {
-                let Some(tag) = vote_val.get("tag").and_then(|t| t.as_str()) else {
-                    continue;
-                };
-                let Some(inner) = vote_val.get("value") else {
-                    continue;
-                };
-                match tag {
-                    "Notarize" => {
-                        let view = parse_int(&inner["view"]);
-                        let sig = inner["sig"].as_str().unwrap_or("").to_string();
-                        notarize_votes.entry(view).or_default().insert(sig);
-                    }
-                    "Nullify" => {
-                        let view = parse_int(&inner["view"]);
-                        let sig = inner["sig"].as_str().unwrap_or("").to_string();
-                        nullify_votes.entry(view).or_default().insert(sig);
-                    }
-                    "Finalize" => {
-                        let view = parse_int(&inner["view"]);
-                        let sig = inner["sig"].as_str().unwrap_or("").to_string();
-                        finalize_votes.entry(view).or_default().insert(sig);
                     }
                     _ => {}
                 }
@@ -483,9 +448,6 @@ fn extract_expected_state(
                 notarizations,
                 nullifications,
                 finalizations,
-                notarize_votes,
-                nullify_votes,
-                finalize_votes,
                 last_finalized,
                 committed_sequence,
             },

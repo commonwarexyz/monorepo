@@ -194,8 +194,8 @@ pub fn replay_trace(trace: &TraceData) -> Vec<ReplayedReplicaState> {
         // Wait for processing to settle
         context.sleep(Duration::from_secs(2)).await;
 
-        // Extract observable state with votes
-        invariants::extract_replayed(&reporters, &participants, n)
+        // Extract observable state
+        invariants::extract_replayed(&reporters, n)
     })
 }
 
