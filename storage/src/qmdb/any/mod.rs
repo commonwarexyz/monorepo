@@ -102,105 +102,86 @@ pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;
 
-/// Configuration for an `Any` authenticated db with fixed-size values.
+/// Configuration for an `Any` authenticated db.
+///
+/// The `LC` parameter selects the log journal variant:
+/// - [FConfig] for fixed-size values
+/// - [VConfig]`<C>` for variable-size values
 #[derive(Clone)]
-pub struct FixedConfig<T: Translator> {
+pub struct Config<T: Translator, LC> {
     /// Configuration for the MMR backing the authenticated journal.
     pub mmr: MmrConfig,
 
-    /// Configuration for the fixed-size operations log journal.
-    pub log: FConfig,
+    /// Configuration for the operations log journal.
+    pub log: LC,
 
     /// The translator used by the compressed index.
     pub translator: T,
 }
+
+/// Configuration for an `Any` authenticated db with fixed-size values.
+pub type FixedConfig<T> = Config<T, FConfig>;
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
-#[derive(Clone)]
-pub struct VariableConfig<T: Translator, C> {
-    /// Configuration for the MMR backing the authenticated journal.
-    pub mmr: MmrConfig,
+pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
 
-    /// Configuration for the variable-size operations log journal.
-    pub log: VConfig<C>,
+/// Generate `init_fixed` or `init_variable` for a specific journal type.
+///
+/// Both variants construct an authenticated journal, seed it if empty, and build the db from the
+/// log. They differ only in the journal type and codec bounds (same Rust #100013 limitation as
+/// `authenticated::Journal::new`).
+macro_rules! impl_any_init {
+    ($fn_name:ident, $journal_ty:ty, $cfg_ty:ty, $codec_bound:path) => {
+        pub(super) async fn $fn_name<E, U, H, T, I, F, NewIndex>(
+            context: E,
+            cfg: $cfg_ty,
+            known_inactivity_floor: Option<Location>,
+            callback: F,
+            new_index: NewIndex,
+        ) -> Result<db::Db<E, $journal_ty, I, H, U>, Error>
+        where
+            E: Storage + Clock + Metrics,
+            U: Update + Send + Sync,
+            H: Hasher,
+            T: Translator,
+            I: UnorderedIndex<Value = Location>,
+            F: FnMut(bool, Option<Location>),
+            NewIndex: FnOnce(E, T) -> I,
+            Operation<U>: $codec_bound + Committable,
+        {
+            let mut log = authenticated::Journal::<_, $journal_ty, _>::new(
+                context.with_label("log"),
+                cfg.mmr,
+                cfg.log,
+                Operation::is_commit,
+            )
+            .await?;
 
-    /// The translator used by the compressed index.
-    pub translator: T,
+            if log.size().await == 0 {
+                warn!("Authenticated log is empty, initializing new db");
+                let commit_floor = Operation::CommitFloor(None, Location::new(0));
+                log.append(&commit_floor).await?;
+                log.sync().await?;
+            }
+
+            let index = new_index(context.with_label("index"), cfg.translator);
+            db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
+        }
+    };
 }
 
-/// Shared initialization logic for fixed-sized value [db::Db].
-pub(super) async fn init_fixed<E, U, H, T, I, F, NewIndex>(
-    context: E,
-    cfg: FixedConfig<T>,
-    known_inactivity_floor: Option<Location>,
-    callback: F,
-    new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<U>>, I, H, U>, Error>
-where
-    E: Storage + Clock + Metrics,
-    U: Update + Send + Sync,
-    H: Hasher,
-    T: Translator,
-    I: UnorderedIndex<Value = Location>,
-    F: FnMut(bool, Option<Location>),
-    NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: CodecFixedShared + Committable,
-{
-    let mut log = authenticated::Journal::<_, FJournal<_, _>, _>::new(
-        context.with_label("log"),
-        cfg.mmr,
-        cfg.log,
-        Operation::is_commit,
-    )
-    .await?;
-
-    if log.size().await == 0 {
-        warn!("Authenticated log is empty, initializing new db");
-        let commit_floor = Operation::CommitFloor(None, Location::new(0));
-        log.append(&commit_floor).await?;
-        log.sync().await?;
-    }
-
-    let index = new_index(context.with_label("index"), cfg.translator);
-    db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
-}
-
-/// Shared initialization logic for variable-sized value [db::Db].
-pub(super) async fn init_variable<E, U, H, T, I, F, NewIndex>(
-    context: E,
-    cfg: VariableConfig<T, <Operation<U> as Read>::Cfg>,
-    known_inactivity_floor: Option<Location>,
-    callback: F,
-    new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<U>>, I, H, U>, Error>
-where
-    E: Storage + Clock + Metrics,
-    U: Update + Send + Sync,
-    H: Hasher,
-    T: Translator,
-    I: UnorderedIndex<Value = Location>,
-    F: FnMut(bool, Option<Location>),
-    NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: Codec + Committable,
-{
-    let mut log = authenticated::Journal::<_, VJournal<_, _>, _>::new(
-        context.with_label("log"),
-        cfg.mmr,
-        cfg.log,
-        Operation::is_commit,
-    )
-    .await?;
-
-    if log.size().await == 0 {
-        warn!("Authenticated log is empty, initializing new db");
-        let commit_floor = Operation::CommitFloor(None, Location::new(0));
-        log.append(&commit_floor).await?;
-        log.sync().await?;
-    }
-
-    let index = new_index(context.with_label("index"), cfg.translator);
-    db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
-}
+impl_any_init!(
+    init_fixed,
+    FJournal<E, Operation<U>>,
+    FixedConfig<T>,
+    CodecFixedShared
+);
+impl_any_init!(
+    init_variable,
+    VJournal<E, Operation<U>>,
+    VariableConfig<T, <Operation<U> as Read>::Cfg>,
+    Codec
+);
 
 #[cfg(test)]
 // pub(crate) so qmdb/current can use the generic tests.

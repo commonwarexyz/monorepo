@@ -503,84 +503,54 @@ where
 /// The number of items to apply to the MMR in a single batch.
 const APPLY_BATCH_SIZE: u64 = 1 << 16;
 
-impl<E, O, H> Journal<E, fixed::Journal<E, O>, H>
-where
-    E: Storage + Clock + Metrics,
-    O: CodecFixedShared,
-    H: Hasher,
-{
-    /// Create a new [Journal] for fixed-length items.
-    ///
-    /// The journal will be rewound to the last item that matches the `rewind_predicate` on
-    /// initialization.
-    pub async fn new(
-        context: E,
-        mmr_cfg: crate::mmr::journaled::Config,
-        journal_cfg: fixed::Config,
-        rewind_predicate: fn(&O) -> bool,
-    ) -> Result<Self, Error> {
-        let mut journal = fixed::Journal::init(context.with_label("journal"), journal_cfg).await?;
+/// Generate a `new()` constructor for an authenticated journal backed by a specific contiguous
+/// journal type.
+///
+/// Both fixed and variable contiguous journals use an identical init sequence (construct inner
+/// journal, rewind, align MMR, sync). A generic free function would be cleaner but Rust #100013
+/// (RPITIT lifetime bounds) prevents proving `Send` for the resulting future when the journal
+/// type is generic. The macro generates concrete impl blocks so the compiler resolves all types.
+macro_rules! impl_journal_new {
+    ($journal_mod:ident, $cfg_ty:ty, $codec_bound:path) => {
+        impl<E, O, H> Journal<E, $journal_mod::Journal<E, O>, H>
+        where
+            E: Storage + Clock + Metrics,
+            O: $codec_bound,
+            H: Hasher,
+        {
+            /// Create a new authenticated [Journal].
+            ///
+            /// The inner journal will be rewound to the last item matching `rewind_predicate`,
+            /// and the MMR will be aligned to match.
+            pub async fn new(
+                context: E,
+                mmr_cfg: crate::mmr::journaled::Config,
+                journal_cfg: $cfg_ty,
+                rewind_predicate: fn(&O) -> bool,
+            ) -> Result<Self, Error> {
+                let mut journal =
+                    $journal_mod::Journal::init(context.with_label("journal"), journal_cfg).await?;
+                journal.rewind_to(rewind_predicate).await?;
 
-        // Rewind journal to last matching item.
-        journal.rewind_to(rewind_predicate).await?;
+                let hasher = StandardHasher::<H>::new();
+                let mut mmr = Mmr::init(context.with_label("mmr"), &hasher, mmr_cfg).await?;
+                Self::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE).await?;
 
-        // Align the MMR and journal.
-        let hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &hasher, mmr_cfg).await?;
-        Self::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE).await?;
+                journal.sync().await?;
+                mmr.sync().await?;
 
-        // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
-        // been performed on next startup.
-        journal.sync().await?;
-        mmr.sync().await?;
-
-        Ok(Self {
-            mmr,
-            journal,
-            hasher,
-        })
-    }
+                Ok(Self {
+                    mmr,
+                    journal,
+                    hasher,
+                })
+            }
+        }
+    };
 }
 
-impl<E, O, H> Journal<E, variable::Journal<E, O>, H>
-where
-    E: Storage + Clock + Metrics,
-    O: CodecShared,
-    H: Hasher,
-{
-    /// Create a new [Journal] for variable-length items.
-    ///
-    /// The journal will be rewound to the last item that matches the `rewind_predicate` on
-    /// initialization.
-    pub async fn new(
-        context: E,
-        mmr_cfg: crate::mmr::journaled::Config,
-        journal_cfg: variable::Config<O::Cfg>,
-        rewind_predicate: fn(&O) -> bool,
-    ) -> Result<Self, Error> {
-        let hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &hasher, mmr_cfg).await?;
-        let mut journal =
-            variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
-
-        // Rewind to last matching item.
-        journal.rewind_to(rewind_predicate).await?;
-
-        // Align the MMR and journal.
-        Self::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE).await?;
-
-        // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
-        // been performed on next startup.
-        journal.sync().await?;
-        mmr.sync().await?;
-
-        Ok(Self {
-            mmr,
-            journal,
-            hasher,
-        })
-    }
-}
+impl_journal_new!(fixed, fixed::Config, CodecFixedShared);
+impl_journal_new!(variable, variable::Config<O::Cfg>, CodecShared);
 
 impl<E, C, H> Contiguous for Journal<E, C, H>
 where

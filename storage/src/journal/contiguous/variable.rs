@@ -933,6 +933,14 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Persistable for Journal<E, V>
     }
 }
 
+impl<E: Clock + Storage + Metrics, V: CodecShared> super::Initializable<E> for Journal<E, V> {
+    type Config = Config<V::Cfg>;
+
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error> {
+        Self::init(context, config).await
+    }
+}
+
 #[cfg(test)]
 impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Test helper: Read the item at the given position.

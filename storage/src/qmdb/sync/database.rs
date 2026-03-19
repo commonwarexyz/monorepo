@@ -7,18 +7,10 @@ pub trait Config {
     fn journal_config(&self) -> Self::JournalConfig;
 }
 
-impl<T: Translator> Config for crate::qmdb::any::FixedConfig<T> {
-    type JournalConfig = crate::journal::contiguous::fixed::Config;
+impl<T: Translator, LC: Clone> Config for crate::qmdb::any::Config<T, LC> {
+    type JournalConfig = LC;
 
-    fn journal_config(&self) -> Self::JournalConfig {
-        self.log.clone()
-    }
-}
-
-impl<T: Translator, C: Clone> Config for crate::qmdb::any::VariableConfig<T, C> {
-    type JournalConfig = crate::journal::contiguous::variable::Config<C>;
-
-    fn journal_config(&self) -> Self::JournalConfig {
+    fn journal_config(&self) -> LC {
         self.log.clone()
     }
 }
