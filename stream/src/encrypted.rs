@@ -55,10 +55,8 @@
 //! - **Future Secrecy**: If a peer's static private key is compromised, future sessions will be exposed.
 //! - **0-RTT**: The protocol does not support 0-RTT handshakes (resumed sessions).
 
-use crate::utils::codec::{recv_frame, send_frame};
-use commonware_codec::{
-    varint::UInt, DecodeExt, Encode as _, EncodeSize, Error as CodecError, Write,
-};
+use crate::utils::codec::{build_frame, recv_frame, send_frame};
+use commonware_codec::{DecodeExt, Encode as _, EncodeSize, Error as CodecError, Write};
 use commonware_cryptography::{
     handshake::{
         self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
@@ -314,32 +312,33 @@ impl<O: Sink> Sender<O> {
     ) -> Result<commonware_runtime::IoBuf, Error> {
         let mut bufs = bufs.into();
         let ciphertext_len = bufs.len() + TAG_SIZE as usize;
-        let max_ciphertext_size = self.max_message_size.saturating_add(TAG_SIZE) as usize;
-        if ciphertext_len > max_ciphertext_size {
-            return Err(Error::SendTooLarge(ciphertext_len));
-        }
 
-        let prefix = UInt(ciphertext_len as u32);
-        let prefix_len = prefix.encode_size();
+        build_frame(
+            ciphertext_len,
+            self.max_message_size.saturating_add(TAG_SIZE),
+            |prefix| {
+                let prefix_len = prefix.encode_size();
 
-        // Allocate buffer from pool for prefix + ciphertext (plaintext + tag).
-        let mut frame = self.pool.alloc(prefix_len + ciphertext_len);
+                // Allocate buffer from pool for prefix + ciphertext (plaintext + tag).
+                let mut frame = self.pool.alloc(prefix_len + ciphertext_len);
 
-        // Write prefix.
-        prefix.write(&mut frame);
+                // Write prefix.
+                prefix.write(&mut frame);
 
-        // Copy plaintext into buffer.
-        frame.put(&mut bufs);
+                // Copy plaintext into buffer.
+                frame.put(&mut bufs);
 
-        // Encrypt in-place.
-        let tag = self
-            .cipher
-            .send_in_place(&mut frame.as_mut()[prefix_len..])?;
+                // Encrypt in-place.
+                let tag = self
+                    .cipher
+                    .send_in_place(&mut frame.as_mut()[prefix_len..])?;
 
-        // Append tag.
-        frame.put_slice(&tag);
+                // Append tag.
+                frame.put_slice(&tag);
 
-        Ok(frame.freeze())
+                Ok(frame.freeze())
+            },
+        )
     }
 
     /// Encrypts and sends a message to the peer.
