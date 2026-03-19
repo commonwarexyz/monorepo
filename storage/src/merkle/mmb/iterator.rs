@@ -554,4 +554,46 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_to_nearest_size() {
+        // Zero maps to zero.
+        assert_eq!(
+            PeakIterator::to_nearest_size(Position::new(0)),
+            Position::new(0)
+        );
+
+        // For every size 0..2000: result is valid, <= input, monotonic, and exact sizes
+        // are unchanged while gaps round down.
+        let mut prev = Position::new(0);
+        for s in 0u64..=2000 {
+            let nearest = PeakIterator::to_nearest_size(Position::new(s));
+            assert!(
+                nearest.is_valid_size(),
+                "result {nearest} not valid for input {s}"
+            );
+            assert!(
+                nearest <= Position::new(s),
+                "result {nearest} exceeds input {s}"
+            );
+            assert!(nearest >= prev, "not monotonic at {s}");
+            prev = nearest;
+        }
+
+        // Valid sizes map to themselves; gaps map to the previous valid size.
+        for n in 1u64..=500 {
+            let size = size_for_leaves(Location::new(n));
+            assert_eq!(PeakIterator::to_nearest_size(size), size, "n={n}");
+
+            let next_size = size_for_leaves(Location::new(n + 1));
+            for s in *size + 1..*next_size {
+                assert_eq!(
+                    PeakIterator::to_nearest_size(Position::new(s)),
+                    size,
+                    "gap size {s} between n={n} and n={}",
+                    n + 1
+                );
+            }
+        }
+    }
 }
