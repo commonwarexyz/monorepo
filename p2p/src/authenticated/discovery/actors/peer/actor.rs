@@ -102,20 +102,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         Ok(())
     }
 
-    /// Unpack outbound `msg` and assert the underlying `channel` is registered.
-    fn validate_outbound_msg<V>(
-        msg: Option<EncodedData>,
-        rate_limits: &HashMap<u64, V>,
-    ) -> Result<EncodedData, Error> {
-        let encoded = match msg {
-            Some(encoded) => encoded,
-            None => return Err(Error::PeerDisconnected),
-        };
+    /// Assert the outbound message's `channel` is registered.
+    fn validate_outbound_msg<V>(msg: EncodedData, rate_limits: &HashMap<u64, V>) -> EncodedData {
         assert!(
-            rate_limits.contains_key(&encoded.channel),
+            rate_limits.contains_key(&msg.channel),
             "outbound message on invalid channel"
         );
-        Ok(encoded)
+        msg
     }
 
     /// Drains already-queued messages into `batch`.
@@ -140,7 +133,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 continue;
             }
             if let Ok(msg) = high.try_recv() {
-                let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
+                let encoded = Self::validate_outbound_msg(msg, rate_limits);
                 sent_messages
                     .get_or_create(&metrics::Message::new_data(peer, encoded.channel))
                     .inc();
@@ -148,7 +141,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 continue;
             }
             if let Ok(msg) = low.try_recv() {
-                let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
+                let encoded = Self::validate_outbound_msg(msg, rate_limits);
                 sent_messages
                     .get_or_create(&metrics::Message::new_data(peer, encoded.channel))
                     .inc();
@@ -199,6 +192,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     // Set the initial deadline to now to start gossiping immediately
                     let mut deadline = context.current();
 
+                    // Reused across iterations to avoid per-send allocation.
+                    let mut batch = Vec::with_capacity(self.send_batch_size);
+
                     // Enter into the main loop
                     select_loop! {
                         context,
@@ -214,14 +210,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         // drain already-queued messages into a single runtime write.
                         // Priority order: control > high > low.
                         msg = recv_prioritized(&mut self.control, &mut self.high, &mut self.low) => {
-                            let mut batch = Vec::with_capacity(self.send_batch_size);
+                            batch.clear();
                             match msg {
                                 Prioritized::Closed => return Err(Error::PeerDisconnected),
                                 Prioritized::Control(msg) => {
                                     Self::encode_control(&peer, msg, &pool, &self.sent_messages, &mut batch)?;
                                 },
                                 Prioritized::Data(encoded) => {
-                                    let encoded = Self::validate_outbound_msg(Some(encoded), &rate_limits)?;
+                                    let encoded = Self::validate_outbound_msg(encoded, &rate_limits);
                                     self.sent_messages
                                         .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
                                         .inc();
@@ -233,7 +229,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 &mut self.control, &pool, &mut self.high, &mut self.low,
                                 &rate_limits, &self.sent_messages,
                             )?;
-                            conn_sender.send_many(batch).await.map_err(Error::SendFailed)?;
+                            conn_sender.send_many(batch.drain(..)).await.map_err(Error::SendFailed)?;
                         },
                     }
 
