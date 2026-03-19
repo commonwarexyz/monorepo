@@ -87,13 +87,16 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         low: &mut mpsc::Receiver<EncodedData>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &Family<metrics::Message, Counter>,
-    ) -> Result<(), Error> {
+    ) {
         while batch.len() < batch_size {
             // Preserve the existing priority behavior when draining more work
             // into the same send: always exhaust already-ready high-priority
             // data before pulling from the low-priority queue.
-            if let Ok(msg) = high.try_recv() {
-                let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
+            if let Ok(encoded) = high.try_recv() {
+                assert!(
+                    rate_limits.contains_key(&encoded.channel),
+                    "outbound message on invalid channel"
+                );
                 sent_messages
                     .get_or_create(&metrics::Message::new_data(peer, encoded.channel))
                     .inc();
@@ -101,8 +104,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 continue;
             }
 
-            if let Ok(msg) = low.try_recv() {
-                let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
+            if let Ok(encoded) = low.try_recv() {
+                assert!(
+                    rate_limits.contains_key(&encoded.channel),
+                    "outbound message on invalid channel"
+                );
                 sent_messages
                     .get_or_create(&metrics::Message::new_data(peer, encoded.channel))
                     .inc();
@@ -112,8 +118,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
             break;
         }
-
-        Ok(())
     }
 
     pub async fn run<Si: Sink, St: Stream>(
@@ -158,9 +162,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 .get_or_create(&metrics::Message::new_ping(&peer))
                                 .inc();
                             conn_sender
-                                .send_batch(vec![IoBufs::from(
-                                    types::Message::Ping.encode_with_pool(&pool),
-                                )])
+                                .send(types::Message::Ping.encode_with_pool(&pool))
                                 .await
                                 .map_err(Error::SendFailed)?;
 
@@ -174,10 +176,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         },
                         msg_high = self.high.recv() => {
                             let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
-                            let mut batch = Vec::with_capacity(self.send_batch_size);
                             self.sent_messages
                                 .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
                                 .inc();
+                            let mut batch = Vec::with_capacity(self.send_batch_size);
                             batch.push(encoded.payload);
                             // Only drain messages that are already queued. This
                             // reduces runtime write calls without introducing a
@@ -190,15 +192,15 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 &mut self.low,
                                 &rate_limits,
                                 &self.sent_messages,
-                            )?;
+                            );
                             conn_sender.send_batch(batch).await.map_err(Error::SendFailed)?;
                         },
                         msg_low = self.low.recv() => {
                             let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                            let mut batch = Vec::with_capacity(self.send_batch_size);
                             self.sent_messages
                                 .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
                                 .inc();
+                            let mut batch = Vec::with_capacity(self.send_batch_size);
                             batch.push(encoded.payload);
                             // Only drain messages that are already queued. This
                             // reduces runtime write calls without introducing a
@@ -211,7 +213,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 &mut self.low,
                                 &rate_limits,
                                 &self.sent_messages,
-                            )?;
+                            );
                             conn_sender.send_batch(batch).await.map_err(Error::SendFailed)?;
                         },
                     }
