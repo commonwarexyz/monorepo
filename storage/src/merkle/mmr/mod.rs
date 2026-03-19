@@ -69,6 +69,13 @@ pub mod batch;
 pub mod iterator;
 pub mod mem;
 pub mod proof;
+cfg_if::cfg_if! {
+    if #[cfg(feature = "std")] {
+        pub mod journaled;
+        pub mod storage;
+        pub mod verification;
+    }
+}
 
 pub use super::proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
 use crate::merkle;
@@ -78,13 +85,16 @@ pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 /// MMR-specific type alias for `merkle::proof::Proof`.
 pub type Proof<D> = merkle::proof::Proof<Family, D>;
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "std")] {
-        pub mod journaled;
-        pub mod storage;
-        pub mod verification;
-    }
-}
+/// A node index or node count in an MMR.
+pub type Position = merkle::Position<Family>;
+
+/// A leaf index or leaf count in an MMR.
+pub type Location = merkle::Location<Family>;
+
+pub type StandardHasher<H> = merkle::hasher::Standard<H>;
+
+/// Errors that can occur when interacting with an MMR.
+pub type Error = merkle::Error<Family>;
 
 /// Marker type for the MMR family.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -204,17 +214,6 @@ impl merkle::Family for Family {
     }
 }
 
-/// A node index or node count in an MMR.
-pub type Position = merkle::Position<Family>;
-
-/// A leaf index or leaf count in an MMR.
-pub type Location = merkle::Location<Family>;
-
-pub type StandardHasher<H> = merkle::hasher::Standard<H>;
-
-/// Errors that can occur when interacting with an MMR.
-pub type Error = merkle::Error<Family>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,10 +284,7 @@ mod tests {
         assert_eq!(Position::new(u64::MAX).saturating_add(1), *MAX_NODES);
         assert_eq!(MAX_NODES.saturating_add(1), *MAX_NODES);
         assert_eq!(MAX_NODES.saturating_add(1000), *MAX_NODES);
-        assert_eq!(
-            Position::new(*MAX_NODES - 5).saturating_add(10),
-            *MAX_NODES
-        );
+        assert_eq!(Position::new(*MAX_NODES - 5).saturating_add(10), *MAX_NODES);
     }
 
     #[test]

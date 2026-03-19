@@ -126,6 +126,16 @@ pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 /// MMB-specific type alias for `merkle::proof::Proof`.
 pub type Proof<D> = merkle::proof::Proof<Family, D>;
 
+/// A node index or node count in an MMB.
+pub type Position = merkle::Position<Family>;
+
+/// A leaf index or leaf count in an MMB.
+pub type Location = merkle::Location<Family>;
+
+pub type StandardHasher<H> = merkle::hasher::Standard<H>;
+
+/// Errors that can occur during MMB operations.
+pub type Error = merkle::Error<Family>;
 /// Marker type for the MMB family.
 #[derive(Copy, Clone, Debug)]
 pub struct Family;
@@ -195,17 +205,6 @@ impl merkle::Family for Family {
         height.into_iter()
     }
 }
-
-/// A node index or node count in an MMB.
-pub type Position = merkle::Position<Family>;
-
-/// A leaf index or leaf count in an MMB.
-pub type Location = merkle::Location<Family>;
-
-pub type StandardHasher<H> = merkle::hasher::Standard<H>;
-
-/// Errors that can occur during MMB operations.
-pub type Error = merkle::Error<Family>;
 
 #[cfg(test)]
 mod tests {

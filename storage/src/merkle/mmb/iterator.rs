@@ -346,10 +346,7 @@ mod tests {
 
         // One more leaf should exceed MAX_NODES.
         let over_size = *Family::location_to_position(Location::new(max_loc + 1));
-        assert!(
-            over_size > max_pos,
-            "one more leaf should exceed MAX_NODES"
-        );
+        assert!(over_size > max_pos, "one more leaf should exceed MAX_NODES");
 
         // Sizes above MAX_NODES should be rejected.
         assert!(!Position::new(max_pos + 1).is_valid());

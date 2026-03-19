@@ -298,7 +298,10 @@ mod tests {
             result_overflow.is_err(),
             "Should reject location > MAX_LEAVES"
         );
-        matches!(result_overflow, Err(merkle::Error::LocationOverflow(_)));
+        assert!(matches!(
+            result_overflow,
+            Err(merkle::Error::LocationOverflow(_))
+        ));
     }
 
     #[test]
