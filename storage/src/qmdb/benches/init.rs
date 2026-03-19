@@ -4,10 +4,10 @@
 //! from the generation benchmarks so they can be filtered easily.
 
 use crate::common::{
-    any_fixed_cfg, current_fixed_cfg, gen_random_kv, make_fixed_value, make_variable_value,
-    variable_any_cfg, variable_any_vec_cfg, variable_current_cfg, variable_current_vec_cfg,
-    with_fixed_db, with_fixed_db_cfg, with_variable_db, with_variable_db_cfg, Digest,
-    FIXED_VARIANTS, VARIABLE_VARIANTS,
+    any_fix_cfg, any_var_digest_cfg, any_var_vec_cfg, cur_fix_cfg, cur_var_digest_cfg,
+    cur_var_vec_cfg, gen_random_kv, make_fixed_value, make_var_value, with_fixed_value_db,
+    with_fixed_value_db_cfg, with_var_value_db, with_var_value_db_cfg, Digest,
+    FIXED_VALUE_VARIANTS, VAR_VALUE_VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -44,14 +44,14 @@ async fn populate_and_sync<C: DbAny<Key = Digest>>(
     db.sync().await.unwrap();
 }
 
-fn bench_fixed_init(c: &mut Criterion) {
+fn bench_fixed_value_init(c: &mut Criterion) {
     let cfg = Config::default();
     for elements in ELEMENTS {
         for operations in OPERATIONS {
-            for variant in FIXED_VARIANTS {
+            for variant in FIXED_VALUE_VARIANTS {
                 // Setup: populate database
                 commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
-                    with_fixed_db!(ctx, variant, |mut db| {
+                    with_fixed_value_db!(ctx, variant, |mut db| {
                         populate_and_sync(&mut db, elements, operations, make_fixed_value).await;
                     });
                 });
@@ -67,13 +67,13 @@ fn bench_fixed_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
-                            let af = any_fixed_cfg(&ctx);
-                            let cf = current_fixed_cfg(&ctx);
-                            let av = variable_any_cfg(&ctx);
-                            let cv = variable_current_cfg(&ctx);
+                            let af = any_fix_cfg(&ctx);
+                            let cf = cur_fix_cfg(&ctx);
+                            let av = any_var_digest_cfg(&ctx);
+                            let cv = cur_var_digest_cfg(&ctx);
                             let start = Instant::now();
                             for _ in 0..iters {
-                                with_fixed_db_cfg!(ctx, variant, af, cf, av, cv, |mut db| {
+                                with_fixed_value_db_cfg!(ctx, variant, af, cf, av, cv, |mut db| {
                                     assert_ne!(db.bounds().await.end, 0);
                                 });
                             }
@@ -84,7 +84,7 @@ fn bench_fixed_init(c: &mut Criterion) {
 
                 // Cleanup: destroy database
                 commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
-                    with_fixed_db!(ctx, variant, |mut db| {
+                    with_fixed_value_db!(ctx, variant, |mut db| {
                         db.destroy().await.unwrap();
                     });
                 });
@@ -93,15 +93,15 @@ fn bench_fixed_init(c: &mut Criterion) {
     }
 }
 
-fn bench_variable_init(c: &mut Criterion) {
+fn bench_var_value_init(c: &mut Criterion) {
     let cfg = Config::default();
     for elements in ELEMENTS {
         for operations in OPERATIONS {
-            for variant in VARIABLE_VARIANTS {
+            for variant in VAR_VALUE_VARIANTS {
                 // Setup: populate database
                 commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
-                    with_variable_db!(ctx, variant, |mut db| {
-                        populate_and_sync(&mut db, elements, operations, make_variable_value).await;
+                    with_var_value_db!(ctx, variant, |mut db| {
+                        populate_and_sync(&mut db, elements, operations, make_var_value).await;
                     });
                 });
 
@@ -116,11 +116,11 @@ fn bench_variable_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
-                            let av = variable_any_vec_cfg(&ctx);
-                            let cv = variable_current_vec_cfg(&ctx);
+                            let av = any_var_vec_cfg(&ctx);
+                            let cv = cur_var_vec_cfg(&ctx);
                             let start = Instant::now();
                             for _ in 0..iters {
-                                with_variable_db_cfg!(ctx, variant, av, cv, |mut db| {
+                                with_var_value_db_cfg!(ctx, variant, av, cv, |mut db| {
                                     assert_ne!(db.bounds().await.end, 0);
                                 });
                             }
@@ -131,7 +131,7 @@ fn bench_variable_init(c: &mut Criterion) {
 
                 // Cleanup: destroy database
                 commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
-                    with_variable_db!(ctx, variant, |mut db| {
+                    with_var_value_db!(ctx, variant, |mut db| {
                         db.destroy().await.unwrap();
                     });
                 });
@@ -143,5 +143,5 @@ fn bench_variable_init(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_fixed_init, bench_variable_init
+    targets = bench_fixed_value_init, bench_var_value_init
 }

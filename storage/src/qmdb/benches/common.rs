@@ -35,32 +35,36 @@ pub const DELETE_FREQUENCY: u32 = 10;
 pub const VARIABLE_VALUE_MAX_LEN: usize = 256;
 pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
-// -- Type aliases for fixed-value databases --
+// -- Fixed value (Digest), fixed storage layout --
 
-pub type UFixedDb = UFixed<Context, Digest, Digest, Sha256, EightCap>;
-pub type OFixedDb = OFixed<Context, Digest, Digest, Sha256, EightCap>;
-pub type UVAnyDb = UVariable<Context, Digest, Digest, Sha256, EightCap>;
-pub type OVAnyDb = OVariable<Context, Digest, Digest, Sha256, EightCap>;
-pub type UCFixedDb = UCFixed<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
-pub type OCFixedDb = OCFixed<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
-pub type UCVFixedDb = UCVariable<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
-pub type OCVFixedDb = OCVariable<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type AnyUFixDb = UFixed<Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyOFixDb = OFixed<Context, Digest, Digest, Sha256, EightCap>;
+pub type CurUFixDb = UCFixed<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurOFixDb = OCFixed<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
-// -- Type aliases for variable-value databases --
+// -- Fixed value (Digest), variable storage layout --
+// Measures overhead of variable-capable storage when values are fixed-size.
 
-pub type UVarDb = UVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
-pub type OVarDb = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
-pub type UCVarDb = UCVariable<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
-pub type OCVarDb = OCVariable<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type AnyUVarDigestDb = UVariable<Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyOVarDigestDb = OVariable<Context, Digest, Digest, Sha256, EightCap>;
+pub type CurUVarDigestDb = UCVariable<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurOVarDigestDb = OCVariable<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
-// -- Type alias for keyless database --
+// -- Variable value (Vec<u8>), variable storage layout --
+
+pub type AnyUVarVecDb = UVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type AnyOVarVecDb = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type CurUVarVecDb = UCVariable<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+pub type CurOVarVecDb = OCVariable<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
+
+// -- Keyless --
 
 pub type KeylessDb = Keyless<Context, Vec<u8>, Sha256>;
 
 // -- Variant enums --
 
 #[derive(Debug, Clone, Copy)]
-pub enum FixedVariant {
+pub enum FixedValueVariant {
     AnyUnorderedFixed,
     AnyOrderedFixed,
     AnyUnorderedVariable,
@@ -71,7 +75,7 @@ pub enum FixedVariant {
     CurrentOrderedVariable,
 }
 
-impl FixedVariant {
+impl FixedValueVariant {
     pub const fn name(self) -> &'static str {
         match self {
             Self::AnyUnorderedFixed => "any::unordered::fixed",
@@ -86,26 +90,26 @@ impl FixedVariant {
     }
 }
 
-pub const FIXED_VARIANTS: [FixedVariant; 8] = [
-    FixedVariant::AnyUnorderedFixed,
-    FixedVariant::AnyOrderedFixed,
-    FixedVariant::AnyUnorderedVariable,
-    FixedVariant::AnyOrderedVariable,
-    FixedVariant::CurrentUnorderedFixed,
-    FixedVariant::CurrentOrderedFixed,
-    FixedVariant::CurrentUnorderedVariable,
-    FixedVariant::CurrentOrderedVariable,
+pub const FIXED_VALUE_VARIANTS: [FixedValueVariant; 8] = [
+    FixedValueVariant::AnyUnorderedFixed,
+    FixedValueVariant::AnyOrderedFixed,
+    FixedValueVariant::AnyUnorderedVariable,
+    FixedValueVariant::AnyOrderedVariable,
+    FixedValueVariant::CurrentUnorderedFixed,
+    FixedValueVariant::CurrentOrderedFixed,
+    FixedValueVariant::CurrentUnorderedVariable,
+    FixedValueVariant::CurrentOrderedVariable,
 ];
 
 #[derive(Debug, Clone, Copy)]
-pub enum VariableVariant {
+pub enum VarValueVariant {
     AnyUnordered,
     AnyOrdered,
     CurrentUnordered,
     CurrentOrdered,
 }
 
-impl VariableVariant {
+impl VarValueVariant {
     pub const fn name(self) -> &'static str {
         match self {
             Self::AnyUnordered => "any::unordered",
@@ -116,26 +120,26 @@ impl VariableVariant {
     }
 }
 
-pub const VARIABLE_VARIANTS: [VariableVariant; 4] = [
-    VariableVariant::AnyUnordered,
-    VariableVariant::AnyOrdered,
-    VariableVariant::CurrentUnordered,
-    VariableVariant::CurrentOrdered,
+pub const VAR_VALUE_VARIANTS: [VarValueVariant; 4] = [
+    VarValueVariant::AnyUnordered,
+    VarValueVariant::AnyOrdered,
+    VarValueVariant::CurrentUnordered,
+    VarValueVariant::CurrentOrdered,
 ];
 
 // -- Config builders --
 
-const PARTITION_FIXED: &str = "bench-fixed";
-const PARTITION_VARIABLE: &str = "bench-variable";
+const PARTITION_FIX: &str = "bench-fixed";
+const PARTITION_VAR: &str = "bench-variable";
 const PARTITION_KEYLESS: &str = "bench-keyless";
 
-pub fn any_fixed_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap> {
+pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap> {
     AnyFixedConfig::<EightCap> {
-        mmr_journal_partition: format!("journal-{PARTITION_FIXED}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_FIXED}"),
+        mmr_journal_partition: format!("journal-{PARTITION_FIX}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_FIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_journal_partition: format!("log-journal-{PARTITION_FIXED}"),
+        log_journal_partition: format!("log-journal-{PARTITION_FIX}"),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         translator: EightCap,
@@ -144,31 +148,31 @@ pub fn any_fixed_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig
     }
 }
 
-pub fn current_fixed_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> CurrentFixedConfig<EightCap> {
+pub fn cur_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> CurrentFixedConfig<EightCap> {
     CurrentFixedConfig::<EightCap> {
-        mmr_journal_partition: format!("journal-{PARTITION_FIXED}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_FIXED}"),
+        mmr_journal_partition: format!("journal-{PARTITION_FIX}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_FIX}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_journal_partition: format!("log-journal-{PARTITION_FIXED}"),
+        log_journal_partition: format!("log-journal-{PARTITION_FIX}"),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
-        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_FIXED}"),
+        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_FIX}"),
         translator: EightCap,
         thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
         page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
-pub fn variable_any_cfg(
+pub fn any_var_digest_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> AnyVariableConfig<EightCap, ((), ())> {
     AnyVariableConfig::<EightCap, ((), ())> {
-        mmr_journal_partition: format!("journal-{PARTITION_VARIABLE}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_VARIABLE}"),
+        mmr_journal_partition: format!("journal-{PARTITION_VAR}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_VAR}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log-journal-{PARTITION_VARIABLE}"),
+        log_partition: format!("log-journal-{PARTITION_VAR}"),
         log_codec_config: ((), ()),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
@@ -179,35 +183,35 @@ pub fn variable_any_cfg(
     }
 }
 
-pub fn variable_current_cfg(
+pub fn cur_var_digest_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> CurrentVariableConfig<EightCap, ((), ())> {
     CurrentVariableConfig::<EightCap, ((), ())> {
-        mmr_journal_partition: format!("journal-{PARTITION_VARIABLE}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_VARIABLE}"),
+        mmr_journal_partition: format!("journal-{PARTITION_VAR}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_VAR}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log-journal-{PARTITION_VARIABLE}"),
+        log_partition: format!("log-journal-{PARTITION_VAR}"),
         log_codec_config: ((), ()),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
-        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VARIABLE}"),
+        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
         page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
-pub fn variable_any_vec_cfg(
+pub fn any_var_vec_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> AnyVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     AnyVariableConfig::<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
-        mmr_journal_partition: format!("journal-{PARTITION_VARIABLE}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_VARIABLE}"),
+        mmr_journal_partition: format!("journal-{PARTITION_VAR}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_VAR}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log-journal-{PARTITION_VARIABLE}"),
+        log_partition: format!("log-journal-{PARTITION_VAR}"),
         log_codec_config: ((), ((0..=10000).into(), ())),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
@@ -218,20 +222,20 @@ pub fn variable_any_vec_cfg(
     }
 }
 
-pub fn variable_current_vec_cfg(
+pub fn cur_var_vec_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> CurrentVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     CurrentVariableConfig::<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
-        mmr_journal_partition: format!("journal-{PARTITION_VARIABLE}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_VARIABLE}"),
+        mmr_journal_partition: format!("journal-{PARTITION_VAR}"),
+        mmr_metadata_partition: format!("metadata-{PARTITION_VAR}"),
         mmr_items_per_blob: ITEMS_PER_BLOB,
         mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log-journal-{PARTITION_VARIABLE}"),
+        log_partition: format!("log-journal-{PARTITION_VAR}"),
         log_codec_config: ((), ((0..=10000).into(), ())),
         log_items_per_blob: ITEMS_PER_BLOB,
         log_write_buffer: WRITE_BUFFER_SIZE,
         log_compression: None,
-        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VARIABLE}"),
+        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
         translator: EightCap,
         thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
         page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -270,110 +274,111 @@ macro_rules! dispatch_arm {
 }
 
 /// Construct a fixed-value database for the given variant, bind it as `$db`, execute `$body`.
-macro_rules! with_fixed_db {
+macro_rules! with_fixed_value_db {
     ($ctx:expr, $variant:expr, |mut $db:ident| $body:expr) => {{
-        use $crate::common::FixedVariant::*;
+        use $crate::common::FixedValueVariant::*;
         match $variant {
             AnyUnorderedFixed => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::UFixedDb,
-                any_fixed_cfg
+                $crate::common::AnyUFixDb,
+                any_fix_cfg
             ),
             AnyOrderedFixed => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::OFixedDb,
-                any_fixed_cfg
+                $crate::common::AnyOFixDb,
+                any_fix_cfg
             ),
             AnyUnorderedVariable => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::UVAnyDb,
-                variable_any_cfg
+                $crate::common::AnyUVarDigestDb,
+                any_var_digest_cfg
             ),
             AnyOrderedVariable => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::OVAnyDb,
-                variable_any_cfg
+                $crate::common::AnyOVarDigestDb,
+                any_var_digest_cfg
             ),
             CurrentUnorderedFixed => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::UCFixedDb,
-                current_fixed_cfg
+                $crate::common::CurUFixDb,
+                cur_fix_cfg
             ),
             CurrentOrderedFixed => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::OCFixedDb,
-                current_fixed_cfg
+                $crate::common::CurOFixDb,
+                cur_fix_cfg
             ),
             CurrentUnorderedVariable => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::UCVFixedDb,
-                variable_current_cfg
+                $crate::common::CurUVarDigestDb,
+                cur_var_digest_cfg
             ),
             CurrentOrderedVariable => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::OCVFixedDb,
-                variable_current_cfg
+                $crate::common::CurOVarDigestDb,
+                cur_var_digest_cfg
             ),
         }
     }};
 }
 
-/// Construct a variable-value database for the given variant, bind it as `$db`, execute `$body`.
-macro_rules! with_variable_db {
+/// Construct a variable-value (Vec<u8>) database for the given variant, bind it as `$db`,
+/// execute `$body`.
+macro_rules! with_var_value_db {
     ($ctx:expr, $variant:expr, |mut $db:ident| $body:expr) => {{
-        use $crate::common::VariableVariant::*;
+        use $crate::common::VarValueVariant::*;
         match $variant {
             AnyUnordered => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::UVarDb,
-                variable_any_vec_cfg
+                $crate::common::AnyUVarVecDb,
+                any_var_vec_cfg
             ),
             AnyOrdered => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::OVarDb,
-                variable_any_vec_cfg
+                $crate::common::AnyOVarVecDb,
+                any_var_vec_cfg
             ),
             CurrentUnordered => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::UCVarDb,
-                variable_current_vec_cfg
+                $crate::common::CurUVarVecDb,
+                cur_var_vec_cfg
             ),
             CurrentOrdered => $crate::common::dispatch_arm!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::OCVarDb,
-                variable_current_vec_cfg
+                $crate::common::CurOVarVecDb,
+                cur_var_vec_cfg
             ),
         }
     }};
 }
 
 pub(crate) use dispatch_arm;
-pub(crate) use with_fixed_db;
-pub(crate) use with_variable_db;
+pub(crate) use with_fixed_value_db;
+pub(crate) use with_var_value_db;
 
 /// Internal helper: construct a db from a pre-built config, bind it, execute body.
 macro_rules! dispatch_arm_with_cfg {
@@ -384,104 +389,104 @@ macro_rules! dispatch_arm_with_cfg {
     }};
 }
 
-/// Like `with_fixed_db!` but takes pre-built configs to avoid rebuilding them each call.
-macro_rules! with_fixed_db_cfg {
+/// Like `with_fixed_value_db!` but takes pre-built configs to avoid rebuilding them each call.
+macro_rules! with_fixed_value_db_cfg {
     ($ctx:expr, $variant:expr, $any_fixed:expr, $current_fixed:expr,
      $any_var:expr, $current_var:expr, |mut $db:ident| $body:expr) => {{
-        use $crate::common::FixedVariant::*;
+        use $crate::common::FixedValueVariant::*;
         match $variant {
             AnyUnorderedFixed => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::UFixedDb,
+                $crate::common::AnyUFixDb,
                 $any_fixed
             ),
             AnyOrderedFixed => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::OFixedDb,
+                $crate::common::AnyOFixDb,
                 $any_fixed
             ),
             AnyUnorderedVariable => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::UVAnyDb,
+                $crate::common::AnyUVarDigestDb,
                 $any_var
             ),
             AnyOrderedVariable => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::OVAnyDb,
+                $crate::common::AnyOVarDigestDb,
                 $any_var
             ),
             CurrentUnorderedFixed => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::UCFixedDb,
+                $crate::common::CurUFixDb,
                 $current_fixed
             ),
             CurrentOrderedFixed => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::OCFixedDb,
+                $crate::common::CurOFixDb,
                 $current_fixed
             ),
             CurrentUnorderedVariable => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::UCVFixedDb,
+                $crate::common::CurUVarDigestDb,
                 $current_var
             ),
             CurrentOrderedVariable => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::OCVFixedDb,
+                $crate::common::CurOVarDigestDb,
                 $current_var
             ),
         }
     }};
 }
 
-/// Like `with_variable_db!` but takes pre-built configs to avoid rebuilding them each call.
-macro_rules! with_variable_db_cfg {
+/// Like `with_var_value_db!` but takes pre-built configs to avoid rebuilding them each call.
+macro_rules! with_var_value_db_cfg {
     ($ctx:expr, $variant:expr, $any_var:expr, $current_var:expr,
      |mut $db:ident| $body:expr) => {{
-        use $crate::common::VariableVariant::*;
+        use $crate::common::VarValueVariant::*;
         match $variant {
             AnyUnordered => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::UVarDb,
+                $crate::common::AnyUVarVecDb,
                 $any_var
             ),
             AnyOrdered => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::OVarDb,
+                $crate::common::AnyOVarVecDb,
                 $any_var
             ),
             CurrentUnordered => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::UCVarDb,
+                $crate::common::CurUVarVecDb,
                 $current_var
             ),
             CurrentOrdered => $crate::common::dispatch_arm_with_cfg!(
                 $ctx,
                 $db,
                 $body,
-                $crate::common::OCVarDb,
+                $crate::common::CurOVarVecDb,
                 $current_var
             ),
         }
@@ -489,8 +494,8 @@ macro_rules! with_variable_db_cfg {
 }
 
 pub(crate) use dispatch_arm_with_cfg;
-pub(crate) use with_fixed_db_cfg;
-pub(crate) use with_variable_db_cfg;
+pub(crate) use with_fixed_value_db_cfg;
+pub(crate) use with_var_value_db_cfg;
 
 // -- Data generation --
 
@@ -547,7 +552,7 @@ pub fn make_fixed_value(rng: &mut StdRng) -> Digest {
 }
 
 /// Generate a variable-size `Vec<u8>` value (1-256 bytes).
-pub fn make_variable_value(rng: &mut StdRng) -> Vec<u8> {
+pub fn make_var_value(rng: &mut StdRng) -> Vec<u8> {
     let len = (rng.next_u32() as usize) % VARIABLE_VALUE_MAX_LEN + 1;
     vec![rng.next_u32() as u8; len]
 }

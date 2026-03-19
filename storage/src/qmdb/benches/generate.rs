@@ -4,8 +4,8 @@
 //! variants (fixed-value, variable-value) and the keyless variant.
 
 use crate::common::{
-    gen_random_kv, keyless_cfg, make_fixed_value, make_variable_value, with_fixed_db,
-    with_variable_db, Digest, KeylessDb, FIXED_VARIANTS, VARIABLE_VARIANTS,
+    gen_random_kv, keyless_cfg, make_fixed_value, make_var_value, with_fixed_value_db,
+    with_var_value_db, Digest, KeylessDb, FIXED_VALUE_VARIANTS, VAR_VALUE_VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -45,11 +45,11 @@ async fn bench_db<C: DbAny<Key = Digest>>(
     elapsed
 }
 
-fn bench_fixed_generate(c: &mut Criterion) {
+fn bench_fixed_value_generate(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
-            for variant in FIXED_VARIANTS {
+            for variant in FIXED_VALUE_VARIANTS {
                 c.bench_function(
                     &format!(
                         "{}/variant={} elements={elements} operations={operations}",
@@ -62,7 +62,7 @@ fn bench_fixed_generate(c: &mut Criterion) {
                             let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
-                                total += with_fixed_db!(ctx, variant, |mut db| {
+                                total += with_fixed_value_db!(ctx, variant, |mut db| {
                                     bench_db(
                                         db,
                                         elements,
@@ -82,11 +82,11 @@ fn bench_fixed_generate(c: &mut Criterion) {
     }
 }
 
-fn bench_variable_generate(c: &mut Criterion) {
+fn bench_var_value_generate(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for elements in [NUM_ELEMENTS, NUM_ELEMENTS * 10] {
         for operations in [NUM_OPERATIONS, NUM_OPERATIONS * 10] {
-            for variant in VARIABLE_VARIANTS {
+            for variant in VAR_VALUE_VARIANTS {
                 c.bench_function(
                     &format!(
                         "{}/variant={} elements={elements} operations={operations}",
@@ -99,13 +99,13 @@ fn bench_variable_generate(c: &mut Criterion) {
                             let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
-                                total += with_variable_db!(ctx, variant, |mut db| {
+                                total += with_var_value_db!(ctx, variant, |mut db| {
                                     bench_db(
                                         db,
                                         elements,
                                         operations,
                                         commit_freq,
-                                        make_variable_value,
+                                        make_var_value,
                                     )
                                     .await
                                 });
@@ -139,7 +139,7 @@ fn bench_keyless_generate(c: &mut Criterion) {
                         let mut rng = StdRng::seed_from_u64(42);
                         let mut batch = db.new_batch();
                         for _ in 0u64..operations {
-                            let v = make_variable_value(&mut rng);
+                            let v = make_var_value(&mut rng);
                             batch = batch.append(v);
                             if rng.next_u32() % KEYLESS_COMMIT_FREQ == 0 {
                                 let finalized = batch.merkleize(None).finalize();
@@ -164,5 +164,5 @@ fn bench_keyless_generate(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = bench_fixed_generate, bench_variable_generate, bench_keyless_generate
+    targets = bench_fixed_value_generate, bench_var_value_generate, bench_keyless_generate
 }
