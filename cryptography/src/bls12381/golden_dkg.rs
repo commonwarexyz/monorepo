@@ -11,7 +11,7 @@ use crate::{
         },
     },
     ed25519,
-    transcript::Summary,
+    transcript::{Summary, Transcript},
     Signer as _, Verifier as _,
 };
 use bytes::Bytes;
@@ -49,7 +49,17 @@ pub struct Output<P> {
     revealed: Set<P>,
 }
 
-impl<P: Ord> Output<P> {
+impl<P: Ord + Clone> Output<P> {
+    pub fn new(summary: Summary, public: Sharing<MinPk>, dealers: Set<P>, players: Set<P>) -> Self {
+        Self {
+            summary,
+            public,
+            dealers,
+            players: players.clone(),
+            revealed: players,
+        }
+    }
+
     /// Return the quorum, i.e. the number of players needed to reconstruct the key.
     pub fn quorum<M: Faults>(&self) -> u32 {
         self.players.quorum::<M>()
@@ -73,6 +83,7 @@ impl<P: Ord> Output<P> {
     }
 }
 
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct Info {
     summary: Summary,
@@ -85,6 +96,35 @@ pub struct Info {
 
 #[allow(dead_code)]
 impl Info {
+    pub fn new(
+        round: u64,
+        previous: Option<Output<PublicKey>>,
+        dealers: Set<PublicKey>,
+        players: Set<PublicKey>,
+    ) -> Self {
+        let mode = Mode::default();
+        let summary = {
+            let mut transcript = Transcript::new(NAMESPACE);
+            transcript
+                .commit(round.encode())
+                .commit(dealers.encode())
+                .commit(players.encode());
+            transcript.summarize()
+        };
+        Self {
+            summary,
+            round,
+            previous,
+            mode,
+            dealers,
+            players,
+        }
+    }
+
+    pub fn summary(&self) -> &Summary {
+        &self.summary
+    }
+
     fn player_index(&self, player: &PublicKey) -> Result<Participant, Error> {
         self.players.index(player).ok_or(Error::UnknownPlayer)
     }
@@ -538,8 +578,6 @@ impl Dealing {
 #[cfg(any(feature = "arbitrary", test))]
 mod test_plan {
     use super::*;
-    use crate::transcript::Transcript;
-    use commonware_codec::Encode;
     use commonware_math::{algebra::Random, poly::Poly};
     use commonware_parallel::Sequential;
     use commonware_utils::N3f1;
@@ -716,7 +754,6 @@ mod test_plan {
             dealer_keys: &[PrivateKey],
             player_keys: &[PrivateKey],
         ) -> Info {
-            let mode = Mode::default();
             let dealer_set: Set<PublicKey> = dealer_keys
                 .iter()
                 .map(|k| k.public())
@@ -727,22 +764,7 @@ mod test_plan {
                 .map(|k| k.public())
                 .try_collect()
                 .unwrap();
-            let summary = {
-                let mut transcript = Transcript::new(NAMESPACE);
-                transcript
-                    .commit(round.encode())
-                    .commit(dealer_set.encode())
-                    .commit(player_set.encode());
-                transcript.summarize()
-            };
-            Info {
-                summary,
-                round,
-                previous,
-                mode,
-                dealers: dealer_set,
-                players: player_set,
-            }
+            Info::new(round, previous, dealer_set, player_set)
         }
 
         /// Run a fresh (honest) DKG round and return the output and per-player shares.
@@ -785,13 +807,7 @@ mod test_plan {
                 .map(|k| k.public())
                 .try_collect()
                 .unwrap();
-            let output = Output {
-                summary: info.summary,
-                public: sharing,
-                dealers,
-                players: players.clone(),
-                revealed: players,
-            };
+            let output = Output::new(info.summary().clone(), sharing, dealers, players);
             Ok((output, shares))
         }
 
@@ -1066,8 +1082,6 @@ pub use test_plan::Plan as FuzzPlan;
 #[cfg(test)]
 mod tests {
     use super::{test_plan::Plan, *};
-    use crate::bls12381::primitives::sharing::Mode;
-    use commonware_codec::Encode;
     use commonware_invariants::minifuzz;
     use commonware_math::algebra::Random;
     use commonware_utils::N3f1;
@@ -1225,14 +1239,7 @@ mod tests {
             .try_collect()
             .unwrap();
 
-        let info = Info {
-            summary: crate::transcript::Summary::random(&mut rng),
-            round: 0,
-            previous: None,
-            mode: Mode::default(),
-            dealers: dealer_set,
-            players: player_set,
-        };
+        let info = Info::new(0, None, dealer_set, player_set);
 
         let outsider = PrivateKey::random(&mut rng);
         let result = deal::<N3f1>(&mut rng, &info, &outsider, None);
@@ -1255,14 +1262,7 @@ mod tests {
             .try_collect()
             .unwrap();
 
-        let info = Info {
-            summary: crate::transcript::Summary::random(&mut rng),
-            round: 0,
-            previous: None,
-            mode: Mode::default(),
-            dealers: dealer_set,
-            players: player_set,
-        };
+        let info = Info::new(0, None, dealer_set, player_set);
 
         // Deal honestly, then try to play as an outsider.
         let mut logs = std::collections::BTreeMap::new();
@@ -1303,23 +1303,7 @@ mod tests {
             .try_collect()
             .unwrap();
 
-        let summary = {
-            let mut transcript = crate::transcript::Transcript::new(NAMESPACE);
-            transcript
-                .commit(1u64.encode())
-                .commit(dealer_set.encode())
-                .commit(player_set.encode());
-            transcript.summarize()
-        };
-
-        let info = Info {
-            summary,
-            round: 1,
-            previous: Some(output),
-            mode: Mode::default(),
-            dealers: dealer_set,
-            players: player_set,
-        };
+        let info = Info::new(1, Some(output), dealer_set, player_set);
 
         // Call deal with share: None in reshare mode -> MissingDealerShare
         let result = deal::<N3f1>(&mut rng, &info, &dealer_keys[0], None);
