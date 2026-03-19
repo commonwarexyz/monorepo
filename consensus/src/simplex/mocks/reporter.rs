@@ -22,6 +22,7 @@ use commonware_utils::{
     },
     ordered::{Quorum, Set},
     sync::Mutex,
+    Participant,
     N3f1,
 };
 use rand_core::CryptoRngCore;
@@ -46,8 +47,11 @@ pub struct Config<S: Scheme, L: ElectorConfig<S>> {
 /// Controls which debug state the mock reporter retains.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
+    /// Keep derived leader and certification tracking.
     pub retain_metadata: bool,
+    /// Keep per-view vote participation maps.
     pub retain_votes: bool,
+    /// Keep stored equivocation and fault evidence.
     pub retain_faults: bool,
 }
 
@@ -147,6 +151,64 @@ where
             self.participants.key(leader).cloned().unwrap()
         });
     }
+
+    fn record_notarize(&self, notarize: &Notarize<S, D>) {
+        if !self.options.retain_votes {
+            return;
+        }
+
+        let public_key = self.participants.key(notarize.signer()).unwrap().clone();
+        self.notarizes
+            .lock()
+            .entry(notarize.view())
+            .or_default()
+            .entry(notarize.proposal.payload)
+            .or_default()
+            .insert(public_key);
+    }
+
+    fn record_nullify(&self, nullify: &Nullify<S>) {
+        if !self.options.retain_votes {
+            return;
+        }
+
+        let public_key = self.participants.key(nullify.signer()).unwrap().clone();
+        self.nullifies
+            .lock()
+            .entry(nullify.view())
+            .or_default()
+            .insert(public_key);
+    }
+
+    fn record_finalize(&self, finalize: &Finalize<S, D>) {
+        if !self.options.retain_votes {
+            return;
+        }
+
+        let public_key = self.participants.key(finalize.signer()).unwrap().clone();
+        self.finalizes
+            .lock()
+            .entry(finalize.view())
+            .or_default()
+            .entry(finalize.proposal.payload)
+            .or_default()
+            .insert(public_key);
+    }
+
+    fn record_fault(&self, signer: Participant, view: View, activity: Activity<S, D>) {
+        if !self.options.retain_faults {
+            return;
+        }
+
+        let public_key = self.participants.key(signer).unwrap().clone();
+        self.faults
+            .lock()
+            .entry(public_key)
+            .or_default()
+            .entry(view)
+            .or_default()
+            .insert(activity);
+    }
 }
 
 impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
@@ -172,16 +234,7 @@ where
                 }
                 let encoded = notarize.encode();
                 Notarize::<S, D>::decode(encoded).unwrap();
-                if self.options.retain_votes {
-                    let public_key = self.participants.key(notarize.signer()).unwrap().clone();
-                    self.notarizes
-                        .lock()
-                        .entry(notarize.view())
-                        .or_default()
-                        .entry(notarize.proposal.payload)
-                        .or_default()
-                        .insert(public_key);
-                }
+                self.record_notarize(notarize);
             }
             Activity::Notarization(notarization) | Activity::Certification(notarization) => {
                 // Verify notarization
@@ -212,14 +265,7 @@ where
                 }
                 let encoded = nullify.encode();
                 Nullify::<S>::decode(encoded).unwrap();
-                if self.options.retain_votes {
-                    let public_key = self.participants.key(nullify.signer()).unwrap().clone();
-                    self.nullifies
-                        .lock()
-                        .entry(nullify.view())
-                        .or_default()
-                        .insert(public_key);
-                }
+                self.record_nullify(nullify);
             }
             Activity::Nullification(nullification) => {
                 // Verify nullification
@@ -252,16 +298,7 @@ where
                 }
                 let encoded = finalize.encode();
                 Finalize::<S, D>::decode(encoded).unwrap();
-                if self.options.retain_votes {
-                    let public_key = self.participants.key(finalize.signer()).unwrap().clone();
-                    self.finalizes
-                        .lock()
-                        .entry(finalize.view())
-                        .or_default()
-                        .entry(finalize.proposal.payload)
-                        .or_default()
-                        .insert(public_key);
-                }
+                self.record_finalize(finalize);
             }
             Activity::Finalization(finalization) => {
                 // Verify finalization
@@ -300,16 +337,7 @@ where
                 }
                 let encoded = conflicting.encode();
                 ConflictingNotarize::<S, D>::decode(encoded).unwrap();
-                if self.options.retain_faults {
-                    let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
-                    self.faults
-                        .lock()
-                        .entry(public_key)
-                        .or_default()
-                        .entry(view)
-                        .or_default()
-                        .insert(activity);
-                }
+                self.record_fault(conflicting.signer(), view, activity);
             }
             Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
@@ -320,16 +348,7 @@ where
                 }
                 let encoded = conflicting.encode();
                 ConflictingFinalize::<S, D>::decode(encoded).unwrap();
-                if self.options.retain_faults {
-                    let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
-                    self.faults
-                        .lock()
-                        .entry(public_key)
-                        .or_default()
-                        .entry(view)
-                        .or_default()
-                        .insert(activity);
-                }
+                self.record_fault(conflicting.signer(), view, activity);
             }
             Activity::NullifyFinalize(conflicting) => {
                 let view = conflicting.view();
@@ -340,16 +359,7 @@ where
                 }
                 let encoded = conflicting.encode();
                 NullifyFinalize::<S, D>::decode(encoded).unwrap();
-                if self.options.retain_faults {
-                    let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
-                    self.faults
-                        .lock()
-                        .entry(public_key)
-                        .or_default()
-                        .entry(view)
-                        .or_default()
-                        .insert(activity);
-                }
+                self.record_fault(conflicting.signer(), view, activity);
             }
         }
     }
