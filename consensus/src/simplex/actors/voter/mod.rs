@@ -2035,6 +2035,108 @@ mod tests {
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(secp256r1::fixture);
     }
 
+    /// Regression: a timeout armed for an older view must not nullify the new current view
+    /// after a certificate advances the voter.
+    fn stale_timeout_does_not_nullify_newer_view<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"stale_timeout_does_not_nullify_newer_view".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let (mut mailbox, mut batcher_receiver, _resolver_receiver, _relay, _reporter) =
+                setup_voter(
+                    &mut context,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    RoundRobin::<Sha256>::default(),
+                    Duration::from_secs(10),
+                    Duration::from_secs(10),
+                    Duration::from_mins(60),
+                    mocks::application::Certifier::Always,
+                )
+                .await;
+
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { current, response, .. } => {
+                    assert_eq!(current, View::new(1));
+                    response.send(None).unwrap();
+                }
+                _ => panic!("expected initial update"),
+            }
+
+            let target_view = View::new(1);
+            let (_, nullification) =
+                build_nullification(&schemes, Round::new(Epoch::new(333), target_view), quorum);
+            mailbox
+                .resolved(Certificate::Nullification(nullification))
+                .await;
+
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current, response, ..
+                    } => {
+                        response.send(None).unwrap();
+                        if current == View::new(2) {
+                            break;
+                        }
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            select! {
+                msg = batcher_receiver.recv() => match msg.unwrap() {
+                    batcher::Message::Constructed(Vote::Nullify(nullify)) if nullify.view() == View::new(2) => {
+                        panic!("stale timeout for old view incorrectly nullified current view 2");
+                    }
+                    batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                    _ => {}
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {}
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_stale_timeout_does_not_nullify_newer_view() {
+        stale_timeout_does_not_nullify_newer_view::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        stale_timeout_does_not_nullify_newer_view::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        stale_timeout_does_not_nullify_newer_view::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        stale_timeout_does_not_nullify_newer_view::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        stale_timeout_does_not_nullify_newer_view::<_, _>(ed25519::fixture);
+        stale_timeout_does_not_nullify_newer_view::<_, _>(secp256r1::fixture);
+    }
+
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,

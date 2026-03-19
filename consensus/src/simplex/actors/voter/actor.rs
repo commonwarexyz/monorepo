@@ -883,6 +883,10 @@ impl<
                     .expect("unable to sync journal");
             },
             _ = self.context.sleep_until(timeout) => {
+                if self.state.current_view() != start {
+                    continue;
+                }
+
                 // Process the timeout
                 self.timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
                     .await;
