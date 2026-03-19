@@ -32,6 +32,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
 
     gossip_bit_vec_frequency: Duration,
+    send_batch_size: usize,
     info_verifier: InfoVerifier<C>,
 
     max_bit_vec: u64,
@@ -58,6 +59,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 context,
                 mailbox: control_sender,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
+                send_batch_size: cfg.send_batch_size.get(),
                 info_verifier: cfg.info_verifier,
                 max_bit_vec: cfg.max_peer_set_size,
                 max_peers: cfg.peer_gossip_max_count,
@@ -97,21 +99,66 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         metric: metrics::Message,
         payload: types::Payload<C>,
     ) -> Result<(), Error> {
-        let msg = payload.encode_with_pool(pool);
-        sender.send(msg).await.map_err(Error::SendFailed)?;
-        sent_messages.get_or_create(&metric).inc();
+        Self::flush_send_batch(
+            sender,
+            sent_messages,
+            vec![(metric, payload.encode_with_pool(pool).into())],
+        )
+        .await
+    }
+
+    async fn flush_send_batch<Si: Sink>(
+        sender: &mut Sender<Si>,
+        sent_messages: &Family<metrics::Message, Counter>,
+        batch: Vec<(metrics::Message, IoBufs)>,
+    ) -> Result<(), Error> {
+        let mut metrics_to_inc = Vec::with_capacity(batch.len());
+        let mut payloads = Vec::with_capacity(batch.len());
+        for (metric, payload) in batch {
+            metrics_to_inc.push(metric);
+            payloads.push(payload);
+        }
+
+        sender
+            .send_batch(payloads)
+            .await
+            .map_err(Error::SendFailed)?;
+        for metric in metrics_to_inc {
+            sent_messages.get_or_create(&metric).inc();
+        }
         Ok(())
     }
 
-    /// Sends pre-encoded bytes directly to the stream.
-    async fn send_encoded<Si: Sink>(
-        sender: &mut Sender<Si>,
-        sent_messages: &Family<metrics::Message, Counter>,
-        metric: metrics::Message,
-        payload: IoBufs,
+    fn extend_send_batch<V>(
+        peer: &C,
+        batch_size: usize,
+        batch: &mut Vec<(metrics::Message, IoBufs)>,
+        high: &mut mpsc::Receiver<EncodedData>,
+        low: &mut mpsc::Receiver<EncodedData>,
+        rate_limits: &HashMap<u64, V>,
     ) -> Result<(), Error> {
-        sender.send(payload).await.map_err(Error::SendFailed)?;
-        sent_messages.get_or_create(&metric).inc();
+        while batch.len() < batch_size {
+            if let Ok(msg) = high.try_recv() {
+                let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
+                batch.push((
+                    metrics::Message::new_data(peer, encoded.channel),
+                    encoded.payload,
+                ));
+                continue;
+            }
+
+            if let Ok(msg) = low.try_recv() {
+                let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
+                batch.push((
+                    metrics::Message::new_data(peer, encoded.channel),
+                    encoded.payload,
+                ));
+                continue;
+            }
+
+            break;
+        }
+
         Ok(())
     }
 
@@ -180,34 +227,63 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 ),
                                 Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                             };
-                            Self::send_payload(
-                                &pool,
+                            let mut batch = vec![(metric, payload.encode_with_pool(&pool).into())];
+                            Self::extend_send_batch(
+                                &peer,
+                                self.send_batch_size,
+                                &mut batch,
+                                &mut self.high,
+                                &mut self.low,
+                                &rate_limits,
+                            )?;
+                            Self::flush_send_batch(
                                 &mut conn_sender,
                                 &self.sent_messages,
-                                metric,
-                                payload,
+                                batch,
                             )
                             .await?;
                         },
                         msg_high = self.high.recv() => {
-                            // Data is already pre-encoded, just forward to stream
                             let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
-                            Self::send_encoded(
-                                &mut conn_sender,
-                                &self.sent_messages,
+                            let mut batch = Vec::with_capacity(self.send_batch_size);
+                            batch.push((
                                 metrics::Message::new_data(&peer, encoded.channel),
                                 encoded.payload,
+                            ));
+                            Self::extend_send_batch(
+                                &peer,
+                                self.send_batch_size,
+                                &mut batch,
+                                &mut self.high,
+                                &mut self.low,
+                                &rate_limits,
+                            )?;
+                            Self::flush_send_batch(
+                                &mut conn_sender,
+                                &self.sent_messages,
+                                batch,
                             )
                             .await?;
                         },
                         msg_low = self.low.recv() => {
-                            // Data is already pre-encoded, just forward to stream
                             let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                            Self::send_encoded(
-                                &mut conn_sender,
-                                &self.sent_messages,
+                            let mut batch = Vec::with_capacity(self.send_batch_size);
+                            batch.push((
                                 metrics::Message::new_data(&peer, encoded.channel),
                                 encoded.payload,
+                            ));
+                            Self::extend_send_batch(
+                                &peer,
+                                self.send_batch_size,
+                                &mut batch,
+                                &mut self.high,
+                                &mut self.low,
+                                &rate_limits,
+                            )?;
+                            Self::flush_send_batch(
+                                &mut conn_sender,
+                                &self.sent_messages,
+                                batch,
                             )
                             .await?;
                         },
@@ -406,6 +482,7 @@ mod tests {
     use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        num::NonZeroUsize,
         time::Duration,
     };
 
@@ -416,6 +493,7 @@ mod tests {
     fn default_peer_config(me: PublicKey) -> Config<PublicKey> {
         Config {
             mailbox_size: 10,
+            send_batch_size: NonZeroUsize::new(8).unwrap(),
             gossip_bit_vec_frequency: Duration::from_secs(30),
             max_peer_set_size: 128,
             peer_gossip_max_count: 10,
@@ -813,6 +891,7 @@ mod tests {
             // Create peer config with our metric
             let config = Config {
                 mailbox_size: 10,
+                send_batch_size: NonZeroUsize::new(8).unwrap(),
                 gossip_bit_vec_frequency: Duration::from_secs(30),
                 max_peer_set_size: 128,
                 peer_gossip_max_count: 10,

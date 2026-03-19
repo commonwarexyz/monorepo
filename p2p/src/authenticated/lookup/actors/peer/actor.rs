@@ -26,6 +26,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
 
     ping_frequency: Duration,
+    send_batch_size: usize,
 
     control: mpsc::Receiver<Message>,
     high: mpsc::Receiver<EncodedData>,
@@ -47,6 +48,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
             Self {
                 context,
                 ping_frequency: cfg.ping_frequency,
+                send_batch_size: cfg.send_batch_size.get(),
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
@@ -85,21 +87,66 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         metric: metrics::Message,
         payload: types::Message,
     ) -> Result<(), Error> {
-        let msg = payload.encode_with_pool(pool);
-        sender.send(msg).await.map_err(Error::SendFailed)?;
-        sent_messages.get_or_create(&metric).inc();
+        Self::flush_send_batch(
+            sender,
+            sent_messages,
+            vec![(metric, payload.encode_with_pool(pool).into())],
+        )
+        .await
+    }
+
+    async fn flush_send_batch<Si: Sink>(
+        sender: &mut Sender<Si>,
+        sent_messages: &Family<metrics::Message, Counter>,
+        batch: Vec<(metrics::Message, IoBufs)>,
+    ) -> Result<(), Error> {
+        let mut metrics_to_inc = Vec::with_capacity(batch.len());
+        let mut payloads = Vec::with_capacity(batch.len());
+        for (metric, payload) in batch {
+            metrics_to_inc.push(metric);
+            payloads.push(payload);
+        }
+
+        sender
+            .send_batch(payloads)
+            .await
+            .map_err(Error::SendFailed)?;
+        for metric in metrics_to_inc {
+            sent_messages.get_or_create(&metric).inc();
+        }
         Ok(())
     }
 
-    /// Sends pre-encoded bytes directly to the stream.
-    async fn send_encoded<Si: Sink>(
-        sender: &mut Sender<Si>,
-        sent_messages: &Family<metrics::Message, Counter>,
-        metric: metrics::Message,
-        payload: IoBufs,
+    fn extend_send_batch<V>(
+        peer: &C,
+        batch_size: usize,
+        batch: &mut Vec<(metrics::Message, IoBufs)>,
+        high: &mut mpsc::Receiver<EncodedData>,
+        low: &mut mpsc::Receiver<EncodedData>,
+        rate_limits: &HashMap<u64, V>,
     ) -> Result<(), Error> {
-        sender.send(payload).await.map_err(Error::SendFailed)?;
-        sent_messages.get_or_create(&metric).inc();
+        while batch.len() < batch_size {
+            if let Ok(msg) = high.try_recv() {
+                let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
+                batch.push((
+                    metrics::Message::new_data(peer, encoded.channel),
+                    encoded.payload,
+                ));
+                continue;
+            }
+
+            if let Ok(msg) = low.try_recv() {
+                let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
+                batch.push((
+                    metrics::Message::new_data(peer, encoded.channel),
+                    encoded.payload,
+                ));
+                continue;
+            }
+
+            break;
+        }
+
         Ok(())
     }
 
@@ -159,24 +206,46 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                         },
                         msg_high = self.high.recv() => {
-                            // Data is already pre-encoded, just forward to stream
                             let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
-                            Self::send_encoded(
-                                &mut conn_sender,
-                                &self.sent_messages,
+                            let mut batch = Vec::with_capacity(self.send_batch_size);
+                            batch.push((
                                 metrics::Message::new_data(&peer, encoded.channel),
                                 encoded.payload,
+                            ));
+                            Self::extend_send_batch(
+                                &peer,
+                                self.send_batch_size,
+                                &mut batch,
+                                &mut self.high,
+                                &mut self.low,
+                                &rate_limits,
+                            )?;
+                            Self::flush_send_batch(
+                                &mut conn_sender,
+                                &self.sent_messages,
+                                batch,
                             )
                             .await?;
                         },
                         msg_low = self.low.recv() => {
-                            // Data is already pre-encoded, just forward to stream
                             let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                            Self::send_encoded(
-                                &mut conn_sender,
-                                &self.sent_messages,
+                            let mut batch = Vec::with_capacity(self.send_batch_size);
+                            batch.push((
                                 metrics::Message::new_data(&peer, encoded.channel),
                                 encoded.payload,
+                            ));
+                            Self::extend_send_batch(
+                                &peer,
+                                self.send_batch_size,
+                                &mut batch,
+                                &mut self.high,
+                                &mut self.low,
+                                &rate_limits,
+                            )?;
+                            Self::flush_send_batch(
+                                &mut conn_sender,
+                                &self.sent_messages,
+                                batch,
                             )
                             .await?;
                         },
@@ -291,17 +360,46 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
-    use commonware_runtime::{deterministic, mocks, BufferPooler, Runner, Spawner};
+    use commonware_runtime::{
+        deterministic, mocks, BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner,
+    };
     use commonware_stream::encrypted::Config as StreamConfig;
+    use commonware_utils::channel::fallible::AsyncFallibleExt;
     use prometheus_client::metrics::{counter::Counter, family::Family};
-    use std::time::Duration;
+    use std::{
+        num::{NonZeroU32, NonZeroUsize},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
 
     const STREAM_NAMESPACE: &[u8] = b"test_lookup_peer_actor";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
+    struct CountingSink<S> {
+        inner: S,
+        sends: Arc<AtomicUsize>,
+    }
+
+    impl<S> CountingSink<S> {
+        fn new(inner: S, sends: Arc<AtomicUsize>) -> Self {
+            Self { inner, sends }
+        }
+    }
+
+    impl<S: commonware_runtime::Sink> commonware_runtime::Sink for CountingSink<S> {
+        async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), RuntimeError> {
+            self.sends.fetch_add(1, Ordering::Relaxed);
+            self.inner.send(bufs).await
+        }
+    }
+
     fn default_peer_config() -> Config {
         Config {
             mailbox_size: 10,
+            send_batch_size: NonZeroUsize::new(8).unwrap(),
             ping_frequency: Duration::from_secs(30),
             sent_messages: Family::<metrics::Message, Counter>::default(),
             received_messages: Family::<metrics::Message, Counter>::default(),
@@ -430,6 +528,114 @@ mod tests {
             assert_eq!(
                 invalid_count, 1,
                 "invalid channel metric should be incremented"
+            );
+        });
+    }
+
+    #[test]
+    fn test_batches_outbound_sends_into_single_runtime_write() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let local_key = PrivateKey::from_seed(1);
+            let remote_key = PrivateKey::from_seed(2);
+            let local_pk = local_key.public_key();
+            let remote_pk = remote_key.public_key();
+
+            let (local_sink, remote_stream) = mocks::Channel::init();
+            let (remote_sink, local_stream) = mocks::Channel::init();
+            let sends = Arc::new(AtomicUsize::new(0));
+
+            let local_config = stream_config(local_key.clone());
+            let remote_config = stream_config(remote_key.clone());
+
+            let local_pk_clone = local_pk.clone();
+            let listener_handle = context.clone().spawn({
+                let sends = sends.clone();
+                move |ctx| async move {
+                    commonware_stream::encrypted::listen(
+                        ctx,
+                        |_| async { true },
+                        remote_config,
+                        remote_stream,
+                        CountingSink::new(remote_sink, sends),
+                    )
+                    .await
+                    .map(|(pk, sender, receiver)| {
+                        assert_eq!(pk, local_pk_clone);
+                        (sender, receiver)
+                    })
+                }
+            });
+
+            let (_local_sender, mut local_receiver) = commonware_stream::encrypted::dial(
+                context.clone(),
+                local_config,
+                remote_pk.clone(),
+                local_stream,
+                local_sink,
+            )
+            .await
+            .expect("dial failed");
+
+            let (remote_sender, remote_receiver) = listener_handle
+                .await
+                .expect("listen failed")
+                .expect("listen result failed");
+            sends.store(0, Ordering::Relaxed);
+
+            let cfg = Config {
+                send_batch_size: NonZeroUsize::new(2).unwrap(),
+                ..default_peer_config()
+            };
+            let (peer_actor, peer_mailbox, relay) =
+                Actor::<deterministic::Context, PublicKey>::new(context.clone(), cfg);
+
+            let mut channels = create_channels(&context);
+            let quota = commonware_runtime::Quota::per_second(NonZeroU32::new(100).unwrap());
+            let (_sender, _receiver) = channels.register(0, quota, 10, context.clone());
+
+            let pool = context.network_buffer_pool().clone();
+            relay
+                .send(
+                    types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
+                    false,
+                )
+                .expect("first send failed");
+            relay
+                .send(
+                    types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
+                    false,
+                )
+                .expect("second send failed");
+
+            let peer_handle = context.clone().spawn(move |_context| async move {
+                peer_actor
+                    .run(local_pk.clone(), (remote_sender, remote_receiver), channels)
+                    .await
+            });
+
+            let first = local_receiver.recv().await.expect("recv failed");
+            let first_len = first.len();
+            let first = types::Message::decode_cfg(first, &first_len).expect("decode failed");
+            let types::Message::Data(first) = first else {
+                panic!("expected data message");
+            };
+            assert_eq!(first.message, IoBuf::from(b"first"));
+
+            let second = local_receiver.recv().await.expect("recv failed");
+            let second_len = second.len();
+            let second = types::Message::decode_cfg(second, &second_len).expect("decode failed");
+            let types::Message::Data(second) = second else {
+                panic!("expected data message");
+            };
+            assert_eq!(second.message, IoBuf::from(b"second"));
+            assert_eq!(sends.load(Ordering::Relaxed), 1);
+
+            peer_mailbox.0.send_lossy(Message::Kill).await;
+            let result = peer_handle.await.expect("peer task failed");
+            assert!(
+                matches!(result, Err(Error::PeerKilled(_))),
+                "unexpected result: {result:?}"
             );
         });
     }

@@ -55,8 +55,10 @@
 //! - **Future Secrecy**: If a peer's static private key is compromised, future sessions will be exposed.
 //! - **0-RTT**: The protocol does not support 0-RTT handshakes (resumed sessions).
 
-use crate::utils::codec::{recv_frame, send_frame, send_frame_with};
-use commonware_codec::{DecodeExt, Encode as _, EncodeSize, Error as CodecError, Write};
+use crate::utils::codec::{recv_frame, send_frame};
+use commonware_codec::{
+    varint::UInt, DecodeExt, Encode as _, EncodeSize, Error as CodecError, Write,
+};
 use commonware_cryptography::{
     handshake::{
         self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
@@ -301,42 +303,68 @@ pub struct Sender<O> {
 }
 
 impl<O: Sink> Sender<O> {
+    fn encrypt_frame(
+        &mut self,
+        bufs: impl Into<IoBufs>,
+    ) -> Result<commonware_runtime::IoBuf, Error> {
+        let mut bufs = bufs.into();
+        let ciphertext_len = bufs.len() + TAG_SIZE as usize;
+        let max_ciphertext_size = self.max_message_size.saturating_add(TAG_SIZE) as usize;
+        if ciphertext_len > max_ciphertext_size {
+            return Err(Error::SendTooLarge(ciphertext_len));
+        }
+
+        let prefix = UInt(ciphertext_len as u32);
+        let prefix_len = prefix.encode_size();
+
+        // Allocate buffer from pool for prefix + ciphertext (plaintext + tag).
+        let mut frame = self.pool.alloc(prefix_len + ciphertext_len);
+
+        // Write prefix.
+        prefix.write(&mut frame);
+
+        // Copy plaintext into buffer.
+        frame.put(&mut bufs);
+
+        // Encrypt in-place.
+        let tag = self
+            .cipher
+            .send_in_place(&mut frame.as_mut()[prefix_len..])?;
+
+        // Append tag.
+        frame.put_slice(&tag);
+
+        Ok(frame.freeze())
+    }
+
     /// Encrypts and sends a message to the peer.
     ///
     /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
     /// and sends the ciphertext.
     pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
-        let mut bufs = bufs.into();
-        let ciphertext_len = bufs.len() + TAG_SIZE as usize;
+        let frame = self.encrypt_frame(bufs)?;
+        self.sink.send(frame).await.map_err(Error::SendFailed)
+    }
 
-        send_frame_with(
-            &mut self.sink,
-            ciphertext_len,
-            self.max_message_size.saturating_add(TAG_SIZE),
-            |prefix| {
-                let prefix_len = prefix.encode_size();
+    /// Encrypts and sends multiple messages in a single runtime write.
+    ///
+    /// Each message is framed independently so receivers still observe the
+    /// original message boundaries.
+    pub async fn send_batch<B, I>(&mut self, bufs: I) -> Result<(), Error>
+    where
+        B: Into<IoBufs>,
+        I: IntoIterator<Item = B>,
+    {
+        let mut frames = IoBufs::default();
+        for buf in bufs {
+            frames.append(self.encrypt_frame(buf)?);
+        }
 
-                // Allocate buffer from pool for prefix + ciphertext (plaintext + tag).
-                let mut frame = self.pool.alloc(prefix_len + ciphertext_len);
+        if frames.is_empty() {
+            return Ok(());
+        }
 
-                // Write prefix.
-                prefix.write(&mut frame);
-
-                // Copy plaintext into buffer.
-                frame.put(&mut bufs);
-
-                // Encrypt in-place.
-                let tag = self
-                    .cipher
-                    .send_in_place(&mut frame.as_mut()[prefix_len..])?;
-
-                // Append tag.
-                frame.put_slice(&tag);
-
-                Ok(frame.freeze().into())
-            },
-        )
-        .await
+        self.sink.send(frames).await.map_err(Error::SendFailed)
     }
 }
 
@@ -381,10 +409,34 @@ impl<I: Stream> Receiver<I> {
 mod test {
     use super::*;
     use commonware_cryptography::{ed25519::PrivateKey, Signer};
-    use commonware_runtime::{deterministic, mocks, Runner as _, Spawner as _};
+    use commonware_runtime::{
+        deterministic, mocks, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
+
+    struct CountingSink<S> {
+        inner: S,
+        sends: Arc<AtomicUsize>,
+    }
+
+    impl<S> CountingSink<S> {
+        fn new(inner: S, sends: Arc<AtomicUsize>) -> Self {
+            Self { inner, sends }
+        }
+    }
+
+    impl<S: commonware_runtime::Sink> commonware_runtime::Sink for CountingSink<S> {
+        async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), RuntimeError> {
+            self.sends.fetch_add(1, Ordering::Relaxed);
+            self.inner.send(bufs).await
+        }
+    }
 
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {
@@ -446,6 +498,84 @@ mod test {
                 let ack = dialer_receiver.recv().await?;
                 assert_eq!(ack.coalesce(), *msg);
             }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_send_batch_uses_single_runtime_send() -> Result<(), Error> {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let dialer_crypto = PrivateKey::from_seed(42);
+            let listener_crypto = PrivateKey::from_seed(24);
+
+            let (dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, dialer_stream) = mocks::Channel::init();
+            let sends = Arc::new(AtomicUsize::new(0));
+
+            let dialer_config = Config {
+                signing_key: dialer_crypto.clone(),
+                namespace: NAMESPACE.to_vec(),
+                max_message_size: MAX_MESSAGE_SIZE,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_secs(1),
+            };
+
+            let listener_config = Config {
+                signing_key: listener_crypto.clone(),
+                namespace: NAMESPACE.to_vec(),
+                max_message_size: MAX_MESSAGE_SIZE,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_secs(1),
+            };
+
+            let listener_handle = context.clone().spawn(move |context| async move {
+                listen(
+                    context,
+                    |_| async { true },
+                    listener_config,
+                    listener_stream,
+                    listener_sink,
+                )
+                .await
+            });
+
+            let (mut dialer_sender, _dialer_receiver) = dial(
+                context,
+                dialer_config,
+                listener_crypto.public_key(),
+                dialer_stream,
+                CountingSink::new(dialer_sink, sends.clone()),
+            )
+            .await?;
+
+            let (_listener_peer, _listener_sender, mut listener_receiver) =
+                listener_handle.await.unwrap()?;
+            sends.store(0, Ordering::Relaxed);
+
+            dialer_sender
+                .send_batch(vec![
+                    IoBufs::from(IoBuf::from(b"alpha")),
+                    IoBufs::from(IoBuf::from(b"beta")),
+                    IoBufs::from(IoBuf::from(b"gamma")),
+                ])
+                .await?;
+
+            assert_eq!(sends.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                listener_receiver.recv().await?.coalesce(),
+                IoBuf::from(b"alpha")
+            );
+            assert_eq!(
+                listener_receiver.recv().await?.coalesce(),
+                IoBuf::from(b"beta")
+            );
+            assert_eq!(
+                listener_receiver.recv().await?.coalesce(),
+                IoBuf::from(b"gamma")
+            );
             Ok(())
         })
     }
