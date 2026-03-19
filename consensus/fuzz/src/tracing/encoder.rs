@@ -117,28 +117,46 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     .unwrap();
     writeln!(out).unwrap();
 
-    // Test body
-    writeln!(out, "    run traceTest = {{").unwrap();
-
-    // Init with leader map
-    write!(out, "        initWithLeaderAndCertify(\n            Map(").unwrap();
-    let leader_entries: Vec<String> = leader_map
-        .iter()
-        .map(|(v, id)| format!("{} -> \"{}\"", v, id))
-        .collect();
-    write!(out, "{}", leader_entries.join(", ")).unwrap();
-    writeln!(out, "),").unwrap();
-    writeln!(out, "            CERTIFY_CUSTOM").unwrap();
-    writeln!(out, "        )").unwrap();
-
     // Generate actions with self-vote injection
     let actions = build_actions(&correct_entries, &block_map, cfg);
-    for action in &actions {
-        writeln!(out, "            .then({})", action).unwrap();
+
+    // Split actions into chunks of CHUNK_SIZE, emitting trace_part_NN actions
+    const CHUNK_SIZE: usize = 25;
+    let chunks: Vec<&[String]> = actions.chunks(CHUNK_SIZE).collect();
+
+    let leader_init = {
+        let leader_entries: Vec<String> = leader_map
+            .iter()
+            .map(|(v, id)| format!("{} -> \"{}\"", v, id))
+            .collect();
+        format!(
+            "initWithLeaderAndCertify(\n            Map({}),\n            CERTIFY_CUSTOM\n        )",
+            leader_entries.join(", ")
+        )
+    };
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        writeln!(out, "    action trace_part_{:02} =", i).unwrap();
+        if i == 0 {
+            writeln!(out, "        {}", leader_init).unwrap();
+        } else {
+            writeln!(out, "        trace_part_{:02}", i - 1).unwrap();
+        }
+        for action in *chunk {
+            writeln!(out, "            .then({})", action).unwrap();
+        }
+        writeln!(out).unwrap();
     }
 
+    // Final run references the last part
+    let last_part = if chunks.is_empty() {
+        leader_init
+    } else {
+        format!("trace_part_{:02}", chunks.len() - 1)
+    };
+    writeln!(out, "    run traceTest =").unwrap();
+    writeln!(out, "        {}", last_part).unwrap();
     writeln!(out, "            .expect(all_invariants)").unwrap();
-    writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
     // Helper actions

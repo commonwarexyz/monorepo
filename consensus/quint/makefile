@@ -1,7 +1,7 @@
 TRACES_ROOT ?= ../fuzz/artifacts/traces
 TEST_DIR ?= traces
 
-FUZZ_RUNS ?= 50
+FUZZ_RUNS ?= 100
 
 .PHONY: test typecheck repl check clean get_traces build_traces test_traces clean_traces tv
 

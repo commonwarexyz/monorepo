@@ -40,10 +40,8 @@ for qnt_file in "$TEST_DIR"/trace_*.qnt; do
     echo "Testing: $qnt_file"
     heap_mb=24576
     quint_bin="$(command -v quint)"
-    cmd=(node --stack-size=65500 "$quint_bin" test --main=tests "$qnt_file")
-
-    NODE_OPTIONS="--max-old-space-size=$heap_mb" "${cmd[@]}"
-    if "${cmd[@]}"; then
+    cmd=("$quint_bin" test --main=tests --backend=rust --verbosity=4 --match=traceTest "$qnt_file")
+    if NODE_OPTIONS="--max-old-space-size=$heap_mb" "${cmd[@]}"; then
         PASS=$((PASS + 1))
     else
         FAIL=$((FAIL + 1))
