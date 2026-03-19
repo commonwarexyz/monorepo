@@ -100,14 +100,8 @@ fn bench_var_value_generate(c: &mut Criterion) {
                             let mut total = Duration::ZERO;
                             for _ in 0..iters {
                                 total += with_var_value_db!(ctx, variant, |mut db| {
-                                    bench_db(
-                                        db,
-                                        elements,
-                                        operations,
-                                        commit_freq,
-                                        make_var_value,
-                                    )
-                                    .await
+                                    bench_db(db, elements, operations, commit_freq, make_var_value)
+                                        .await
                                 });
                             }
                             total
