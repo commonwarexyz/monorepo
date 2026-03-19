@@ -15,8 +15,8 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    iobuf::EncodeExt, BufferPool, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter,
-    Sink, Spawner, Stream,
+    iobuf::EncodeExt, BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink,
+    Spawner, Stream,
 };
 use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{
@@ -92,52 +92,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
     }
 
     /// Creates a message from a payload, then sends and increments metrics.
-    async fn send_payload<Si: Sink>(
-        pool: &BufferPool,
-        sender: &mut Sender<Si>,
-        sent_messages: &Family<metrics::Message, Counter>,
-        metric: metrics::Message,
-        payload: types::Payload<C>,
-    ) -> Result<(), Error> {
-        Self::flush_send_batch(
-            sender,
-            sent_messages,
-            vec![(metric, payload.encode_with_pool(pool).into())],
-        )
-        .await
-    }
-
-    async fn flush_send_batch<Si: Sink>(
-        sender: &mut Sender<Si>,
-        sent_messages: &Family<metrics::Message, Counter>,
-        batch: Vec<(metrics::Message, IoBufs)>,
-    ) -> Result<(), Error> {
-        // Keep metrics aligned with the logical messages even when they share a
-        // single runtime write.
-        let mut metrics_to_inc = Vec::with_capacity(batch.len());
-        let mut payloads = Vec::with_capacity(batch.len());
-        for (metric, payload) in batch {
-            metrics_to_inc.push(metric);
-            payloads.push(payload);
-        }
-
-        sender
-            .send_batch(payloads)
-            .await
-            .map_err(Error::SendFailed)?;
-        for metric in metrics_to_inc {
-            sent_messages.get_or_create(&metric).inc();
-        }
-        Ok(())
-    }
-
     fn extend_send_batch<V>(
         peer: &C,
         batch_size: usize,
-        batch: &mut Vec<(metrics::Message, IoBufs)>,
+        batch: &mut Vec<IoBufs>,
         high: &mut mpsc::Receiver<EncodedData>,
         low: &mut mpsc::Receiver<EncodedData>,
         rate_limits: &HashMap<u64, V>,
+        sent_messages: &Family<metrics::Message, Counter>,
     ) -> Result<(), Error> {
         while batch.len() < batch_size {
             // Preserve the existing priority behavior when draining more work
@@ -145,19 +107,19 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
             // data before pulling from the low-priority queue.
             if let Ok(msg) = high.try_recv() {
                 let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
-                batch.push((
-                    metrics::Message::new_data(peer, encoded.channel),
-                    encoded.payload,
-                ));
+                sent_messages
+                    .get_or_create(&metrics::Message::new_data(peer, encoded.channel))
+                    .inc();
+                batch.push(encoded.payload);
                 continue;
             }
 
             if let Ok(msg) = low.try_recv() {
                 let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
-                batch.push((
-                    metrics::Message::new_data(peer, encoded.channel),
-                    encoded.payload,
-                ));
+                sent_messages
+                    .get_or_create(&metrics::Message::new_data(peer, encoded.channel))
+                    .inc();
+                batch.push(encoded.payload);
                 continue;
             }
 
@@ -187,14 +149,15 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         let pool = self.context.network_buffer_pool().clone();
 
         // Send greeting first before any other messages
-        Self::send_payload(
-            &pool,
-            &mut conn_sender,
-            &self.sent_messages,
-            metrics::Message::new_greeting(&peer),
-            types::Payload::Greeting(greeting),
-        )
-        .await?;
+        self.sent_messages
+            .get_or_create(&metrics::Message::new_greeting(&peer))
+            .inc();
+        conn_sender
+            .send_batch(vec![IoBufs::from(
+                types::Payload::Greeting(greeting).encode_with_pool(&pool),
+            )])
+            .await
+            .map_err(Error::SendFailed)?;
 
         // Send/Receive messages from the peer
         let mut send_handler: Handle<Result<(), Error>> =
@@ -232,7 +195,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 ),
                                 Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                             };
-                            let mut batch = vec![(metric, payload.encode_with_pool(&pool).into())];
+                            self.sent_messages.get_or_create(&metric).inc();
+                            let mut batch = vec![payload.encode_with_pool(&pool).into()];
                             // Treat control traffic the same way as data: batch
                             // only with messages that are already queued so we
                             // do not delay gossip behind a timer.
@@ -243,21 +207,17 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 &mut self.high,
                                 &mut self.low,
                                 &rate_limits,
-                            )?;
-                            Self::flush_send_batch(
-                                &mut conn_sender,
                                 &self.sent_messages,
-                                batch,
-                            )
-                            .await?;
+                            )?;
+                            conn_sender.send_batch(batch).await.map_err(Error::SendFailed)?;
                         },
                         msg_high = self.high.recv() => {
                             let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
                             let mut batch = Vec::with_capacity(self.send_batch_size);
-                            batch.push((
-                                metrics::Message::new_data(&peer, encoded.channel),
-                                encoded.payload,
-                            ));
+                            self.sent_messages
+                                .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
+                                .inc();
+                            batch.push(encoded.payload);
                             // Only drain messages that are already queued. This
                             // reduces runtime write calls without introducing a
                             // per-connection timer or extra buffering latency.
@@ -268,21 +228,17 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 &mut self.high,
                                 &mut self.low,
                                 &rate_limits,
-                            )?;
-                            Self::flush_send_batch(
-                                &mut conn_sender,
                                 &self.sent_messages,
-                                batch,
-                            )
-                            .await?;
+                            )?;
+                            conn_sender.send_batch(batch).await.map_err(Error::SendFailed)?;
                         },
                         msg_low = self.low.recv() => {
                             let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
                             let mut batch = Vec::with_capacity(self.send_batch_size);
-                            batch.push((
-                                metrics::Message::new_data(&peer, encoded.channel),
-                                encoded.payload,
-                            ));
+                            self.sent_messages
+                                .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
+                                .inc();
+                            batch.push(encoded.payload);
                             // Only drain messages that are already queued. This
                             // reduces runtime write calls without introducing a
                             // per-connection timer or extra buffering latency.
@@ -293,13 +249,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 &mut self.high,
                                 &mut self.low,
                                 &rate_limits,
-                            )?;
-                            Self::flush_send_batch(
-                                &mut conn_sender,
                                 &self.sent_messages,
-                                batch,
-                            )
-                            .await?;
+                            )?;
+                            conn_sender.send_batch(batch).await.map_err(Error::SendFailed)?;
                         },
                     }
 
