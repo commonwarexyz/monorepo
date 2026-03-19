@@ -209,37 +209,18 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             )?;
                             conn_sender.send_batch(batch).await.map_err(Error::SendFailed)?;
                         },
-                        msg_high = self.high.recv() => {
-                            let encoded = Self::validate_outbound_msg(msg_high, &rate_limits)?;
+                        msg = async {
+                            select! {
+                                msg = self.high.recv() => msg,
+                                msg = self.low.recv() => msg,
+                            }
+                        } => {
+                            let encoded = Self::validate_outbound_msg(msg, &rate_limits)?;
                             self.sent_messages
                                 .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
                                 .inc();
                             let mut batch = Vec::with_capacity(self.send_batch_size);
                             batch.push(encoded.payload);
-                            // Only drain messages that are already queued. This
-                            // reduces runtime write calls without introducing a
-                            // per-connection timer or extra buffering latency.
-                            Self::extend_send_batch(
-                                &peer,
-                                self.send_batch_size,
-                                &mut batch,
-                                &mut self.high,
-                                &mut self.low,
-                                &rate_limits,
-                                &self.sent_messages,
-                            )?;
-                            conn_sender.send_batch(batch).await.map_err(Error::SendFailed)?;
-                        },
-                        msg_low = self.low.recv() => {
-                            let encoded = Self::validate_outbound_msg(msg_low, &rate_limits)?;
-                            self.sent_messages
-                                .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
-                                .inc();
-                            let mut batch = Vec::with_capacity(self.send_batch_size);
-                            batch.push(encoded.payload);
-                            // Only drain messages that are already queued. This
-                            // reduces runtime write calls without introducing a
-                            // per-connection timer or extra buffering latency.
                             Self::extend_send_batch(
                                 &peer,
                                 self.send_batch_size,
