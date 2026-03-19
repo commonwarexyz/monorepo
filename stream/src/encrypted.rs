@@ -56,7 +56,9 @@
 //! - **0-RTT**: The protocol does not support 0-RTT handshakes (resumed sessions).
 
 use crate::utils::codec::{build_frame, recv_frame, send_frame};
-use commonware_codec::{DecodeExt, Encode as _, EncodeSize, Error as CodecError, Write};
+use commonware_codec::{
+    varint::UInt, DecodeExt, Encode as _, EncodeSize, Error as CodecError, Write,
+};
 use commonware_cryptography::{
     handshake::{
         self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
@@ -353,24 +355,50 @@ impl<O: Sink> Sender<O> {
     /// Encrypts and sends multiple messages in a single runtime write.
     ///
     /// Each message is framed independently so receivers still observe the
-    /// original message boundaries.
+    /// original message boundaries. All frames are written into a single
+    /// pre-allocated buffer to avoid per-message runtime buffers.
     pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error>
     where
         B: Into<IoBufs>,
         I: IntoIterator<Item = B>,
     {
-        let mut frames = IoBufs::default();
+        let max_ciphertext_size = self.max_message_size.saturating_add(TAG_SIZE) as usize;
+
+        let bufs = bufs.into_iter();
+        let (lower, _) = bufs.size_hint();
+        let mut messages = Vec::with_capacity(lower);
+        let mut total = 0usize;
         for buf in bufs {
-            // Each item is framed independently so the receiver can continue to
-            // consume one message at a time even when the runtime write is batched.
-            frames.append(self.encrypt_frame(buf)?);
+            let msg = buf.into();
+            let ciphertext_len = msg.len() + TAG_SIZE as usize;
+            if ciphertext_len > max_ciphertext_size {
+                return Err(Error::SendTooLarge(ciphertext_len));
+            }
+            let prefix_len = UInt(ciphertext_len as u32).encode_size();
+            total = total.saturating_add(prefix_len + ciphertext_len);
+            messages.push(msg);
         }
 
-        if frames.is_empty() {
+        if messages.is_empty() {
             return Ok(());
         }
 
-        self.sink.send(frames).await.map_err(Error::SendFailed)
+        let mut frame = self.pool.alloc(total);
+        for mut msg in messages {
+            let ciphertext_len = msg.len() + TAG_SIZE as usize;
+            let prefix = UInt(ciphertext_len as u32);
+            prefix.write(&mut frame);
+
+            let plaintext_offset = frame.len();
+            frame.put(&mut msg);
+
+            let tag = self
+                .cipher
+                .send_in_place(&mut frame.as_mut()[plaintext_offset..])?;
+            frame.put_slice(&tag);
+        }
+
+        self.sink.send(frame.freeze()).await.map_err(Error::SendFailed)
     }
 }
 
@@ -422,6 +450,7 @@ mod test {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+    use std::time::Duration;
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
