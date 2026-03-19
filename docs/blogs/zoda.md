@@ -220,7 +220,7 @@ data that commits to that value.
 One drawback is that now we can only know that the data exists _after_
 we've reconstructed it.
 If we're tying this process to consensus,
-it would be nice to avoid coming to agreement on a piece of data which will
+it would be nice to avoid coming to an agreement on a piece of data which will
 turn out to never have existed, producing an empty block.
 There's also, more plainly, a cost to re-encoding, which it might be nice to avoid.
 
@@ -235,7 +235,7 @@ piece of data, as soon as we receive our shard.
 "Hadamard" variant from section D of the paper).
 
 This involves sending, along with the shard, some additional data, of use not in
-recovering it, but in providing assurance that our shard results from an encoding of it.
+recovering it, but in assuring that our shard results from an encoding of it.
 
 ### Some Details and Intuition
 
@@ -251,7 +251,7 @@ of randomness in what follows, according to the _Fiat-Shamir_ paradigm.
 
 Whereas in the plain coding scheme, we received one particular row of $Y$,
 here we receive $S$ rows, sampled at random.
-(We may modify $m$ and $n$ to accomodate this fact).
+(We may modify $m$ and $n$ to accommodate this fact).
 We also receive proofs of inclusion for each row.
 
 In order to convince us that our rows $Y_S$ came from $G X$,
