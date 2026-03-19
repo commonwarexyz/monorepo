@@ -355,7 +355,7 @@ impl<O: Sink> Sender<O> {
     ///
     /// Each message is framed independently so receivers still observe the
     /// original message boundaries.
-    pub async fn send_batch<B, I>(&mut self, bufs: I) -> Result<(), Error>
+    pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error>
     where
         B: Into<IoBufs>,
         I: IntoIterator<Item = B>,
@@ -510,7 +510,7 @@ mod test {
     }
 
     #[test]
-    fn test_send_batch_uses_single_runtime_send() -> Result<(), Error> {
+    fn test_send_many_uses_single_runtime_send() -> Result<(), Error> {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let dialer_crypto = PrivateKey::from_seed(42);
@@ -563,7 +563,7 @@ mod test {
             sends.store(0, Ordering::Relaxed);
 
             dialer_sender
-                .send_batch(vec![
+                .send_many(vec![
                     IoBufs::from(IoBuf::from(b"alpha")),
                     IoBufs::from(IoBuf::from(b"beta")),
                     IoBufs::from(IoBuf::from(b"gamma")),

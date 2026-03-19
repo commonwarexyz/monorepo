@@ -186,7 +186,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 &rate_limits,
                                 &self.sent_messages,
                             )?;
-                            conn_sender.send_batch(batch).await.map_err(Error::SendFailed)?;
+                            conn_sender.send_many(batch).await.map_err(Error::SendFailed)?;
                         },
                     }
 
