@@ -100,16 +100,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         low: &mut mpsc::Receiver<EncodedData>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &Family<metrics::Message, Counter>,
-    ) {
+    ) -> Result<(), Error> {
         while batch.len() < batch_size {
             // Preserve the existing priority behavior when draining more work
             // into the same send: always exhaust already-ready high-priority
             // data before pulling from the low-priority queue.
-            if let Ok(encoded) = high.try_recv() {
-                assert!(
-                    rate_limits.contains_key(&encoded.channel),
-                    "outbound message on invalid channel"
-                );
+            if let Ok(msg) = high.try_recv() {
+                let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
                 sent_messages
                     .get_or_create(&metrics::Message::new_data(peer, encoded.channel))
                     .inc();
@@ -117,11 +114,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 continue;
             }
 
-            if let Ok(encoded) = low.try_recv() {
-                assert!(
-                    rate_limits.contains_key(&encoded.channel),
-                    "outbound message on invalid channel"
-                );
+            if let Ok(msg) = low.try_recv() {
+                let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
                 sent_messages
                     .get_or_create(&metrics::Message::new_data(peer, encoded.channel))
                     .inc();
@@ -131,6 +125,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
 
             break;
         }
+
+        Ok(())
     }
 
     pub async fn run<O: Sink, I: Stream>(
@@ -210,7 +206,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 &mut self.low,
                                 &rate_limits,
                                 &self.sent_messages,
-                            );
+                            )?;
                             conn_sender.send_batch(batch).await.map_err(Error::SendFailed)?;
                         },
                         msg_high = self.high.recv() => {
@@ -231,7 +227,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 &mut self.low,
                                 &rate_limits,
                                 &self.sent_messages,
-                            );
+                            )?;
                             conn_sender.send_batch(batch).await.map_err(Error::SendFailed)?;
                         },
                         msg_low = self.low.recv() => {
@@ -252,7 +248,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 &mut self.low,
                                 &rate_limits,
                                 &self.sent_messages,
-                            );
+                            )?;
                             conn_sender.send_batch(batch).await.map_err(Error::SendFailed)?;
                         },
                     }
