@@ -43,12 +43,42 @@ pub struct Config<S: Scheme, L: ElectorConfig<S>> {
     pub elector: L,
 }
 
+/// Controls which debug state the mock reporter retains.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    pub retain_metadata: bool,
+    pub retain_votes: bool,
+    pub retain_faults: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            retain_metadata: true,
+            retain_votes: true,
+            retain_faults: true,
+        }
+    }
+}
+
+impl Options {
+    /// Retain only the certificate state needed by fuzz invariants.
+    pub const fn minimal() -> Self {
+        Self {
+            retain_metadata: false,
+            retain_votes: false,
+            retain_faults: false,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest> {
     context: E,
     pub participants: Set<S::PublicKey>,
     scheme: S,
     elector: L::Elector,
+    options: Options,
 
     pub leaders: Arc<Mutex<HashMap<View, S::PublicKey>>>,
     pub certified: Arc<Mutex<HashSet<View>>>,
@@ -73,6 +103,10 @@ where
     D: Digest + Eq + Hash + Clone,
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
+        Self::new_with_options(context, cfg, Options::default())
+    }
+
+    pub fn new_with_options(context: E, cfg: Config<S, L>, options: Options) -> Self {
         // Build elector with participants
         let elector = cfg.elector.build(&cfg.participants);
 
@@ -81,6 +115,7 @@ where
             participants: cfg.participants,
             scheme: cfg.scheme,
             elector,
+            options,
             leaders: Arc::new(Mutex::new(HashMap::new())),
             certified: Arc::new(Mutex::new(HashSet::new())),
             notarizes: Arc::new(Mutex::new(HashMap::new())),
@@ -97,6 +132,10 @@ where
     }
 
     fn certified(&self, round: Round, certificate: &S::Certificate) {
+        if !self.options.retain_metadata {
+            return;
+        }
+
         // Record that this view has a certificate
         self.certified.lock().insert(round.view());
 
@@ -133,14 +172,16 @@ where
                 }
                 let encoded = notarize.encode();
                 Notarize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants.key(notarize.signer()).unwrap().clone();
-                self.notarizes
-                    .lock()
-                    .entry(notarize.view())
-                    .or_default()
-                    .entry(notarize.proposal.payload)
-                    .or_default()
-                    .insert(public_key);
+                if self.options.retain_votes {
+                    let public_key = self.participants.key(notarize.signer()).unwrap().clone();
+                    self.notarizes
+                        .lock()
+                        .entry(notarize.view())
+                        .or_default()
+                        .entry(notarize.proposal.payload)
+                        .or_default()
+                        .insert(public_key);
+                }
             }
             Activity::Notarization(notarization) | Activity::Certification(notarization) => {
                 // Verify notarization
@@ -171,12 +212,14 @@ where
                 }
                 let encoded = nullify.encode();
                 Nullify::<S>::decode(encoded).unwrap();
-                let public_key = self.participants.key(nullify.signer()).unwrap().clone();
-                self.nullifies
-                    .lock()
-                    .entry(nullify.view())
-                    .or_default()
-                    .insert(public_key);
+                if self.options.retain_votes {
+                    let public_key = self.participants.key(nullify.signer()).unwrap().clone();
+                    self.nullifies
+                        .lock()
+                        .entry(nullify.view())
+                        .or_default()
+                        .insert(public_key);
+                }
             }
             Activity::Nullification(nullification) => {
                 // Verify nullification
@@ -209,14 +252,16 @@ where
                 }
                 let encoded = finalize.encode();
                 Finalize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants.key(finalize.signer()).unwrap().clone();
-                self.finalizes
-                    .lock()
-                    .entry(finalize.view())
-                    .or_default()
-                    .entry(finalize.proposal.payload)
-                    .or_default()
-                    .insert(public_key);
+                if self.options.retain_votes {
+                    let public_key = self.participants.key(finalize.signer()).unwrap().clone();
+                    self.finalizes
+                        .lock()
+                        .entry(finalize.view())
+                        .or_default()
+                        .entry(finalize.proposal.payload)
+                        .or_default()
+                        .insert(public_key);
+                }
             }
             Activity::Finalization(finalization) => {
                 // Verify finalization
@@ -255,14 +300,16 @@ where
                 }
                 let encoded = conflicting.encode();
                 ConflictingNotarize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
-                self.faults
-                    .lock()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .insert(activity);
+                if self.options.retain_faults {
+                    let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
+                    self.faults
+                        .lock()
+                        .entry(public_key)
+                        .or_default()
+                        .entry(view)
+                        .or_default()
+                        .insert(activity);
+                }
             }
             Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
@@ -273,14 +320,16 @@ where
                 }
                 let encoded = conflicting.encode();
                 ConflictingFinalize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
-                self.faults
-                    .lock()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .insert(activity);
+                if self.options.retain_faults {
+                    let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
+                    self.faults
+                        .lock()
+                        .entry(public_key)
+                        .or_default()
+                        .entry(view)
+                        .or_default()
+                        .insert(activity);
+                }
             }
             Activity::NullifyFinalize(conflicting) => {
                 let view = conflicting.view();
@@ -291,14 +340,16 @@ where
                 }
                 let encoded = conflicting.encode();
                 NullifyFinalize::<S, D>::decode(encoded).unwrap();
-                let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
-                self.faults
-                    .lock()
-                    .entry(public_key)
-                    .or_default()
-                    .entry(view)
-                    .or_default()
-                    .insert(activity);
+                if self.options.retain_faults {
+                    let public_key = self.participants.key(conflicting.signer()).unwrap().clone();
+                    self.faults
+                        .lock()
+                        .entry(public_key)
+                        .or_default()
+                        .entry(view)
+                        .or_default()
+                        .insert(activity);
+                }
             }
         }
     }
