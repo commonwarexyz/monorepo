@@ -1,19 +1,10 @@
 //! MMR-specific proof construction and verification.
-//!
-//! Provides functions for building and verifying inclusion proofs against MMR root digests.
-//! Also provides lower-level functions for building verifiers against new or extended proof types.
-//! These lower-level functions are kept outside of the `Proof` structure and not re-exported by the
-//! parent module.
 
-#[cfg(any(feature = "std", test))]
-use crate::merkle::proof as merkle_proof;
 use crate::merkle::{
     hasher::Hasher,
     mmr::{iterator::nodes_to_pin, Error, Family, Location, Position},
     proof::{Blueprint, Proof},
 };
-#[cfg(any(feature = "std", test))]
-use alloc::collections::btree_set::BTreeSet;
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 use commonware_cryptography::Digest;
 
@@ -139,22 +130,13 @@ impl<D: Digest> Proof<Family, D> {
     }
 }
 
-/// Returns the positions of the minimal set of nodes whose digests are required to prove the
-/// inclusion of the elements at the specified `locations`.
-#[cfg(any(feature = "std", test))]
-pub(crate) fn nodes_required_for_multi_proof(
-    leaves: Location,
-    locations: &[Location],
-) -> Result<BTreeSet<Position>, Error> {
-    merkle_proof::nodes_required_for_multi_proof(leaves, locations)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::merkle::{
         self as merkle,
         mmr::{iterator::PeakIterator, mem::Mmr, StandardHasher as Standard},
+        proof::nodes_required_for_multi_proof,
         Family as _, LocationRangeExt as _,
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};

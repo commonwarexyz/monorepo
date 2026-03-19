@@ -2,26 +2,12 @@
 //!
 //! Provides functions for building and verifying inclusion proofs against MMB root digests.
 
-use crate::merkle::{
-    mmb::{Error, Location, Position},
-    proof as merkle_proof,
-};
-use alloc::collections::BTreeSet;
-
-/// Returns the positions of the minimal set of nodes whose digests are required to prove the
-/// inclusion of the elements at the specified `locations`.
-#[allow(dead_code)]
-pub(crate) fn nodes_required_for_multi_proof(
-    leaves: Location,
-    locations: &[Location],
-) -> Result<BTreeSet<Position>, Error> {
-    merkle_proof::nodes_required_for_multi_proof(leaves, locations)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::merkle::{hasher::Standard, mmb::mem::Mmb, proof::Blueprint};
+    use crate::{
+        merkle::{hasher::Standard, mmb::mem::Mmb, proof::Blueprint},
+        mmb::Location,
+    };
     use commonware_cryptography::Sha256;
 
     type D = <Sha256 as commonware_cryptography::Hasher>::Digest;

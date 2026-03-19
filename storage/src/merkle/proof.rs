@@ -556,6 +556,7 @@ where
 /// Returns the positions of the minimal set of nodes whose digests are required to prove the
 /// inclusion of the elements at the specified `locations`. This is the generic implementation
 /// shared by all Merkle families.
+#[cfg(any(feature = "std", test))]
 pub(crate) fn nodes_required_for_multi_proof<F: Family>(
     leaves: Location<F>,
     locations: &[Location<F>],

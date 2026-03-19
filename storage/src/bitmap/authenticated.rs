@@ -11,14 +11,13 @@
 //! over elements whose activity state is reflected by the bitmap.
 
 use crate::{
-    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher},
+    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher, storage::Storage},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         self,
         batch::UnmerkleizedBatch,
         iterator::nodes_to_pin,
         mem::{Config, Mmr},
-        storage::Storage,
         verification, Error, Location, Position, Proof,
     },
 };
@@ -627,7 +626,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage
+impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage<mmr::Family>
     for MerkleizedBitMap<E, D, N>
 {
     type Digest = D;

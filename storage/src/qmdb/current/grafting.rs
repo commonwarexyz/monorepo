@@ -42,11 +42,8 @@
 //! change.
 
 use crate::{
-    merkle::hasher::Hasher as HasherTrait,
-    mmr::{
-        self, iterator::pos_to_height, storage::Storage as StorageTrait, Error, Location, Position,
-        Readable, StandardHasher,
-    },
+    merkle::{hasher::Hasher as HasherTrait, storage::Storage as StorageTrait},
+    mmr::{self, iterator::pos_to_height, Error, Location, Position, Readable, StandardHasher},
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::bitmap::BitMap;
@@ -280,7 +277,7 @@ pub(super) struct Storage<
     'a,
     D: Digest,
     G: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
-    S: StorageTrait<Digest = D>,
+    S: StorageTrait<mmr::Family, Digest = D>,
 > {
     grafted_mmr: &'a G,
     grafting_height: u32,
@@ -292,7 +289,7 @@ impl<
         'a,
         D: Digest,
         G: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
-        S: StorageTrait<Digest = D>,
+        S: StorageTrait<mmr::Family, Digest = D>,
     > Storage<'a, D, G, S>
 {
     /// Creates a new [Storage] instance.
@@ -309,8 +306,8 @@ impl<
 impl<
         D: Digest,
         G: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
-        S: StorageTrait<Digest = D>,
-    > StorageTrait for Storage<'_, D, G, S>
+        S: StorageTrait<mmr::Family, Digest = D>,
+    > StorageTrait<mmr::Family> for Storage<'_, D, G, S>
 {
     type Digest = D;
 

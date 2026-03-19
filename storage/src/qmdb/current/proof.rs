@@ -6,8 +6,8 @@
 
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
-    merkle::hasher::Hasher as _,
-    mmr::{storage::Storage, verification, Location, Proof},
+    merkle::{hasher::Hasher as _, storage::Storage},
+    mmr::{self, verification, Location, Proof},
     qmdb::{current::grafting, Error},
 };
 use commonware_codec::Codec;
@@ -34,7 +34,11 @@ pub struct RangeProof<D: Digest> {
 
 impl<D: Digest> RangeProof<D> {
     /// Create a new range proof for the provided `range` of operations.
-    pub async fn new<H: CHasher<Digest = D>, S: Storage<Digest = D>, const N: usize>(
+    pub async fn new<
+        H: CHasher<Digest = D>,
+        S: Storage<mmr::Family, Digest = D>,
+        const N: usize,
+    >(
         hasher: &mut H,
         status: &BitMap<N>,
         storage: &S,
@@ -73,7 +77,7 @@ impl<D: Digest> RangeProof<D> {
     pub async fn new_with_ops<
         H: CHasher<Digest = D>,
         C: Contiguous,
-        S: Storage<Digest = D>,
+        S: Storage<mmr::Family, Digest = D>,
         const N: usize,
     >(
         hasher: &mut H,
@@ -241,7 +245,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     /// # Errors
     ///
     /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
-    pub async fn new<H: CHasher<Digest = D>, S: Storage<Digest = D>>(
+    pub async fn new<H: CHasher<Digest = D>, S: Storage<mmr::Family, Digest = D>>(
         hasher: &mut H,
         status: &BitMap<N>,
         storage: &S,

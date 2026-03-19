@@ -17,6 +17,8 @@ pub(super) mod path;
 mod position;
 mod proof;
 mod read;
+#[cfg(feature = "std")]
+pub mod storage;
 
 use alloc::vec::Vec;
 use core::fmt::Debug;

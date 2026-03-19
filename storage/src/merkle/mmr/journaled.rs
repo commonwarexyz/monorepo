@@ -12,13 +12,12 @@ use crate::{
         },
         Error as JError,
     },
-    merkle::{batch::ChainInfo, hasher::Hasher},
+    merkle::{batch::ChainInfo, hasher::Hasher, storage::Storage},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         batch::{self, UnmerkleizedBatch},
         iterator::{nodes_to_pin, PeakIterator},
         mem::{Config as MemConfig, Mmr as MemMmr},
-        storage::Storage,
         verification, Error, Family, Location, Position, Proof, Readable,
     },
 };
@@ -965,7 +964,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> ChainInfo<Family> for Mmr<E, D> {
     fn collect_overwrites(&self, _into: &mut BTreeMap<Position, D>) {}
 }
 
-impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage for Mmr<E, D> {
+impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<Family> for Mmr<E, D> {
     type Digest = D;
 
     async fn size(&self) -> Position {

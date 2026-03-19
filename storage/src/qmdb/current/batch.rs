@@ -9,8 +9,8 @@ use crate::{
         authenticated::{self, BatchChain},
         contiguous::{Contiguous, Mutable},
     },
-    merkle::batch::ChainInfo,
-    mmr::{self, storage::Storage as MmrStorage, Location, Position, Readable, StandardHasher},
+    merkle::{batch::ChainInfo, storage::Storage as MmrStorage},
+    mmr::{self, Location, Position, Readable, StandardHasher},
     qmdb::{
         any::{
             self,
@@ -245,7 +245,7 @@ struct BatchStorageAdapter<
     'a,
     D: Digest,
     R: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
-    S: MmrStorage<Digest = D>,
+    S: MmrStorage<mmr::Family, Digest = D>,
 > {
     batch: &'a R,
     base: &'a S,
@@ -256,7 +256,7 @@ impl<
         'a,
         D: Digest,
         R: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
-        S: MmrStorage<Digest = D>,
+        S: MmrStorage<mmr::Family, Digest = D>,
     > BatchStorageAdapter<'a, D, R, S>
 {
     const fn new(batch: &'a R, base: &'a S) -> Self {
@@ -271,8 +271,8 @@ impl<
 impl<
         D: Digest,
         R: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
-        S: MmrStorage<Digest = D>,
-    > MmrStorage for BatchStorageAdapter<'_, D, R, S>
+        S: MmrStorage<mmr::Family, Digest = D>,
+    > MmrStorage<mmr::Family> for BatchStorageAdapter<'_, D, R, S>
 {
     type Digest = D;
 

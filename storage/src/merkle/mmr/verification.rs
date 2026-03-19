@@ -13,10 +13,9 @@
 
 use crate::merkle::{
     hasher::Hasher,
-    mmr::{
-        iterator::PeakIterator, proof, storage::Storage, Error, Family, Location, Position, Proof,
-    },
-    proof::Blueprint,
+    mmr::{iterator::PeakIterator, Error, Family, Location, Position, Proof},
+    proof::{self as merkle_proof, Blueprint},
+    storage::Storage,
 };
 use commonware_cryptography::Digest;
 use core::ops::Range;
@@ -135,7 +134,8 @@ impl<D: Digest> ProofStore<D> {
         }
 
         let leaves = Location::try_from(self.size)?;
-        let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(leaves, locations)?;
+        let node_positions: BTreeSet<_> =
+            merkle_proof::nodes_required_for_multi_proof(leaves, locations)?;
 
         let peak_map: HashMap<Position, D> = peaks.iter().copied().collect();
 
@@ -162,7 +162,11 @@ impl<D: Digest> ProofStore<D> {
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn range_proof<D: Digest, H: Hasher<Family, Digest = D>, S: Storage<Digest = D>>(
+pub async fn range_proof<
+    D: Digest,
+    H: Hasher<Family, Digest = D>,
+    S: Storage<Family, Digest = D>,
+>(
     hasher: &H,
     mmr: &S,
     range: Range<Location>,
@@ -183,7 +187,7 @@ pub async fn range_proof<D: Digest, H: Hasher<Family, Digest = D>, S: Storage<Di
 pub async fn historical_range_proof<
     D: Digest,
     H: Hasher<Family, Digest = D>,
-    S: Storage<Digest = D>,
+    S: Storage<Family, Digest = D>,
 >(
     hasher: &H,
     mmr: &S,
@@ -227,7 +231,7 @@ pub async fn historical_range_proof<
 /// Returns [Error::RangeOutOfBounds] if any location in `locations` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty
-pub async fn multi_proof<D: Digest, S: Storage<Digest = D>>(
+pub async fn multi_proof<D: Digest, S: Storage<Family, Digest = D>>(
     mmr: &S,
     locations: &[Location],
 ) -> Result<Proof<D>, Error> {
@@ -239,7 +243,8 @@ pub async fn multi_proof<D: Digest, S: Storage<Digest = D>>(
     // Collect all required node positions
     let size = mmr.size().await;
     let leaves = Location::try_from(size)?;
-    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(leaves, locations)?;
+    let node_positions: BTreeSet<_> =
+        merkle_proof::nodes_required_for_multi_proof(leaves, locations)?;
 
     // Fetch all required digests in parallel and collect with positions
     let node_futures: Vec<_> = node_positions
