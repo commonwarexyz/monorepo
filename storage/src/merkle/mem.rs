@@ -5,8 +5,8 @@
 //! `mmr::mem::Mmr` and `mmb::mem::Mmb` via type aliases.
 
 use crate::merkle::{
-    batch::BatchChainInfo, hasher::Hasher, proof as merkle_proof, Error, Family, Location,
-    Position, Proof, Readable,
+    batch::ChainInfo, hasher::Hasher, proof as merkle_proof, Error, Family, Location, Position,
+    Proof, Readable,
 };
 use alloc::{
     collections::{BTreeMap, VecDeque},
@@ -401,7 +401,7 @@ impl<F: Family, D: Digest> Readable for Mem<F, D> {
     }
 }
 
-impl<F: Family, D: Digest> BatchChainInfo<F> for Mem<F, D> {
+impl<F: Family, D: Digest> ChainInfo<F> for Mem<F, D> {
     type Digest = D;
 
     fn base_size(&self) -> Position<F> {

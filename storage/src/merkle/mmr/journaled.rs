@@ -12,7 +12,7 @@ use crate::{
         },
         Error as JError,
     },
-    merkle::{batch::BatchChainInfo, hasher::Hasher},
+    merkle::{batch::ChainInfo, hasher::Hasher},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         batch::{self, UnmerkleizedBatch},
@@ -955,7 +955,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> BatchChainInfo<Family> for Mmr<E, D> {
+impl<E: RStorage + Clock + Metrics, D: Digest> ChainInfo<Family> for Mmr<E, D> {
     type Digest = D;
 
     fn base_size(&self) -> Position {

@@ -9,7 +9,7 @@ use crate::{
         authenticated::{self, BatchChain},
         contiguous::{Contiguous, Mutable},
     },
-    merkle::batch::BatchChainInfo,
+    merkle::batch::ChainInfo,
     mmr::{self, storage::Storage as MmrStorage, Location, Position, Readable, StandardHasher},
     qmdb::{
         any::{
@@ -299,10 +299,10 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+        + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
 {
     /// The inner any-layer batch that handles mutations, journal, and floor raise.
@@ -336,10 +336,10 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+        + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
 {
     /// The inner any-layer merkleized batch.
@@ -391,10 +391,10 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+        + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
 {
     pub(super) const fn new(
@@ -437,10 +437,10 @@ where
     H: Hasher,
     Operation<update::Unordered<K, V>>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<update::Unordered<K, V>>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+        + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
 {
     /// Read through: mutations -> base diff -> committed DB.
@@ -487,10 +487,10 @@ where
     H: Hasher,
     Operation<update::Ordered<K, V>>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<update::Ordered<K, V>>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+        + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
 {
     /// Read through: mutations -> base diff -> committed DB.
@@ -625,10 +625,10 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+        + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
 {
     let old_grafted_leaves = *grafted_parent.leaves() as usize;
@@ -724,10 +724,10 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+        + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
 {
     /// Return the speculative root.
@@ -785,10 +785,10 @@ where
     H: Hasher,
     Operation<update::Unordered<K, V>>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<update::Unordered<K, V>>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+        + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
 {
     /// Read through: diff -> committed DB.
@@ -809,10 +809,10 @@ where
     H: Hasher,
     Operation<update::Ordered<K, V>>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<update::Ordered<K, V>>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+        + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
 {
     /// Read through: diff -> committed DB.
@@ -831,10 +831,10 @@ where
     H: Hasher,
     Operation<U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<U>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+        + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
 {
     /// Consume this batch, producing an owned [`Changeset`].
@@ -879,7 +879,7 @@ mod trait_impls {
     use super::*;
     use crate::{
         journal::contiguous::Mutable,
-        merkle::batch::BatchChainInfo,
+        merkle::batch::ChainInfo,
         mmr::journaled::Mmr,
         qmdb::any::traits::{
             BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
@@ -902,10 +902,10 @@ mod trait_impls {
         H: Hasher,
         Operation<update::Unordered<K, V>>: Codec,
         P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + BatchChainInfo<mmr::Family, Digest = H::Digest>
+            + ChainInfo<mmr::Family, Digest = H::Digest>
             + BatchChain<Operation<update::Unordered<K, V>>>,
         G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+            + ChainInfo<mmr::Family, Digest = H::Digest>,
         B: BitmapRead<N>,
     {
         type K = K;
@@ -937,10 +937,10 @@ mod trait_impls {
         H: Hasher,
         Operation<update::Ordered<K, V>>: Codec,
         P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + BatchChainInfo<mmr::Family, Digest = H::Digest>
+            + ChainInfo<mmr::Family, Digest = H::Digest>
             + BatchChain<Operation<update::Ordered<K, V>>>,
         G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+            + ChainInfo<mmr::Family, Digest = H::Digest>,
         B: BitmapRead<N>,
     {
         type K = K;
@@ -970,10 +970,10 @@ mod trait_impls {
         H: Hasher,
         Operation<U>: Codec,
         P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + BatchChainInfo<mmr::Family, Digest = H::Digest>
+            + ChainInfo<mmr::Family, Digest = H::Digest>
             + BatchChain<Operation<U>>,
         G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + BatchChainInfo<mmr::Family, Digest = H::Digest>,
+            + ChainInfo<mmr::Family, Digest = H::Digest>,
         B: BitmapRead<N>,
     {
         type Digest = H::Digest;

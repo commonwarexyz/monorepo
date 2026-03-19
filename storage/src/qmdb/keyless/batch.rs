@@ -3,7 +3,7 @@
 use super::Keyless;
 use crate::{
     journal::authenticated::{self, BatchChain},
-    merkle::batch::BatchChainInfo,
+    merkle::batch::ChainInfo,
     mmr::{self, Location, Readable},
     qmdb::{any::VariableValue, keyless::operation::Operation, Error},
 };
@@ -19,7 +19,7 @@ where
     V: VariableValue,
     H: Hasher,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<V>>,
 {
     /// The committed DB this batch is built on top of.
@@ -50,7 +50,7 @@ where
     V: VariableValue,
     H: Hasher,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<V>>,
 {
     /// The committed DB this batch is built on top of.
@@ -87,7 +87,7 @@ where
     V: VariableValue,
     H: Hasher,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<V>>,
 {
     /// The location that the next appended value will be placed at.
@@ -169,7 +169,7 @@ where
     V: VariableValue,
     H: Hasher,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + BatchChainInfo<mmr::Family, Digest = H::Digest>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<V>>,
 {
     /// Return the speculative root.

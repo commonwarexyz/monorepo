@@ -545,7 +545,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> MerkleizedBa
 // ---------------------------------------------------------------------------
 
 /// Information needed to flatten a chain of batches into a single [`Changeset`].
-pub trait BatchChainInfo<F: Family>: Send + Sync {
+pub trait ChainInfo<F: Family>: Send + Sync {
     /// The digest type used by this structure.
     type Digest: Digest;
 
@@ -563,9 +563,9 @@ impl<
         'a,
         F: Family,
         D: Digest,
-        P: Readable<Family = F, Digest = D> + BatchChainInfo<F, Digest = D>,
+        P: Readable<Family = F, Digest = D> + ChainInfo<F, Digest = D>,
         S: State<D>,
-    > BatchChainInfo<F> for Batch<'a, F, D, P, S>
+    > ChainInfo<F> for Batch<'a, F, D, P, S>
 {
     type Digest = D;
 
@@ -600,12 +600,8 @@ pub struct Changeset<F: Family, D: Digest> {
     pub(crate) base_size: Position<F>,
 }
 
-impl<
-        'a,
-        F: Family,
-        D: Digest,
-        P: Readable<Family = F, Digest = D> + BatchChainInfo<F, Digest = D>,
-    > MerkleizedBatch<'a, F, D, P>
+impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D> + ChainInfo<F, Digest = D>>
+    MerkleizedBatch<'a, F, D, P>
 {
     /// Flatten this batch chain into a single [`Changeset`] relative to the
     /// ultimate base structure.
