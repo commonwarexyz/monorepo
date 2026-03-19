@@ -543,8 +543,7 @@ mod test_plan {
     use commonware_math::{algebra::Random, poly::Poly};
     use commonware_parallel::Sequential;
     use commonware_utils::N3f1;
-    use rand::rngs::StdRng;
-    use rand::SeedableRng;
+    use rand::{rngs::StdRng, SeedableRng};
     use std::collections::{BTreeMap, BTreeSet};
 
     /// A golden DKG test plan.
@@ -565,6 +564,7 @@ mod test_plan {
         drop_dealers: BTreeSet<u32>,
         reshare: bool,
         replace_shares: BTreeSet<u32>,
+        fake_masks: BTreeSet<u32>,
     }
 
     impl Plan {
@@ -581,6 +581,7 @@ mod test_plan {
                 drop_dealers: BTreeSet::new(),
                 reshare: false,
                 replace_shares: BTreeSet::new(),
+                fake_masks: BTreeSet::new(),
             }
         }
 
@@ -624,6 +625,11 @@ mod test_plan {
             self
         }
 
+        pub fn fake_mask(mut self, dealer: u32) -> Self {
+            self.fake_masks.insert(dealer);
+            self
+        }
+
         pub fn validate(&self) -> anyhow::Result<()> {
             anyhow::ensure!(self.num_dealers >= 1, "need at least 1 dealer");
             anyhow::ensure!(self.num_players >= 1, "need at least 1 player");
@@ -655,6 +661,9 @@ mod test_plan {
                 anyhow::ensure!(d < self.num_dealers, "replace_share dealer out of range");
                 anyhow::ensure!(self.reshare, "replace_share requires reshare");
             }
+            for &d in &self.fake_masks {
+                anyhow::ensure!(d < self.num_dealers, "fake_mask dealer out of range");
+            }
             Ok(())
         }
 
@@ -663,6 +672,7 @@ mod test_plan {
             self.bad_commitments.contains(&dealer)
                 || self.shift_degree_effective(dealer)
                 || self.replace_shares.contains(&dealer)
+                || self.fake_masks.contains(&dealer)
                 || self.bad_shares.iter().any(|&(d, _)| d == dealer)
                 || self.missing_shares.iter().any(|&(d, _)| d == dealer)
         }
@@ -923,6 +933,25 @@ mod test_plan {
                         }
                     }
 
+                    // P6: fake mask commitments
+                    //
+                    // Exploit the empty VRF proof: add a random delta to
+                    // both the masked share z_i and the mask commitment M_i
+                    // for every player. The check verifies
+                    // z_i*G - M_i == F(x_i), so shifting both by the same
+                    // delta preserves the equation. But the player unmasks
+                    // with the real VRF value, recovering f(x_i) + delta
+                    // instead of f(x_i).
+                    if self.fake_masks.contains(&i) {
+                        for p in &info.players {
+                            let delta = Scalar::random(&mut rng);
+                            if let Some(share_val) = log.dealing.masked_shares.get_value_mut(p) {
+                                *share_val += &delta;
+                            }
+                            log.commitments.perturb(p, &(G1::generator() * &delta));
+                        }
+                    }
+
                     logs.insert(pk, log);
                 }
                 // If identify() returned None (bad sig), log is silently dropped.
@@ -1004,6 +1033,13 @@ mod test_plan {
                     if u.ratio(1, 12)? {
                         plan.missing_shares.insert((d, p));
                     }
+                }
+            }
+
+            // Optionally add fake mask commitments.
+            for d in 0..num_dealers {
+                if u.ratio(1, 8)? {
+                    plan.fake_masks.insert(d);
                 }
             }
 
@@ -1159,6 +1195,16 @@ mod tests {
             .replace_share(2)
             .run(42)
             .expect("plan should handle expected failure");
+    }
+
+    // Fake mask test (exploiting empty VRF proofs)
+
+    #[test]
+    fn fake_mask_filtered() {
+        Plan::new(4, 7, 3)
+            .fake_mask(0)
+            .run(42)
+            .expect("plan should succeed with 1 fake mask dealer filtered");
     }
 
     // Error tests (standalone, outside Plan)
