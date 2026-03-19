@@ -367,10 +367,10 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
 
     /// Add a pre-computed leaf digest.
     pub fn add_leaf_digest(mut self, digest: D) -> Self {
-        let parents: Vec<u32> = F::parent_heights(self.size()).collect();
+        let heights = F::parent_heights(self.size());
         self.appended.push(digest);
 
-        for height in parents {
+        for height in heights {
             let pos = self.size();
             self.appended.push(D::EMPTY);
             self.state.insert(pos, height);

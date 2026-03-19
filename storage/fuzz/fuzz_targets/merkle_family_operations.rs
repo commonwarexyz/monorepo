@@ -136,10 +136,6 @@ fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {
         for (op_idx, op) in operations.iter().enumerate() {
             match op {
                 MerkleOperation::Add { data } => {
-                    if merkle.bounds().is_empty() && *merkle.size() > 0 {
-                        continue;
-                    }
-
                     let limited = limit(data);
                     let size_before = merkle.size();
                     let loc = add(&mut merkle, &hasher, limited);
@@ -176,6 +172,7 @@ fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {
                     let limited = limit(new_data);
 
                     if reference.is_leaf_pruned(leaf_loc) {
+                        assert!(update_leaf(&mut merkle, &hasher, leaf_loc, limited).is_err());
                         continue;
                     }
 
@@ -246,18 +243,14 @@ fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {
                         continue;
                     }
 
-                    if let Ok(valid) =
-                        verify_element_proof(&merkle, &hasher, loc, reference.leaf_data[idx].as_slice())
-                    {
-                        assert!(valid, "{} op {op_idx}: proof should verify", type_name::<F>());
-                    }
+                    assert!(
+                        verify_element_proof(&merkle, &hasher, loc, reference.leaf_data[idx].as_slice()).expect("proof generation should succeed"),
+                        "{} op {op_idx}: element proof verification failed for loc {loc}",
+                        type_name::<F>()
+                    );
                 }
 
                 MerkleOperation::PruneAll => {
-                    if merkle.bounds().is_empty() {
-                        continue;
-                    }
-
                     let size_before = merkle.size();
 
                     merkle.prune_all();
@@ -288,7 +281,7 @@ fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {
                     let loc = Location::new(*pos_idx % (*merkle.leaves() + 1));
                     let retained_before = merkle.bounds().start;
 
-                    if loc <= retained_before || loc > merkle.leaves() {
+                    if loc <= retained_before {
                         continue;
                     }
 

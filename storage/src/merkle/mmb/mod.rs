@@ -136,6 +136,7 @@ pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 
 /// Errors that can occur during MMB operations.
 pub type Error = merkle::Error<Family>;
+
 /// Marker type for the MMB family.
 #[derive(Copy, Clone, Debug)]
 pub struct Family;
