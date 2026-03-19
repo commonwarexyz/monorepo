@@ -22,8 +22,7 @@ use commonware_utils::{
     },
     ordered::{Quorum, Set},
     sync::Mutex,
-    Participant,
-    N3f1,
+    N3f1, Participant,
 };
 use rand_core::CryptoRngCore;
 use std::{
