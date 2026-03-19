@@ -6,7 +6,7 @@ use std::hint::black_box;
 fn bench_contains<F: commonware_utils::fuse::Fingerprint>(c: &mut Criterion, n: usize) {
     let mut rng = StdRng::seed_from_u64(n as u64);
     let keys: Vec<u64> = (0..n).map(|_| rng.gen()).collect();
-    let filter = BinaryFuseFilter::<F>::new(&keys).expect("construction failed");
+    let filter = BinaryFuseFilter::<F>::new(n as u64, 32, &keys).expect("construction failed");
     let probe: u64 = rng.gen();
     let fp_bits = F::SIZE * 8;
     c.bench_function(

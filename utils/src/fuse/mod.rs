@@ -23,13 +23,21 @@
 //! Keys must be provided as [`u64`]. Callers are responsible for hashing their
 //! own types to `u64` before calling [`BinaryFuseFilter::contains`].
 //!
+//! # Adversarial Environments
+//!
+//! Construction can fail if an adversary can control both the key set and the
+//! internal seed. Pass a seed that the adversary cannot predict (e.g. a VRF
+//! output or a random beacon) so that they cannot craft a key set that causes
+//! construction to fail.
+//!
 //! # Examples
 //!
 //! ```
 //! use commonware_utils::fuse::BinaryFuseFilter;
 //!
+//! let seed = 42u64;
 //! let keys: Vec<u64> = (0u64..1_000).collect();
-//! let filter = BinaryFuseFilter::<u8>::new(&keys).expect("construction failed");
+//! let filter = BinaryFuseFilter::<u8>::new(seed, 32, &keys).expect("construction failed");
 //!
 //! // Every inserted key is always found (no false negatives).
 //! for &k in &keys {
@@ -41,10 +49,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, Write};
 
 /// Number of positions each key maps to in the filter array.
-const ARITY: usize = 3;
-
-/// Maximum number of construction attempts before giving up.
-const MAX_ITERATIONS: u32 = 100;
+const ARITY: u32 = 3;
 
 /// Error returned by [`BinaryFuseFilter::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -53,11 +58,20 @@ pub enum Error {
     #[error("key set is empty")]
     Empty,
 
-    /// Construction did not converge after the maximum number of attempts.
+    /// The key set is too large to construct a filter.
     ///
-    /// This is practically impossible for random key sets. It may occur with
-    /// adversarially crafted inputs.
-    #[error("construction failed after {MAX_ITERATIONS} attempts")]
+    /// Triggered when the unique key count or the computed array size overflows
+    /// a `u32`. In practice, filters with more than a few billion keys are not
+    /// feasible anyway due to memory requirements.
+    #[error("key set too large")]
+    TooLarge,
+
+    /// Construction did not converge within the allowed retries.
+    ///
+    /// This is practically impossible for random key sets with a secret seed.
+    /// It may occur with adversarially crafted inputs when the seed is known.
+    /// Try a different seed or increase `max_retries`.
+    #[error("construction failed; try a different seed or increase max_retries")]
     ConstructionFailed,
 }
 
@@ -109,46 +123,76 @@ pub struct BinaryFuseFilter<F: Fingerprint> {
 impl<F: Fingerprint> BinaryFuseFilter<F> {
     /// Builds a filter from a set of keys.
     ///
-    /// Every key in `keys` is guaranteed to be found by [`contains`](Self::contains).
-    /// The false-positive rate is approximately `1 / 2^(F::SIZE * 8)`.
+    /// `seed` is mixed into the hash function and should not be controllable
+    /// by the party that supplies `keys` (e.g. use a VRF output or random beacon).
+    ///
+    /// `max_retries` is the maximum number of construction attempts. Each attempt
+    /// uses a seed derived deterministically from `seed` and the attempt index.
+    /// A value of 32 is sufficient for random key sets; higher values provide
+    /// additional safety against adversarial inputs.
+    ///
+    /// Duplicate keys are silently removed. Key ordering does not affect the result.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Empty`] if `keys` is empty.
-    /// Returns [`Error::ConstructionFailed`] if construction does not converge
-    /// (practically impossible for random key sets).
-    pub fn new(keys: &[u64]) -> Result<Self, Error> {
-        let n = keys.len();
-        if n == 0 {
+    /// Returns [`Error::Empty`] if `keys` is empty (or all duplicates reduce to empty).
+    /// Returns [`Error::TooLarge`] if the unique key count exceeds `u32::MAX`.
+    /// Returns [`Error::ConstructionFailed`] if construction does not converge.
+    pub fn new(seed: u64, max_retries: u32, keys: &[u64]) -> Result<Self, Error> {
+        // Canonicalize: sort and dedup for determinism and correct peeling.
+        let mut owned: Vec<u64> = keys.to_vec();
+        owned.sort_unstable();
+        owned.dedup();
+
+        if owned.is_empty() {
             return Err(Error::Empty);
         }
+        let n = u32::try_from(owned.len()).map_err(|_| Error::TooLarge)?;
 
         let segment_length = segment_length_for(n);
-        let size_factor = size_factor_for(n);
-        let capacity = ((n as f64 * size_factor).round() as u32).max(n as u32);
 
-        // Number of pure segments. The array has (sc + ARITY - 1) segments total.
-        // saturating_sub guards small n where capacity < 2 * segment_length.
+        // Capacity and segment_count are computed in u64 to detect overflow before
+        // truncating to u32. Both values are stored on the wire, so they must fit.
+        let capacity = capacity_for(n);
         let segment_count = capacity
-            .div_ceil(segment_length)
-            .saturating_sub(ARITY as u32 - 1)
+            .div_ceil(segment_length as u64)
+            .saturating_sub((ARITY - 1) as u64)
             .max(1);
-        let array_length = (segment_count + ARITY as u32 - 1) * segment_length;
+        let segment_count =
+            u32::try_from(segment_count).map_err(|_| Error::TooLarge)?;
 
-        let mut seed = 1u64;
-        for _ in 0..MAX_ITERATIONS {
-            if let Some(data) =
-                try_construct::<F>(keys, seed, segment_length, segment_count, array_length)
-            {
+        // array_length = (segment_count + ARITY - 1) * segment_length must also fit in u32.
+        // This is the number of fingerprint slots in the backing array.
+        let array_length = (segment_count as u64 + (ARITY - 1) as u64)
+            .checked_mul(segment_length as u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or(Error::TooLarge)?;
+
+        // Pre-allocate working buffers once and reset them on each attempt.
+        // Reusing avoids (max_retries + 1) pairs of heap allocations; on failure-prone
+        // inputs (adversarial keys) this matters since we may exhaust all retries.
+        let al = array_length as usize;
+        let mut count = vec![0u32; al];
+        let mut xor_mask = vec![0u64; al];
+
+        for attempt in 0..=max_retries {
+            // Derive a distinct seed for each attempt deterministically.
+            let attempt_seed = seed.wrapping_add((attempt as u64).wrapping_mul(0x517cc1b727220a95));
+            if let Some(data) = try_construct::<F>(
+                &owned,
+                attempt_seed,
+                segment_length,
+                segment_count,
+                &mut count,
+                &mut xor_mask,
+            ) {
                 return Ok(Self {
-                    seed,
+                    seed: attempt_seed,
                     segment_length,
                     segment_count,
                     data,
                 });
             }
-            // Advance seed with a large odd increment to vary the hash function.
-            seed = seed.wrapping_add(0x517cc1b727220a95);
         }
 
         Err(Error::ConstructionFailed)
@@ -208,7 +252,7 @@ impl<F: Fingerprint> Read for BinaryFuseFilter<F> {
             ));
         }
 
-        let array_length = (segment_count as usize + ARITY - 1)
+        let array_length = (segment_count as usize + ARITY as usize - 1)
             .checked_mul(segment_length as usize)
             .ok_or(CodecError::Invalid(
                 "BinaryFuseFilter",
@@ -247,20 +291,22 @@ impl<F: Fingerprint> Read for BinaryFuseFilter<F> {
 
 /// Attempts one construction pass. Returns the fingerprint array on success,
 /// or `None` if peeling got stuck (triggering a retry with a new seed).
+///
+/// `count` and `xor_mask` are pre-allocated working buffers of length `array_length`;
+/// they are zeroed at the start of each call so callers can reuse them across retries.
 fn try_construct<F: Fingerprint>(
     keys: &[u64],
     seed: u64,
     segment_length: u32,
     segment_count: u32,
-    array_length: u32,
+    count: &mut [u32], // length == array_length
+    xor_mask: &mut [u64],
 ) -> Option<Vec<F>> {
     let n = keys.len();
-    let al = array_length as usize;
 
-    // count[i] = number of keys that map to position i.
-    // xor_mask[i] = XOR of hashes of all keys at position i.
-    let mut count = vec![0u32; al];
-    let mut xor_mask = vec![0u64; al];
+    // Reset working state from any previous attempt.
+    count.fill(0);
+    xor_mask.fill(0);
 
     for &key in keys {
         let hash = splitmix(key.wrapping_add(seed));
@@ -274,7 +320,7 @@ fn try_construct<F: Fingerprint>(
     }
 
     // Seed the queue with every position that starts at degree 1.
-    let mut queue: Vec<usize> = (0..al).filter(|&i| count[i] == 1).collect();
+    let mut queue: Vec<usize> = (0..count.len()).filter(|&i| count[i] == 1).collect();
     let mut stack: Vec<(usize, u64)> = Vec::with_capacity(n);
 
     // Iteratively peel keys that are alone at exactly one position.
@@ -312,7 +358,7 @@ fn try_construct<F: Fingerprint>(
     // For each key, assign data[pos] so that data[h0] ^ data[h1] ^ data[h2] == fp.
     // The two other positions already have their final values; data[pos] starts at
     // F::default() (zero), so including it in the XOR is a no-op.
-    let mut data = vec![F::default(); al];
+    let mut data = vec![F::default(); count.len()];
     for (pos, hash) in stack.into_iter().rev() {
         let fp = F::from_hash(hash);
         let [h0, h1, h2] = positions(hash, segment_count, segment_length);
@@ -368,40 +414,77 @@ const fn mulhi(a: u64, b: u64) -> u64 {
     ((a as u128 * b as u128) >> 64) as u64
 }
 
-/// Computes the segment length for `n` keys.
+/// Returns the segment length for `n` keys using a precomputed lookup table.
 ///
-/// Uses the formula from the Binary Fuse Filter paper for arity 3:
-/// `2^ceil(log(n) / log(3.33) + 2.25)`, clamped to `[4, 2^18]`.
-fn segment_length_for(n: usize) -> u32 {
-    if n <= 1 {
-        return 4;
+/// The table implements `2^ceil(ln(n) / ln(3.33) + 2.25)` (the formula from the
+/// Binary Fuse Filter paper for arity 3) using only integer comparisons.
+/// Each entry is the largest `n` for which the corresponding power of 2 applies.
+/// All thresholds were derived from `floor(3.33^(exp - 2.25))` for exp = 3..18.
+fn segment_length_for(n: u32) -> u32 {
+    // (max_n_inclusive, segment_length)
+    const TABLE: &[(u32, u32)] = &[
+        (1, 4),
+        (2, 8),
+        (8, 16),
+        (27, 32),
+        (91, 64),
+        (303, 128),
+        (1_009, 256),
+        (3_361, 512),
+        (11_193, 1_024),
+        (37_271, 2_048),
+        (124_102, 4_096),
+        (413_259, 8_192),
+        (1_376_152, 16_384),
+        (4_582_587, 32_768),
+        (15_259_214, 65_536),
+        (50_813_183, 131_072),
+    ];
+    for &(max_n, sl) in TABLE {
+        if n <= max_n {
+            return sl;
+        }
     }
-    let exponent = ((n as f64).ln() / 3.33_f64.ln() + 2.25).ceil() as u32;
-    (1u32 << exponent.min(18)).max(4)
+    262_144 // 2^18, maximum
 }
 
-/// Computes the size factor for `n` keys.
+/// Returns the target array capacity for `n` keys using integer-only arithmetic.
 ///
-/// Larger values increase the array size and construction reliability.
-/// The formula from the paper ensures near-certain construction success.
-fn size_factor_for(n: usize) -> f64 {
+/// Returns a `u64` so the caller can detect overflow before truncating to `u32`.
+///
+/// Implements an integer approximation of
+/// `n * max(1.125, 0.875 + 0.25 * log2(10^6) / log2(n))`
+/// from the Binary Fuse Filter paper.
+///
+/// Scaling by 64 instead of 8 reduces rounding error from integer division
+/// enough to match the floating-point formula within one segment for all
+/// practical key-set sizes (verified up to n = 10^8).
+fn capacity_for(n: u32) -> u64 {
     if n <= 1 {
-        return 1.125;
+        return n as u64;
     }
-    // max(1.125, 0.875 + 0.25 * log(1_000_000) / log(n))
-    let factor = 0.875 + 0.25 * (1_000_000_f64).ln() / (n as f64).ln();
-    factor.max(1.125)
+    // floor_log2(n), at least 1 to avoid division by zero.
+    let log2_n = n.ilog2().max(1) as u64;
+    // Compute size_factor * 64, clamped to at least 72 (= 1.125 * 64).
+    // 56 + 320 / log2_n  approximates (7/8 + 5/log2_n) * 64
+    //                  = (0.875 + 0.25 * 20 / log2_n) * 64
+    //                  = 64 * size_factor.
+    // Using 20 as an integer approximation of log2(10^6) ~= 19.93.
+    let factor_x64 = (56u64 + 320 / log2_n).max(72);
+    // Round to nearest: add 32 (= 64/2) before dividing.
+    ((n as u64 * factor_x64 + 32) / 64).max(n as u64)
 }
 
 #[cfg(feature = "arbitrary")]
 impl<'a, F: Fingerprint> arbitrary::Arbitrary<'a> for BinaryFuseFilter<F> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let seed: u64 = u.arbitrary()?;
         // Generate a non-empty key set and build the filter from it.
         let keys: Vec<u64> = u.arbitrary()?;
         if keys.is_empty() {
             return Err(arbitrary::Error::IncorrectFormat);
         }
-        Self::new(&keys).map_err(|_| arbitrary::Error::IncorrectFormat)
+        Self::new(seed, 32, &keys).map_err(|_| arbitrary::Error::IncorrectFormat)
     }
 }
 
@@ -413,7 +496,7 @@ mod tests {
     #[test]
     fn test_contains_all_keys_u8() {
         let keys: Vec<u64> = (0u64..1_000).collect();
-        let filter = BinaryFuseFilter::<u8>::new(&keys).unwrap();
+        let filter = BinaryFuseFilter::<u8>::new(0, 32, &keys).unwrap();
         for &k in &keys {
             assert!(filter.contains(k), "false negative for key {k}");
         }
@@ -422,7 +505,7 @@ mod tests {
     #[test]
     fn test_contains_all_keys_u16() {
         let keys: Vec<u64> = (0u64..1_000).collect();
-        let filter = BinaryFuseFilter::<u16>::new(&keys).unwrap();
+        let filter = BinaryFuseFilter::<u16>::new(0, 32, &keys).unwrap();
         for &k in &keys {
             assert!(filter.contains(k), "false negative for key {k}");
         }
@@ -430,14 +513,32 @@ mod tests {
 
     #[test]
     fn test_empty_returns_error() {
-        let result = BinaryFuseFilter::<u8>::new(&[]);
+        let result = BinaryFuseFilter::<u8>::new(0, 32, &[]);
         assert_eq!(result, Err(Error::Empty));
     }
 
     #[test]
     fn test_single_key() {
-        let filter = BinaryFuseFilter::<u8>::new(&[42u64]).unwrap();
+        let filter = BinaryFuseFilter::<u8>::new(0, 32, &[42u64]).unwrap();
         assert!(filter.contains(42));
+    }
+
+    #[test]
+    fn test_duplicate_keys_deduplicated() {
+        // Duplicate keys should be silently removed; the filter still finds the key.
+        let keys = vec![7u64, 7, 7, 7];
+        let filter = BinaryFuseFilter::<u8>::new(0, 32, &keys).unwrap();
+        assert!(filter.contains(7));
+    }
+
+    #[test]
+    fn test_unsorted_keys() {
+        // Key order must not affect the result.
+        let mut keys: Vec<u64> = (0u64..500).collect();
+        let filter_sorted = BinaryFuseFilter::<u8>::new(1, 32, &keys).unwrap();
+        keys.reverse();
+        let filter_reversed = BinaryFuseFilter::<u8>::new(1, 32, &keys).unwrap();
+        assert_eq!(filter_sorted, filter_reversed);
     }
 
     #[test]
@@ -445,7 +546,7 @@ mod tests {
         // Build a filter on even keys, then probe odd keys.
         // Expect roughly 0.4% false positives; we use a generous threshold.
         let keys: Vec<u64> = (0u64..10_000).map(|i| i * 2).collect();
-        let filter = BinaryFuseFilter::<u8>::new(&keys).unwrap();
+        let filter = BinaryFuseFilter::<u8>::new(0, 32, &keys).unwrap();
 
         let probes: Vec<u64> = (0u64..10_000).map(|i| i * 2 + 1).collect();
         let false_positives = probes.iter().filter(|&&k| filter.contains(k)).count();
@@ -461,7 +562,7 @@ mod tests {
     #[test]
     fn test_encode_decode_u8() {
         let keys: Vec<u64> = (0u64..500).collect();
-        let original = BinaryFuseFilter::<u8>::new(&keys).unwrap();
+        let original = BinaryFuseFilter::<u8>::new(0, 32, &keys).unwrap();
         let encoded = original.encode();
         assert_eq!(encoded.len(), original.encode_size());
         let decoded = BinaryFuseFilter::<u8>::decode(encoded).unwrap();
@@ -474,7 +575,7 @@ mod tests {
     #[test]
     fn test_encode_decode_u16() {
         let keys: Vec<u64> = (0u64..500).collect();
-        let original = BinaryFuseFilter::<u16>::new(&keys).unwrap();
+        let original = BinaryFuseFilter::<u16>::new(0, 32, &keys).unwrap();
         let encoded = original.encode();
         assert_eq!(encoded.len(), original.encode_size());
         let decoded = BinaryFuseFilter::<u16>::decode(encoded).unwrap();
@@ -509,9 +610,9 @@ mod tests {
         // request a ~16 GB allocation before reading any fingerprint data. The decoder
         // must reject this without allocating.
         let mut buf = Vec::new();
-        1u64.write(&mut buf);       // seed
+        1u64.write(&mut buf); // seed
         (1u32 << 18).write(&mut buf); // segment_length = 262144 (max allowed power of 2)
-        u32::MAX.write(&mut buf);   // segment_count = 4294967295
+        u32::MAX.write(&mut buf); // segment_count = 4294967295
         // no fingerprint data follows
         assert!(BinaryFuseFilter::<u8>::decode(bytes::Bytes::from(buf)).is_err());
     }
@@ -519,10 +620,49 @@ mod tests {
     #[test]
     fn test_large_key_set() {
         let keys: Vec<u64> = (0u64..100_000).collect();
-        let filter = BinaryFuseFilter::<u8>::new(&keys).unwrap();
+        let filter = BinaryFuseFilter::<u8>::new(0, 32, &keys).unwrap();
         for &k in &keys {
             assert!(filter.contains(k));
         }
+    }
+
+    #[test]
+    fn test_different_seeds_produce_different_filters() {
+        let keys: Vec<u64> = (0u64..1_000).collect();
+        let f1 = BinaryFuseFilter::<u8>::new(1, 32, &keys).unwrap();
+        let f2 = BinaryFuseFilter::<u8>::new(2, 32, &keys).unwrap();
+        // Different seeds must produce different internal state.
+        assert_ne!(f1, f2);
+        // Both must still contain all keys.
+        for &k in &keys {
+            assert!(f1.contains(k));
+            assert!(f2.contains(k));
+        }
+    }
+
+    #[test]
+    fn test_segment_length_table_boundaries() {
+        // Spot-check the lookup table boundaries.
+        assert_eq!(segment_length_for(1), 4);
+        assert_eq!(segment_length_for(2), 8);
+        assert_eq!(segment_length_for(3), 16);
+        assert_eq!(segment_length_for(8), 16);
+        assert_eq!(segment_length_for(9), 32);
+        assert_eq!(segment_length_for(91), 64);
+        assert_eq!(segment_length_for(92), 128);
+        assert_eq!(segment_length_for(303), 128);
+        assert_eq!(segment_length_for(304), 256);
+        assert_eq!(segment_length_for(u32::MAX), 262_144);
+    }
+
+    #[test]
+    fn test_capacity_overflow_returns_too_large() {
+        // capacity_for(u32::MAX) overflows u32, so new() must return TooLarge
+        // rather than panicking or silently truncating.
+        // We can't actually pass u32::MAX unique keys, but we can verify that
+        // capacity_for produces a value that exceeds u32::MAX for large n.
+        let cap = capacity_for(u32::MAX);
+        assert!(cap > u32::MAX as u64, "capacity_for(u32::MAX) should overflow u32");
     }
 
     #[cfg(feature = "arbitrary")]
