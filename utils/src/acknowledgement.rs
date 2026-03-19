@@ -136,7 +136,7 @@ struct ExactState {
 
 impl ExactState {
     /// Create a new acknowledgement state with a remaining count of 1.
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             remaining: AtomicUsize::new(1),
             canceled: AtomicBool::new(false),

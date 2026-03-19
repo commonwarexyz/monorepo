@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use commonware_utils::sync::Mutex;
+use std::sync::Arc;
 use tracing_subscriber::fmt::MakeWriter;
 
 /// Appends logs to a provided vector.
@@ -8,7 +9,7 @@ pub struct Writer {
 
 impl Writer {
     /// Creates a new `Writer` instance.
-    pub fn new(logs: Arc<Mutex<Vec<String>>>) -> Self {
+    pub const fn new(logs: Arc<Mutex<Vec<String>>>) -> Self {
         Self { logs }
     }
 
@@ -58,7 +59,7 @@ impl std::io::Write for Writer {
         let log_message = log_message.replace("()", "");
 
         // Append log message
-        let mut logs = self.logs.lock().unwrap();
+        let mut logs = self.logs.lock();
         logs.push(log_message.trim_end().to_string());
         Ok(buf.len())
     }
@@ -72,7 +73,7 @@ impl<'a> MakeWriter<'a> for Writer {
     type Writer = Self;
 
     fn make_writer(&'a self) -> Self::Writer {
-        Writer {
+        Self {
             logs: Arc::clone(&self.logs),
         }
     }

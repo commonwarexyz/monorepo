@@ -84,4 +84,17 @@ mod tests {
         // None -> 0x00
         assert_eq!(t_option_none.encode(), &[0xFF, 0x00][..]);
     }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<(u32, u32)>,
+            CodecConformance<(u32, u32, u32)>,
+            CodecConformance<(u32, u32, u32, u32)>,
+            CodecConformance<(u32, u32, u32, u32, u32)>,
+            CodecConformance<(u32, u32, u32, u32, u32, u32)>,
+        }
+    }
 }

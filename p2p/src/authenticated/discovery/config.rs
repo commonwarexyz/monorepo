@@ -1,10 +1,11 @@
+use crate::Ingress;
 use commonware_cryptography::Signer;
+use commonware_runtime::Quota;
 use commonware_utils::NZU32;
-use governor::Quota;
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
-/// Known peer and its accompanying address that will be dialed on startup.
-pub type Bootstrapper<P> = (P, SocketAddr);
+/// Known peer and its accompanying ingress address that will be dialed on startup.
+pub type Bootstrapper<P> = (P, Ingress);
 
 /// Configuration for the peer-to-peer instance.
 ///
@@ -24,11 +25,17 @@ pub struct Config<C: Signer> {
     /// Address to listen on.
     pub listen: SocketAddr,
 
-    /// Dialable address of the peer.
-    pub dialable: SocketAddr,
+    /// Dialable ingress address of the peer.
+    pub dialable: Ingress,
 
     /// Peers dialed on startup.
     pub bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
+
+    /// Whether or not to allow DNS-based ingress addresses.
+    ///
+    /// When dialing a DNS-based address, the hostname is resolved and a random IP
+    /// is selected from the results (shuffled for each dial attempt).
+    pub allow_dns: bool,
 
     /// Whether or not to allow connections with private IP addresses.
     pub allow_private_ips: bool,
@@ -37,7 +44,7 @@ pub struct Config<C: Signer> {
     ///
     /// The actual size of the network message will be higher due to overhead from the protocol;
     /// this may include additional metadata, data from the codec, and/or cryptographic signatures.
-    pub max_message_size: usize,
+    pub max_message_size: u32,
 
     /// Message backlog allowed for internal actors.
     ///
@@ -57,8 +64,8 @@ pub struct Config<C: Signer> {
     /// unauthenticated peers from holding open connection.
     pub handshake_timeout: Duration,
 
-    /// Quota for connection attempts per peer (incoming or outgoing).
-    pub allowed_connection_rate_per_peer: Quota,
+    /// Minimum time between connection reservations for a single peer.
+    pub peer_connection_cooldown: Duration,
 
     /// Maximum number of concurrent handshake attempts allowed.
     pub max_concurrent_handshakes: NonZeroU32,
@@ -74,11 +81,6 @@ pub struct Config<C: Signer> {
 
     /// Average frequency at which we make a single dial attempt across all peers.
     pub dial_frequency: Duration,
-
-    /// Average frequency at which we will fetch a new list of dialable peers.
-    ///
-    /// This value also limits the rate at which we attempt to re-dial any single peer.
-    pub query_frequency: Duration,
 
     /// Times that dialing a given peer should fail before asking for updated peer information for
     /// that peer.
@@ -104,10 +106,10 @@ pub struct Config<C: Signer> {
     ///
     /// If there is no other network activity, this message is used as a ping
     /// and should be sent more often than the read_timeout.
+    ///
+    /// This also determines the rate limit for incoming BitVec and Peers messages
+    /// (one per half this frequency to account for jitter).
     pub gossip_bit_vec_frequency: Duration,
-
-    /// Quota for bit vector messages a peer can send us.
-    pub allowed_bit_vec_rate: Quota,
 
     /// Maximum number of peers we will send or consider valid when receiving in a single message.
     ///
@@ -115,8 +117,8 @@ pub struct Config<C: Signer> {
     /// of which requires a signature verification).
     pub peer_gossip_max_count: usize,
 
-    /// Quota for peers messages a peer can send us.
-    pub allowed_peers_rate: Quota,
+    /// Duration after which a blocked peer is allowed to reconnect.
+    pub block_duration: Duration,
 }
 
 impl<C: Signer> Config<C> {
@@ -125,16 +127,17 @@ impl<C: Signer> Config<C> {
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
-        dialable: SocketAddr,
+        dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_message_size: usize,
+        max_message_size: u32,
     ) -> Self {
         Self {
             crypto,
             namespace: namespace.to_vec(),
             listen,
-            dialable,
+            dialable: dialable.into(),
             bootstrappers,
+            allow_dns: true,
 
             allow_private_ips: false,
             max_message_size,
@@ -142,19 +145,17 @@ impl<C: Signer> Config<C> {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
-            allowed_connection_rate_per_peer: Quota::per_minute(NZU32!(1)),
+            peer_connection_cooldown: Duration::from_secs(60),
             max_concurrent_handshakes: NZU32!(512),
             allowed_handshake_rate_per_ip: Quota::with_period(Duration::from_secs(5)).unwrap(), // 1 concurrent handshake per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(64)),
             dial_frequency: Duration::from_secs(1),
-            query_frequency: Duration::from_secs(60),
             dial_fail_limit: 2,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
-            allowed_bit_vec_rate: Quota::per_second(NZU32!(2)),
             peer_gossip_max_count: 32,
-            allowed_peers_rate: Quota::per_second(NZU32!(2)),
+            block_duration: Duration::from_hours(4),
         }
     }
 
@@ -168,16 +169,17 @@ impl<C: Signer> Config<C> {
         crypto: C,
         namespace: &[u8],
         listen: SocketAddr,
-        dialable: SocketAddr,
+        dialable: impl Into<Ingress>,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_message_size: usize,
+        max_message_size: u32,
     ) -> Self {
         Self {
             crypto,
             namespace: namespace.to_vec(),
             listen,
-            dialable,
+            dialable: dialable.into(),
             bootstrappers,
+            allow_dns: true,
 
             allow_private_ips: true,
             max_message_size,
@@ -185,19 +187,17 @@ impl<C: Signer> Config<C> {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
-            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(1)),
+            peer_connection_cooldown: Duration::from_secs(1),
             max_concurrent_handshakes: NZU32!(1_024),
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(16)), // 80 concurrent handshakes per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(128)),
             dial_frequency: Duration::from_millis(500),
-            query_frequency: Duration::from_secs(30),
             dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
-            allowed_bit_vec_rate: Quota::per_second(NZU32!(2)),
             peer_gossip_max_count: 32,
-            allowed_peers_rate: Quota::per_second(NZU32!(5)),
+            block_duration: Duration::from_hours(1),
         }
     }
 
@@ -206,14 +206,15 @@ impl<C: Signer> Config<C> {
         crypto: C,
         listen: SocketAddr,
         bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
-        max_message_size: usize,
+        max_message_size: u32,
     ) -> Self {
         Self {
             crypto,
             namespace: b"test_namespace".to_vec(),
             listen,
-            dialable: listen,
+            dialable: listen.into(),
             bootstrappers,
+            allow_dns: true,
 
             allow_private_ips: true,
             max_message_size,
@@ -221,19 +222,17 @@ impl<C: Signer> Config<C> {
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
-            allowed_connection_rate_per_peer: Quota::per_second(NZU32!(4)),
+            peer_connection_cooldown: Duration::from_millis(250),
             max_concurrent_handshakes: NZU32!(1_024),
             allowed_handshake_rate_per_ip: Quota::per_second(NZU32!(128)), // 640 concurrent handshakes per IP
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(256)),
             dial_frequency: Duration::from_millis(200),
-            query_frequency: Duration::from_secs(5),
             dial_fail_limit: 1,
             tracked_peer_sets: 4,
             max_peer_set_size: 1 << 8, // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),
-            allowed_bit_vec_rate: Quota::per_second(NZU32!(5)),
             peer_gossip_max_count: 32,
-            allowed_peers_rate: Quota::per_second(NZU32!(5)),
+            block_duration: Duration::from_mins(1),
         }
     }
 }

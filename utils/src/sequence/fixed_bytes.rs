@@ -8,6 +8,7 @@ use core::{
     ops::Deref,
 };
 use thiserror::Error;
+use zeroize::Zeroize;
 
 /// Errors returned by `Bytes` functions.
 #[derive(Error, Debug, PartialEq)]
@@ -18,6 +19,7 @@ pub enum Error {
 
 /// An `Array` implementation for fixed-length byte arrays.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct FixedBytes<const N: usize>([u8; N]);
 
@@ -72,6 +74,12 @@ impl<const N: usize> Display for FixedBytes<N> {
 impl<const N: usize> From<[u8; N]> for FixedBytes<N> {
     fn from(value: [u8; N]) -> Self {
         Self::new(value)
+    }
+}
+
+impl<const N: usize> Zeroize for FixedBytes<N> {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -155,5 +163,15 @@ mod tests {
 
         let c = FixedBytes::new([1, 2, 3, 4]);
         assert_eq!(a, c);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<FixedBytes<16>>,
+        }
     }
 }

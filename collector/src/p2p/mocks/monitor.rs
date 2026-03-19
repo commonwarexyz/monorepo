@@ -1,6 +1,6 @@
 use super::types::Response;
 use commonware_cryptography::ed25519::PublicKey;
-use futures::{channel::mpsc, SinkExt};
+use commonware_utils::channel::mpsc;
 
 /// A mock [crate::Monitor] collected a response.
 #[derive(Debug, Clone)]
@@ -19,13 +19,13 @@ pub struct Monitor {
 impl Monitor {
     /// Create a new [Monitor].
     pub fn new() -> (Self, mpsc::UnboundedReceiver<Collected>) {
-        let (sender, receiver) = mpsc::unbounded();
+        let (sender, receiver) = mpsc::unbounded_channel();
         (Self { sender }, receiver)
     }
 
     /// Create a dummy [Monitor] that doesn't track events.
     pub fn dummy() -> Self {
-        let (sender, _) = mpsc::unbounded();
+        let (sender, _) = mpsc::unbounded_channel();
         Self { sender }
     }
 }
@@ -40,13 +40,10 @@ impl crate::Monitor for Monitor {
         response: Self::Response,
         count: usize,
     ) {
-        let _ = self
-            .sender
-            .send(Collected {
-                handler,
-                response,
-                count,
-            })
-            .await;
+        let _ = self.sender.send(Collected {
+            handler,
+            response,
+            count,
+        });
     }
 }

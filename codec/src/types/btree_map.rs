@@ -8,59 +8,13 @@ extern crate alloc;
 use crate::{
     codec::{EncodeSize, Read, Write},
     error::Error,
+    types::read_ordered_map,
     RangeCfg,
 };
 use alloc::collections::BTreeMap;
 use bytes::{Buf, BufMut};
-use core::cmp::Ordering;
 
 const BTREEMAP_TYPE: &str = "BTreeMap";
-
-/// Read keyed items from [Buf] in ascending order.
-fn read_ordered_map<K, V, F>(
-    buf: &mut impl Buf,
-    len: usize,
-    k_cfg: &K::Cfg,
-    v_cfg: &V::Cfg,
-    mut insert: F,
-    map_type: &'static str,
-) -> Result<(), Error>
-where
-    K: Read + Ord,
-    V: Read,
-    F: FnMut(K, V) -> Option<V>,
-{
-    let mut last: Option<(K, V)> = None;
-    for _ in 0..len {
-        // Read key
-        let key = K::read_cfg(buf, k_cfg)?;
-
-        // Check if keys are in ascending order relative to the previous key
-        if let Some((ref last_key, _)) = last {
-            match key.cmp(last_key) {
-                Ordering::Equal => return Err(Error::Invalid(map_type, "Duplicate key")),
-                Ordering::Less => return Err(Error::Invalid(map_type, "Keys must ascend")),
-                _ => {}
-            }
-        }
-
-        // Read value
-        let value = V::read_cfg(buf, v_cfg)?;
-
-        // Add previous item, if exists
-        if let Some((last_key, last_value)) = last.take() {
-            insert(last_key, last_value);
-        }
-        last = Some((key, value));
-    }
-
-    // Add last item, if exists
-    if let Some((last_key, last_value)) = last {
-        insert(last_key, last_value);
-    }
-
-    Ok(())
-}
 
 // ---------- BTreeMap ----------
 
@@ -96,7 +50,7 @@ impl<K: Read + Clone + Ord + Eq, V: Read + Clone> Read for BTreeMap<K, V> {
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
         // Read and validate the length prefix
         let len = usize::read_cfg(buf, range)?;
-        let mut map = BTreeMap::new();
+        let mut map = Self::new();
 
         // Read items in ascending order
         read_ordered_map(
@@ -259,5 +213,15 @@ mod tests {
         });
 
         assert_eq!(map1.encode(), map2.encode());
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<BTreeMap<u32, u32>>,
+        }
     }
 }

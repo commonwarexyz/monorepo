@@ -1,23 +1,26 @@
 use crate::{
-    simplex::{signing_scheme::Scheme, types::Voter},
-    types::View,
+    simplex::{
+        metrics::TimeoutReason,
+        types::{Proposal, Vote},
+    },
+    types::{Participant, View},
 };
-use commonware_cryptography::Digest;
-use futures::{
-    channel::{mpsc, oneshot},
-    SinkExt,
-};
-use tracing::error;
+use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc, oneshot};
 
+/// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
+    /// View update with leader info.
     Update {
         current: View,
-        leader: u32,
+        leader: Participant,
         finalized: View,
+        forwardable_proposal: Option<Proposal<D>>,
 
-        active: oneshot::Sender<bool>,
+        response: oneshot::Sender<Option<TimeoutReason>>,
     },
-    Constructed(Voter<S, D>),
+    /// A constructed vote (needed for quorum).
+    Constructed(Vote<S, D>),
 }
 
 #[derive(Clone)]
@@ -26,37 +29,38 @@ pub struct Mailbox<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Mailbox<S, D> {
-    pub fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
+    /// Create a new mailbox.
+    pub const fn new(sender: mpsc::Sender<Message<S, D>>) -> Self {
         Self { sender }
     }
 
-    pub async fn update(&mut self, current: View, leader: u32, finalized: View) -> bool {
-        let (active, active_receiver) = oneshot::channel();
-        if let Err(err) = self
-            .sender
-            .send(Message::Update {
-                current,
-                leader,
-                finalized,
-                active,
-            })
+    /// Send an update message.
+    ///
+    /// Returns `None` if the leader is active, or `Some(reason)` if the round
+    /// should be nullified.
+    pub async fn update(
+        &mut self,
+        current: View,
+        leader: Participant,
+        finalized: View,
+        forwardable_proposal: Option<Proposal<D>>,
+    ) -> Option<TimeoutReason> {
+        self.sender
+            .request_or(
+                |response| Message::Update {
+                    current,
+                    leader,
+                    finalized,
+                    forwardable_proposal,
+                    response,
+                },
+                None,
+            )
             .await
-        {
-            error!(?err, "failed to send update message");
-            return true; // default to active
-        }
-        match active_receiver.await {
-            Ok(active) => active,
-            Err(err) => {
-                error!(?err, "failed to receive active response");
-                true // default to active
-            }
-        }
     }
 
-    pub async fn constructed(&mut self, message: Voter<S, D>) {
-        if let Err(err) = self.sender.send(Message::Constructed(message)).await {
-            error!(?err, "failed to send constructed message");
-        }
+    /// Send a constructed vote.
+    pub async fn constructed(&mut self, message: Vote<S, D>) {
+        self.sender.send_lossy(Message::Constructed(message)).await;
     }
 }

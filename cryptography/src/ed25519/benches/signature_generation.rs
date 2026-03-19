@@ -1,9 +1,10 @@
-use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
+use commonware_cryptography::{ed25519, Signer as _};
+use commonware_math::algebra::Random;
 use criterion::{criterion_group, BatchSize, Criterion};
 use rand::{thread_rng, Rng};
 use std::hint::black_box;
 
-fn benchmark_signature_generation(c: &mut Criterion) {
+fn bench_signature_generation(c: &mut Criterion) {
     let namespace = b"namespace";
     let mut msg = [0u8; 32];
     thread_rng().fill(&mut msg);
@@ -16,9 +17,9 @@ fn benchmark_signature_generation(c: &mut Criterion) {
         ),
         |b| {
             b.iter_batched(
-                || ed25519::PrivateKey::from_rng(&mut thread_rng()),
+                || ed25519::PrivateKey::random(&mut thread_rng()),
                 |private_key| {
-                    black_box(private_key.sign(Some(namespace), &msg));
+                    black_box(private_key.sign(namespace, &msg));
                 },
                 BatchSize::SmallInput,
             );
@@ -26,4 +27,4 @@ fn benchmark_signature_generation(c: &mut Criterion) {
     );
 }
 
-criterion_group!(benches, benchmark_signature_generation);
+criterion_group!(benches, bench_signature_generation);

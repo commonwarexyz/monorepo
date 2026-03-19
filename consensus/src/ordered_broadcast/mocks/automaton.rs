@@ -1,17 +1,21 @@
-use crate::{ordered_broadcast::types::Context, types::Epoch, Automaton as A, Relay as R};
+use crate::{
+    ordered_broadcast::types::Context,
+    types::{Epoch, Height},
+    Automaton as A, Relay as R,
+};
 use bytes::Bytes;
 use commonware_cryptography::{sha256, Hasher, PublicKey, Sha256};
-use futures::channel::oneshot;
+use commonware_utils::channel::oneshot;
 use tracing::trace;
 
 #[derive(Clone)]
 pub struct Automaton<P: PublicKey> {
-    invalid_when: fn(u64) -> bool,
+    invalid_when: fn(Height) -> bool,
     _phantom: std::marker::PhantomData<P>,
 }
 
 impl<P: PublicKey> Automaton<P> {
-    pub fn new(invalid_when: fn(u64) -> bool) -> Self {
+    pub fn new(invalid_when: fn(Height) -> bool) -> Self {
         Self {
             invalid_when,
             _phantom: std::marker::PhantomData,
@@ -61,7 +65,10 @@ impl<P: PublicKey> A for Automaton<P> {
 
 impl<P: PublicKey> R for Automaton<P> {
     type Digest = sha256::Digest;
-    async fn broadcast(&mut self, payload: Self::Digest) {
+    type Plan = ();
+    type PublicKey = P;
+
+    async fn broadcast(&mut self, payload: Self::Digest, _plan: ()) {
         trace!(?payload, "broadcast");
     }
 }

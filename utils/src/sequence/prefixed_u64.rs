@@ -20,6 +20,7 @@ pub enum Error {
 
 /// An `Array` implementation for prefixed `U64`
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct U64([u8; u64::SIZE + 1]);
 
@@ -31,7 +32,7 @@ impl U64 {
         Self([prefix, b0, b1, b2, b3, b4, b5, b6, b7])
     }
 
-    pub fn prefix(&self) -> u8 {
+    pub const fn prefix(&self) -> u8 {
         self.0[0]
     }
 
@@ -62,8 +63,8 @@ impl Span for U64 {}
 
 impl Array for U64 {}
 
-impl From<[u8; U64::SIZE]> for U64 {
-    fn from(value: [u8; U64::SIZE]) -> Self {
+impl From<[u8; Self::SIZE]> for U64 {
+    fn from(value: [u8; Self::SIZE]) -> Self {
         Self(value)
     }
 }
@@ -131,5 +132,15 @@ mod tests {
 
         let decoded = U64::decode(encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<U64>,
+        }
     }
 }

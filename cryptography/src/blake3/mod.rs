@@ -24,6 +24,7 @@ use crate::Hasher;
 use blake3::Hash;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{hex, Array, Span};
 use core::{
     fmt::{Debug, Display},
@@ -39,7 +40,7 @@ const DIGEST_LENGTH: usize = blake3::OUT_LEN;
 
 /// BLAKE3 hasher.
 #[cfg_attr(
-    feature = "parallel",
+    feature = "blake3-parallel",
     doc = "When the input message is larger than 128KiB, `rayon` is used to parallelize hashing."
 )]
 #[derive(Debug, Default)]
@@ -58,10 +59,10 @@ impl Hasher for Blake3 {
     type Digest = Digest;
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
-        #[cfg(not(feature = "parallel"))]
+        #[cfg(not(feature = "blake3-parallel"))]
         self.hasher.update(message);
 
-        #[cfg(feature = "parallel")]
+        #[cfg(feature = "blake3-parallel")]
         {
             // 128 KiB
             const PARALLEL_THRESHOLD: usize = 2usize.pow(17);
@@ -88,16 +89,22 @@ impl Hasher for Blake3 {
         self.hasher = CoreBlake3::new();
         self
     }
-
-    fn empty() -> Self::Digest {
-        Self::default().finalize()
-    }
 }
 
 /// Digest of a BLAKE3 hashing operation.
 #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
+
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for Digest {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        // Generate random bytes and compute their Blake3 hash
+        let len = u.int_in_range(0..=256)?;
+        let data = u.bytes(len)?;
+        Ok(Blake3::hash(data))
+    }
+}
 
 impl Write for Digest {
     fn write(&self, buf: &mut impl BufMut) {
@@ -160,7 +167,11 @@ impl Display for Digest {
 }
 
 impl crate::Digest for Digest {
-    fn random<R: CryptoRngCore>(rng: &mut R) -> Self {
+    const EMPTY: Self = Self([0u8; DIGEST_LENGTH]);
+}
+
+impl Random for Digest {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut array = [0u8; DIGEST_LENGTH];
         rng.fill_bytes(&mut array);
         Self(array)
@@ -181,8 +192,6 @@ mod tests {
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] =
         hex!("d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24");
-    const EMPTY_DIGEST: [u8; DIGEST_LENGTH] =
-        hex!("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262");
 
     #[test]
     fn test_blake3() {
@@ -212,22 +221,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_empty() {
-        let digest1 = Blake3::empty();
-        let digest2 = Blake3::empty();
-
-        assert_eq!(digest1, digest2);
-    }
-
-    #[test]
-    fn test_blake3_empty() {
-        let empty_digest = Blake3::empty();
-        let expected_digest = Digest::from(EMPTY_DIGEST);
-
-        assert_eq!(empty_digest, expected_digest);
-    }
-
-    #[test]
     fn test_codec() {
         let msg = b"hello world";
         let mut hasher = Blake3::new();
@@ -240,5 +233,15 @@ mod tests {
 
         let decoded = Digest::decode(encoded).unwrap();
         assert_eq!(digest, decoded);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Digest>,
+        }
     }
 }

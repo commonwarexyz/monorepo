@@ -1,20 +1,42 @@
-//! A historical wrapper around [crate::bitmap::Prunable] that maintains snapshots via diff-based batching.
+//! A historical wrapper around [crate::bitmap::Prunable] that maintains snapshots via diffs.
 //!
 //! The Historical bitmap maintains one full [crate::bitmap::Prunable] bitmap (the current/head state).
-//! All historical states and batch mutations are represented as diffs, not full bitmap clones.
+//! All historical states are represented as diffs, not full bitmap clones.
+//!
+//! Uses a type-state pattern to track whether the bitmap is clean (no pending mutations) or
+//! dirty (has pending mutations). This provides compile-time guarantees about when mutations
+//! are allowed.
 //!
 //! # Examples
 //!
-//! ## Basic Batching
+//! ## Usage
+//!
+//! ```
+//! # use commonware_utils::bitmap::historical::BitMap;
+//! let bitmap: BitMap<4> = BitMap::new();
+//!
+//! // Transition to dirty state to make mutations
+//! let mut dirty = bitmap.into_dirty();
+//! dirty.push(true);
+//! dirty.push(false);
+//!
+//! // Commit changes and return to clean state
+//! let bitmap = dirty.commit(1).unwrap();
+//!
+//! assert_eq!(bitmap.len(), 2);
+//! assert!(bitmap.get_bit(0));
+//! assert!(!bitmap.get_bit(1));
+//! ```
+//!
+//! ## Usage with closure
 //!
 //! ```
 //! # use commonware_utils::bitmap::historical::BitMap;
 //! let mut bitmap: BitMap<4> = BitMap::new();
 //!
-//! // Create and commit a batch
-//! bitmap.with_batch(1, |batch| {
-//!     batch.push(true);
-//!     batch.push(false);
+//! bitmap = bitmap.apply_batch(1, |dirty| {
+//!     dirty.push(true);
+//!     dirty.push(false);
 //! }).unwrap();
 //!
 //! assert_eq!(bitmap.len(), 2);
@@ -27,39 +49,38 @@
 //! ```
 //! # use commonware_utils::bitmap::historical::BitMap;
 //! let mut bitmap: BitMap<4> = BitMap::new();
-//! bitmap.with_batch(1, |batch| { batch.push(false); }).unwrap();
+//! bitmap = bitmap.apply_batch(1, |dirty| { dirty.push(false); }).unwrap();
 //!
 //! // Before modification
 //! assert!(!bitmap.get_bit(0));
 //!
-//! {
-//!     let mut batch = bitmap.start_batch();
-//!     batch.set_bit(0, true);
+//! let mut dirty = bitmap.into_dirty();
+//! dirty.set_bit(0, true);
 //!
-//!     // Read through batch sees the modification
-//!     assert!(batch.get_bit(0));
+//! // Read through dirty state sees the modification
+//! assert!(dirty.get_bit(0));
 //!
-//!     batch.commit(2).unwrap();
-//! }
+//! let bitmap = dirty.commit(2).unwrap();
 //!
 //! // After commit, modification is in current
 //! assert!(bitmap.get_bit(0));
 //! ```
 //!
-//! ## Abort on Drop
+//! ## Abort Mutations
 //!
 //! ```
 //! # use commonware_utils::bitmap::historical::BitMap;
-//! # let mut bitmap: BitMap<4> = BitMap::new();
-//! # bitmap.with_batch(1, |batch| { batch.push(true); }).unwrap();
+//! let mut bitmap: BitMap<4> = BitMap::new();
+//! bitmap = bitmap.apply_batch(1, |dirty| { dirty.push(true); }).unwrap();
 //! let len_before = bitmap.len();
 //!
-//! {
-//!     let mut batch = bitmap.start_batch();
-//!     batch.push(true);
-//!     batch.push(false);
-//!     // Drop without commit = automatic abort
-//! }
+//! // Make changes in dirty state
+//! let mut dirty = bitmap.into_dirty();
+//! dirty.push(true);
+//! dirty.push(false);
+//!
+//! // Abort to discard changes and return to clean state
+//! let bitmap = dirty.abort();
 //!
 //! assert_eq!(bitmap.len(), len_before); // Unchanged
 //! ```
@@ -68,10 +89,10 @@
 //!
 //! ```
 //! # use commonware_utils::bitmap::historical::BitMap;
-//! # let mut bitmap: BitMap<4> = BitMap::new();
+//! let mut bitmap: BitMap<4> = BitMap::new();
 //! for i in 1..=5 {
-//!     bitmap.with_batch(i, |batch| {
-//!         batch.push(true);
+//!     bitmap = bitmap.apply_batch(i, |dirty| {
+//!         dirty.push(true);
 //!     }).unwrap();
 //! }
 //!
@@ -82,10 +103,8 @@
 //! assert_eq!(bitmap.commits().count(), 3);
 //! ```
 
-mod batch;
-pub use batch::BatchGuard;
 mod bitmap;
-pub use bitmap::BitMap;
+pub use bitmap::{BitMap, Clean, CleanBitMap, Dirty, DirtyBitMap, State};
 mod error;
 pub use error::Error;
 

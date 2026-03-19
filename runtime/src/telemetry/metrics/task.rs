@@ -15,7 +15,7 @@ pub struct Label {
 
 impl Label {
     /// Create a new label for the root task.
-    pub fn root() -> Self {
+    pub const fn root() -> Self {
         Self {
             name: String::new(),
             kind: Kind::Root,
@@ -24,7 +24,7 @@ impl Label {
     }
 
     /// Create a new label for a future task.
-    pub fn task(name: String, execution: crate::Execution) -> Self {
+    pub const fn task(name: String, execution: crate::Execution) -> Self {
         Self {
             name,
             kind: Kind::Task,

@@ -2,7 +2,7 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::Metrics;
 use commonware_storage::{
     index::{ordered, partitioned, unordered, Unordered},
-    translator::{FourCap, TwoCap},
+    translator::{Cap, FourCap, Hashed, TwoCap},
 };
 use criterion::{criterion_group, Criterion};
 use prometheus_client::registry::Metric;
@@ -18,14 +18,17 @@ const N_ITEMS: [usize; 5] = [10_000, 50_000, 100_000, 500_000, 1_000_000];
 enum Variant {
     Ordered,
     Unordered,
-    PartitionedUnordered1, // 1-byte prefix
-    PartitionedUnordered2, // 2-byte prefix
-    PartitionedOrdered1,   // 1-byte prefix
-    PartitionedOrdered2,   // 2-byte prefix
+    PartitionedUnordered1,
+    PartitionedUnordered2,
+    PartitionedOrdered1,
+    PartitionedOrdered2,
+    HashedUnordered,
+    HashedPartitionedUnordered1,
+    HashedPartitionedUnordered2,
 }
 
 impl Variant {
-    pub fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
             Self::Ordered => "ordered",
             Self::Unordered => "unordered",
@@ -33,17 +36,23 @@ impl Variant {
             Self::PartitionedUnordered2 => "partitioned_unordered_2",
             Self::PartitionedOrdered1 => "partitioned_ordered_1",
             Self::PartitionedOrdered2 => "partitioned_ordered_2",
+            Self::HashedUnordered => "hashed_unordered",
+            Self::HashedPartitionedUnordered1 => "hashed_partitioned_unordered_1",
+            Self::HashedPartitionedUnordered2 => "hashed_partitioned_unordered_2",
         }
     }
 }
 
-const VARIANTS: [Variant; 6] = [
+const VARIANTS: [Variant; 9] = [
     Variant::Ordered,
     Variant::Unordered,
     Variant::PartitionedUnordered1,
     Variant::PartitionedUnordered2,
     Variant::PartitionedOrdered1,
     Variant::PartitionedOrdered2,
+    Variant::HashedUnordered,
+    Variant::HashedPartitionedUnordered1,
+    Variant::HashedPartitionedUnordered2,
 ];
 
 #[derive(Clone)]
@@ -51,7 +60,7 @@ struct DummyMetrics;
 
 impl Metrics for DummyMetrics {
     fn label(&self) -> String {
-        "".to_string()
+        "".into()
     }
 
     fn with_label(&self, _: &str) -> Self {
@@ -59,10 +68,18 @@ impl Metrics for DummyMetrics {
     }
 
     fn encode(&self) -> String {
-        "".to_string()
+        "".into()
     }
 
     fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
+
+    fn with_attribute(&self, _: &str, _: impl std::fmt::Display) -> Self {
+        Self
+    }
+
+    fn with_scope(&self) -> Self {
+        Self
+    }
 }
 
 fn bench_insert(c: &mut Criterion) {
@@ -97,12 +114,9 @@ fn bench_insert(c: &mut Criterion) {
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedUnordered1 => {
-                                // For apples to apples behavior (in terms of # of collision) we'd
-                                // ideally like a "ThreeCap" translator when there is a 1-byte
-                                // prefix, but that's not currently a thing.
                                 let mut index = partitioned::unordered::Index::<_, _, 1>::new(
                                     DummyMetrics,
-                                    FourCap,
+                                    Cap::<3>::new(),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
@@ -116,14 +130,36 @@ fn bench_insert(c: &mut Criterion) {
                             Variant::PartitionedOrdered1 => {
                                 let mut index = partitioned::ordered::Index::<_, _, 1>::new(
                                     DummyMetrics,
-                                    FourCap,
+                                    Cap::<3>::new(),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }
                             Variant::PartitionedOrdered2 => {
                                 let mut index = partitioned::ordered::Index::<_, _, 2>::new(
                                     DummyMetrics,
-                                    TwoCap,
+                                    Cap::<2>::new(),
+                                );
+                                total += run_benchmark(&mut index, &kvs_data);
+                            }
+
+                            Variant::HashedUnordered => {
+                                let mut index = unordered::Index::new(
+                                    DummyMetrics,
+                                    Hashed::from_seed(0, FourCap),
+                                );
+                                total += run_benchmark(&mut index, &kvs_data);
+                            }
+                            Variant::HashedPartitionedUnordered1 => {
+                                let mut index = partitioned::unordered::Index::<_, _, 1>::new(
+                                    DummyMetrics,
+                                    Hashed::from_seed(0, Cap::<3>::new()),
+                                );
+                                total += run_benchmark(&mut index, &kvs_data);
+                            }
+                            Variant::HashedPartitionedUnordered2 => {
+                                let mut index = partitioned::unordered::Index::<_, _, 2>::new(
+                                    DummyMetrics,
+                                    Hashed::from_seed(0, TwoCap),
                                 );
                                 total += run_benchmark(&mut index, &kvs_data);
                             }

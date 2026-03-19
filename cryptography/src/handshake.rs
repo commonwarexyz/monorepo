@@ -24,8 +24,10 @@
 //! The shared secret can then be used to derive to AEAD keys, for the sending data ([SendCipher])
 //! and receiving data ([RecvCipher]). These use ChaCha20-Poly1305 as the AEAD. Each direction has
 //! a 12 byte counter to used as a nonce, with every call to [SendCipher::send] on one end,
-//! or [RecvCipher::recv] on the other end incrementing this counter.
-//! Note that this guarantees that messages sent are received in order.
+//! or [RecvCipher::recv] on the other end incrementing this counter. This guarantees that if
+//! a message is successfully received, then it was delivered in order. Re-ordering messages on
+//! the wire will have the effect of producing errors on the receiving end, but not of producing
+//! successful messages in a different order.
 //!
 //! # Security Features
 //!
@@ -47,9 +49,12 @@ mod key_exchange;
 use key_exchange::{EphemeralPublicKey, SecretKey};
 
 mod cipher;
-pub use cipher::{RecvCipher, SendCipher, CIPHERTEXT_OVERHEAD};
+pub use cipher::{RecvCipher, SendCipher, TAG_SIZE};
 
-const NAMESPACE: &[u8] = b"commonware/handshake";
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
+
+const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE";
 const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
 const LABEL_CIPHER_D2L: &[u8] = b"cipher_d2l";
 const LABEL_CONFIRMATION_L2D: &[u8] = b"confirmation_l2d";
@@ -57,7 +62,7 @@ const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 
 /// First handshake message sent by the dialer.
 /// Contains dialer's ephemeral key and timestamp signature.
-#[cfg_attr(test, derive(PartialEq))]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct Syn<S: Signature> {
     time_ms: u64,
     epk: EphemeralPublicKey,
@@ -91,9 +96,23 @@ impl<S: Signature + Read> Read for Syn<S> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Signature> arbitrary::Arbitrary<'_> for Syn<S>
+where
+    S: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            time_ms: u.arbitrary()?,
+            epk: u.arbitrary()?,
+            sig: u.arbitrary()?,
+        })
+    }
+}
+
 /// Second handshake message sent by the listener.
 /// Contains listener's ephemeral key, signature, and confirmation tag.
-#[cfg_attr(test, derive(PartialEq))]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct SynAck<S: Signature> {
     time_ms: u64,
     epk: EphemeralPublicKey,
@@ -130,9 +149,25 @@ impl<S: Signature + Read> Read for SynAck<S> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<S: Signature> arbitrary::Arbitrary<'_> for SynAck<S>
+where
+    S: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            time_ms: u.arbitrary()?,
+            epk: u.arbitrary()?,
+            sig: u.arbitrary()?,
+            confirmation: u.arbitrary()?,
+        })
+    }
+}
+
 /// Third handshake message sent by the dialer.
 /// Contains dialer's confirmation tag to complete the handshake.
 #[cfg_attr(test, derive(PartialEq))]
+#[cfg_attr(feature = "arbitrary", derive(Debug, arbitrary::Arbitrary))]
 pub struct Ack {
     confirmation: Summary,
 }
@@ -180,6 +215,7 @@ pub struct ListenState {
 /// Handshake context containing timing and identity information.
 /// Used by both dialer and listener to initialize handshake state.
 pub struct Context<S, P> {
+    transcript: Transcript,
     current_time: u64,
     ok_timestamps: Range<u64>,
     my_identity: S,
@@ -189,12 +225,14 @@ pub struct Context<S, P> {
 impl<S, P> Context<S, P> {
     /// Creates a new handshake context.
     pub fn new(
+        base: &Transcript,
         current_time_ms: u64,
         ok_timestamps: Range<u64>,
         my_identity: S,
         peer_identity: P,
     ) -> Self {
         Self {
+            transcript: base.fork(NAMESPACE),
             current_time: current_time_ms,
             ok_timestamps,
             my_identity,
@@ -214,10 +252,10 @@ pub fn dial_start<S: Signer, P: PublicKey>(
         ok_timestamps,
         my_identity,
         peer_identity,
+        mut transcript,
     } = ctx;
     let esk = SecretKey::new(rng);
     let epk = esk.public();
-    let mut transcript = Transcript::new(NAMESPACE);
     let sig = transcript
         .commit(current_time.encode())
         .commit(peer_identity.encode())
@@ -261,10 +299,12 @@ pub fn dial_end<P: PublicKey>(
     {
         return Err(Error::HandshakeFailed);
     }
-    let Some(secret) = esk.exchange(&msg.epk) else {
+    let Some(shared) = esk.exchange(&msg.epk) else {
         return Err(Error::HandshakeFailed);
     };
-    transcript.commit(secret.as_ref());
+    shared
+        .secret
+        .expose(|secret| transcript.commit(secret.as_ref()));
     let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_L2D));
     let send = SendCipher::new(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
@@ -294,11 +334,11 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         my_identity,
         peer_identity,
         ok_timestamps,
+        mut transcript,
     } = ctx;
     if !ok_timestamps.contains(&msg.time_ms) {
         return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
     }
-    let mut transcript = Transcript::new(NAMESPACE);
     if !transcript
         .commit(msg.time_ms.encode())
         .commit(my_identity.public_key().encode())
@@ -314,10 +354,12 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         .commit(current_time.encode())
         .commit(epk.encode())
         .sign(&my_identity);
-    let Some(secret) = esk.exchange(&msg.epk) else {
+    let Some(shared) = esk.exchange(&msg.epk) else {
         return Err(Error::HandshakeFailed);
     };
-    transcript.commit(secret.as_ref());
+    shared
+        .secret
+        .expose(|secret| transcript.commit(secret.as_ref()));
     let send = SendCipher::new(transcript.noise(LABEL_CIPHER_L2D));
     let recv = RecvCipher::new(transcript.noise(LABEL_CIPHER_D2L));
     let confirmation_l2d = transcript.fork(LABEL_CONFIRMATION_L2D).summarize();
@@ -350,10 +392,10 @@ pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCiphe
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{ed25519::PrivateKey, PrivateKeyExt as _, Signer};
+    use crate::{ed25519::PrivateKey, transcript::Transcript, Signer};
     use commonware_codec::{Codec, DecodeExt};
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha8Rng;
+    use commonware_math::algebra::Random;
+    use commonware_utils::test_rng;
 
     fn test_encode_roundtrip<T: Codec<Cfg = ()> + PartialEq>(value: &T) {
         assert!(value == &<T as DecodeExt<_>>::decode(value.encode()).unwrap());
@@ -361,28 +403,30 @@ mod test {
 
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {
-        let mut rng = ChaCha8Rng::seed_from_u64(0);
-        let dialer_crypto = PrivateKey::from_rng(&mut rng);
-        let listener_crypto = PrivateKey::from_rng(&mut rng);
+        let mut rng = test_rng();
+        let dialer_crypto = PrivateKey::random(&mut rng);
+        let listener_crypto = PrivateKey::random(&mut rng);
 
         let (d_state, msg1) = dial_start(
             &mut rng,
-            Context {
-                current_time: 0,
-                ok_timestamps: 0..1,
-                my_identity: dialer_crypto.clone(),
-                peer_identity: listener_crypto.public_key(),
-            },
+            Context::new(
+                &Transcript::new(b"test_namespace"),
+                0,
+                0..1,
+                dialer_crypto.clone(),
+                listener_crypto.public_key(),
+            ),
         );
         test_encode_roundtrip(&msg1);
         let (l_state, msg2) = listen_start(
             &mut rng,
-            Context {
-                current_time: 0,
-                ok_timestamps: 0..1,
-                my_identity: listener_crypto,
-                peer_identity: dialer_crypto.public_key(),
-            },
+            Context::new(
+                &Transcript::new(b"test_namespace"),
+                0,
+                0..1,
+                listener_crypto,
+                dialer_crypto.public_key(),
+            ),
             msg1,
         )?;
         test_encode_roundtrip(&msg2);
@@ -402,5 +446,49 @@ mod test {
         assert_eq!(m2, &m2_prime);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_mismatched_namespace_fails() {
+        let mut rng = test_rng();
+        let dialer_crypto = PrivateKey::random(&mut rng);
+        let listener_crypto = PrivateKey::random(&mut rng);
+
+        let (_, msg1) = dial_start(
+            &mut rng,
+            Context::new(
+                &Transcript::new(b"namespace_a"),
+                0,
+                0..1,
+                dialer_crypto.clone(),
+                listener_crypto.public_key(),
+            ),
+        );
+
+        let result = listen_start(
+            &mut rng,
+            Context::new(
+                &Transcript::new(b"namespace_b"),
+                0,
+                0..1,
+                listener_crypto,
+                dialer_crypto.public_key(),
+            ),
+            msg1,
+        );
+
+        assert!(matches!(result, Err(Error::HandshakeFailed)));
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Syn<crate::ed25519::Signature>>,
+            CodecConformance<SynAck<crate::ed25519::Signature>>,
+            CodecConformance<Ack>,
+        }
     }
 }

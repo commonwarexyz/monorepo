@@ -6,7 +6,7 @@ use criterion::{criterion_group, Criterion};
 use rand::thread_rng;
 use std::hint::black_box;
 
-fn benchmark_tle_encrypt(c: &mut Criterion) {
+fn bench_tle_encrypt(c: &mut Criterion) {
     let mut rng = thread_rng();
     let (_, master_public) = keypair::<_, MinSig>(&mut rng);
     let target = 10u64.to_be_bytes();
@@ -17,7 +17,7 @@ fn benchmark_tle_encrypt(c: &mut Criterion) {
             black_box(encrypt::<_, MinSig>(
                 &mut rng,
                 master_public,
-                (None, &target),
+                (b"_BENCH_TLE_", &target),
                 &message,
             ));
         });
@@ -27,5 +27,5 @@ fn benchmark_tle_encrypt(c: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default().sample_size(10);
-    targets = benchmark_tle_encrypt
+    targets = bench_tle_encrypt
 }

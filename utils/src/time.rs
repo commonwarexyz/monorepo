@@ -14,7 +14,8 @@ cfg_if::cfg_if! {
         /// Source: [`FILETIME` range](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-filetime)
         /// uses unsigned 64-bit ticks (100ns) since 1601-01-01; converting to the Unix epoch offset of
         /// 11_644_473_600 seconds yields the remaining representable span.
-        pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(910_692_730_085, 477_580_700);
+        pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration =
+            Duration::new(910_692_730_085, 477_580_700);
 
         /// The precision of [`SystemTime`] on Windows.
         pub const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(100);
@@ -26,7 +27,8 @@ cfg_if::cfg_if! {
         /// [`std::sys::pal::unix::time`](https://github.com/rust-lang/rust/blob/master/library/std/src/sys/pal/unix/time.rs),
         /// which bounds additions at `i64::MAX` seconds plus 999_999_999 nanoseconds.
         #[cfg(not(windows))]
-        pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration = Duration::new(i64::MAX as u64, 999_999_999);
+        pub const MAX_DURATION_SINCE_UNIX_EPOCH: Duration =
+            Duration::new(i64::MAX as u64, 999_999_999);
 
         /// The precision of [`SystemTime`] on Unix.
         pub const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(1);
@@ -94,14 +96,14 @@ pub trait DurationExt {
 impl DurationExt for Duration {
     fn from_nanos_saturating(ns: u128) -> Duration {
         // Clamp anything beyond the representable range
-        if ns > Duration::MAX.as_nanos() {
-            return Duration::MAX;
+        if ns > Self::MAX.as_nanos() {
+            return Self::MAX;
         }
 
         // Convert to `Duration`
         let secs = (ns / NANOS_PER_SEC) as u64;
         let nanos = (ns % NANOS_PER_SEC) as u32;
-        Duration::new(secs, nanos)
+        Self::new(secs, nanos)
     }
 
     fn parse(s: &str) -> Result<Duration, String> {
@@ -113,7 +115,7 @@ impl DurationExt for Duration {
                 .trim()
                 .parse()
                 .map_err(|_| format!("Invalid milliseconds value: '{num_str}'"))?;
-            return Ok(Duration::from_millis(millis));
+            return Ok(Self::from_millis(millis));
         }
 
         // Handle hours
@@ -125,7 +127,7 @@ impl DurationExt for Duration {
             let seconds = hours
                 .checked_mul(3600)
                 .ok_or_else(|| format!("Hours value too large (would overflow): '{hours}'"))?;
-            return Ok(Duration::from_secs(seconds));
+            return Ok(Self::from_secs(seconds));
         }
 
         // Handle minutes
@@ -137,7 +139,7 @@ impl DurationExt for Duration {
             let seconds = minutes
                 .checked_mul(60)
                 .ok_or_else(|| format!("Minutes value too large (would overflow): '{minutes}'"))?;
-            return Ok(Duration::from_secs(seconds));
+            return Ok(Self::from_secs(seconds));
         }
 
         // Handle seconds
@@ -146,7 +148,7 @@ impl DurationExt for Duration {
                 .trim()
                 .parse()
                 .map_err(|_| format!("Invalid seconds value: '{num_str}'"))?;
-            return Ok(Duration::from_secs(secs));
+            return Ok(Self::from_secs(secs));
         }
 
         // No suffix - return error
@@ -178,7 +180,7 @@ pub trait SystemTimeExt {
     fn limit() -> SystemTime;
 
     /// Adds `delta` to the current time, saturating at the platform maximum instead of overflowing.
-    fn saturating_add(&self, delta: Duration) -> SystemTime;
+    fn saturating_add_ext(&self, delta: Duration) -> SystemTime;
 }
 
 impl SystemTimeExt for SystemTime {
@@ -196,12 +198,12 @@ impl SystemTimeExt for SystemTime {
     }
 
     fn limit() -> SystemTime {
-        SystemTime::UNIX_EPOCH
+        Self::UNIX_EPOCH
             .checked_add(MAX_DURATION_SINCE_UNIX_EPOCH)
             .expect("maximum system time must be representable")
     }
 
-    fn saturating_add(&self, delta: Duration) -> SystemTime {
+    fn saturating_add_ext(&self, delta: Duration) -> SystemTime {
         if delta.is_zero() {
             return *self;
         }
@@ -215,6 +217,7 @@ impl SystemTimeExt for SystemTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_rng;
 
     #[test]
     fn test_epoch() {
@@ -290,7 +293,7 @@ mod tests {
 
     #[test]
     fn test_add_jittered() {
-        let mut rng = rand::thread_rng();
+        let mut rng = test_rng();
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
         let jitter = Duration::from_secs(2);
 
@@ -327,8 +330,8 @@ mod tests {
     #[test]
     fn system_time_saturating_add() {
         let max = SystemTime::limit();
-        assert_eq!(max.saturating_add(Duration::from_nanos(1)), max);
-        assert_eq!(max.saturating_add(Duration::from_secs(1)), max);
+        assert_eq!(max.saturating_add_ext(Duration::from_nanos(1)), max);
+        assert_eq!(max.saturating_add_ext(Duration::from_secs(1)), max);
     }
 
     #[test]

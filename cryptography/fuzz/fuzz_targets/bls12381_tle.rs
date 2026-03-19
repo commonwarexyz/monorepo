@@ -10,7 +10,7 @@ use common::{
 use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
     primitives::{
-        group::Scalar,
+        group::Private,
         ops::{compute_public, sign_message},
         variant::{MinPk, MinSig, Variant},
     },
@@ -19,52 +19,41 @@ use commonware_cryptography::bls12381::{
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, SeedableRng};
 
-type Message = (Option<Vec<u8>>, Vec<u8>);
-
 #[derive(Debug, Clone)]
 enum FuzzOperation {
     EncryptDecryptMinPk {
-        master_secret: Scalar,
-        target: Vec<u8>,
-        message: [u8; 32],
-        rng_seed: u64,
-    },
-    EncryptDecryptMinSig {
-        master_secret: Scalar,
-        target: Vec<u8>,
-        message: [u8; 32],
-        rng_seed: u64,
-    },
-    EncryptDecryptWithNamespaceMinPk {
-        master_secret: Scalar,
+        master_secret: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         rng_seed: u64,
     },
-    EncryptDecryptWithNamespaceMinSig {
-        master_secret: Scalar,
+    EncryptDecryptMinSig {
+        master_secret: Private,
         namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         rng_seed: u64,
     },
     DecryptWithWrongKeyMinPk {
-        master_secret1: Scalar,
-        master_secret2: Scalar,
+        master_secret1: Private,
+        master_secret2: Private,
+        namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         rng_seed: u64,
     },
     DecryptWithWrongKeyMinSig {
-        master_secret1: Scalar,
-        master_secret2: Scalar,
+        master_secret1: Private,
+        master_secret2: Private,
+        namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         rng_seed: u64,
     },
     TamperedCiphertextMinPk {
-        master_secret: Scalar,
+        master_secret: Private,
+        namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         tamper_index: usize,
@@ -72,7 +61,8 @@ enum FuzzOperation {
         rng_seed: u64,
     },
     TamperedCiphertextMinSig {
-        master_secret: Scalar,
+        master_secret: Private,
+        namespace: Vec<u8>,
         target: Vec<u8>,
         message: [u8; 32],
         tamper_index: usize,
@@ -91,70 +81,62 @@ enum FuzzOperation {
 
 impl<'a> Arbitrary<'a> for FuzzOperation {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let choice = u.int_in_range(0..=9)?;
+        let choice = u.int_in_range(0..=7)?;
 
         match choice {
             0 => Ok(FuzzOperation::EncryptDecryptMinPk {
-                master_secret: common::arbitrary_scalar(u)?,
+                master_secret: u.arbitrary()?,
+                namespace: common::arbitrary_bytes(u, 0, 50)?,
                 target: common::arbitrary_bytes(u, 0, 100)?,
                 message: u.arbitrary()?,
                 rng_seed: u.arbitrary()?,
             }),
             1 => Ok(FuzzOperation::EncryptDecryptMinSig {
-                master_secret: common::arbitrary_scalar(u)?,
-                target: common::arbitrary_bytes(u, 0, 100)?,
-                message: u.arbitrary()?,
-                rng_seed: u.arbitrary()?,
-            }),
-            2 => Ok(FuzzOperation::EncryptDecryptWithNamespaceMinPk {
-                master_secret: common::arbitrary_scalar(u)?,
+                master_secret: u.arbitrary()?,
                 namespace: common::arbitrary_bytes(u, 0, 50)?,
                 target: common::arbitrary_bytes(u, 0, 100)?,
                 message: u.arbitrary()?,
                 rng_seed: u.arbitrary()?,
             }),
-            3 => Ok(FuzzOperation::EncryptDecryptWithNamespaceMinSig {
-                master_secret: common::arbitrary_scalar(u)?,
+            2 => Ok(FuzzOperation::DecryptWithWrongKeyMinPk {
+                master_secret1: u.arbitrary()?,
+                master_secret2: u.arbitrary()?,
                 namespace: common::arbitrary_bytes(u, 0, 50)?,
                 target: common::arbitrary_bytes(u, 0, 100)?,
                 message: u.arbitrary()?,
                 rng_seed: u.arbitrary()?,
             }),
-            4 => Ok(FuzzOperation::DecryptWithWrongKeyMinPk {
-                master_secret1: common::arbitrary_scalar(u)?,
-                master_secret2: common::arbitrary_scalar(u)?,
+            3 => Ok(FuzzOperation::DecryptWithWrongKeyMinSig {
+                master_secret1: u.arbitrary()?,
+                master_secret2: u.arbitrary()?,
+                namespace: common::arbitrary_bytes(u, 0, 50)?,
                 target: common::arbitrary_bytes(u, 0, 100)?,
                 message: u.arbitrary()?,
                 rng_seed: u.arbitrary()?,
             }),
-            5 => Ok(FuzzOperation::DecryptWithWrongKeyMinSig {
-                master_secret1: common::arbitrary_scalar(u)?,
-                master_secret2: common::arbitrary_scalar(u)?,
-                target: common::arbitrary_bytes(u, 0, 100)?,
-                message: u.arbitrary()?,
-                rng_seed: u.arbitrary()?,
-            }),
-            6 => Ok(FuzzOperation::TamperedCiphertextMinPk {
-                master_secret: common::arbitrary_scalar(u)?,
+            4 => Ok(FuzzOperation::TamperedCiphertextMinPk {
+                master_secret: u.arbitrary()?,
+                namespace: common::arbitrary_bytes(u, 0, 50)?,
                 target: common::arbitrary_bytes(u, 0, 100)?,
                 message: u.arbitrary()?,
                 tamper_index: u.int_in_range(0..=95)?,
                 tamper_value: u.arbitrary()?,
                 rng_seed: u.arbitrary()?,
             }),
-            7 => Ok(FuzzOperation::TamperedCiphertextMinSig {
-                master_secret: common::arbitrary_scalar(u)?,
+            5 => Ok(FuzzOperation::TamperedCiphertextMinSig {
+                master_secret: u.arbitrary()?,
+                namespace: common::arbitrary_bytes(u, 0, 50)?,
                 target: common::arbitrary_bytes(u, 0, 100)?,
                 message: u.arbitrary()?,
                 tamper_index: u.int_in_range(0..=95)?,
                 tamper_value: u.arbitrary()?,
                 rng_seed: u.arbitrary()?,
             }),
-            8 => Ok(FuzzOperation::DecryptArbitraryMinPk {
+            6 => Ok(FuzzOperation::DecryptArbitraryMinPk {
                 signature: arbitrary_minpk_signature(u)?,
                 ciphertext: arbitrary_ciphertext_minpk(u)?,
             }),
-            9 => Ok(FuzzOperation::DecryptArbitraryMinSig {
+            7 => Ok(FuzzOperation::DecryptArbitraryMinSig {
                 signature: arbitrary_minsig_signature(u)?,
                 ciphertext: arbitrary_ciphertext_minsig(u)?,
             }),
@@ -166,52 +148,6 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 fn fuzz(op: FuzzOperation) {
     match op {
         FuzzOperation::EncryptDecryptMinPk {
-            master_secret,
-            target,
-            message,
-            rng_seed,
-        } => {
-            let master_public = compute_public::<MinPk>(&master_secret);
-            let message_block = Block::new(message);
-
-            let mut rng = StdRng::seed_from_u64(rng_seed);
-            let ciphertext =
-                encrypt::<_, MinPk>(&mut rng, master_public, (None, &target), &message_block);
-
-            let signature = sign_message::<MinPk>(&master_secret, None, &target);
-            let decrypted = decrypt::<MinPk>(&signature, &ciphertext);
-
-            if let Some(decrypted_block) = decrypted {
-                assert_eq!(message_block, decrypted_block);
-            } else {
-                panic!("Decryption failed for valid ciphertext");
-            }
-        }
-
-        FuzzOperation::EncryptDecryptMinSig {
-            master_secret,
-            target,
-            message,
-            rng_seed,
-        } => {
-            let master_public = compute_public::<MinSig>(&master_secret);
-            let message_block = Block::new(message);
-
-            let mut rng = StdRng::seed_from_u64(rng_seed);
-            let ciphertext =
-                encrypt::<_, MinSig>(&mut rng, master_public, (None, &target), &message_block);
-
-            let signature = sign_message::<MinSig>(&master_secret, None, &target);
-            let decrypted = decrypt::<MinSig>(&signature, &ciphertext);
-
-            if let Some(decrypted_block) = decrypted {
-                assert_eq!(message_block, decrypted_block);
-            } else {
-                panic!("Decryption failed for valid ciphertext");
-            }
-        }
-
-        FuzzOperation::EncryptDecryptWithNamespaceMinPk {
             master_secret,
             namespace,
             target,
@@ -225,21 +161,21 @@ fn fuzz(op: FuzzOperation) {
             let ciphertext = encrypt::<_, MinPk>(
                 &mut rng,
                 master_public,
-                (Some(&namespace), &target),
+                (&namespace, &target),
                 &message_block,
             );
 
-            let signature = sign_message::<MinPk>(&master_secret, Some(&namespace), &target);
+            let signature = sign_message::<MinPk>(&master_secret, &namespace, &target);
             let decrypted = decrypt::<MinPk>(&signature, &ciphertext);
 
             if let Some(decrypted_block) = decrypted {
                 assert_eq!(message_block, decrypted_block);
             } else {
-                panic!("Decryption failed for valid ciphertext with namespace");
+                panic!("Decryption failed for valid ciphertext");
             }
         }
 
-        FuzzOperation::EncryptDecryptWithNamespaceMinSig {
+        FuzzOperation::EncryptDecryptMinSig {
             master_secret,
             namespace,
             target,
@@ -253,23 +189,24 @@ fn fuzz(op: FuzzOperation) {
             let ciphertext = encrypt::<_, MinSig>(
                 &mut rng,
                 master_public,
-                (Some(&namespace), &target),
+                (&namespace, &target),
                 &message_block,
             );
 
-            let signature = sign_message::<MinSig>(&master_secret, Some(&namespace), &target);
+            let signature = sign_message::<MinSig>(&master_secret, &namespace, &target);
             let decrypted = decrypt::<MinSig>(&signature, &ciphertext);
 
             if let Some(decrypted_block) = decrypted {
                 assert_eq!(message_block, decrypted_block);
             } else {
-                panic!("Decryption failed for valid ciphertext with namespace");
+                panic!("Decryption failed for valid ciphertext");
             }
         }
 
         FuzzOperation::DecryptWithWrongKeyMinPk {
             master_secret1,
             master_secret2,
+            namespace,
             target,
             message,
             rng_seed,
@@ -278,16 +215,21 @@ fn fuzz(op: FuzzOperation) {
             let message_block = Block::new(message);
 
             let mut rng = StdRng::seed_from_u64(rng_seed);
-            let ciphertext =
-                encrypt::<_, MinPk>(&mut rng, master_public1, (None, &target), &message_block);
+            let ciphertext = encrypt::<_, MinPk>(
+                &mut rng,
+                master_public1,
+                (&namespace, &target),
+                &message_block,
+            );
 
-            let wrong_signature = sign_message::<MinPk>(&master_secret2, None, &target);
+            let wrong_signature = sign_message::<MinPk>(&master_secret2, &namespace, &target);
             let _ = decrypt::<MinPk>(&wrong_signature, &ciphertext);
         }
 
         FuzzOperation::DecryptWithWrongKeyMinSig {
             master_secret1,
             master_secret2,
+            namespace,
             target,
             message,
             rng_seed,
@@ -296,15 +238,20 @@ fn fuzz(op: FuzzOperation) {
             let message_block = Block::new(message);
 
             let mut rng = StdRng::seed_from_u64(rng_seed);
-            let ciphertext =
-                encrypt::<_, MinSig>(&mut rng, master_public1, (None, &target), &message_block);
+            let ciphertext = encrypt::<_, MinSig>(
+                &mut rng,
+                master_public1,
+                (&namespace, &target),
+                &message_block,
+            );
 
-            let wrong_signature = sign_message::<MinSig>(&master_secret2, None, &target);
+            let wrong_signature = sign_message::<MinSig>(&master_secret2, &namespace, &target);
             let _ = decrypt::<MinSig>(&wrong_signature, &ciphertext);
         }
 
         FuzzOperation::TamperedCiphertextMinPk {
             master_secret,
+            namespace,
             target,
             message,
             tamper_index,
@@ -315,8 +262,12 @@ fn fuzz(op: FuzzOperation) {
             let message_block = Block::new(message);
 
             let mut rng = StdRng::seed_from_u64(rng_seed);
-            let ciphertext =
-                encrypt::<_, MinPk>(&mut rng, master_public, (None, &target), &message_block);
+            let ciphertext = encrypt::<_, MinPk>(
+                &mut rng,
+                master_public,
+                (&namespace, &target),
+                &message_block,
+            );
 
             let mut encoded = Vec::new();
             commonware_codec::Write::write(&ciphertext, &mut encoded);
@@ -325,13 +276,14 @@ fn fuzz(op: FuzzOperation) {
             }
 
             if let Ok(tampered) = Ciphertext::<MinPk>::read(&mut encoded.as_slice()) {
-                let signature = sign_message::<MinPk>(&master_secret, None, &target);
+                let signature = sign_message::<MinPk>(&master_secret, &namespace, &target);
                 let _ = decrypt::<MinPk>(&signature, &tampered);
             }
         }
 
         FuzzOperation::TamperedCiphertextMinSig {
             master_secret,
+            namespace,
             target,
             message,
             tamper_index,
@@ -342,8 +294,12 @@ fn fuzz(op: FuzzOperation) {
             let message_block = Block::new(message);
             let mut rng = StdRng::seed_from_u64(rng_seed);
 
-            let ciphertext =
-                encrypt::<_, MinSig>(&mut rng, master_public, (None, &target), &message_block);
+            let ciphertext = encrypt::<_, MinSig>(
+                &mut rng,
+                master_public,
+                (&namespace, &target),
+                &message_block,
+            );
 
             let mut encoded = Vec::new();
             commonware_codec::Write::write(&ciphertext, &mut encoded);
@@ -352,7 +308,7 @@ fn fuzz(op: FuzzOperation) {
             }
 
             if let Ok(tampered) = Ciphertext::<MinSig>::read(&mut encoded.as_slice()) {
-                let signature = sign_message::<MinSig>(&master_secret, None, &target);
+                let signature = sign_message::<MinSig>(&master_secret, &namespace, &target);
                 let _ = decrypt::<MinSig>(&signature, &tampered);
             }
         }

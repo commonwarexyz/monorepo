@@ -39,7 +39,7 @@ impl<const N: usize> Prunable<N> {
     /* Constructors */
 
     /// Create a new empty prunable bitmap.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             bitmap: BitMap::new(),
             pruned_chunks: 0,
@@ -69,7 +69,7 @@ impl<const N: usize> Prunable<N> {
 
     /// Return the number of bits in the bitmap, irrespective of any pruning.
     #[inline]
-    pub fn len(&self) -> u64 {
+    pub const fn len(&self) -> u64 {
         let pruned_bits = (self.pruned_chunks as u64)
             .checked_mul(Self::CHUNK_SIZE_BITS)
             .expect("invariant violated: pruned_chunks * CHUNK_SIZE_BITS overflows u64");
@@ -81,31 +81,42 @@ impl<const N: usize> Prunable<N> {
 
     /// Return true if the bitmap is empty.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns true if the bitmap length is aligned to a chunk boundary.
     #[inline]
-    pub fn is_chunk_aligned(&self) -> bool {
+    pub const fn is_chunk_aligned(&self) -> bool {
         self.len().is_multiple_of(Self::CHUNK_SIZE_BITS)
     }
 
-    /// Return the number of unpruned chunks in the bitmap.
+    /// Return the number of chunks, including pruned chunks.
     #[inline]
     pub fn chunks_len(&self) -> usize {
-        self.bitmap.chunks_len()
+        self.pruned_chunks + self.bitmap.chunks_len()
     }
 
     /// Return the number of pruned chunks.
     #[inline]
-    pub fn pruned_chunks(&self) -> usize {
+    pub const fn pruned_chunks(&self) -> usize {
         self.pruned_chunks
+    }
+
+    /// Return the number of complete (fully filled) chunks in the bitmap, accounting
+    /// for pruning. A chunk is complete when all CHUNK_SIZE_BITS bits have been written.
+    #[inline]
+    pub fn complete_chunks(&self) -> usize {
+        self.pruned_chunks
+            + self
+                .bitmap
+                .chunks_len()
+                .saturating_sub(if self.is_chunk_aligned() { 0 } else { 1 })
     }
 
     /// Return the number of pruned bits.
     #[inline]
-    pub fn pruned_bits(&self) -> u64 {
+    pub const fn pruned_bits(&self) -> u64 {
         (self.pruned_chunks as u64)
             .checked_mul(Self::CHUNK_SIZE_BITS)
             .expect("invariant violated: pruned_chunks * CHUNK_SIZE_BITS overflows u64")
@@ -120,7 +131,7 @@ impl<const N: usize> Prunable<N> {
     /// Panics if the bit doesn't exist or has been pruned.
     #[inline]
     pub fn get_bit(&self, bit: u64) -> bool {
-        let chunk_num = Self::unpruned_chunk(bit);
+        let chunk_num = Self::to_chunk_index(bit);
         assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit}");
 
         // Adjust bit to account for pruning
@@ -134,7 +145,7 @@ impl<const N: usize> Prunable<N> {
     /// Panics if the bit doesn't exist or has been pruned.
     #[inline]
     pub fn get_chunk_containing(&self, bit: u64) -> &[u8; N] {
-        let chunk_num = Self::unpruned_chunk(bit);
+        let chunk_num = Self::to_chunk_index(bit);
         assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit}");
 
         // Adjust bit to account for pruning
@@ -144,8 +155,8 @@ impl<const N: usize> Prunable<N> {
     /// Get the value of a bit from its chunk.
     /// `bit` is an index into the entire bitmap, not just the chunk.
     #[inline]
-    pub fn get_bit_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
-        BitMap::<N>::get_from_chunk(chunk, bit)
+    pub const fn get_bit_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
+        BitMap::<N>::get_bit_from_chunk(chunk, bit)
     }
 
     /// Return the last chunk of the bitmap and its size in bits.
@@ -162,7 +173,7 @@ impl<const N: usize> Prunable<N> {
     ///
     /// Panics if the bit doesn't exist or has been pruned.
     pub fn set_bit(&mut self, bit: u64, value: bool) {
-        let chunk_num = Self::unpruned_chunk(bit);
+        let chunk_num = Self::to_chunk_index(bit);
         assert!(chunk_num >= self.pruned_chunks, "bit pruned: {bit}");
 
         // Adjust bit to account for pruning
@@ -231,7 +242,7 @@ impl<const N: usize> Prunable<N> {
             self.len()
         );
 
-        let chunk = Self::unpruned_chunk(bit);
+        let chunk = Self::to_chunk_index(bit);
         if chunk < self.pruned_chunks {
             return;
         }
@@ -245,51 +256,42 @@ impl<const N: usize> Prunable<N> {
 
     /// Convert a bit into a bitmask for the byte containing that bit.
     #[inline]
-    pub fn chunk_byte_bitmask(bit: u64) -> u8 {
+    pub const fn chunk_byte_bitmask(bit: u64) -> u8 {
         BitMap::<N>::chunk_byte_bitmask(bit)
     }
 
     /// Convert a bit into the index of the byte within a chunk containing the bit.
     #[inline]
-    pub fn chunk_byte_offset(bit: u64) -> usize {
+    pub const fn chunk_byte_offset(bit: u64) -> usize {
         BitMap::<N>::chunk_byte_offset(bit)
     }
 
-    /// Convert a bit into the index of the chunk it belongs to within the bitmap,
-    /// taking pruned chunks into account. That is, the returned value is a valid index into
-    /// the inner bitmap.
-    ///
-    /// # Warning
-    ///
-    /// Panics if the bit doesn't exist or has been pruned.
-    #[inline]
-    pub fn pruned_chunk(&self, bit: u64) -> usize {
-        assert!(bit < self.len(), "out of bounds: {bit}");
-        let chunk = Self::unpruned_chunk(bit);
-        assert!(chunk >= self.pruned_chunks, "bit pruned: {bit}");
-
-        chunk - self.pruned_chunks
-    }
-
-    /// Convert a bit into the number of the chunk it belongs to,
-    /// ignoring any pruning.
+    /// Convert a bit into the index of the chunk it belongs to.
     ///
     /// # Panics
     ///
     /// Panics if `bit / CHUNK_SIZE_BITS > usize::MAX`.
     #[inline]
-    pub fn unpruned_chunk(bit: u64) -> usize {
-        BitMap::<N>::chunk(bit)
+    pub fn to_chunk_index(bit: u64) -> usize {
+        BitMap::<N>::to_chunk_index(bit)
     }
 
-    /// Get a reference to a chunk by its index in the current bitmap
-    /// Note this is an index into the chunks, not a bit.
+    /// Get a reference to a chunk by its absolute index (includes pruned chunks).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chunk has been pruned or is out of bounds.
     #[inline]
     pub fn get_chunk(&self, chunk: usize) -> &[u8; N] {
-        self.bitmap.get_chunk(chunk)
+        assert!(
+            chunk >= self.pruned_chunks,
+            "chunk {chunk} is pruned (pruned_chunks: {})",
+            self.pruned_chunks
+        );
+        self.bitmap.get_chunk(chunk - self.pruned_chunks)
     }
 
-    /// Overwrite a chunk's data by its raw (unpruned) chunk index.
+    /// Overwrite a chunk's data by its absolute chunk index.
     ///
     /// # Panics
     ///
@@ -385,6 +387,19 @@ impl<const N: usize> EncodeSize for Prunable<N> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<const N: usize> arbitrary::Arbitrary<'_> for Prunable<N> {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let mut bitmap = Self {
+            bitmap: BitMap::<N>::arbitrary(u)?,
+            pruned_chunks: 0,
+        };
+        let prune_to = u.int_in_range(0..=bitmap.len())?;
+        bitmap.prune_to_bit(prune_to);
+        Ok(bitmap)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,7 +423,7 @@ mod tests {
         assert_eq!(prunable.len(), 16);
         assert_eq!(prunable.pruned_bits(), 16);
         assert_eq!(prunable.pruned_chunks(), 1);
-        assert_eq!(prunable.chunks_len(), 0);
+        assert_eq!(prunable.chunks_len(), 1);
     }
 
     #[test]
@@ -656,11 +671,11 @@ mod tests {
     #[test]
     fn test_chunk_calculations() {
         // Test chunk_num calculation
-        assert_eq!(Prunable::<4>::unpruned_chunk(0), 0);
-        assert_eq!(Prunable::<4>::unpruned_chunk(31), 0);
-        assert_eq!(Prunable::<4>::unpruned_chunk(32), 1);
-        assert_eq!(Prunable::<4>::unpruned_chunk(63), 1);
-        assert_eq!(Prunable::<4>::unpruned_chunk(64), 2);
+        assert_eq!(Prunable::<4>::to_chunk_index(0), 0);
+        assert_eq!(Prunable::<4>::to_chunk_index(31), 0);
+        assert_eq!(Prunable::<4>::to_chunk_index(32), 1);
+        assert_eq!(Prunable::<4>::to_chunk_index(63), 1);
+        assert_eq!(Prunable::<4>::to_chunk_index(64), 2);
 
         // Test chunk_byte_offset
         assert_eq!(Prunable::<4>::chunk_byte_offset(0), 0);
@@ -674,32 +689,6 @@ mod tests {
         assert_eq!(Prunable::<4>::chunk_byte_bitmask(1), 0b00000010);
         assert_eq!(Prunable::<4>::chunk_byte_bitmask(7), 0b10000000);
         assert_eq!(Prunable::<4>::chunk_byte_bitmask(8), 0b00000001); // Next byte
-    }
-
-    #[test]
-    fn test_pruned_chunk() {
-        let mut prunable: Prunable<4> = Prunable::new();
-
-        // Add three chunks
-        for i in 0..3 {
-            let chunk = [
-                (i * 4) as u8,
-                (i * 4 + 1) as u8,
-                (i * 4 + 2) as u8,
-                (i * 4 + 3) as u8,
-            ];
-            prunable.push_chunk(&chunk);
-        }
-
-        // Before pruning
-        assert_eq!(prunable.pruned_chunk(0), 0);
-        assert_eq!(prunable.pruned_chunk(32), 1);
-        assert_eq!(prunable.pruned_chunk(64), 2);
-
-        // After pruning first chunk
-        prunable.prune_to_bit(32);
-        assert_eq!(prunable.pruned_chunk(32), 0); // Now at index 0
-        assert_eq!(prunable.pruned_chunk(64), 1); // Now at index 1
     }
 
     #[test]
@@ -794,8 +783,8 @@ mod tests {
 
         // After pruning
         prunable.prune_to_bit(32);
-        assert_eq!(prunable.get_chunk(0), &chunk2);
-        assert_eq!(prunable.get_chunk(1), &chunk3);
+        assert_eq!(prunable.get_chunk(1), &chunk2);
+        assert_eq!(prunable.get_chunk(2), &chunk3);
     }
 
     #[test]
@@ -1221,5 +1210,15 @@ mod tests {
             prunable.pop();
         }
         assert!(prunable.is_chunk_aligned()); // 0 bits
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Prunable<16>>,
+        }
     }
 }

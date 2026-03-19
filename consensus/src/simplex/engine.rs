@@ -1,53 +1,61 @@
 use super::{
     actors::{batcher, resolver, voter},
     config::Config,
+    elector::Config as Elector,
     types::{Activity, Context},
 };
-use crate::{simplex::signing_scheme::Scheme, Automaton, Relay, Reporter};
-use commonware_cryptography::{Digest, PublicKey};
+use crate::{
+    simplex::{scheme::Scheme, Plan},
+    CertifiableAutomaton, Relay, Reporter,
+};
+use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Receiver, Sender};
-use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
-use governor::clock::Clock as GClock;
-use rand::{CryptoRng, Rng};
+use commonware_parallel::Strategy;
+use commonware_runtime::{
+    spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
+};
+use rand_core::CryptoRngCore;
 use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-    P: PublicKey,
-    S: Scheme<PublicKey = P>,
-    B: Blocker<PublicKey = P>,
+    E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
+    S: Scheme<D>,
+    L: Elector<S>,
+    B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
-    A: Automaton<Context = Context<D, P>, Digest = D>,
-    R: Relay<Digest = D>,
+    A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
+    R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
     F: Reporter<Activity = Activity<S, D>>,
+    T: Strategy,
 > {
     context: ContextCell<E>,
 
-    voter: voter::Actor<E, P, S, B, D, A, R, F>,
+    voter: voter::Actor<E, S, L, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
 
-    batcher: batcher::Actor<E, P, S, B, D, F>,
+    batcher: batcher::Actor<E, S, B, D, F, R, T>,
     batcher_mailbox: batcher::Mailbox<S, D>,
 
-    resolver: resolver::Actor<E, P, S, B, D>,
+    resolver: resolver::Actor<E, S, B, D, T>,
     resolver_mailbox: resolver::Mailbox<S, D>,
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
-        P: PublicKey,
-        S: Scheme<PublicKey = P>,
-        B: Blocker<PublicKey = P>,
+        E: BufferPooler + Clock + CryptoRngCore + Spawner + Storage + Metrics,
+        S: Scheme<D>,
+        L: Elector<S>,
+        B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
-        A: Automaton<Context = Context<D, P>, Digest = D>,
-        R: Relay<Digest = D>,
+        A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
+        R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
         F: Reporter<Activity = Activity<S, D>>,
-    > Engine<E, P, S, B, D, A, R, F>
+        T: Strategy,
+    > Engine<E, S, L, B, D, A, R, F, T>
 {
     /// Create a new `simplex` consensus engine.
-    pub fn new(context: E, cfg: Config<P, S, B, D, A, R, F>) -> Self {
+    pub fn new(context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
         cfg.assert();
 
@@ -58,11 +66,13 @@ impl<
                 scheme: cfg.scheme.clone(),
                 blocker: cfg.blocker.clone(),
                 reporter: cfg.reporter.clone(),
+                relay: cfg.relay.clone(),
+                strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,
-                namespace: cfg.namespace.clone(),
                 mailbox_size: cfg.mailbox_size,
                 activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
+                forwarding: cfg.forwarding,
             },
         );
 
@@ -71,6 +81,7 @@ impl<
             context.with_label("voter"),
             voter::Config {
                 scheme: cfg.scheme.clone(),
+                elector: cfg.elector,
                 blocker: cfg.blocker.clone(),
                 automaton: cfg.automaton,
                 relay: cfg.relay,
@@ -78,14 +89,13 @@ impl<
                 partition: cfg.partition,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
-                namespace: cfg.namespace.clone(),
                 leader_timeout: cfg.leader_timeout,
-                notarization_timeout: cfg.notarization_timeout,
-                nullify_retry: cfg.nullify_retry,
+                certification_timeout: cfg.certification_timeout,
+                timeout_retry: cfg.timeout_retry,
                 activity_timeout: cfg.activity_timeout,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
-                buffer_pool: cfg.buffer_pool,
+                page_cache: cfg.page_cache,
             },
         );
 
@@ -95,12 +105,11 @@ impl<
             resolver::Config {
                 blocker: cfg.blocker,
                 scheme: cfg.scheme,
+                strategy: cfg.strategy,
                 mailbox_size: cfg.mailbox_size,
                 epoch: cfg.epoch,
-                namespace: cfg.namespace,
                 fetch_concurrent: cfg.fetch_concurrent,
                 fetch_timeout: cfg.fetch_timeout,
-                fetch_rate_per_peer: cfg.fetch_rate_per_peer,
             },
         );
 
@@ -128,7 +137,7 @@ impl<
     /// The engine requires three separate network channels, each carrying votes or
     /// certificates to help drive the consensus engine.
     ///
-    /// ## `pending_network`
+    /// ## `vote_network`
     ///
     /// Carries **individual votes**:
     /// - [`Notarize`](super::types::Notarize): Vote to notarize a proposal
@@ -138,7 +147,7 @@ impl<
     /// These messages are sent to the batcher, which performs batch signature
     /// verification before forwarding valid votes to the voter for aggregation.
     ///
-    /// ## `recovered_network`
+    /// ## `certificate_network`
     ///
     /// Carries **certificates**:
     /// - [`Notarization`](super::types::Notarization): Proof that a proposal was notarized
@@ -146,7 +155,9 @@ impl<
     /// - [`Finalization`](super::types::Finalization): Proof that a proposal was finalized
     ///
     /// Certificates are broadcast on this channel as soon as they are constructed
-    /// from collected votes.
+    /// from collected votes. We separate this from the `vote_network` to optimistically
+    /// allow for certificate processing to short-circuit vote processing (if we receive
+    /// a certificate before processing pending votes, we can skip them).
     ///
     /// ## `resolver_network`
     ///
@@ -156,43 +167,63 @@ impl<
     /// rate limiting, retries, and peer selection for these requests.
     pub fn start(
         mut self,
-        pending_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        recovered_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        vote_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
+        certificate_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
+        resolver_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
     ) -> Handle<()> {
         spawn_cell!(
             self.context,
-            self.run(pending_network, recovered_network, resolver_network)
+            self.run(vote_network, certificate_network, resolver_network)
                 .await
         )
     }
 
     async fn run(
         self,
-        pending_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        recovered_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-        resolver_network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
+        vote_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
+        certificate_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
+        resolver_network: (
+            impl Sender<PublicKey = S::PublicKey>,
+            impl Receiver<PublicKey = S::PublicKey>,
+        ),
     ) {
-        // Start the batcher
-        let (pending_sender, pending_receiver) = pending_network;
-        let mut batcher_task = self
-            .batcher
-            .start(self.voter_mailbox.clone(), pending_receiver);
+        // Start the batcher (receives votes via vote_network, certificates via certificate_network)
+        // Batcher sends proposals/certificates to voter via voter_mailbox
+        let (vote_sender, vote_receiver) = vote_network;
+        let (certificate_sender, certificate_receiver) = certificate_network;
+        let mut batcher_task = self.batcher.start(
+            self.voter_mailbox.clone(),
+            vote_receiver,
+            certificate_receiver,
+        );
 
-        // Start the resolver
+        // Start the resolver (sends certificates to voter via voter_mailbox)
         let (resolver_sender, resolver_receiver) = resolver_network;
         let mut resolver_task =
             self.resolver
                 .start(self.voter_mailbox, resolver_sender, resolver_receiver);
 
         // Start the voter
-        let (recovered_sender, recovered_receiver) = recovered_network;
         let mut voter_task = self.voter.start(
             self.batcher_mailbox,
             self.resolver_mailbox,
-            pending_sender,
-            recovered_sender,
-            recovered_receiver,
+            vote_sender,
+            certificate_sender,
         );
 
         // Wait for the resolver or voter to finish

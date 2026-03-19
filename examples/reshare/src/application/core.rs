@@ -5,12 +5,14 @@ use crate::{
     dkg,
 };
 use commonware_consensus::{
-    marshal::ingress::mailbox::AncestorStream,
-    simplex::{signing_scheme::Scheme, types::Context},
-    Block as _, VerifyingApplication,
+    marshal::ancestry::{AncestorStream, BlockProvider},
+    simplex::types::Context,
+    types::{Epoch, Round, View},
+    Heightable, VerifyingApplication,
 };
 use commonware_cryptography::{
-    bls12381::primitives::variant::Variant, Committable, Hasher, Signer,
+    bls12381::primitives::variant::Variant, certificate::Scheme, Committable, Digest, Hasher,
+    Signer,
 };
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt;
@@ -38,7 +40,7 @@ where
     C: Signer,
     V: Variant,
 {
-    pub fn new(dkg: dkg::Mailbox<H, C, V>) -> Self {
+    pub const fn new(dkg: dkg::Mailbox<H, C, V>) -> Self {
         Self {
             dkg,
             _marker: PhantomData,
@@ -59,13 +61,20 @@ where
     type Block = Block<H, C, V>;
 
     async fn genesis(&mut self) -> Self::Block {
-        genesis_block::<H, C, V>()
+        // Create a genesis context with epoch 0, view 0, and empty parent.
+        // Use a deterministic leader from seed 0 so all validators agree on genesis.
+        let genesis_context = Context {
+            round: Round::new(Epoch::zero(), View::zero()),
+            leader: C::from_seed(0).public_key(),
+            parent: (View::zero(), <H::Digest as Digest>::EMPTY),
+        };
+        genesis_block::<H, C, V>(genesis_context)
     }
 
-    async fn propose(
+    async fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
-        _context: (E, Self::Context),
-        mut ancestry: AncestorStream<Self::SigningScheme, Self::Block>,
+        (_, context): (E, Self::Context),
+        mut ancestry: AncestorStream<A, Self::Block>,
     ) -> Option<Self::Block> {
         // Fetch the parent block from the ancestry stream.
         let parent_block = ancestry.next().await?;
@@ -78,10 +87,11 @@ where
         // from any given dealer.
         let reshare = self.dkg.act().await;
 
-        // Create a new block
+        // Create a new block with the consensus context
         Some(Block::new(
+            context,
             parent_commitment,
-            parent_block.height() + 1,
+            parent_block.height().next(),
             reshare,
         ))
     }
@@ -95,14 +105,20 @@ where
     C: Signer,
     V: Variant,
 {
-    async fn verify(
+    async fn verify<A: BlockProvider<Block = Self::Block>>(
         &mut self,
         _: (E, Self::Context),
-        _: AncestorStream<Self::SigningScheme, Self::Block>,
+        _: AncestorStream<A, Self::Block>,
     ) -> bool {
         // We wrap this application with `Marshaled`, which handles ancestry
-        // verification (parent commitment and height contiguity), hence there is
-        // nothing to verify here.
+        // verification (parent commitment and height contiguity).
+        //
+        // You could opt to verify the deal_outcome in the block here (both that it is valid
+        // and that the dealer is the proposer) but we opt to only process deal data after the
+        // block has been finalized to keep verification as fast as possible. The downside
+        // of this approach is that invalid data can be included in the canonical chain (which
+        // makes certificates over finalized blocks less useful because the verifier must still
+        // check the block contents).
         true
     }
 }

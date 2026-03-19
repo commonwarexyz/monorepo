@@ -1,9 +1,10 @@
 //! In-memory [tracing_subscriber::Layer] to collect spans and events for testing purposes.
 
+use commonware_utils::sync::Mutex;
 use std::{
     fmt,
     ops::{Deref, DerefMut},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 use thiserror::Error;
 use tracing::{field, span, Event, Level, Subscriber};
@@ -16,7 +17,7 @@ pub struct TraceAssertionError(String);
 
 impl From<String> for TraceAssertionError {
     fn from(value: String) -> Self {
-        TraceAssertionError(value)
+        Self(value)
     }
 }
 
@@ -70,10 +71,10 @@ impl EventMetadata {
     where
         F: Fn(&(String, String)) -> Result<(), TraceAssertionError>,
     {
-        match self.fields.get(index) {
-            Some(field) => predicate(field),
-            None => Err(format!("Missing field at index {index}").into()),
-        }
+        self.fields.get(index).map_or_else(
+            || Err(format!("Missing field at index {index}").into()),
+            predicate,
+        )
     }
 
     /// Expects that the event has a field with exactly the specified name and value.
@@ -164,10 +165,10 @@ impl RecordedEvent {
     where
         F: Fn(&EventMetadata) -> Result<(), TraceAssertionError>,
     {
-        match self.spans.get(index) {
-            Some(span) => predicate(span),
-            None => Err(format!("Missing span at index {index}").into()),
-        }
+        self.spans.get(index).map_or_else(
+            || Err(format!("Missing span at index {index}").into()),
+            predicate,
+        )
     }
 
     /// Expects that any span matches the predicate.
@@ -197,10 +198,10 @@ impl RecordedEvents {
     where
         F: Fn(&RecordedEvent) -> Result<(), TraceAssertionError>,
     {
-        match self.get(index) {
-            Some(field) => predicate(field),
-            None => Err(format!("Missing event at index {index}").into()),
-        }
+        self.get(index).map_or_else(
+            || Err(format!("Missing event at index {index}").into()),
+            predicate,
+        )
     }
 
     /// Expects that any [RecordedEvent] matches the predicate.
@@ -267,7 +268,6 @@ impl TraceStorage {
     pub fn get_by_level(&self, level: Level) -> RecordedEvents {
         self.0
             .lock()
-            .unwrap()
             .iter()
             .filter_map(|event| (event.level == level).then_some(event.clone()))
             .collect::<Vec<_>>()
@@ -276,12 +276,12 @@ impl TraceStorage {
 
     /// Returns all [RecordedEvent]s in the storage.
     pub fn get_all(&self) -> RecordedEvents {
-        self.0.lock().unwrap().clone()
+        self.0.lock().clone()
     }
 
     /// Returns if the storage is empty.
     pub fn is_empty(&self) -> bool {
-        self.0.lock().unwrap().is_empty()
+        self.0.lock().is_empty()
     }
 }
 
@@ -334,7 +334,7 @@ where
             }
         }
 
-        let mut storage = self.0 .0.lock().unwrap();
+        let mut storage = self.0 .0.lock();
         storage.push(RecordedEvent {
             level,
             target: metadata.target().to_string(),

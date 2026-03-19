@@ -43,7 +43,7 @@ _Emitted binary `flood` is placed in `assets`._
 
 ```bash
 cd assets
-deployer ec2 create --config config.yaml
+deployer aws create --config config.yaml
 ```
 
 ## Monitor Performance on Grafana
@@ -63,13 +63,13 @@ docker run -it -v ${PWD}/../..:/monorepo flood-builder
 ### Restart Flood Binary on EC2 Instances
 
 ```bash
-deployer ec2 update --config config.yaml
+deployer aws update --config config.yaml
 ```
 
 ## Destroy Infrastructure
 
 ```bash
-deployer ec2 destroy --config config.yaml
+deployer aws destroy --config config.yaml
 ```
 
 ## Debugging

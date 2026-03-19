@@ -1,9 +1,9 @@
-use bytes::{Buf, BufMut};
 use commonware_codec::{DecodeExt, Encode, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write};
+use commonware_runtime::{Buf, BufMut};
 use std::mem::size_of;
 
 /// Maximum message size in bytes (10MB).
-pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+pub const MAX_MESSAGE_SIZE: u32 = 10 * 1024 * 1024;
 
 pub mod request_id;
 pub use request_id::RequestId;
@@ -35,11 +35,11 @@ pub enum ErrorCode {
 impl Write for ErrorCode {
     fn write(&self, buf: &mut impl BufMut) {
         let discriminant = match self {
-            ErrorCode::InvalidRequest => 0u8,
-            ErrorCode::DatabaseError => 1u8,
-            ErrorCode::NetworkError => 2u8,
-            ErrorCode::Timeout => 3u8,
-            ErrorCode::InternalError => 4u8,
+            Self::InvalidRequest => 0u8,
+            Self::DatabaseError => 1u8,
+            Self::NetworkError => 2u8,
+            Self::Timeout => 3u8,
+            Self::InternalError => 4u8,
         };
         discriminant.write(buf);
     }
@@ -57,11 +57,11 @@ impl Read for ErrorCode {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let discriminant = u8::read(buf)?;
         match discriminant {
-            0 => Ok(ErrorCode::InvalidRequest),
-            1 => Ok(ErrorCode::DatabaseError),
-            2 => Ok(ErrorCode::NetworkError),
-            3 => Ok(ErrorCode::Timeout),
-            4 => Ok(ErrorCode::InternalError),
+            0 => Ok(Self::InvalidRequest),
+            1 => Ok(Self::DatabaseError),
+            2 => Ok(Self::NetworkError),
+            3 => Ok(Self::Timeout),
+            4 => Ok(Self::InternalError),
             _ => Err(Error::InvalidEnum(discriminant)),
         }
     }
@@ -100,7 +100,7 @@ impl Read for ErrorResponse {
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
         let request_id = RequestId::read_cfg(buf, &())?;
         let error_code = ErrorCode::read(buf)?;
-        let message_bytes = Vec::<u8>::read_range(buf, 0..=MAX_MESSAGE_SIZE)?;
+        let message_bytes = Vec::<u8>::read_range(buf, 0..=MAX_MESSAGE_SIZE as usize)?;
         let message = String::from_utf8(message_bytes)
             .map_err(|_| Error::Invalid("ErrorResponse", "invalid UTF-8 in message"))?;
         Ok(Self {
@@ -149,18 +149,20 @@ mod tests {
         let requester = Generator::new();
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            op_count: Location::new(100).unwrap(),
-            start_loc: Location::new(10).unwrap(),
+            op_count: Location::new(100),
+            start_loc: Location::new(10),
             max_ops: NZU64!(50),
+            include_pinned_nodes: false,
         };
         assert!(request.validate().is_ok());
 
         // Invalid start_loc
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            op_count: Location::new(100).unwrap(),
-            start_loc: Location::new(100).unwrap(),
+            op_count: Location::new(100),
+            start_loc: Location::new(100),
             max_ops: NZU64!(50),
+            include_pinned_nodes: false,
         };
         assert!(matches!(
             request.validate(),
@@ -170,9 +172,10 @@ mod tests {
         // start_loc beyond size
         let request = GetOperationsRequest {
             request_id: requester.next(),
-            op_count: Location::new(100).unwrap(),
-            start_loc: Location::new(150).unwrap(),
+            op_count: Location::new(100),
+            start_loc: Location::new(150),
             max_ops: NZU64!(50),
+            include_pinned_nodes: false,
         };
         assert!(matches!(
             request.validate(),

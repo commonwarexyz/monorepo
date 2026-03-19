@@ -2,28 +2,25 @@ use clap::{value_parser, Arg, Command};
 use commonware_bridge::{
     application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
 };
-use commonware_codec::{Decode, DecodeExt, RangeCfg};
+use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    simplex::{self, Engine},
+    simplex::{self, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme, Engine},
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
     bls12381::primitives::{
         group,
-        poly::{Poly, Public},
+        sharing::{ModeVersion, Sharing},
         variant::{MinSig, Variant},
     },
-    ed25519, PrivateKeyExt as _, Sha256, Signer as _,
+    ed25519, Sha256, Signer as _,
 };
 use commonware_p2p::{authenticated, Manager};
-use commonware_runtime::{buffer::PoolRef, tokio, Metrics, Network, Runner};
-use commonware_stream::{dial, Config as StreamConfig};
-use commonware_utils::{
-    from_hex,
-    set::{Ordered, OrderedQuorum},
-    union, NZUsize, NZU32,
+use commonware_runtime::{
+    buffer::paged::CacheRef, tokio, Metrics, Network, Quota, Runner, ThreadPooler,
 };
-use governor::Quota;
+use commonware_stream::encrypted::{dial, Config as StreamConfig};
+use commonware_utils::{from_hex, ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -86,14 +83,15 @@ fn main() {
     if participants.len() == 0 {
         panic!("Please provide at least one participant");
     }
-    let validators = participants
+    let validators: Set<_> = participants
         .into_iter()
         .map(|peer| {
             let verifier = ed25519::PrivateKey::from_seed(peer).public_key();
             tracing::info!(key = ?verifier, "registered authorized key");
             verifier
         })
-        .collect::<Ordered<_>>();
+        .try_collect()
+        .expect("public keys are unique");
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -107,7 +105,7 @@ fn main() {
             let verifier = ed25519::PrivateKey::from_seed(bootstrapper_key).public_key();
             let bootstrapper_address =
                 SocketAddr::from_str(parts[1]).expect("Bootstrapper address not well-formed");
-            bootstrapper_identities.push((verifier, bootstrapper_address));
+            bootstrapper_identities.push((verifier, bootstrapper_address.into()));
         }
     }
 
@@ -117,14 +115,15 @@ fn main() {
         .expect("Please provide storage directory");
 
     // Configure threshold
-    let threshold = validators.quorum();
     let identity = matches
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
-    let identity: Public<MinSig> =
-        Poly::decode_cfg(identity.as_ref(), &RangeCfg::exact(NZU32!(threshold)))
-            .expect("Identity not well-formed");
+    let identity: Sharing<MinSig> = Sharing::decode_cfg(
+        identity.as_ref(),
+        &(NZU32!(validators.len() as u32), ModeVersion::v0()),
+    )
+    .expect("Identity not well-formed");
     let share = matches
         .get_one::<String>("share")
         .expect("Please provide share");
@@ -152,7 +151,7 @@ fn main() {
 
     // Initialize context
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
-    let executor = tokio::Runner::new(runtime_cfg.clone());
+    let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
     let indexer_cfg = StreamConfig {
@@ -166,7 +165,7 @@ fn main() {
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        signer.clone(),
+        signer,
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -199,18 +198,18 @@ fn main() {
         //
         // In a real-world scenario, this would be updated as new peer sets are created (like when
         // the composition of a validator set changes).
-        oracle.update(0, validators.clone()).await;
+        oracle.track(0, validators.clone()).await;
 
         // Register consensus channels
         //
         // If you want to maximize the number of views per second, increase the rate limit
         // for this channel.
-        let (pending_sender, pending_receiver) = network.register(
+        let (vote_sender, vote_receiver) = network.register(
             0,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
         );
-        let (recovered_sender, recovered_receiver) = network.register(
+        let (certificate_sender, certificate_receiver) = network.register(
             1,
             Quota::per_second(NZU32!(10)),
             256, // 256 messages in flight
@@ -222,18 +221,20 @@ fn main() {
         );
 
         // Initialize application
+        let strategy = context.clone().create_strategy(NZUsize!(2)).unwrap();
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
+        let this_network =
+            Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
+                .expect("share must be in participants");
+        let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
         let (application, scheme, mailbox) = application::Application::new(
             context.with_label("application"),
             application::Config {
                 indexer,
-                namespace: consensus_namespace.clone(),
-                identity,
-                other_public,
                 hasher: Sha256::default(),
+                this_network,
+                other_network,
                 mailbox_size: 1024,
-                participants: validators.clone(),
-                share,
             },
         );
 
@@ -242,6 +243,7 @@ fn main() {
             context.with_label("engine"),
             simplex::Config {
                 scheme,
+                elector: RoundRobin::<Sha256>::default(),
                 blocker: oracle,
                 automaton: mailbox.clone(),
                 relay: mailbox.clone(),
@@ -249,26 +251,26 @@ fn main() {
                 partition: String::from("log"),
                 mailbox_size: 1024,
                 epoch: Epoch::zero(),
-                namespace: consensus_namespace,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_secs(1),
-                notarization_timeout: Duration::from_secs(2),
-                nullify_retry: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: 32,
-                fetch_rate_per_peer: Quota::per_second(NZU32!(1)),
-                buffer_pool: PoolRef::new(NZUsize!(16_384), NZUsize!(10_000)),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
+                strategy,
+                forwarding: simplex::ForwardingPolicy::Disabled,
             },
         );
 
         // Start consensus
         network.start();
         engine.start(
-            (pending_sender, pending_receiver),
-            (recovered_sender, recovered_receiver),
+            (vote_sender, vote_receiver),
+            (certificate_sender, certificate_receiver),
             (resolver_sender, resolver_receiver),
         );
 

@@ -7,4 +7,4 @@ mod core;
 pub use core::Application;
 
 mod scheme;
-pub use scheme::{EdScheme, EpochSchemeProvider, SchemeProvider, ThresholdScheme};
+pub use scheme::{EdScheme, EpochProvider, Provider, ThresholdScheme};

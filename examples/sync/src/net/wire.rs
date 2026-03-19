@@ -1,17 +1,20 @@
 use crate::net::{ErrorResponse, RequestId};
-use bytes::{Buf, BufMut};
 use commonware_codec::{
     DecodeExt, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::Digest;
+use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
-    adb::sync::Target,
     mmr::{Location, Proof},
+    qmdb::sync::Target,
 };
 use std::num::NonZeroU64;
 
 /// Maximum number of digests in a proof.
 pub const MAX_DIGESTS: usize = 10_000;
+
+/// Maximum number of pinned nodes (one per MMR peak, bounded by max tree height).
+pub const MAX_PINNED_NODES: usize = 64;
 
 /// Request for operations from the server.
 #[derive(Debug)]
@@ -20,6 +23,7 @@ pub struct GetOperationsRequest {
     pub op_count: Location,
     pub start_loc: Location,
     pub max_ops: NonZeroU64,
+    pub include_pinned_nodes: bool,
 }
 
 /// Response with operations and proof.
@@ -31,6 +35,7 @@ where
     pub request_id: RequestId,
     pub proof: Proof<D>,
     pub operations: Vec<Op>,
+    pub pinned_nodes: Option<Vec<D>>,
 }
 
 /// Request for sync target from server.
@@ -66,13 +71,13 @@ impl<Op, D> Message<Op, D>
 where
     D: Digest,
 {
-    pub fn request_id(&self) -> RequestId {
+    pub const fn request_id(&self) -> RequestId {
         match self {
-            Message::GetOperationsRequest(r) => r.request_id,
-            Message::GetOperationsResponse(r) => r.request_id,
-            Message::GetSyncTargetRequest(r) => r.request_id,
-            Message::GetSyncTargetResponse(r) => r.request_id,
-            Message::Error(e) => e.request_id,
+            Self::GetOperationsRequest(r) => r.request_id,
+            Self::GetOperationsResponse(r) => r.request_id,
+            Self::GetSyncTargetRequest(r) => r.request_id,
+            Self::GetSyncTargetResponse(r) => r.request_id,
+            Self::Error(e) => e.request_id,
         }
     }
 }
@@ -94,23 +99,23 @@ where
 {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Message::GetOperationsRequest(req) => {
+            Self::GetOperationsRequest(req) => {
                 0u8.write(buf);
                 req.write(buf);
             }
-            Message::GetOperationsResponse(resp) => {
+            Self::GetOperationsResponse(resp) => {
                 1u8.write(buf);
                 resp.write(buf);
             }
-            Message::GetSyncTargetRequest(req) => {
+            Self::GetSyncTargetRequest(req) => {
                 2u8.write(buf);
                 req.write(buf);
             }
-            Message::GetSyncTargetResponse(resp) => {
+            Self::GetSyncTargetResponse(resp) => {
                 3u8.write(buf);
                 resp.write(buf);
             }
-            Message::Error(err) => {
+            Self::Error(err) => {
                 4u8.write(buf);
                 err.write(buf);
             }
@@ -125,11 +130,11 @@ where
 {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Message::GetOperationsRequest(req) => req.encode_size(),
-            Message::GetOperationsResponse(resp) => resp.encode_size(),
-            Message::GetSyncTargetRequest(req) => req.encode_size(),
-            Message::GetSyncTargetResponse(resp) => resp.encode_size(),
-            Message::Error(err) => err.encode_size(),
+            Self::GetOperationsRequest(req) => req.encode_size(),
+            Self::GetOperationsResponse(resp) => resp.encode_size(),
+            Self::GetSyncTargetRequest(req) => req.encode_size(),
+            Self::GetSyncTargetResponse(resp) => resp.encode_size(),
+            Self::Error(err) => err.encode_size(),
         }
     }
 }
@@ -143,19 +148,15 @@ where
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let tag = u8::read(buf)?;
         match tag {
-            0 => Ok(Message::GetOperationsRequest(GetOperationsRequest::read(
+            0 => Ok(Self::GetOperationsRequest(GetOperationsRequest::read(buf)?)),
+            1 => Ok(Self::GetOperationsResponse(GetOperationsResponse::read(
                 buf,
             )?)),
-            1 => Ok(Message::GetOperationsResponse(GetOperationsResponse::read(
+            2 => Ok(Self::GetSyncTargetRequest(GetSyncTargetRequest::read(buf)?)),
+            3 => Ok(Self::GetSyncTargetResponse(GetSyncTargetResponse::read(
                 buf,
             )?)),
-            2 => Ok(Message::GetSyncTargetRequest(GetSyncTargetRequest::read(
-                buf,
-            )?)),
-            3 => Ok(Message::GetSyncTargetResponse(GetSyncTargetResponse::read(
-                buf,
-            )?)),
-            4 => Ok(Message::Error(ErrorResponse::read(buf)?)),
+            4 => Ok(Self::Error(ErrorResponse::read(buf)?)),
             d => Err(CodecError::InvalidEnum(d)),
         }
     }
@@ -167,6 +168,7 @@ impl Write for GetOperationsRequest {
         self.op_count.write(buf);
         self.start_loc.write(buf);
         self.max_ops.get().write(buf);
+        (self.include_pinned_nodes as u8).write(buf);
     }
 }
 
@@ -176,6 +178,7 @@ impl EncodeSize for GetOperationsRequest {
             + self.op_count.encode_size()
             + self.start_loc.encode_size()
             + self.max_ops.get().encode_size()
+            + 1u8.encode_size()
     }
 }
 
@@ -183,20 +186,8 @@ impl Read for GetOperationsRequest {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let op_count = u64::read(buf)?;
-        let Some(op_count) = Location::new(op_count) else {
-            return Err(CodecError::Invalid(
-                "GetOperationsRequest",
-                "op_count exceeds MAX_LOCATION",
-            ));
-        };
-        let start_loc = u64::read(buf)?;
-        let Some(start_loc) = Location::new(start_loc) else {
-            return Err(CodecError::Invalid(
-                "GetOperationsRequest",
-                "start_loc exceeds MAX_LOCATION",
-            ));
-        };
+        let op_count = Location::read(buf)?;
+        let start_loc = Location::read(buf)?;
         let max_ops = u64::read(buf)?;
         let Some(max_ops) = NonZeroU64::new(max_ops) else {
             return Err(CodecError::Invalid(
@@ -204,11 +195,13 @@ impl Read for GetOperationsRequest {
                 "max_ops cannot be zero",
             ));
         };
+        let include_pinned_nodes = u8::read(buf)? != 0;
         Ok(Self {
             request_id,
             op_count,
             start_loc,
             max_ops,
+            include_pinned_nodes,
         })
     }
 }
@@ -234,6 +227,15 @@ where
         self.request_id.write(buf);
         self.proof.write(buf);
         self.operations.write(buf);
+        match &self.pinned_nodes {
+            Some(nodes) => {
+                1u8.write(buf);
+                nodes.write(buf);
+            }
+            None => {
+                0u8.write(buf);
+            }
+        }
     }
 }
 
@@ -243,7 +245,14 @@ where
     D: Digest,
 {
     fn encode_size(&self) -> usize {
-        self.request_id.encode_size() + self.proof.encode_size() + self.operations.encode_size()
+        self.request_id.encode_size()
+            + self.proof.encode_size()
+            + self.operations.encode_size()
+            + 1u8.encode_size()
+            + self
+                .pinned_nodes
+                .as_ref()
+                .map_or(0, |nodes| nodes.encode_size())
     }
 }
 
@@ -260,10 +269,18 @@ where
             let range_cfg = RangeCfg::from(0..=MAX_DIGESTS);
             Vec::<Op>::read_cfg(buf, &(range_cfg, ()))?
         };
+        let has_pinned_nodes = u8::read(buf)? != 0;
+        let pinned_nodes = if has_pinned_nodes {
+            let range_cfg = RangeCfg::from(0..=MAX_PINNED_NODES);
+            Some(Vec::<D>::read_cfg(buf, &(range_cfg, ()))?)
+        } else {
+            None
+        };
         Ok(Self {
             request_id,
             proof,
             operations,
+            pinned_nodes,
         })
     }
 }

@@ -1,7 +1,10 @@
 use clap::{value_parser, Arg, Command};
-use commonware_cryptography::{ed25519, PrivateKeyExt as _, Signer as _};
-use commonware_deployer::ec2;
+use commonware_codec::Encode;
+use commonware_cryptography::{ed25519, Signer as _};
+use commonware_deployer::aws;
 use commonware_flood::Config;
+use commonware_math::algebra::Random;
+use commonware_utils::hex;
 use rand::{rngs::OsRng, seq::IteratorRandom};
 use tracing::info;
 use uuid::Uuid;
@@ -60,7 +63,7 @@ fn main() {
             Arg::new("message-size")
                 .long("message-size")
                 .required(true)
-                .value_parser(value_parser!(usize)),
+                .value_parser(value_parser!(u32)),
         )
         .arg(
             Arg::new("message-backlog")
@@ -109,7 +112,7 @@ fn main() {
         "bootstrappers must be less than peers"
     );
     let peer_schemes = (0..peers)
-        .map(|_| ed25519::PrivateKey::from_rng(&mut OsRng))
+        .map(|_| ed25519::PrivateKey::random(&mut OsRng))
         .collect::<Vec<_>>();
     let allowed_peers: Vec<String> = peer_schemes
         .iter()
@@ -136,7 +139,7 @@ fn main() {
     let storage_size = *matches.get_one::<i32>("storage_size").unwrap();
     let storage_class = matches.get_one::<String>("storage_class").unwrap();
     let worker_threads = *matches.get_one::<usize>("worker-threads").unwrap();
-    let message_size = *matches.get_one::<usize>("message-size").unwrap();
+    let message_size = *matches.get_one::<u32>("message-size").unwrap();
     let message_backlog = *matches.get_one::<usize>("message-backlog").unwrap();
     let mailbox_size = *matches.get_one::<usize>("mailbox-size").unwrap();
     let instrument = *matches.get_one::<bool>("instrument").unwrap();
@@ -147,7 +150,7 @@ fn main() {
         let name = scheme.public_key().to_string();
         let peer_config_file = format!("{name}.yaml");
         let peer_config = Config {
-            private_key: scheme.to_string(),
+            private_key: hex(&scheme.encode()),
             port: PORT,
             allowed_peers: allowed_peers.clone(),
             bootstrappers: bootstrappers.clone(),
@@ -162,7 +165,7 @@ fn main() {
         // Create instance config
         let region_index = index % regions.len();
         let region = regions[region_index].clone();
-        let instance = ec2::InstanceConfig {
+        let instance = aws::InstanceConfig {
             name: name.clone(),
             region,
             instance_type: instance_type.clone(),
@@ -176,16 +179,16 @@ fn main() {
     }
 
     // Generate root config file
-    let config = ec2::Config {
+    let config = aws::Config {
         tag,
         instances: instance_configs,
-        monitoring: ec2::MonitoringConfig {
+        monitoring: aws::MonitoringConfig {
             instance_type: instance_type.clone(),
             storage_size,
             storage_class: storage_class.clone(),
             dashboard: "dashboard.json".to_string(),
         },
-        ports: vec![ec2::PortConfig {
+        ports: vec![aws::PortConfig {
             protocol: "tcp".to_string(),
             port: PORT,
             cidr: "0.0.0.0/0".to_string(),

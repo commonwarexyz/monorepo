@@ -1,4 +1,5 @@
-use commonware_cryptography::{sha256, Digest as _, Hasher, Sha256};
+use commonware_cryptography::{sha256, Hasher, Sha256};
+use commonware_math::algebra::Random as _;
 use commonware_storage::bmt::Builder;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -37,7 +38,7 @@ fn bench_prove_range(c: &mut Criterion) {
                         let mut hasher = Sha256::new();
                         let range_leaves = &elements[start..=end];
                         assert!(proof
-                            .verify(&mut hasher, start as u32, range_leaves, &root)
+                            .verify_range_inclusion(&mut hasher, start as u32, range_leaves, &root)
                             .is_ok());
                     },
                     criterion::BatchSize::SmallInput,

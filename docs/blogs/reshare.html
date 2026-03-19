@@ -4,6 +4,8 @@
 <head>
     <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Once a Validator, Not Always a Validator</title>
@@ -11,7 +13,9 @@
     <meta name="author" content="Ben Clabby, Patrick O'Grady">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
-    <meta property="og:url" content="https://commonware.xyz/blogs/reshare.html" />
+    <link rel="canonical" href="https://commonware.xyz/blogs/reshare" />
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/reshare" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/epoching-cover.png" />
@@ -24,7 +28,7 @@
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta property="twitter:domain" content="commonware.xyz" />
-    <meta property="twitter:url" content="https://commonware.xyz/blogs/reshare.html" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/reshare" />
     <meta property="twitter:title" content="Once a Validator, Not Always a Validator" />
     <meta property="twitter:description" content="Many consensus protocols, from Tendermint and HotStuff to our own Minimmit, are defined under a permissioned model where the validator set is fixed and known ahead of time. Safely transitioning from one committee to the next, where validators can be added and removed, is left as an exercise to the implementer." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/epoching-cover.png" />
@@ -115,7 +119,7 @@
             When maintaining a threshold secret, changing the validator set requires more than updating a list. Whenever participants are added or removed, a new dealing of the secret must
             be performed to ensure new participants receive a share to participate in consensus and existing participants can't use multiple shares from old epochs to induce a safety failure (i.e. each player
             must not be able to use shares across dealings or else it is trivial for a single malicious participant to acquire <i>f</i> shares over <i>f</i> epochs). Our original
-            <a href="https://github.com/commonwarexyz/monorepo/tree/main/examples/vrf"><code>commonware-vrf</code></a> demonstrated how to perform proactive resharing but relied on a
+            <a href="https://github.com/commonwarexyz/monorepo/tree/v0.0.63/examples/vrf"><code>commonware-vrf</code></a> demonstrated how to perform proactive resharing but relied on a
             trusted <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/dkg/arbiter/struct.Arbiter.html">Arbiter</a> to ensure all participants received the same set of
             commitments. Removing that trusted coordinator requires some form of reliable broadcast such that all participants can each run their own arbiter (and all arrive at the same output). Fortunately,
             we get that out-of-the-box with a replicated log.

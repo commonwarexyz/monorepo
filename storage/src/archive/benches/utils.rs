@@ -1,33 +1,37 @@
 //! Helpers shared by the Archive benchmarks.
 
-use commonware_runtime::{buffer::PoolRef, tokio::Context};
+use commonware_codec::config::RangeCfg;
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU16, NonZeroUsize};
 
 /// Number of bytes that can be buffered in a section before being written to a
 /// [commonware_runtime::Blob].
-const WRITE_BUFFER: usize = 1024 * 1024; // 1MB
+const WRITE_BUFFER: usize = 8 * 1024 * 1024; // 8MB
 
 /// Number of items per section (the granularity of pruning).
-const ITEMS_PER_SECTION: u64 = 1_024;
+const ITEMS_PER_SECTION: u64 = 16_384;
 
 /// Number of bytes to buffer when replaying a [commonware_runtime::Blob].
 const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 
-/// Use a "prod sized" page size to test the performance of the journal.
-const PAGE_SIZE: NonZeroUsize = NZUsize!(16_384);
+/// Page size for the page cache.
+const PAGE_SIZE: NonZeroU16 = NZU16!(4_096);
 
-/// The number of pages to cache in the buffer pool.
-const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
+/// The number of pages to cache in the page cache (8,192 × 4KB = 32MB).
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8_192);
 
-/// Fixed-length key and value types.
+/// Key type (fixed-length) and value type (variable-length for large values).
 pub type Key = FixedBytes<64>;
-pub type Val = FixedBytes<32>;
+pub type Val = Vec<u8>;
+
+/// Size of values in bytes (64KB, representative of block data).
+const VALUE_SIZE: usize = 65536;
 
 /// Archive variant to benchmark.
 #[derive(Debug, Clone, Copy)]
@@ -37,10 +41,10 @@ pub enum Variant {
 }
 
 impl Variant {
-    pub fn name(&self) -> &'static str {
+    pub const fn name(&self) -> &'static str {
         match self {
-            Variant::Immutable => "immutable",
-            Variant::Prunable => "prunable",
+            Self::Immutable => "immutable",
+            Self::Prunable => "prunable",
         }
     }
 }
@@ -58,35 +62,40 @@ impl Archive {
         match variant {
             Variant::Immutable => {
                 let cfg = immutable::Config {
-                    metadata_partition: "archive_bench_metadata".into(),
-                    freezer_table_partition: "archive_bench_table".into(),
+                    metadata_partition: "archive-bench-metadata".into(),
+                    freezer_table_partition: "archive-bench-table".into(),
                     freezer_table_initial_size: 131_072,
                     freezer_table_resize_frequency: 4,
                     freezer_table_resize_chunk_size: 1024,
-                    freezer_journal_partition: "archive_bench_journal".into(),
-                    freezer_journal_target_size: 1024 * 1024 * 10, // 10MB
-                    freezer_journal_compression: compression,
-                    freezer_journal_buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
-                    ordinal_partition: "archive_bench_ordinal".into(),
+                    freezer_key_partition: "archive-bench-key".into(),
+                    freezer_key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    freezer_value_partition: "archive-bench-value".into(),
+                    freezer_value_target_size: 128 * 1024 * 1024,
+                    freezer_value_compression: compression,
+                    ordinal_partition: "archive-bench-ordinal".into(),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
-                    write_buffer: NZUsize!(WRITE_BUFFER),
+                    freezer_key_write_buffer: NZUsize!(WRITE_BUFFER),
+                    freezer_value_write_buffer: NZUsize!(WRITE_BUFFER),
+                    ordinal_write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
-                    codec_config: (),
+                    codec_config: (RangeCfg::new(..), ()),
                 };
-                Archive::Immutable(immutable::Archive::init(ctx, cfg).await.unwrap())
+                Self::Immutable(immutable::Archive::init(ctx, cfg).await.unwrap())
             }
             Variant::Prunable => {
                 let cfg = prunable::Config {
-                    partition: "archive_bench_partition".into(),
                     translator: TwoCap,
+                    key_partition: "archive-bench-key".into(),
+                    key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    value_partition: "archive-bench-value".into(),
                     compression,
-                    codec_config: (),
+                    codec_config: (RangeCfg::new(..), ()),
                     items_per_section: NZU64!(ITEMS_PER_SECTION),
-                    write_buffer: NZUsize!(WRITE_BUFFER),
+                    key_write_buffer: NZUsize!(WRITE_BUFFER),
+                    value_write_buffer: NZUsize!(WRITE_BUFFER),
                     replay_buffer: NZUsize!(REPLAY_BUFFER),
-                    buffer_pool: PoolRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 };
-                Archive::Prunable(prunable::Archive::init(ctx, cfg).await.unwrap())
+                Self::Prunable(prunable::Archive::init(ctx, cfg).await.unwrap())
             }
         }
     }
@@ -104,8 +113,8 @@ impl ArchiveTrait for Archive {
         value: Val,
     ) -> Result<(), commonware_storage::archive::Error> {
         match self {
-            Archive::Immutable(a) => a.put(index, key, value).await,
-            Archive::Prunable(a) => a.put(index, key, value).await,
+            Self::Immutable(a) => a.put(index, key, value).await,
+            Self::Prunable(a) => a.put(index, key, value).await,
         }
     }
 
@@ -114,8 +123,8 @@ impl ArchiveTrait for Archive {
         identifier: Identifier<'_, Key>,
     ) -> Result<Option<Val>, commonware_storage::archive::Error> {
         match self {
-            Archive::Immutable(a) => a.get(identifier).await,
-            Archive::Prunable(a) => a.get(identifier).await,
+            Self::Immutable(a) => a.get(identifier).await,
+            Self::Prunable(a) => a.get(identifier).await,
         }
     }
 
@@ -124,64 +133,57 @@ impl ArchiveTrait for Archive {
         identifier: Identifier<'_, Key>,
     ) -> Result<bool, commonware_storage::archive::Error> {
         match self {
-            Archive::Immutable(a) => a.has(identifier).await,
-            Archive::Prunable(a) => a.has(identifier).await,
+            Self::Immutable(a) => a.has(identifier).await,
+            Self::Prunable(a) => a.has(identifier).await,
         }
     }
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
         match self {
-            Archive::Immutable(a) => a.next_gap(index),
-            Archive::Prunable(a) => a.next_gap(index),
+            Self::Immutable(a) => a.next_gap(index),
+            Self::Prunable(a) => a.next_gap(index),
         }
     }
 
     fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
         match self {
-            Archive::Immutable(a) => a.missing_items(index, max),
-            Archive::Prunable(a) => a.missing_items(index, max),
+            Self::Immutable(a) => a.missing_items(index, max),
+            Self::Prunable(a) => a.missing_items(index, max),
         }
     }
 
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
         match self {
-            Archive::Immutable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
-            Archive::Prunable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
+            Self::Immutable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
+            Self::Prunable(a) => a.ranges().collect::<Vec<_>>().into_iter(),
         }
     }
 
     fn first_index(&self) -> Option<u64> {
         match self {
-            Archive::Immutable(a) => a.first_index(),
-            Archive::Prunable(a) => a.first_index(),
+            Self::Immutable(a) => a.first_index(),
+            Self::Prunable(a) => a.first_index(),
         }
     }
 
     fn last_index(&self) -> Option<u64> {
         match self {
-            Archive::Immutable(a) => a.last_index(),
-            Archive::Prunable(a) => a.last_index(),
+            Self::Immutable(a) => a.last_index(),
+            Self::Prunable(a) => a.last_index(),
         }
     }
 
     async fn sync(&mut self) -> Result<(), commonware_storage::archive::Error> {
         match self {
-            Archive::Immutable(a) => a.sync().await,
-            Archive::Prunable(a) => a.sync().await,
-        }
-    }
-
-    async fn close(self) -> Result<(), commonware_storage::archive::Error> {
-        match self {
-            Archive::Immutable(a) => a.close().await,
-            Archive::Prunable(a) => a.close().await,
+            Self::Immutable(a) => a.sync().await,
+            Self::Prunable(a) => a.sync().await,
         }
     }
 
     async fn destroy(self) -> Result<(), commonware_storage::archive::Error> {
         match self {
-            Archive::Immutable(a) => a.destroy().await,
-            Archive::Prunable(a) => a.destroy().await,
+            Self::Immutable(a) => a.destroy().await,
+            Self::Prunable(a) => a.destroy().await,
         }
     }
 }
@@ -190,15 +192,16 @@ impl ArchiveTrait for Archive {
 pub async fn append_random(archive: &mut Archive, count: u64) -> Vec<Key> {
     let mut rng = StdRng::seed_from_u64(0);
     let mut key_buf = [0u8; 64];
-    let mut val_buf = [0u8; 32];
 
     let mut keys = Vec::with_capacity(count as usize);
     for i in 0..count {
         rng.fill_bytes(&mut key_buf);
         let key = Key::new(key_buf);
         keys.push(key.clone());
+
+        let mut val_buf = vec![0u8; VALUE_SIZE];
         rng.fill_bytes(&mut val_buf);
-        archive.put(i, key, Val::new(val_buf)).await.unwrap();
+        archive.put(i, key, val_buf).await.unwrap();
     }
     archive.sync().await.unwrap();
     keys

@@ -1,21 +1,23 @@
 use commonware_codec::EncodeSize as _;
-use commonware_coding::{Config, NoCoding, ReedSolomon, Scheme, Zoda};
+use commonware_coding::{Config, PhasedAsScheme, ReedSolomon, Scheme, Zoda};
 use commonware_cryptography::Sha256;
+use commonware_parallel::Sequential;
+use commonware_utils::NZU16;
 use rand::{RngCore as _, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 
-const CONCURRENCY: usize = 1;
+const STRATEGY: Sequential = Sequential;
 
-fn benchmark_size<S: Scheme>(name: &str) {
+fn bench_size<S: Scheme>(name: &str) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
-    let cases = [8, 12, 16, 19, 20, 24].map(|i| 2usize.pow(i));
+    let cases = [8, 12, 16, 19, 20, 22, 23, 24].map(|i| 2usize.pow(i));
 
     for data_length in cases.into_iter() {
-        for chunks in [10, 25, 50, 100, 250] {
+        for chunks in [10u16, 25, 50, 100, 250] {
             let min = chunks / 3;
             let config = Config {
-                minimum_shards: min as u16,
-                extra_shards: (chunks - min) as u16,
+                minimum_shards: NZU16!(min),
+                extra_shards: NZU16!(chunks - min),
             };
 
             let data = {
@@ -24,9 +26,8 @@ fn benchmark_size<S: Scheme>(name: &str) {
                 data
             };
 
-            let (commitment, mut shards) =
-                S::encode(&config, data.as_slice(), CONCURRENCY).unwrap();
-            let shard = shards.pop().unwrap();
+            let (_, shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+            let shard = &shards[0];
             println!(
                 "{} (shard)/msg_len={} chunks={}: {} B",
                 name,
@@ -34,28 +35,12 @@ fn benchmark_size<S: Scheme>(name: &str) {
                 chunks,
                 shard.encode_size()
             );
-
-            let (_, _, reshard) = S::reshard(
-                &config,
-                &commitment,
-                config.minimum_shards + config.extra_shards - 1,
-                shard,
-            )
-            .unwrap();
-            println!(
-                "{} (reshard)/msg_len={} chunks={}: {} B",
-                name,
-                data_length,
-                chunks,
-                reshard.encode_size()
-            );
             println!();
         }
     }
 }
 
 fn main() {
-    benchmark_size::<ReedSolomon<Sha256>>("reed_solomon size");
-    benchmark_size::<NoCoding<Sha256>>("no_coding size");
-    benchmark_size::<Zoda<Sha256>>("zoda size");
+    bench_size::<ReedSolomon<Sha256>>("reed_solomon size");
+    bench_size::<PhasedAsScheme<Zoda<Sha256>>>("zoda size");
 }

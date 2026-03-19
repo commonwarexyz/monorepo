@@ -18,14 +18,14 @@ pub fn get<C: Send + 'static>() -> C {
     CONTEXT.with(|cell| {
         // Attempt to take the context from the thread-local storage
         let mut borrow = cell.borrow_mut();
-        match borrow.take() {
-            Some(context) => {
+        borrow
+            .take()
+            .map(|context| {
                 // Convert the context back to the original type
                 let context = context.downcast::<C>().expect("failed to downcast context");
                 *context
-            }
-            None => panic!("no context set"),
-        }
+            })
+            .expect("no context set")
     })
 }
 

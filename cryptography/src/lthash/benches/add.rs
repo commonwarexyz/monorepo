@@ -1,7 +1,7 @@
 use commonware_cryptography::lthash::LtHash;
 use criterion::{criterion_group, BatchSize, Criterion};
 
-fn benchmark_add(c: &mut Criterion) {
+fn bench_add(c: &mut Criterion) {
     for size in [32, 256, 1024, 4096] {
         let data = vec![0u8; size];
         c.bench_function(&format!("{}/bytes={}", module_path!(), size), |b| {
@@ -16,4 +16,4 @@ fn benchmark_add(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, benchmark_add);
+criterion_group!(benches, bench_add);

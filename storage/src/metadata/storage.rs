@@ -1,10 +1,10 @@
 use super::{Config, Error};
-use bytes::BufMut;
 use commonware_codec::{Codec, FixedSize, ReadExt};
+use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Blob, Clock, Error as RError, Metrics, Storage,
+    telemetry::metrics::status::GaugeExt, Blob, BufMut, Clock, Error as RError, Metrics, Storage,
 };
-use commonware_utils::Array;
+use commonware_utils::{sync::AsyncMutex, Span};
 use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -21,13 +21,13 @@ struct Info {
 
 impl Info {
     /// Create a new [Info].
-    fn new(start: usize, length: usize) -> Self {
+    const fn new(start: usize, length: usize) -> Self {
         Self { start, length }
     }
 }
 
 /// One of the two wrappers that store metadata.
-struct Wrapper<B: Blob, K: Array> {
+struct Wrapper<B: Blob, K: Span> {
     blob: B,
     version: u64,
     lengths: HashMap<K, Info>,
@@ -35,9 +35,9 @@ struct Wrapper<B: Blob, K: Array> {
     data: Vec<u8>,
 }
 
-impl<B: Blob, K: Array> Wrapper<B, K> {
+impl<B: Blob, K: Span> Wrapper<B, K> {
     /// Create a new [Wrapper].
-    fn new(blob: B, version: u64, lengths: HashMap<K, Info>, data: Vec<u8>) -> Self {
+    const fn new(blob: B, version: u64, lengths: HashMap<K, Info>, data: Vec<u8>) -> Self {
         Self {
             blob,
             version,
@@ -59,23 +59,28 @@ impl<B: Blob, K: Array> Wrapper<B, K> {
     }
 }
 
+/// State used during [Metadata::sync] operations.
+struct State<B: Blob, K: Span> {
+    cursor: usize,
+    next_version: u64,
+    key_order_changed: u64,
+    blobs: [Wrapper<B, K>; 2],
+}
+
 /// Implementation of [Metadata] storage.
-pub struct Metadata<E: Clock + Storage + Metrics, K: Array, V: Codec> {
+pub struct Metadata<E: Clock + Storage + Metrics, K: Span, V: Codec> {
     context: E,
 
     map: BTreeMap<K, V>,
-    cursor: usize,
-    key_order_changed: u64,
-    next_version: u64,
     partition: String,
-    blobs: [Wrapper<E::Blob, K>; 2],
+    state: AsyncMutex<State<E::Blob, K>>,
 
     sync_overwrites: Counter,
     sync_rewrites: Counter,
     keys: Gauge,
 }
 
-impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
+impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
     /// Initialize a new [Metadata] instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Open dedicated blobs
@@ -121,11 +126,13 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             context,
 
             map,
-            cursor,
-            key_order_changed: next_version, // rewrite on startup because we don't have a diff record
-            next_version,
             partition: cfg.partition,
-            blobs: [left_wrapper, right_wrapper],
+            state: AsyncMutex::new(State {
+                cursor,
+                next_version,
+                key_order_changed: next_version, // rewrite on startup because we don't have a diff record
+                blobs: [left_wrapper, right_wrapper],
+            }),
 
             sync_rewrites,
             sync_overwrites,
@@ -146,13 +153,13 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         }
 
         // Read blob
-        let len = len.try_into().map_err(|_| Error::BlobTooLarge(len))?;
-        let buf = blob.read_at(vec![0u8; len], 0).await?;
+        let len: usize = len.try_into().expect("blob too large for platform");
+        let buf = blob.read_at(0, len).await?.coalesce();
 
         // Verify integrity.
         //
         // 8 bytes for version + 4 bytes for checksum.
-        if buf.len() < 12 {
+        if buf.len() < 8 + crc32::Digest::SIZE {
             // Truncate and return none
             warn!(
                 blob = index,
@@ -165,10 +172,10 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         }
 
         // Extract checksum
-        let checksum_index = buf.len() - 4;
+        let checksum_index = buf.len() - crc32::Digest::SIZE;
         let stored_checksum =
             u32::from_be_bytes(buf.as_ref()[checksum_index..].try_into().unwrap());
-        let computed_checksum = crc32fast::hash(&buf.as_ref()[..checksum_index]);
+        let computed_checksum = Crc32::checksum(&buf.as_ref()[..checksum_index]);
         if stored_checksum != computed_checksum {
             // Truncate and return none
             warn!(
@@ -207,7 +214,10 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         }
 
         // Return info
-        Ok((data, Wrapper::new(blob, version, lengths, buf.into())))
+        Ok((
+            data,
+            Wrapper::new(blob, version, lengths, buf.freeze().into()),
+        ))
     }
 
     /// Get a value from [Metadata] (if it exists).
@@ -223,8 +233,9 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // Mark key as modified.
         //
         // We need to mark both blobs as modified because we may need to update both files.
-        self.blobs[self.cursor].modified.insert(key.clone());
-        self.blobs[1 - self.cursor].modified.insert(key.clone());
+        let state = self.state.get_mut();
+        state.blobs[state.cursor].modified.insert(key.clone());
+        state.blobs[1 - state.cursor].modified.insert(key.clone());
 
         Some(value)
     }
@@ -236,28 +247,32 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         self.map.clear();
 
         // Mark key order as changed
-        self.key_order_changed = self.next_version;
+        let state = self.state.get_mut();
+        state.key_order_changed = state.next_version;
         self.keys.set(0);
     }
 
     /// Put a value into [Metadata].
     ///
-    /// If the key already exists, the value will be overwritten. The
-    /// value stored will not be persisted until [Self::sync] is called.
-    pub fn put(&mut self, key: K, value: V) {
-        // Get value
-        let exists = self.map.insert(key.clone(), value).is_some();
+    /// If the key already exists, the value will be overwritten and the previous
+    /// value is returned. The value stored will not be persisted until [Self::sync]
+    /// is called.
+    pub fn put(&mut self, key: K, value: V) -> Option<V> {
+        // Insert value, getting previous value if it existed
+        let previous = self.map.insert(key.clone(), value);
 
         // Mark key as modified.
         //
         // We need to mark both blobs as modified because we may need to update both files.
-        if exists {
-            self.blobs[self.cursor].modified.insert(key.clone());
-            self.blobs[1 - self.cursor].modified.insert(key.clone());
+        let state = self.state.get_mut();
+        if previous.is_some() {
+            state.blobs[state.cursor].modified.insert(key.clone());
+            state.blobs[1 - state.cursor].modified.insert(key);
         } else {
-            self.key_order_changed = self.next_version;
+            state.key_order_changed = state.next_version;
         }
         let _ = self.keys.try_set(self.map.len());
+        previous
     }
 
     /// Perform a [Self::put] and [Self::sync] in a single operation.
@@ -298,61 +313,78 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
 
         // Mark key as modified.
         if past.is_some() {
-            self.key_order_changed = self.next_version;
+            let state = self.state.get_mut();
+            state.key_order_changed = state.next_version;
         }
         let _ = self.keys.try_set(self.map.len());
 
         past
     }
 
-    /// Iterate over all keys in metadata, optionally filtered by prefix.
-    ///
-    /// If a prefix is provided, only keys that start with the prefix bytes will be returned.
-    pub fn keys<'a>(&'a self, prefix: Option<&'a [u8]>) -> impl Iterator<Item = &'a K> + 'a {
-        self.map.keys().filter(move |key| {
-            if let Some(prefix_bytes) = prefix {
-                key.as_ref().starts_with(prefix_bytes)
-            } else {
-                true
-            }
-        })
+    /// Iterate over all keys in metadata.
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.map.keys()
     }
 
-    /// Remove all keys that start with the given prefix.
-    pub fn remove_prefix(&mut self, prefix: &[u8]) {
-        // Retain only keys that do not start with the prefix
-        self.map.retain(|key, _| !key.as_ref().starts_with(prefix));
+    /// Retain only the keys that satisfy the predicate.
+    pub fn retain(&mut self, mut f: impl FnMut(&K, &V) -> bool) {
+        // Retain only keys that satisfy the predicate
+        let old_len = self.map.len();
+        self.map.retain(|k, v| f(k, v));
+        let new_len = self.map.len();
 
-        // Mark key order as changed since we may have removed keys
-        self.key_order_changed = self.next_version;
-        let _ = self.keys.try_set(self.map.len());
+        // If the number of keys has changed, mark the key order as changed
+        if new_len != old_len {
+            let state = self.state.get_mut();
+            state.key_order_changed = state.next_version;
+            let _ = self.keys.try_set(self.map.len());
+        }
     }
 
     /// Atomically commit the current state of [Metadata].
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error> {
+        // Acquire lock on sync state which will prevent concurrent sync calls while not blocking
+        // reads from the metadata map.
+        let mut state = self.state.lock().await;
+
+        // Extract values we need
+        let cursor = state.cursor;
+        let next_version = state.next_version;
+        let key_order_changed = state.key_order_changed;
+
         // Compute next version.
         //
-        // While it is possible that extremely high-frequency updates to metadata could cause an eventual
-        // overflow of version, syncing once per millisecond would overflow in 584,942,417 years.
-        let past_version = self.blobs[self.cursor].version;
-        let next_next_version = self.next_version.checked_add(1).expect("version overflow");
+        // While it is possible that extremely high-frequency updates to metadata could cause an
+        // eventual overflow of version, syncing once per millisecond would overflow in 584,942,417
+        // years.
+        let past_version = state.blobs[cursor].version;
+        let next_next_version = next_version.checked_add(1).expect("version overflow");
 
         // Get target blob (the one we will modify)
-        let target_cursor = 1 - self.cursor;
-        let target = &mut self.blobs[target_cursor];
+        let target_cursor = 1 - cursor;
 
-        // Attempt to overwrite existing data if key order has not changed recently
+        // Update the state.
+        state.cursor = target_cursor;
+        state.next_version = next_next_version;
+
+        // Get a mutable reference to the target blob.
+        let target = &mut state.blobs[target_cursor];
+
+        // Determine if we can overwrite existing data in place, and prepare the list of data to
+        // write in that event.
         let mut overwrite = true;
-        let mut writes = Vec::with_capacity(target.modified.len());
-        if self.key_order_changed < past_version {
+        let mut writes = vec![];
+        if key_order_changed < past_version {
+            let write_capacity = target.modified.len() + 2;
+            writes.reserve(write_capacity);
             for key in target.modified.iter() {
                 let info = target.lengths.get(key).expect("key must exist");
                 let new_value = self.map.get(key).expect("key must exist");
                 if info.length == new_value.encode_size() {
                     // Overwrite existing value
-                    let encoded = new_value.encode();
+                    let encoded = new_value.encode_mut();
                     target.data[info.start..info.start + info.length].copy_from_slice(&encoded);
-                    writes.push(target.blob.write_at(encoded, info.start as u64));
+                    writes.push(target.blob.write_at(info.start as u64, encoded));
                 } else {
                     // Rewrite all
                     overwrite = false;
@@ -370,18 +402,18 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
         // Overwrite existing data
         if overwrite {
             // Update version
-            let version = self.next_version.to_be_bytes();
+            let version = next_version.to_be_bytes();
             target.data[0..8].copy_from_slice(&version);
-            writes.push(target.blob.write_at(version.as_slice().into(), 0));
+            writes.push(target.blob.write_at(0, version.as_slice().into()));
 
             // Update checksum
-            let checksum_index = target.data.len() - 4;
-            let checksum = crc32fast::hash(&target.data[..checksum_index]).to_be_bytes();
+            let checksum_index = target.data.len() - crc32::Digest::SIZE;
+            let checksum = Crc32::checksum(&target.data[..checksum_index]).to_be_bytes();
             target.data[checksum_index..].copy_from_slice(&checksum);
             writes.push(
                 target
                     .blob
-                    .write_at(checksum.as_slice().into(), checksum_index as u64),
+                    .write_at(checksum_index as u64, checksum.as_slice().into()),
             );
 
             // Persist changes
@@ -389,55 +421,45 @@ impl<E: Clock + Storage + Metrics, K: Array, V: Codec> Metadata<E, K, V> {
             target.blob.sync().await?;
 
             // Update state
-            target.version = self.next_version;
-            self.cursor = target_cursor;
-            self.next_version = next_next_version;
+            target.version = next_version;
             self.sync_overwrites.inc();
             return Ok(());
         }
 
-        // Rewrite all data
+        // Since we can't overwrite in place, we rewrite the entire blob.
         let mut lengths = HashMap::new();
         let mut next_data = Vec::with_capacity(target.data.len());
-        next_data.put_u64(self.next_version);
+        next_data.put_u64(next_version);
+
+        // Build new data
         for (key, value) in &self.map {
             key.write(&mut next_data);
             let start = next_data.len();
             value.write(&mut next_data);
             lengths.insert(key.clone(), Info::new(start, value.encode_size()));
         }
-        next_data.put_u32(crc32fast::hash(&next_data[..]));
+        next_data.put_u32(Crc32::checksum(&next_data[..]));
 
-        // Persist changes
-        target.blob.write_at(next_data.clone(), 0).await?;
+        // Write and persist the new data
+        target.blob.write_at(0, next_data.clone()).await?;
         if next_data.len() < target.data.len() {
             target.blob.resize(next_data.len() as u64).await?;
         }
         target.blob.sync().await?;
 
-        // Update state
-        target.version = self.next_version;
+        // Update blob state
+        target.version = next_version;
         target.lengths = lengths;
         target.data = next_data;
-        self.cursor = target_cursor;
-        self.next_version = next_next_version;
-        self.sync_rewrites.inc();
-        Ok(())
-    }
 
-    /// Sync outstanding data and close [Metadata].
-    pub async fn close(mut self) -> Result<(), Error> {
-        // Sync and drop blobs
-        self.sync().await?;
-        for wrapper in self.blobs.into_iter() {
-            wrapper.blob.sync().await?;
-        }
+        self.sync_rewrites.inc();
         Ok(())
     }
 
     /// Remove the underlying blobs for this [Metadata].
     pub async fn destroy(self) -> Result<(), Error> {
-        for (i, wrapper) in self.blobs.into_iter().enumerate() {
+        let state = self.state.into_inner();
+        for (i, wrapper) in state.blobs.into_iter().enumerate() {
             drop(wrapper.blob);
             self.context
                 .remove(&self.partition, Some(BLOB_NAMES[i]))

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e7eacaabc5bf96c74bf33ed4fafe8a132d9a6401607b85ddd75553d767fe673a # shrinks to input = FuzzInput { raw_bytes: [0, 0, 0, 0, 0, 0, 0, 0], required_containers: 30, degraded_network: false, configuration: Configuration { n: 4, faults: 1, correct: 3 }, partition: Connected, strategy: AnyScope }

@@ -1,27 +1,82 @@
 #![doc = include_str!("../README.md")]
 
-use crate::application::{EdScheme, ThresholdScheme};
+use crate::{
+    application::{EdScheme, ThresholdScheme},
+    dkg::{ContinueOnUpdate, PostUpdate, Update, UpdateCallBack},
+    setup::ParticipantConfig,
+};
 use clap::{Args, Parser, Subcommand};
-use commonware_cryptography::bls12381::primitives::variant::MinSig;
+use commonware_codec::Encode;
+use commonware_consensus::simplex::elector::{Random, RoundRobin};
+use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_runtime::{
     tokio::{self, telemetry::Logging},
     Metrics, Runner,
 };
-use std::path::PathBuf;
+use commonware_utils::{hex, NZU64};
+use std::{future::Future, num::NonZeroU64, path::PathBuf, pin::Pin};
 use tracing::Level;
 
 mod application;
 mod dkg;
 mod engine;
+mod namespace;
 mod orchestrator;
 mod setup;
 mod validator;
+
+/// This exists to implement [`UpdateCallBack`] for the simple case of saving the DKG result.
+///
+/// This is used to do an initial setup for using the result to run a threshold-signature
+/// based consensus. In order to bootstrap the initial shares, we run a non-threshold
+/// version of consensus, until we successfully complete a DKG, and then save the
+/// public output and our private share to a file.
+///
+/// For a more production-oriented version of this pattern, you'd probably want
+/// to have this use [`commonware_storage`], with the same backing store that you
+/// use for storing the shares later, e.g. [`commonware_storage::metadata`].
+///
+/// In this example, this saves to a file to make the result more easily inspectable.
+struct SaveFileOnUpdate {
+    path: PathBuf,
+}
+
+impl SaveFileOnUpdate {
+    pub fn boxed(path: PathBuf) -> Box<Self> {
+        Box::new(Self { path })
+    }
+}
+
+impl UpdateCallBack<MinSig, PublicKey> for SaveFileOnUpdate {
+    fn on_update(
+        &mut self,
+        update: Update<MinSig, PublicKey>,
+    ) -> Pin<Box<dyn Future<Output = PostUpdate> + Send>> {
+        let config_path = self.path.clone();
+        Box::pin(async move {
+            match update {
+                Update::Failure { .. } => PostUpdate::Continue,
+                Update::Success { output, share, .. } => {
+                    let config_str =
+                        std::fs::read_to_string(&config_path).expect("failed to read config file");
+                    let config: ParticipantConfig = serde_json::from_str(&config_str)
+                        .expect("Failed to deserialize participant configuration");
+                    config.update_and_write(&config_path, |config| {
+                        config.output = Some(hex(output.encode().as_ref()));
+                        config.share = share;
+                    });
+                    PostUpdate::Stop
+                }
+            }
+        })
+    }
+}
 
 /// The number of blocks in an epoch.
 ///
 /// Production systems should use a much larger value, as safety in the DKG/reshare depends on
 /// synchrony. All players must be online for a small duration during this window.
-pub const BLOCKS_PER_EPOCH: u64 = 200;
+pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(200);
 
 /// Reshare example CLI.
 #[derive(Parser)]
@@ -98,7 +153,6 @@ fn main() {
 
     let config = tokio::Config::new()
         .with_worker_threads(app.worker_threads)
-        .with_tcp_nodelay(Some(true))
         .with_catch_panics(false);
     let runner = tokio::Runner::new(config);
     runner.start(|context| async move {
@@ -115,9 +169,22 @@ fn main() {
 
         match app.subcommand {
             Subcommands::Setup(args) => setup::run(args),
-            Subcommands::Dkg(args) => validator::run::<EdScheme>(context, args).await,
+            Subcommands::Dkg(args) => {
+                let config_path = args.config_path.clone();
+                validator::run::<EdScheme, RoundRobin>(
+                    context,
+                    args,
+                    SaveFileOnUpdate::boxed(config_path),
+                )
+                .await;
+            }
             Subcommands::Validator(args) => {
-                validator::run::<ThresholdScheme<MinSig>>(context, args).await
+                validator::run::<ThresholdScheme<MinSig>, Random>(
+                    context,
+                    args,
+                    ContinueOnUpdate::boxed(),
+                )
+                .await
             }
         }
     });

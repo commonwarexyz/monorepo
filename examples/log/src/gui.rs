@@ -4,12 +4,12 @@
 //! implemented to make consensus logging easier to follow.
 
 use commonware_runtime::{Metrics, Spawner};
+use commonware_utils::{channel::mpsc, sync::Mutex};
 use crossterm::{
     event::{self, Event as CEvent, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::{channel::mpsc, SinkExt, StreamExt};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -18,11 +18,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Terminal,
 };
-use std::{
-    io::stdout,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{io::stdout, sync::Arc, time::Duration};
 use tracing_subscriber::fmt::MakeWriter;
 
 const HEIGHT_OFFSET: u16 = 2;
@@ -46,7 +42,7 @@ pub struct Writer {
 
 impl Writer {
     /// Creates a new `Writer` instance.
-    pub fn new(progress: Arc<Mutex<Vec<String>>>, logs: Arc<Mutex<Vec<String>>>) -> Self {
+    pub const fn new(progress: Arc<Mutex<Vec<String>>>, logs: Arc<Mutex<Vec<String>>>) -> Self {
         Self { progress, logs }
     }
 
@@ -101,10 +97,10 @@ impl std::io::Write for Writer {
 
         // Append progress message
         if progress {
-            let mut progress = self.progress.lock().unwrap();
+            let mut progress = self.progress.lock();
             progress.push(formatted_msg);
         } else {
-            let mut logs = self.logs.lock().unwrap();
+            let mut logs = self.logs.lock();
             logs.push(formatted_msg);
         }
         Ok(buf.len())
@@ -119,7 +115,7 @@ impl<'a> MakeWriter<'a> for Writer {
     type Writer = Self;
 
     fn make_writer(&'a self) -> Self::Writer {
-        Writer {
+        Self {
             progress: Arc::clone(&self.progress),
             logs: Arc::clone(&self.logs),
         }
@@ -161,7 +157,7 @@ impl<E: Spawner + Metrics> Gui<E> {
         let mut terminal = Terminal::new(backend).unwrap();
 
         // Listen for input
-        let (mut tx, mut rx) = mpsc::channel(100);
+        let (tx, mut rx) = mpsc::channel(100);
         self.context.with_label("keyboard").spawn(|_| async move {
             loop {
                 match event::poll(Duration::from_millis(500)) {
@@ -207,7 +203,7 @@ impl<E: Spawner + Metrics> Gui<E> {
 
                     // Display progress
                     let progress_height = chunks[0].height - HEIGHT_OFFSET;
-                    let progress = self.progress.lock().unwrap();
+                    let progress = self.progress.lock();
                     let progress_len = progress.len() as u16;
                     let progress_max_scroll = progress_len.saturating_sub(progress_height);
                     if focused_window != Focus::Logs {
@@ -227,7 +223,7 @@ impl<E: Spawner + Metrics> Gui<E> {
                                     Line::raw(p.clone())
                                 }
                             })
-                            .collect::<Vec<Line>>(),
+                            .collect::<Vec<Line<'_>>>(),
                     );
                     let progress_block = Paragraph::new(progress_text)
                         .block(
@@ -244,7 +240,7 @@ impl<E: Spawner + Metrics> Gui<E> {
 
                     // Display logs
                     let logs_height = chunks[1].height - HEIGHT_OFFSET;
-                    let logs = self.logs.lock().unwrap();
+                    let logs = self.logs.lock();
                     let logs_len = logs.len() as u16;
                     let logs_max_scroll = logs_len.saturating_sub(logs_height);
                     if focused_window != Focus::Logs {
@@ -253,7 +249,7 @@ impl<E: Spawner + Metrics> Gui<E> {
                     let logs_text = Text::from(
                         logs.iter()
                             .map(|l| Line::raw(l.clone()))
-                            .collect::<Vec<Line>>(),
+                            .collect::<Vec<Line<'_>>>(),
                     );
                     let logs_block = Paragraph::new(logs_text)
                         .block(
@@ -271,11 +267,8 @@ impl<E: Spawner + Metrics> Gui<E> {
                 .unwrap();
 
             // Handle input
-            let event = rx.next().await;
-            let event = match event {
-                Some(event) => event,
-                None => panic!("Failed to receive event"),
-            };
+            let event = rx.recv().await;
+            let event = event.expect("failed to receive event");
             match event {
                 Event::Input(event) => match event.code {
                     KeyCode::Tab => {

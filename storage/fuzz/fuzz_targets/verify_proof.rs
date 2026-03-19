@@ -3,8 +3,8 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_storage::{
-    adb::verify::verify_multi_proof,
-    mmr::{Location, Position, Proof, StandardHasher as Standard},
+    mmr::{Location, Proof, StandardHasher as Standard},
+    qmdb::verify::verify_multi_proof,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -20,14 +20,14 @@ struct OperationInput {
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    proof_size: u64,
+    proof_leaves: Location,
     digests: Vec<[u8; 32]>,
     operations: Vec<OperationInput>,
     root: [u8; 32],
 }
 
 fn fuzz(input: FuzzInput) {
-    let mut hasher: Standard<Sha256> = Standard::new();
+    let hasher: Standard<Sha256> = Standard::new();
 
     let digests = input
         .digests
@@ -37,7 +37,7 @@ fn fuzz(input: FuzzInput) {
         .collect::<Vec<_>>();
 
     let proof = Proof {
-        size: Position::new(input.proof_size),
+        leaves: input.proof_leaves,
         digests,
     };
 
@@ -48,13 +48,14 @@ fn fuzz(input: FuzzInput) {
             payload.truncate(MAX_OPERATION_BYTES);
         }
         // Only add operations with valid locations
-        if let Some(location) = Location::new(entry.location) {
+        let location = Location::new(entry.location);
+        if location.is_valid() {
             operations.push((location, payload));
         }
     }
 
     let root = Digest::from(input.root);
-    let _ = verify_multi_proof(&mut hasher, &proof, operations.as_slice(), &root);
+    let _ = verify_multi_proof(&hasher, &proof, operations.as_slice(), &root);
 }
 
 fuzz_target!(|data: &[u8]| {

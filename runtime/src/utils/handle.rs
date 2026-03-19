@@ -1,6 +1,9 @@
 use crate::{supervision::Tree, utils::extract_panic_message, Error};
-use futures::{
+use commonware_utils::{
     channel::oneshot,
+    sync::{Mutex, Once},
+};
+use futures::{
     future::{select, Either},
     pin_mut,
     stream::{AbortHandle, Abortable},
@@ -12,7 +15,7 @@ use std::{
     future::Future,
     panic::{resume_unwind, AssertUnwindSafe},
     pin::Pin,
-    sync::{Arc, Mutex, Once},
+    sync::Arc,
     task::{Context, Poll},
 };
 use tracing::error;
@@ -184,7 +187,8 @@ impl Panicker {
     }
 
     /// Returns whether the [Panicker] is configured to catch panics.
-    pub(crate) fn catch(&self) -> bool {
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) const fn catch(&self) -> bool {
         self.catch
     }
 
@@ -200,7 +204,7 @@ impl Panicker {
         }
 
         // If we've already sent a panic, ignore the new one
-        let mut sender = self.sender.lock().unwrap();
+        let mut sender = self.sender.lock();
         let Some(sender) = sender.take() else {
             return;
         };
@@ -251,7 +255,7 @@ pub(crate) struct Aborter {
 
 impl Aborter {
     /// Creates a new [`Aborter`] for the provided abort handle and metric handle.
-    pub(crate) fn new(inner: AbortHandle, metric: MetricHandle) -> Self {
+    pub(crate) const fn new(inner: AbortHandle, metric: MetricHandle) -> Self {
         Self { inner, metric }
     }
 

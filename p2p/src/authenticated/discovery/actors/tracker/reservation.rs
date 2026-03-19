@@ -4,6 +4,7 @@ use commonware_cryptography::PublicKey;
 
 /// Reservation for a peer in the network. This is used to ensure that the peer is reserved only
 /// once, and that the reservation is released when the peer connection fails or is closed.
+#[derive(Debug)]
 pub struct Reservation<P: PublicKey> {
     /// Metadata about the reservation.
     metadata: Metadata<P>,
@@ -16,7 +17,7 @@ pub struct Reservation<P: PublicKey> {
 
 impl<P: PublicKey> Reservation<P> {
     /// Create a new reservation for a peer.
-    pub fn new(metadata: Metadata<P>, releaser: Releaser<P>) -> Self {
+    pub const fn new(metadata: Metadata<P>, releaser: Releaser<P>) -> Self {
         Self {
             metadata,
             releaser: Some(releaser),
@@ -26,7 +27,7 @@ impl<P: PublicKey> Reservation<P> {
 
 impl<P: PublicKey> Reservation<P> {
     /// Returns the metadata associated with this reservation.
-    pub fn metadata(&self) -> &Metadata<P> {
+    pub const fn metadata(&self) -> &Metadata<P> {
         &self.metadata
     }
 }

@@ -1,0 +1,59 @@
+[package]
+name = "commonware-math"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Create and manipulate mathematical objects."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/math"
+documentation = "https://docs.rs/commonware-math"
+
+[lints]
+workspace = true
+
+[features]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
+	"dep:commonware-invariants",
+	"std",
+]
+default = [ "std" ]
+std = [
+	"bytes/std",
+	"commonware-codec/std",
+	"commonware-macros/std",
+	"commonware-parallel/std",
+	"commonware-utils/std",
+	"rand_core/std",
+]
+fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
+
+[dependencies]
+arbitrary = { workspace = true, optional = true }
+bytes.workspace = true
+commonware-codec.workspace = true
+commonware-invariants = { workspace = true, optional = true }
+commonware-macros.workspace = true
+commonware-parallel.workspace = true
+commonware-utils.workspace = true
+rand_core.workspace = true
+
+[dev-dependencies]
+arbitrary = { workspace = true, features = ["derive"] }
+commonware-conformance.workspace = true
+commonware-invariants.workspace = true
+criterion.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+
+[lib]
+bench = false
+
+[[bench]]
+name = "interpolation"
+harness = false
+path = "benches/interpolation.rs"

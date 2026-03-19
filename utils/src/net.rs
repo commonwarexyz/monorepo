@@ -89,10 +89,10 @@ pub trait IpAddrExt {
 impl IpAddrExt for IpAddr {
     fn subnet(&self, mask: &SubnetMask) -> Subnet {
         match self {
-            IpAddr::V4(v4) => Subnet {
+            Self::V4(v4) => Subnet {
                 addr: ipv4_subnet(*v4, mask),
             },
-            IpAddr::V6(v6) => {
+            Self::V6(v6) => {
                 if let Some(v4) = v6.to_ipv4_mapped() {
                     return Subnet {
                         addr: ipv4_subnet(v4, mask),
@@ -108,8 +108,8 @@ impl IpAddrExt for IpAddr {
 
     fn is_global(&self) -> bool {
         match self {
-            IpAddr::V4(ip) => is_global_v4(*ip),
-            IpAddr::V6(ip) => is_global_v6(*ip),
+            Self::V4(ip) => is_global_v4(*ip),
+            Self::V6(ip) => is_global_v6(*ip),
         }
     }
 }

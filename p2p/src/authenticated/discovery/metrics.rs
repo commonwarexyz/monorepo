@@ -18,19 +18,21 @@ impl Peer {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum MessageType {
+    Data(u64),
+    Greeting,
     BitVec,
     Peers,
-    Data(u64),
     Invalid,
 }
 
 impl EncodeLabelValue for MessageType {
-    fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
+    fn encode(&self, encoder: &mut LabelValueEncoder<'_>) -> Result<(), std::fmt::Error> {
         match self {
-            MessageType::BitVec => encoder.write_str("bit_vec"),
-            MessageType::Peers => encoder.write_str("peers"),
-            MessageType::Data(channel) => encoder.write_str(&format!("data_{channel}")),
-            MessageType::Invalid => encoder.write_str("invalid"),
+            Self::Data(channel) => encoder.write_str(&format!("data_{channel}")),
+            Self::Greeting => encoder.write_str("greeting"),
+            Self::BitVec => encoder.write_str("bit_vec"),
+            Self::Peers => encoder.write_str("peers"),
+            Self::Invalid => encoder.write_str("invalid"),
         }
     }
 }
@@ -42,6 +44,18 @@ pub struct Message {
 }
 
 impl Message {
+    pub fn new_data(peer: &impl Array, channel: Channel) -> Self {
+        Self {
+            peer: peer.to_string(),
+            message: MessageType::Data(channel),
+        }
+    }
+    pub fn new_greeting(peer: &impl Array) -> Self {
+        Self {
+            peer: peer.to_string(),
+            message: MessageType::Greeting,
+        }
+    }
     pub fn new_bit_vec(peer: &impl Array) -> Self {
         Self {
             peer: peer.to_string(),
@@ -52,12 +66,6 @@ impl Message {
         Self {
             peer: peer.to_string(),
             message: MessageType::Peers,
-        }
-    }
-    pub fn new_data(peer: &impl Array, channel: Channel) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Data(channel),
         }
     }
     pub fn new_invalid(peer: &impl Array) -> Self {

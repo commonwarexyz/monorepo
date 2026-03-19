@@ -1,25 +1,28 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use bytes::Bytes;
 use commonware_codec::codec::FixedSize;
-use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::{
     simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
-use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+use commonware_runtime::{deterministic, Clock, IoBuf, Metrics, Quota, Runner};
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
     collections::{hash_map, HashMap, HashSet, VecDeque},
+    num::NonZeroU32,
     time::Duration,
 };
 
 const MAX_OPERATIONS: usize = 50;
 const MAX_PEERS: usize = 16;
 const MIN_PEERS: usize = 2;
-const MAX_MSG_SIZE: usize = 1024 * 1024; // 1MB
-const MAX_SLEEP_DURATION: u64 = 1000; // milliseconds
+const MAX_MSG_SIZE: u32 = 1024 * 1024;
+const MAX_SLEEP_DURATION_MS: u64 = 1000;
+
+/// Default rate limit set high enough to not interfere with normal operation
+const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
 /// Operations that can be performed on the simulated p2p network during fuzzing.
 #[derive(Debug, Arbitrary)]
@@ -121,23 +124,24 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Create the simulated network and oracle for controlling it
-        let (network, mut oracle) = simulated::Network::new(context.with_label("network"), p2p_cfg);
+        let (network, oracle) = simulated::Network::new(context.with_label("network"), p2p_cfg);
         let _network_handle = network.start();
 
         // Track registered channels: (peer_idx, channel_id) -> (sender, receiver)
         // Each peer can register multiple channels for message segregation
         // The receiver gets messages from ALL senders on that channel, not per-sender streams
+        #[allow(clippy::type_complexity)]
         let mut channels: HashMap<
             (usize, u8),
             (
-                commonware_p2p::simulated::Sender<ed25519::PublicKey>,
+                commonware_p2p::simulated::Sender<ed25519::PublicKey, deterministic::Context>,
                 commonware_p2p::simulated::Receiver<ed25519::PublicKey>,
             ),
         > = HashMap::new();
 
         // Track expected messages: (to_idx, sender_pk, channel_id) -> queue of messages
         // Messages may be dropped (unreliable links) but those delivered must match expectations
-        let mut expected_msgs: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<Bytes>> = HashMap::new();
+        let mut expected_msgs: HashMap<(usize, ed25519::PublicKey, u8), VecDeque<IoBuf>> = HashMap::new();
 
         for op in input.operations.into_iter() {
             match op {
@@ -150,8 +154,10 @@ fn fuzz(input: FuzzInput) {
 
                     // Only register if not already registered
                     if let hash_map::Entry::Vacant(e) = channels.entry((idx, channel_id)) {
-                        if let Ok((sender, receiver)) =
-                            oracle.control(peer_pks[idx].clone()).register(channel_id as u64).await
+                        if let Ok((sender, receiver)) = oracle
+                            .control(peer_pks[idx].clone())
+                            .register(channel_id as u64, TEST_QUOTA)
+                            .await
                         {
                             e.insert((sender, receiver));
                         }
@@ -169,7 +175,7 @@ fn fuzz(input: FuzzInput) {
                     let to_idx = (to_idx as usize) % peer_pks.len();
 
                     // Clamp message size to not exceed max (accounting for channel overhead)
-                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE - Channel::SIZE);
+                    let msg_size = msg_size.clamp(0, MAX_MSG_SIZE as usize - Channel::SIZE);
 
                     // Skip if receiver hasn't registered this channel - they won't be able to receive
                     if !channels.contains_key(&(to_idx, channel_id)) {
@@ -184,7 +190,7 @@ fn fuzz(input: FuzzInput) {
                     // Generate random message payload
                     let mut bytes = vec![0u8; msg_size];
                     context.fill(&mut bytes[..]);
-                    let message = Bytes::from(bytes);
+                    let message = IoBuf::from(bytes);
 
                     // Attempt to send the message
                     // Note: Success only means accepted for transmission, not guaranteed delivery
@@ -234,7 +240,7 @@ fn fuzz(input: FuzzInput) {
 
                                 // Find message in expected queue
                                 // Messages can be dropped, but if received they must be in order
-                                if let Some(pos) = queue.iter().position(|m| m == &message) {
+                                if let Some(pos) = queue.iter().position(|m| *m == message) {
                                     // Remove all messages up to and including this one
                                     // Messages before it were implicitly dropped, this one is received
                                     for _ in 0..=pos {
@@ -252,7 +258,7 @@ fn fuzz(input: FuzzInput) {
                                     );
                                 }
                             },
-                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION)) => {
+                            _ = context.sleep(Duration::from_millis(MAX_SLEEP_DURATION_MS)) => {
                                 continue; // Timeout - message may not have arrived yet
                             }
                         }

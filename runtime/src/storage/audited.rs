@@ -1,5 +1,4 @@
-use crate::{deterministic::Auditor, Error};
-use commonware_utils::StableBuf;
+use crate::{deterministic::Auditor, Error, IoBufs, IoBufsMut};
 use sha2::digest::Update;
 use std::sync::Arc;
 
@@ -10,30 +9,46 @@ pub struct Storage<S: crate::Storage> {
 }
 
 impl<S: crate::Storage> Storage<S> {
-    pub fn new(inner: S, auditor: Arc<Auditor>) -> Self {
+    pub const fn new(inner: S, auditor: Arc<Auditor>) -> Self {
         Self { inner, auditor }
+    }
+
+    /// Get a reference to the inner storage.
+    pub const fn inner(&self) -> &S {
+        &self.inner
     }
 }
 
 impl<S: crate::Storage> crate::Storage for Storage<S> {
     type Blob = Blob<S::Blob>;
 
-    async fn open(&self, partition: &str, name: &[u8]) -> Result<(Self::Blob, u64), Error> {
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), Error> {
         self.auditor.event(b"open", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
+            hasher.update(&versions.start().to_be_bytes());
+            hasher.update(&versions.end().to_be_bytes());
         });
-        self.inner.open(partition, name).await.map(|(blob, len)| {
-            (
-                Blob {
-                    auditor: self.auditor.clone(),
-                    inner: blob,
-                    partition: partition.into(),
-                    name: name.to_vec(),
-                },
-                len,
-            )
-        })
+        self.inner
+            .open_versioned(partition, name, versions)
+            .await
+            .map(|(blob, len, blob_version)| {
+                (
+                    Blob {
+                        auditor: self.auditor.clone(),
+                        inner: blob,
+                        partition: partition.into(),
+                        name: name.to_vec(),
+                    },
+                    len,
+                    blob_version,
+                )
+            })
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -63,26 +78,41 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(&self, buf: impl Into<StableBuf>, offset: u64) -> Result<StableBuf, Error> {
-        let buf = buf.into();
+    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
         self.auditor.event(b"read_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(buf.as_ref());
             hasher.update(&offset.to_be_bytes());
+            hasher.update(&len.to_be_bytes());
         });
-        self.inner.read_at(buf, offset).await
+        self.inner.read_at(offset, len).await
     }
 
-    async fn write_at(&self, buf: impl Into<StableBuf>, offset: u64) -> Result<(), Error> {
-        let buf = buf.into();
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+    ) -> Result<IoBufsMut, Error> {
+        let bufs = bufs.into();
+        self.auditor.event(b"read_at_buf", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+            hasher.update(&offset.to_be_bytes());
+            hasher.update(&len.to_be_bytes());
+        });
+        self.inner.read_at_buf(offset, len, bufs).await
+    }
+
+    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        let buf = bufs.into().coalesce();
         self.auditor.event(b"write_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
-            hasher.update(buf.as_ref());
             hasher.update(&offset.to_be_bytes());
+            hasher.update(buf.as_ref());
         });
-        self.inner.write_at(buf, offset).await
+        self.inner.write_at(offset, buf).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -110,13 +140,20 @@ mod tests {
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
         },
-        Blob as _, Storage as _,
+        Blob as _, BufferPool, BufferPoolConfig, Storage as _,
     };
     use std::sync::Arc;
 
+    fn test_pool() -> BufferPool {
+        BufferPool::new(
+            BufferPoolConfig::for_storage(),
+            &mut prometheus_client::registry::Registry::default(),
+        )
+    }
+
     #[tokio::test]
     async fn test_audited_storage() {
-        let inner = MemStorage::default();
+        let inner = MemStorage::new(test_pool());
         let auditor = Arc::new(crate::deterministic::Auditor::default());
         let storage = AuditedStorage::new(inner, auditor.clone());
 
@@ -128,12 +165,12 @@ mod tests {
         use crate::deterministic::Auditor;
 
         // Initialize the first storage and auditor
-        let inner1 = MemStorage::default();
+        let inner1 = MemStorage::new(test_pool());
         let auditor1 = Arc::new(Auditor::default());
         let storage1 = AuditedStorage::new(inner1, auditor1.clone());
 
         // Initialize the second storage and auditor
-        let inner2 = MemStorage::default();
+        let inner2 = MemStorage::new(test_pool());
         let auditor2 = Arc::new(Auditor::default());
         let storage2 = AuditedStorage::new(inner2, auditor2.clone());
 
@@ -142,8 +179,8 @@ mod tests {
         let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
 
         // Write data to the blobs
-        blob1.write_at(b"hello world".to_vec(), 0).await.unwrap();
-        blob2.write_at(b"hello world".to_vec(), 0).await.unwrap();
+        blob1.write_at(0, b"hello world").await.unwrap();
+        blob2.write_at(0, b"hello world").await.unwrap();
         assert_eq!(
             auditor1.state(),
             auditor2.state(),
@@ -151,15 +188,15 @@ mod tests {
         );
 
         // Read data from the blobs
-        let read = blob1.read_at(vec![0; 11], 0).await.unwrap();
+        let read = blob1.read_at(0, 11).await.unwrap();
         assert_eq!(
-            read.as_ref(),
+            read.coalesce(),
             b"hello world",
             "Blob1 content does not match"
         );
-        let read = blob2.read_at(vec![0; 11], 0).await.unwrap();
+        let read = blob2.read_at(0, 11).await.unwrap();
         assert_eq!(
-            read.as_ref(),
+            read.coalesce(),
             b"hello world",
             "Blob2 content does not match"
         );

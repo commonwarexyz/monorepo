@@ -10,29 +10,47 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/p2p"
 documentation = "https://docs.rs/commonware-p2p"
 
+[lints]
+workspace = true
+
 [dependencies]
-bytes.workspace = true
+arbitrary = { workspace = true, optional = true, features = ["derive"] }
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
-commonware-macros.workspace = true
+commonware-macros = { workspace = true, features = ["std"] }
+commonware-parallel = { workspace = true, features = ["std"] }
 commonware-runtime.workspace = true
 commonware-stream.workspace = true
 commonware-utils.workspace = true
 either.workspace = true
 futures.workspace = true
-governor.workspace = true
 num-bigint.workspace = true
 num-integer.workspace = true
 num-rational.workspace = true
 num-traits.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
+rand_core.workspace = true
 rand_distr.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+commonware-conformance.workspace = true
+commonware-math.workspace = true
+commonware-runtime = { workspace = true, features = ["test-utils"] }
 tracing-subscriber.workspace = true
+
+[features]
+mocks = [ "commonware-cryptography/mocks" ]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
+	"commonware-runtime/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
+	"num-bigint/arbitrary",
+]
 
 [lib]
 bench = false

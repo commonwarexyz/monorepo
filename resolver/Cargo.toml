@@ -10,24 +10,27 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/resolver"
 documentation = "https://docs.rs/commonware-resolver"
 
+[lints]
+workspace = true
+
 [dependencies]
-bimap.workspace = true
+arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes.workspace = true
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
-commonware-macros.workspace = true
+commonware-macros = { workspace = true, features = ["std"] }
 commonware-p2p.workspace = true
-commonware-runtime.workspace = true
+commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-stream.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-governor.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+commonware-conformance.workspace = true
 commonware-resolver = { path = ".", features = ["mocks"] }
 tracing-subscriber.workspace = true
 
@@ -40,4 +43,12 @@ development = ["commonware-resolver"]
 bench = false
 
 [features]
-mocks = []
+mocks = [ "commonware-cryptography/mocks", "commonware-p2p/mocks" ]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
+	"commonware-p2p/arbitrary",
+	"commonware-runtime/arbitrary",
+	"commonware-utils/arbitrary",
+	"dep:arbitrary",
+]

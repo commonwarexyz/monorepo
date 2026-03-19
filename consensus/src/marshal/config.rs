@@ -1,23 +1,38 @@
-use super::SchemeProvider;
-use crate::{simplex::signing_scheme::Scheme, types::ViewDelta, Block};
-use commonware_runtime::buffer::PoolRef;
-use std::{
-    marker::PhantomData,
-    num::{NonZeroU64, NonZeroUsize},
+use crate::{
+    types::{Epoch, Epocher, ViewDelta},
+    Block,
 };
+use commonware_cryptography::certificate::Provider;
+use commonware_parallel::Strategy;
+use commonware_runtime::buffer::paged::CacheRef;
+use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Marshal configuration.
-pub struct Config<B, P, S>
+///
+/// # Warning
+///
+/// Any height the marshal is asked to sync must be covered by both the
+/// [epocher](Self::epocher) and the [provider](Self::provider). If the epocher
+/// cannot map a height to an epoch, or the provider cannot supply a scheme for
+/// that epoch, the marshal will silently drop the sync request. Callers are
+/// responsible for ensuring both are configured for the full range of heights
+/// they intend to sync.
+pub struct Config<B, P, ES, T>
 where
     B: Block,
-    P: SchemeProvider<Scheme = S>,
-    S: Scheme,
+    P: Provider<Scope = Epoch>,
+    ES: Epocher,
+    T: Strategy,
 {
     /// Provider for epoch-specific signing schemes.
-    pub scheme_provider: P,
+    ///
+    /// Must cover every epoch that contains heights the marshal will sync.
+    pub provider: P,
 
-    /// The length of an epoch in number of blocks.
-    pub epoch_length: u64,
+    /// Configuration for epoch lengths across block height ranges.
+    ///
+    /// Must cover every height the marshal will sync.
+    pub epocher: ES,
 
     /// The prefix to use for all partitions.
     pub partition_prefix: String,
@@ -30,20 +45,20 @@ where
     /// Useful for keeping around information that peers may desire to have.
     pub view_retention_timeout: ViewDelta,
 
-    /// Namespace for proofs.
-    pub namespace: Vec<u8>,
-
     /// Prunable archive partition prefix.
     pub prunable_items_per_section: NonZeroU64,
 
-    /// The buffer pool to use for the freezer journal.
-    pub buffer_pool: PoolRef,
+    /// The page cache to use for the freezer journal.
+    pub page_cache: CacheRef,
 
     /// The size of the replay buffer for storage archives.
     pub replay_buffer: NonZeroUsize,
 
-    /// The size of the write buffer for storage archives.
-    pub write_buffer: NonZeroUsize,
+    /// The size of the write buffer for the key journal of storage archives.
+    pub key_write_buffer: NonZeroUsize,
+
+    /// The size of the write buffer for the value journal of storage archives.
+    pub value_write_buffer: NonZeroUsize,
 
     /// Codec configuration for block type.
     pub block_codec_config: B::Cfg,
@@ -51,5 +66,11 @@ where
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,
 
-    pub _marker: PhantomData<S>,
+    /// Maximum number of blocks dispatched to the application that have not
+    /// yet been acknowledged. Increasing this value allows the application
+    /// to buffer work while marshal continues dispatching, hiding ack latency.
+    pub max_pending_acks: NonZeroUsize,
+
+    /// Strategy for parallel operations.
+    pub strategy: T,
 }

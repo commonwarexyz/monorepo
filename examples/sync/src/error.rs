@@ -8,7 +8,7 @@ use thiserror::Error;
 pub enum Error {
     /// Stream error during communication
     #[error("stream error")]
-    Network(#[from] commonware_stream::Error),
+    Network(#[from] commonware_stream::encrypted::Error),
 
     /// Received unexpected response type for a request
     #[error("unexpected response type for request {request_id}")]
@@ -24,7 +24,7 @@ pub enum Error {
 
     /// Database operation failed
     #[error("database operation failed")]
-    Database(#[from] commonware_storage::adb::Error),
+    Database(#[from] commonware_storage::qmdb::Error),
 
     /// Request channel to I/O task closed unexpectedly
     #[error("request channel closed - I/O task may have terminated")]
@@ -45,12 +45,12 @@ pub enum Error {
 
 impl Error {
     /// Convert this error to a protocol error code for transmission over the network.
-    pub fn to_error_code(&self) -> ErrorCode {
+    pub const fn to_error_code(&self) -> ErrorCode {
         match self {
-            Error::InvalidRequest(_) => ErrorCode::InvalidRequest,
-            Error::Database(_) => ErrorCode::DatabaseError,
-            Error::Network(_) => ErrorCode::NetworkError,
-            Error::RequestChannelClosed | Error::ResponseChannelClosed { .. } => {
+            Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
+            Self::Database(_) => ErrorCode::DatabaseError,
+            Self::Network(_) => ErrorCode::NetworkError,
+            Self::RequestChannelClosed | Self::ResponseChannelClosed { .. } => {
                 ErrorCode::InternalError
             }
             _ => ErrorCode::InternalError,

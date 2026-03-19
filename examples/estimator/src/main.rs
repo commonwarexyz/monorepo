@@ -2,30 +2,32 @@
 
 use clap::{value_parser, Arg, Command as ClapCommand};
 use colored::Colorize;
-use commonware_cryptography::{ed25519, PrivateKeyExt, Signer};
+use commonware_cryptography::{ed25519, Signer};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     simulated::{Config, Link, Network, Receiver, Sender},
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
 };
 use commonware_runtime::{
-    deterministic, Clock, Handle, Metrics, Network as RNetwork, Runner, Spawner,
+    deterministic, BufferPool, BufferPooler, Clock, Handle, Metrics, Network as RNetwork, Quota,
+    Runner, Spawner,
 };
+use commonware_utils::channel::{mpsc, oneshot};
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
     mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    future::try_join_all,
-    SinkExt, StreamExt,
-};
+use futures::future::try_join_all;
 use rand::RngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
     time::{Duration, SystemTime},
 };
 use tracing::debug;
+
+/// Default rate limit set high enough to not interfere with normal operation
+const DEFAULT_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
 /// The channel to use for all messages
 const DEFAULT_CHANNEL: u64 = 0;
@@ -39,17 +41,17 @@ type Message = Vec<u8>;
 /// Create a message containing the ID encoded as a big-endian u32,
 /// padded to the given size.
 fn create_message(id: u32, target_size: Option<usize>) -> Message {
-    match target_size {
-        Some(size) => {
+    target_size.map_or_else(
+        || id.to_be_bytes().to_vec(),
+        |size| {
             let mut message = Vec::with_capacity(size);
             message.extend_from_slice(&id.to_be_bytes());
             if size > 4 {
                 message.resize(size, 0);
             }
             message
-        }
-        None => id.to_be_bytes().to_vec(),
-    }
+        },
+    )
 }
 
 /// Extract the ID from a message.
@@ -59,10 +61,10 @@ fn extract_id_from_message(message: &Message) -> u32 {
 }
 
 /// All state for a given peer
-type PeerIdentity = (
+type PeerIdentity<C> = (
     ed25519::PublicKey,
     String,
-    WrappedSender<Sender<ed25519::PublicKey>, Message>,
+    WrappedSender<Sender<ed25519::PublicKey, C>, Message>,
     WrappedReceiver<Receiver<ed25519::PublicKey>, Message>,
 );
 
@@ -184,6 +186,7 @@ fn parse_arguments() -> Arguments {
                 .parse::<usize>()
                 .expect("invalid count");
 
+            #[allow(clippy::option_if_let_else)]
             let (egress_cap, ingress_cap) = match parts.next() {
                 Some(bandwidth) => {
                     if bandwidth.contains('/') {
@@ -284,7 +287,7 @@ fn run_single_simulation(
 }
 
 /// Core simulation logic that runs the network simulation
-async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + RngCore>(
+async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNetwork + RngCore>(
     context: C,
     proposer_idx: usize,
     peers: usize,
@@ -295,14 +298,19 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
     let (network, mut oracle) = Network::new(
         context.with_label("network"),
         Config {
-            max_size: usize::MAX,
+            max_size: u32::MAX,
             disconnect_on_block: true,
             tracked_peer_sets: None,
         },
     );
     network.start();
 
-    let identities = setup_network_identities(&mut oracle, distribution).await;
+    let identities = setup_network_identities(
+        context.network_buffer_pool().clone(),
+        &mut oracle,
+        distribution,
+    )
+    .await;
     setup_network_links(&mut oracle, &identities, latencies).await;
 
     let (tx, mut rx) = mpsc::channel(peers);
@@ -311,7 +319,7 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
     // Wait for all jobs to indicate they're done
     let mut responders = Vec::with_capacity(peers);
     for _ in 0..peers {
-        responders.push(rx.next().await.unwrap());
+        responders.push(rx.recv().await.unwrap());
     }
 
     // Ensure any messages in the simulator are queued (this is virtual time)
@@ -327,10 +335,11 @@ async fn run_simulation_logic<C: Spawner + Clock + Clone + Metrics + RNetwork + 
 }
 
 /// Set up network identities for all peers across regions
-async fn setup_network_identities(
-    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
+async fn setup_network_identities<C: Clock>(
+    pool: BufferPool,
+    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
     distribution: &Distribution,
-) -> Vec<PeerIdentity> {
+) -> Vec<PeerIdentity<C>> {
     let peers = count_peers(distribution);
     let mut identities = Vec::with_capacity(peers);
     let mut peer_idx = 0;
@@ -341,11 +350,12 @@ async fn setup_network_identities(
             let identity = ed25519::PrivateKey::from_seed(peer_idx as u64).public_key();
             let (sender, receiver) = oracle
                 .control(identity.clone())
-                .register(DEFAULT_CHANNEL)
+                .register(DEFAULT_CHANNEL, DEFAULT_QUOTA)
                 .await
                 .unwrap();
             let codec_config = (commonware_codec::RangeCfg::from(..), ());
-            let (sender, receiver) = wrap::<_, _, Message>(codec_config, sender, receiver);
+            let (sender, receiver) =
+                wrap::<_, _, Message>(codec_config, pool.clone(), sender, receiver);
             identities.push((identity, region.clone(), sender, receiver));
             peer_idx += 1;
         }
@@ -364,9 +374,9 @@ async fn setup_network_identities(
 }
 
 /// Set up network links between all peers with appropriate latencies
-async fn setup_network_links(
-    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey>,
-    identities: &[PeerIdentity],
+async fn setup_network_links<C: Clock>(
+    oracle: &mut commonware_p2p::simulated::Oracle<ed25519::PublicKey, C>,
+    identities: &[PeerIdentity<C>],
     latencies: &Latencies,
 ) {
     for (i, (identity, region, _, _)) in identities.iter().enumerate() {
@@ -393,7 +403,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     context: &C,
     proposer_idx: usize,
     peers: usize,
-    identities: Vec<PeerIdentity>,
+    identities: Vec<PeerIdentity<C>>,
     commands: &[(usize, Command)],
     tx: mpsc::Sender<oneshot::Sender<()>>,
 ) -> Vec<Handle<PeerResult>> {
@@ -401,7 +411,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
     let mut jobs = Vec::new();
     for (i, (identity, region, mut sender, mut receiver)) in identities.into_iter().enumerate() {
         let proposer_identity = proposer_identity.clone();
-        let mut tx = tx.clone();
+        let tx = tx.clone();
         let job = context.with_label("job");
         let commands = commands.to_vec();
         jobs.push(job.spawn(move |ctx| async move {
@@ -464,12 +474,14 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
 
             // Process remaining messages until shutdown
             select_loop! {
+                ctx,
+                on_stopped => {},
                 _ = receiver.recv() => {
                     // Discard message
                 },
                 _ = &mut listener => {
                     break;
-                }
+                },
             }
 
             (region, completions, maybe_proposer)
@@ -480,7 +492,7 @@ fn spawn_peer_jobs<C: Spawner + Metrics + Clock>(
 }
 
 /// Check if a single command would succeed without executing side effects
-async fn process_single_command_check<C: Spawner + Clock>(
+async fn process_single_command_check<C: Clock>(
     ctx: &C,
     command_ctx: &CommandContext,
     command: &(usize, Command),
@@ -546,12 +558,12 @@ async fn process_single_command_check<C: Spawner + Clock>(
 }
 
 /// Process a single command in the DSL
-async fn process_command<C: Spawner + Clock>(
+async fn process_command<C: Clock>(
     ctx: &C,
     command_ctx: &mut CommandContext,
     current_index: &mut usize,
     command: &(usize, Command),
-    sender: &mut WrappedSender<Sender<ed25519::PublicKey>, Message>,
+    sender: &mut WrappedSender<Sender<ed25519::PublicKey, C>, Message>,
     received: &mut BTreeMap<u32, BTreeSet<ed25519::PublicKey>>,
     completions: &mut Vec<(usize, Duration)>,
 ) -> bool {

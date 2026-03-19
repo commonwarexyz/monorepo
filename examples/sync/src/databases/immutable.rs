@@ -2,39 +2,43 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
-use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::{
+    mmr::{Location, Proof},
+    qmdb::{
         self,
         immutable::{self, Config},
-        operation,
     },
-    mmr::{Location, Proof},
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
+use tracing::error;
 
 /// Database type alias.
 pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = operation::variable::Operation<Key, Value>;
+pub type Operation = immutable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config() -> Config<Translator, ()> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
     Config {
-        mmr_journal_partition: "mmr_journal".into(),
-        mmr_metadata_partition: "mmr_metadata".into(),
+        mmr_journal_partition: "mmr-journal".into(),
+        mmr_metadata_partition: "mmr-metadata".into(),
         mmr_items_per_blob: NZU64!(4096),
-        mmr_write_buffer: NZUsize!(1024),
+        mmr_write_buffer: NZUsize!(4096),
         log_partition: "log".into(),
-        log_items_per_section: NZU64!(512),
+        log_items_per_section: NZU64!(4096),
         log_compression: None,
         log_codec_config: (),
-        log_write_buffer: NZUsize!(1024),
+        log_write_buffer: NZUsize!(4096),
         translator: commonware_storage::translator::EightCap,
         thread_pool: None,
-        buffer_pool: commonware_runtime::buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+        page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
+            context,
+            NZU16!(2048),
+            NZUsize!(10),
+        ),
     }
 }
 
@@ -80,38 +84,44 @@ where
     }
 
     async fn add_operations(
-        database: &mut Self,
+        &mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error> {
+    ) -> Result<(), commonware_storage::qmdb::Error> {
+        if operations.last().is_none() || !operations.last().unwrap().is_commit() {
+            // Ignore bad inputs rather than return errors.
+            error!("operations must end with a commit");
+            return Ok(());
+        }
+
+        let mut batch = self.new_batch();
         for operation in operations {
             match operation {
                 Operation::Set(key, value) => {
-                    database.set(key, value).await?;
+                    batch = batch.set(key, value);
                 }
                 Operation::Commit(metadata) => {
-                    database.commit(metadata).await?;
+                    let finalized = batch.merkleize(metadata).finalize();
+                    self.apply_batch(finalized).await?;
+                    self.commit().await?;
+                    batch = self.new_batch();
                 }
-                _ => {}
             }
         }
         Ok(())
-    }
-
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        self.commit(None).await
     }
 
     fn root(&self) -> Key {
         self.root()
     }
 
-    fn op_count(&self) -> Location {
-        self.op_count()
+    async fn size(&self) -> Location {
+        self.bounds().await.end
     }
 
-    fn lower_bound(&self) -> Location {
-        self.oldest_retained_loc()
-            .unwrap_or(Location::new(0).unwrap())
+    async fn inactivity_floor(&self) -> Location {
+        // For Immutable databases, all retained operations are active,
+        // so the inactivity floor equals the pruning boundary.
+        self.bounds().await.start
     }
 
     fn historical_proof(
@@ -119,8 +129,15 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
         self.historical_proof(op_count, start_loc, max_ops)
+    }
+
+    fn pinned_nodes_at(
+        &self,
+        loc: Location,
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error>> + Send {
+        self.pinned_nodes_at(loc)
     }
 
     fn name() -> &'static str {

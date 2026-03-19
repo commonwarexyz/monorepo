@@ -7,28 +7,12 @@
 
 use thiserror::Error;
 
-pub mod authenticated;
+commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
 pub mod contiguous;
 pub mod segmented;
 
-impl<E, Op> crate::adb::sync::Journal for contiguous::fixed::Journal<E, Op>
-where
-    E: commonware_runtime::Storage + commonware_runtime::Clock + commonware_runtime::Metrics,
-    Op: commonware_codec::Codec<Cfg = ()> + commonware_codec::FixedSize,
-{
-    type Op = Op;
-    type Error = Error;
-
-    async fn size(&self) -> u64 {
-        contiguous::fixed::Journal::size(self)
-    }
-
-    async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
-        contiguous::fixed::Journal::append(self, op)
-            .await
-            .map(|_| ())
-    }
-}
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
 
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
@@ -41,12 +25,12 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
+    #[error("metadata error: {0}")]
+    Metadata(#[from] crate::metadata::Error),
     #[error("invalid blob name: {0}")]
     InvalidBlobName(String),
     #[error("invalid blob size: index={0} size={1}")]
     InvalidBlobSize(u64, u64),
-    #[error("checksum mismatch: expected={0} actual={1}")]
-    ChecksumMismatch(u32, u32),
     #[error("item too large: size={0}")]
     ItemTooLarge(usize),
     #[error("already pruned to section: {0}")]
@@ -71,8 +55,12 @@ pub enum Error {
     CompressionFailed,
     #[error("decompression failed")]
     DecompressionFailed,
+    #[error("value too large (> u32::MAX)")]
+    ValueTooLarge,
     #[error("corruption detected: {0}")]
     Corruption(String),
     #[error("invalid configuration: {0}")]
     InvalidConfiguration(String),
+    #[error("checksum mismatch: expected={0}, found={1}")]
+    ChecksumMismatch(u32, u32),
 }

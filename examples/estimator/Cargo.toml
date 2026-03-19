@@ -10,8 +10,10 @@ homepage.workspace = true
 repository = "https://github.com/commonwarexyz/monorepo/tree/main/examples/estimator"
 documentation = "https://docs.rs/commonware-estimator"
 
+[lints]
+workspace = true
+
 [dependencies]
-bytes.workspace = true
 clap.workspace = true
 colored.workspace = true
 commonware-codec.workspace = true
@@ -21,7 +23,6 @@ commonware-p2p.workspace = true
 commonware-runtime.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
-governor.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = ["json", "rustls-tls", "blocking"] }

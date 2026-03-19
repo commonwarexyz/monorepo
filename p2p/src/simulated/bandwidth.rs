@@ -68,7 +68,7 @@ struct State {
 }
 
 impl State {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             resources: Vec::new(),
             limited: false,
@@ -318,10 +318,9 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
         // Finalize the rates for every flow.
         let mut result = BTreeMap::new();
         for (idx, flow) in self.flows.iter().enumerate() {
-            let rate = match &self.rates[idx] {
-                Some(ratio) => Rate::Finite(ratio.clone()),
-                None => Rate::Unlimited,
-            };
+            let rate = self.rates[idx]
+                .as_ref()
+                .map_or(Rate::Unlimited, |ratio| Rate::Finite(ratio.clone()));
             result.insert(flow.id, rate);
         }
         result
@@ -338,7 +337,7 @@ impl<'a, P: Clone + Ord> Planner<'a, P> {
     }
 
     #[cfg(test)]
-    fn active(&self) -> usize {
+    const fn active(&self) -> usize {
         self.active
     }
 

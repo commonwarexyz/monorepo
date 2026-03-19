@@ -19,16 +19,16 @@ impl Peer {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum MessageType {
     Data(u64),
-    Invalid,
     Ping,
+    Invalid,
 }
 
 impl EncodeLabelValue for MessageType {
-    fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
+    fn encode(&self, encoder: &mut LabelValueEncoder<'_>) -> Result<(), std::fmt::Error> {
         match self {
-            MessageType::Data(channel) => encoder.write_str(&format!("data_{channel}")),
-            MessageType::Invalid => encoder.write_str("invalid"),
-            MessageType::Ping => encoder.write_str("ping"),
+            Self::Data(channel) => encoder.write_str(&format!("data_{channel}")),
+            Self::Ping => encoder.write_str("ping"),
+            Self::Invalid => encoder.write_str("invalid"),
         }
     }
 }
@@ -46,16 +46,16 @@ impl Message {
             message: MessageType::Data(channel),
         }
     }
-    pub fn new_invalid(peer: &impl Array) -> Self {
-        Self {
-            peer: peer.to_string(),
-            message: MessageType::Invalid,
-        }
-    }
     pub fn new_ping(peer: &impl Array) -> Self {
         Self {
             peer: peer.to_string(),
             message: MessageType::Ping,
+        }
+    }
+    pub fn new_invalid(peer: &impl Array) -> Self {
+        Self {
+            peer: peer.to_string(),
+            message: MessageType::Invalid,
         }
     }
 }

@@ -6,7 +6,7 @@
 //! `indexer` and send a digest of the block to other participants. Participants in the network will fetch the block
 //! from the `indexer` and verify it contains a 16-byte message or a valid consensus certificate from the other network.
 //! Once a block is finalized, all participants attempt to post the emitted succinct consensus certificate to the `indexer`.
-//! Leader election is performed using the embedded VRF provided by [commonware_consensus::simplex].
+//! Leader election is performed using round-robin.
 //!
 //! # Architecture
 //!
@@ -153,9 +153,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
-use commonware_consensus::simplex::signing_scheme::bls12381_threshold;
+use commonware_consensus::simplex::scheme::bls12381_threshold::standard as bls12381_threshold;
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
-
 pub type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
 #[doc(hidden)]
@@ -163,10 +162,10 @@ pub mod application;
 #[doc(hidden)]
 pub mod types;
 #[doc(hidden)]
-pub const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_BRIDGE";
+pub const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_BRIDGE";
 #[doc(hidden)]
 pub const P2P_SUFFIX: &[u8] = b"_P2P";
 #[doc(hidden)]
 pub const CONSENSUS_SUFFIX: &[u8] = b"_CONSENSUS";
 #[doc(hidden)]
-pub const INDEXER_NAMESPACE: &[u8] = b"_COMMONWARE_INDEXER";
+pub const INDEXER_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_BRIDGE_INDEXER";

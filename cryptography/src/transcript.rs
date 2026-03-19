@@ -7,6 +7,7 @@ use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
 use core::{fmt::Display, ops::Deref};
 use rand_core::{
@@ -27,7 +28,7 @@ struct Rng {
 }
 
 impl Rng {
-    fn new(inner: blake3::OutputReader) -> Self {
+    const fn new(inner: blake3::OutputReader) -> Self {
         Self {
             inner,
             buf: [0u8; BLOCK_LEN],
@@ -80,6 +81,13 @@ impl RngCore for Rng {
 
 impl CryptoRng for Rng {}
 
+fn flush(hasher: &mut blake3::Hasher, pending: u64) {
+    let mut pending_bytes = [0u8; 9];
+    let pending = UInt(pending);
+    pending.write(&mut &mut pending_bytes[..]);
+    hasher.update(&pending_bytes[..pending.encode_size()]);
+}
+
 /// Ensures different [Transcript] initializations are unique.
 #[repr(u8)]
 enum StartTag {
@@ -107,19 +115,15 @@ impl Transcript {
         // for free, since they won't affect the number of bytes we can process without
         // a call to the compression function. So, in many cases where we want to
         // link a new transcript to a previous history, we take an optional summary.
-        let mut hasher = match summary {
-            Some(s) => blake3::Hasher::new_keyed(s.hash.as_bytes()),
-            None => blake3::Hasher::new(),
-        };
+        let mut hasher = summary.map_or_else(blake3::Hasher::new, |s| {
+            blake3::Hasher::new_keyed(s.hash.as_bytes())
+        });
         hasher.update(&[tag as u8]);
         Self { hasher, pending: 0 }
     }
 
     fn flush(&mut self) {
-        let mut pending_bytes = [0u8; 9];
-        let pending = UInt(self.pending);
-        pending.write(&mut &mut pending_bytes[..]);
-        self.hasher.update(&pending_bytes[..pending.encode_size()]);
+        flush(&mut self.hasher, self.pending);
         self.pending = 0;
     }
 
@@ -128,8 +132,8 @@ impl Transcript {
         self.pending += data.len() as u64;
     }
 
-    fn assert_committed(&self) {
-        assert!(self.pending == 0, "transcript had uncommitted data");
+    const fn unflushed(&self) -> bool {
+        self.pending != 0
     }
 }
 
@@ -250,10 +254,14 @@ impl Transcript {
     /// assert_eq!(s1, s2);
     /// ```
     pub fn summarize(&self) -> Summary {
-        self.assert_committed();
-        Summary {
-            hash: self.hasher.finalize(),
-        }
+        let hash = if self.unflushed() {
+            let mut hasher = self.hasher.clone();
+            flush(&mut hasher, self.pending);
+            hasher.finalize()
+        } else {
+            self.hasher.finalize()
+        };
+        Summary { hash }
     }
 }
 
@@ -265,12 +273,16 @@ impl Transcript {
     /// - signing the operations that have been performed on the transcript,
     /// - or, equivalently, signing randomness or a summary extracted from the transcript.
     pub fn sign<S: Signer>(&self, s: &S) -> <S as Signer>::Signature {
-        s.sign(None, self.summarize().hash.as_bytes())
+        // Note: We pass an empty namespace here, since the namespace may be included
+        // within the transcript summary already via `Self::new`.
+        s.sign(b"", self.summarize().hash.as_bytes())
     }
 
     /// Verify a signature produced by [Transcript::sign].
     pub fn verify<V: Verifier>(&self, v: &V, sig: &<V as Verifier>::Signature) -> bool {
-        v.verify(None, self.summarize().hash.as_bytes(), sig)
+        // Note: We pass an empty namespace here, since the namespace may be included
+        // within the transcript summary already via `Self::new`.
+        v.verify(b"", self.summarize().hash.as_bytes(), sig)
     }
 }
 
@@ -340,12 +352,28 @@ impl Span for Summary {}
 impl Array for Summary {}
 
 impl crate::Digest for Summary {
-    fn random<R: CryptoRngCore>(rng: &mut R) -> Self {
+    const EMPTY: Self = Self {
+        hash: blake3::Hash::from_bytes([0u8; blake3::OUT_LEN]),
+    };
+}
+
+impl Random for Summary {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut bytes = [0u8; blake3::OUT_LEN];
         rng.fill_bytes(&mut bytes[..]);
         Self {
             hash: blake3::Hash::from_bytes(bytes),
         }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for Summary {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let bytes: [u8; blake3::OUT_LEN] = u.arbitrary()?;
+        Ok(Self {
+            hash: blake3::Hash::from_bytes(bytes),
+        })
     }
 }
 
@@ -453,5 +481,25 @@ mod test {
     fn test_summary_encode_roundtrip() {
         let s = Transcript::new(b"test").summarize();
         assert_eq!(&s, &Summary::decode(s.encode()).unwrap());
+    }
+
+    #[test]
+    fn test_missing_append() {
+        let s1 = Transcript::new(b"foo").append(b"AB".as_slice()).summarize();
+        let s2 = Transcript::new(b"foo")
+            .append(b"A".as_slice())
+            .commit(b"B".as_slice())
+            .summarize();
+        assert_eq!(s1, s2)
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Summary>,
+        }
     }
 }

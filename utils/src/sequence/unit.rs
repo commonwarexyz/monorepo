@@ -8,6 +8,7 @@ use core::{
 
 /// An `Array` implementation for the unit type `()`.
 #[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Unit;
 
 impl Write for Unit {
@@ -22,7 +23,7 @@ impl Read for Unit {
     type Cfg = ();
 
     fn read_cfg(_buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        Ok(Unit)
+        Ok(Self)
     }
 }
 
@@ -70,8 +71,8 @@ mod test {
     #[test]
     fn test_deref_asref() {
         let unit = Unit;
-        assert_eq!(unit.deref(), &[]);
-        assert_eq!(unit.as_ref(), &[]);
+        assert_eq!(unit.deref(), &[] as &[u8]);
+        assert_eq!(unit.as_ref(), &[] as &[u8]);
     }
 
     #[test]
@@ -81,5 +82,15 @@ mod test {
 
         let decoded = Unit::read_cfg(&mut encoded, &()).unwrap();
         assert_eq!(decoded, Unit);
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Unit>,
+        }
     }
 }

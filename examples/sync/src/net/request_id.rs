@@ -20,7 +20,7 @@ impl Default for Generator {
 
 impl Generator {
     pub fn new() -> Self {
-        Generator {
+        Self {
             counter: Arc::new(AtomicU64::new(1)),
         }
     }

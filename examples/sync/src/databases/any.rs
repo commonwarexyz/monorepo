@@ -2,38 +2,44 @@
 
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::Hasher as CryptoHasher;
-use commonware_runtime::{buffer, Clock, Metrics, Storage};
+use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
-    adb::{
-        self,
-        any::{unordered::fixed::Any, AnyDb, FixedConfig as Config},
-        operation,
-        store::Db,
-    },
     mmr::{Location, Proof},
+    qmdb::{
+        self,
+        any::{
+            unordered::{
+                fixed::{Db, Operation as FixedOperation},
+                Update,
+            },
+            FixedConfig as Config,
+        },
+        operation::Committable,
+    },
 };
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
+use tracing::error;
 
 /// Database type alias.
-pub type Database<E> = Any<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = operation::fixed::unordered::Operation<Key, Value>;
+pub type Operation = FixedOperation<Key, Value>;
 
 /// Create a database configuration for use in tests.
-pub fn create_config() -> Config<Translator> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
     Config {
-        mmr_journal_partition: "mmr_journal".into(),
-        mmr_metadata_partition: "mmr_metadata".into(),
+        mmr_journal_partition: "mmr-journal".into(),
+        mmr_metadata_partition: "mmr-metadata".into(),
         mmr_items_per_blob: NZU64!(4096),
-        mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: "log_journal".into(),
+        mmr_write_buffer: NZUsize!(4096),
+        log_journal_partition: "log-journal".into(),
         log_items_per_blob: NZU64!(4096),
-        log_write_buffer: NZUsize!(1024),
+        log_write_buffer: NZUsize!(4096),
         translator: Translator::default(),
         thread_pool: None,
-        buffer_pool: buffer::PoolRef::new(NZUsize!(1024), NZUsize!(10)),
+        page_cache: buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10)),
     }
 }
 
@@ -59,52 +65,58 @@ where
                 hasher.finalize()
             };
 
-            operations.push(Operation::Update(key, value));
+            operations.push(Operation::Update(Update(key, value)));
 
             if (i + 1) % 10 == 0 {
-                operations.push(Operation::CommitFloor(Location::from(i + 1)));
+                operations.push(Operation::CommitFloor(None, Location::from(i + 1)));
             }
         }
 
         // Always end with a commit
-        operations.push(Operation::CommitFloor(Location::from(count)));
+        operations.push(Operation::CommitFloor(None, Location::from(count)));
         operations
     }
 
     async fn add_operations(
-        database: &mut Self,
+        &mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::adb::Error> {
+    ) -> Result<(), commonware_storage::qmdb::Error> {
+        if operations.last().is_none() || !operations.last().unwrap().is_commit() {
+            // Ignore bad inputs rather than return errors.
+            error!("operations must end with a commit");
+            return Ok(());
+        }
+
+        let mut batch = self.new_batch();
         for operation in operations {
             match operation {
-                Operation::Update(key, value) => {
-                    database.update(key, value).await?;
+                Operation::Update(Update(key, value)) => {
+                    batch = batch.write(key, Some(value));
                 }
                 Operation::Delete(key) => {
-                    database.delete(key).await?;
+                    batch = batch.write(key, None);
                 }
-                Operation::CommitFloor(_) => {
-                    Db::commit(database).await?;
+                Operation::CommitFloor(metadata, _) => {
+                    let finalized = batch.merkleize(metadata).await?.finalize();
+                    self.apply_batch(finalized).await?;
+                    self.commit().await?;
+                    batch = self.new_batch();
                 }
             }
         }
         Ok(())
     }
 
-    async fn commit(&mut self) -> Result<(), commonware_storage::adb::Error> {
-        Db::commit(self).await
-    }
-
     fn root(&self) -> Key {
-        AnyDb::root(self)
+        self.root()
     }
 
-    fn op_count(&self) -> Location {
-        Db::op_count(self)
+    async fn size(&self) -> Location {
+        self.bounds().await.end
     }
 
-    fn lower_bound(&self) -> Location {
-        Db::inactivity_floor_loc(self)
+    async fn inactivity_floor(&self) -> Location {
+        self.inactivity_floor_loc()
     }
 
     fn historical_proof(
@@ -112,8 +124,15 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), adb::Error>> + Send {
-        AnyDb::historical_proof(self, op_count, start_loc, max_ops)
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
+        self.historical_proof(op_count, start_loc, max_ops)
+    }
+
+    fn pinned_nodes_at(
+        &self,
+        loc: Location,
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error>> + Send {
+        self.pinned_nodes_at(loc)
     }
 
     fn name() -> &'static str {
@@ -134,7 +153,7 @@ mod tests {
         let ops = <AnyDb as Syncable>::create_test_operations(5, 12345);
         assert_eq!(ops.len(), 6); // 5 operations + 1 commit
 
-        if let Operation::CommitFloor(loc) = &ops[5] {
+        if let Operation::CommitFloor(_, loc) = &ops[5] {
             assert_eq!(*loc, 5);
         } else {
             panic!("Last operation should be a commit");
