@@ -215,7 +215,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
 
     /// Mark ancestors of the leaf at `loc` as dirty up to its peak.
     ///
-    /// Walks from peak to leaf (top-down) using [`PathIterator`], then inserts dirty markers
+    /// Walks from peak to leaf (top-down) using [`path::Iterator`], then inserts dirty markers
     /// bottom-up so that an early exit is possible when hitting a node that was already
     /// dirtied by a prior `update_leaf`.
     pub(crate) fn mark_dirty(&mut self, loc: Location<F>) {
@@ -366,7 +366,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
     }
     /// Add a pre-computed leaf digest.
     pub fn add_leaf_digest(mut self, digest: D) -> Self {
-        let parents: Vec<u32> = F::append_parents(self.size()).collect();
+        let parents: Vec<u32> = F::parent_heights(self.size()).collect();
         self.appended.push(digest);
 
         for height in parents {

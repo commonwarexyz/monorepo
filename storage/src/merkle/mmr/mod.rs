@@ -162,7 +162,7 @@ impl merkle::Family for Family {
         (pos - (1 << height), pos - 1)
     }
 
-    fn append_parents(size: Position) -> impl Iterator<Item = u32> {
+    fn parent_heights(size: Position) -> impl Iterator<Item = u32> {
         let leaves = Location::try_from(size).expect("invalid mmr size");
         let count = leaves.as_u64().trailing_ones();
         1..=count

@@ -147,7 +147,7 @@ impl merkle::Family for Family {
         let pos = pos.as_u64();
         // Solve 2*N - ilog2(N+1) = pos for N.
         // Starting estimate: N ~ (pos + ilog2(N+1)) / 2 ~ pos/2. One refinement gives accuracy
-        // within +/-1, so the loop body runs at most a few times.
+        // within -1 if the input is a valid leaf position, so the loop body runs at most twice.
         let mut n = pos / 2;
         n = (pos + (n + 1).ilog2() as u64) / 2;
         loop {
@@ -184,7 +184,7 @@ impl merkle::Family for Family {
         iterator::leaves_for_size(size).is_some()
     }
 
-    fn append_parents(size: Position) -> impl Iterator<Item = u32> {
+    fn parent_heights(size: Position) -> impl Iterator<Item = u32> {
         let loc = Location::try_from(size).expect("invalid mmb size");
         let leaf = loc.as_u64();
         let height = if (leaf + 2).is_power_of_two() {
@@ -211,9 +211,9 @@ pub type Error = merkle::Error<Family>;
 mod tests {
     use super::Position;
 
-    /// Verify the MMB merge schedule via `Family::append_parents`.
+    /// Verify the MMB merge schedule via `Family::parent_heights`.
     #[test]
-    fn test_append_parents_schedule() {
+    fn test_parent_heights_schedule() {
         let expected: [Option<u32>; 16] = [
             None,    // loc=0:  0+2=2=2^1
             Some(1), // loc=1
@@ -239,7 +239,7 @@ mod tests {
             } else {
                 Position::new(2 * i as u64 - (i as u64 + 1).ilog2() as u64)
             };
-            let height: Option<u32> = crate::merkle::Family::append_parents(size).next();
+            let height: Option<u32> = crate::merkle::Family::parent_heights(size).next();
             assert_eq!(height, *expected, "mismatch at loc={i}");
         }
     }

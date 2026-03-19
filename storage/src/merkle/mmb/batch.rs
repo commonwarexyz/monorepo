@@ -4,12 +4,7 @@
 //! Provides type aliases that fix the family parameter to [`Family`]. All mutation,
 //! merkleization, and proof methods are inherited from the shared [`crate::merkle::batch`] module.
 
-use crate::merkle::{batch, mmb::Family, Proof};
-
-/// MMB-specific type alias for `merkle::proof::Proof`.
-pub type MmbProof<D> = Proof<Family, D>;
-
-pub use batch::BatchChainInfo;
+use crate::merkle::{batch, mmb::Family};
 
 /// A batch whose root digest has not been computed.
 pub type UnmerkleizedBatch<'a, D, P> = batch::UnmerkleizedBatch<'a, Family, D, P>;

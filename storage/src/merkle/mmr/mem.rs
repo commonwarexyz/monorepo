@@ -98,12 +98,11 @@ mod tests {
                 "mmr peaks not as expected"
             );
 
-            // Test append_parents on the final MMR. Since there's a height gap between the
+            // Test parent_heights on the final MMR. Since there's a height gap between the
             // highest peak (14) and the next, only the lower two peaks (17, 18) would merge,
             // producing 2 parents at heights 1 and 2.
-            let parent_heights: Vec<u32> =
-                crate::merkle::Family::append_parents(mmr.size()).collect();
-            assert_eq!(parent_heights, vec![1, 2], "append_parents not as expected");
+            let heights: Vec<u32> = crate::merkle::Family::parent_heights(mmr.size()).collect();
+            assert_eq!(heights, vec![1, 2], "parent_heights not as expected");
 
             // verify leaf digests
             for leaf in leaves.iter().by_ref() {

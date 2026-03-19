@@ -66,10 +66,10 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     /// given `height`. The caller guarantees `height > 0` (leaves have no children).
     fn children(pos: Position<Self>, height: u32) -> (Position<Self>, Position<Self>);
 
-    /// Return the heights of internal nodes created when appending a leaf to a structure
-    /// of the given `size`. The caller appends one leaf and then one placeholder node per
-    /// yielded height, marking each as dirty at that height.
-    fn append_parents(size: Position<Self>) -> impl Iterator<Item = u32>;
+    /// Return the heights of the internal nodes that lie between `size_for(N)` and
+    /// `size_for(N+1)`, where `N` is the leaf count for the given `size`. These are
+    /// the nodes created when the `N`-th leaf is appended.
+    fn parent_heights(size: Position<Self>) -> impl Iterator<Item = u32>;
 }
 
 /// Errors that can occur when interacting with a Merkle-family data structure.
