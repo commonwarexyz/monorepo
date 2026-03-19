@@ -23,14 +23,31 @@ impl<T> Relay<T> {
     }
 }
 
-/// Awaits data from either the high or low priority receiver.
-pub async fn recv_prioritized<T>(
-    high: &mut mpsc::Receiver<T>,
-    low: &mut mpsc::Receiver<T>,
-) -> Option<T> {
+pub enum Prioritized<C, D> {
+    Control(C),
+    Data(D),
+    Closed,
+}
+
+/// Awaits a message from control, high, or low priority receivers.
+pub async fn recv_prioritized<C, D>(
+    control: &mut mpsc::Receiver<C>,
+    high: &mut mpsc::Receiver<D>,
+    low: &mut mpsc::Receiver<D>,
+) -> Prioritized<C, D> {
     select! {
-        msg = high.recv() => msg,
-        msg = low.recv() => msg,
+        msg = control.recv() => match msg {
+            Some(msg) => Prioritized::Control(msg),
+            None => Prioritized::Closed,
+        },
+        msg = high.recv() => match msg {
+            Some(msg) => Prioritized::Data(msg),
+            None => Prioritized::Closed,
+        },
+        msg = low.recv() => match msg {
+            Some(msg) => Prioritized::Data(msg),
+            None => Prioritized::Closed,
+        },
     }
 }
 

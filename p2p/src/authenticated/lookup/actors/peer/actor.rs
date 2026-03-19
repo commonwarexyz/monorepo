@@ -2,7 +2,7 @@ use super::{ingress::Message, Config, Error};
 use crate::authenticated::{
     data::EncodedData,
     lookup::{channels::Channels, metrics, types},
-    relay::{recv_prioritized, Relay},
+    relay::{recv_prioritized, Prioritized, Relay},
     Mailbox,
 };
 use commonware_codec::Decode;
@@ -79,7 +79,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         Ok(encoded)
     }
 
-    fn extend_send_batch<V>(
+    /// Drains already-queued data messages into `batch`, high priority first.
+    ///
+    /// Only consumes messages that are already ready (via `try_recv`), so this
+    /// reduces runtime write calls without introducing a per-connection timer
+    /// or extra buffering latency.
+    fn extend_send_many<V>(
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
@@ -165,19 +170,31 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             // Reset ticker
                             deadline = context.current() + self.ping_frequency;
                         },
-                        Some(msg) = self.control.recv() else {
-                            return Err(Error::PeerDisconnected);
-                        } => match msg {
-                            Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
-                        },
-                        msg = recv_prioritized(&mut self.high, &mut self.low) => {
-                            let encoded = Self::validate_outbound_msg(msg, &rate_limits)?;
-                            self.sent_messages
-                                .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
-                                .inc();
+                        // Await any outbound message (control, high, or low), then
+                        // drain already-queued messages into a single runtime write.
+                        // Priority order: control > high > low.
+                        msg = recv_prioritized(&mut self.control, &mut self.high, &mut self.low) => {
                             let mut batch = Vec::with_capacity(self.send_batch_size);
-                            batch.push(encoded.payload);
-                            Self::extend_send_batch(
+                            match msg {
+                                Prioritized::Closed => return Err(Error::PeerDisconnected),
+                                Prioritized::Control(msg) => match msg {
+                                    Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
+                                },
+                                Prioritized::Data(encoded) => {
+                                    let encoded = Self::validate_outbound_msg(Some(encoded), &rate_limits)?;
+                                    self.sent_messages
+                                        .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
+                                        .inc();
+                                    batch.push(encoded.payload);
+                                },
+                            }
+                            // Drain remaining control messages.
+                            while let Ok(msg) = self.control.try_recv() {
+                                match msg {
+                                    Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
+                                }
+                            }
+                            Self::extend_send_many(
                                 &peer,
                                 self.send_batch_size,
                                 &mut batch,

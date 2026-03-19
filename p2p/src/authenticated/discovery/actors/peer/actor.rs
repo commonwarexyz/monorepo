@@ -1,7 +1,7 @@
 use super::{Config, Error, Message};
 use crate::authenticated::{
     data::EncodedData,
-    relay::recv_prioritized,
+    relay::{recv_prioritized, Prioritized},
     discovery::{
         actors::tracker,
         channels::Channels,
@@ -76,6 +76,32 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         )
     }
 
+    /// Encodes a control message into the send batch and increments metrics.
+    ///
+    /// Returns `Err` for `Kill` so the caller can terminate the connection.
+    fn encode_control(
+        peer: &C,
+        msg: Message<C>,
+        pool: &commonware_runtime::BufferPool,
+        sent_messages: &Family<metrics::Message, Counter>,
+        batch: &mut Vec<IoBufs>,
+    ) -> Result<(), Error> {
+        let (metric, payload) = match msg {
+            Message::BitVec(bit_vec) => (
+                metrics::Message::new_bit_vec(peer),
+                types::Payload::BitVec(bit_vec),
+            ),
+            Message::Peers(peers) => (
+                metrics::Message::new_peers(peer),
+                types::Payload::Peers(peers),
+            ),
+            Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
+        };
+        sent_messages.get_or_create(&metric).inc();
+        batch.push(payload.encode_with_pool(pool).into());
+        Ok(())
+    }
+
     /// Unpack outbound `msg` and assert the underlying `channel` is registered.
     fn validate_outbound_msg<V>(
         msg: Option<EncodedData>,
@@ -92,8 +118,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         Ok(encoded)
     }
 
-    /// Creates a message from a payload, then sends and increments metrics.
-    fn extend_send_batch<V>(
+    /// Drains already-queued data messages into `batch`, high priority first.
+    ///
+    /// Only consumes messages that are already ready (via `try_recv`), so this
+    /// reduces runtime write calls without introducing a per-connection timer
+    /// or extra buffering latency.
+    fn extend_send_many<V>(
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
@@ -180,44 +210,31 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             // Reset ticker
                             deadline = context.current() + self.gossip_bit_vec_frequency;
                         },
-                        Some(msg) = self.control.recv() else {
-                            return Err(Error::PeerDisconnected);
-                        } => {
-                            let (metric, payload) = match msg {
-                                Message::BitVec(bit_vec) => (
-                                    metrics::Message::new_bit_vec(&peer),
-                                    types::Payload::BitVec(bit_vec),
-                                ),
-                                Message::Peers(peers) => (
-                                    metrics::Message::new_peers(&peer),
-                                    types::Payload::Peers(peers),
-                                ),
-                                Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
-                            };
-                            self.sent_messages.get_or_create(&metric).inc();
-                            let mut batch = vec![payload.encode_with_pool(&pool).into()];
-                            // Treat control traffic the same way as data: batch
-                            // only with messages that are already queued so we
-                            // do not delay gossip behind a timer.
-                            Self::extend_send_batch(
-                                &peer,
-                                self.send_batch_size,
-                                &mut batch,
-                                &mut self.high,
-                                &mut self.low,
-                                &rate_limits,
-                                &self.sent_messages,
-                            )?;
-                            conn_sender.send_many(batch).await.map_err(Error::SendFailed)?;
-                        },
-                        msg = recv_prioritized(&mut self.high, &mut self.low) => {
-                            let encoded = Self::validate_outbound_msg(msg, &rate_limits)?;
-                            self.sent_messages
-                                .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
-                                .inc();
+                        // Await any outbound message (control, high, or low), then
+                        // drain already-queued messages into a single runtime write.
+                        // Priority order: control > high > low.
+                        msg = recv_prioritized(&mut self.control, &mut self.high, &mut self.low) => {
                             let mut batch = Vec::with_capacity(self.send_batch_size);
-                            batch.push(encoded.payload);
-                            Self::extend_send_batch(
+                            match msg {
+                                Prioritized::Closed => return Err(Error::PeerDisconnected),
+                                Prioritized::Control(msg) => {
+                                    Self::encode_control(&peer, msg, &pool, &self.sent_messages, &mut batch)?;
+                                },
+                                Prioritized::Data(encoded) => {
+                                    let encoded = Self::validate_outbound_msg(Some(encoded), &rate_limits)?;
+                                    self.sent_messages
+                                        .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
+                                        .inc();
+                                    batch.push(encoded.payload);
+                                },
+                            }
+                            while batch.len() < self.send_batch_size {
+                                match self.control.try_recv() {
+                                    Ok(msg) => Self::encode_control(&peer, msg, &pool, &self.sent_messages, &mut batch)?,
+                                    Err(_) => break,
+                                }
+                            }
+                            Self::extend_send_many(
                                 &peer,
                                 self.send_batch_size,
                                 &mut batch,
