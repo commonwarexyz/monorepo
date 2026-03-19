@@ -4,9 +4,11 @@
 //! a complete `.qnt` test module that can be verified with the quint
 //! model checker against `replica.qnt`.
 
-use super::sniffer::{TracedCert, TracedVote, TraceEntry};
-use std::collections::{HashMap, HashSet};
-use std::fmt::Write;
+use super::sniffer::{TraceEntry, TracedCert, TracedVote};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write,
+};
 
 /// Returns true if the node ID (e.g. "n0") is Byzantine (index < faults).
 fn is_byzantine_node(node: &str, faults: usize) -> bool {
@@ -76,13 +78,9 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     writeln!(out, "        Q = {},", q).unwrap();
 
     // CORRECT / BYZANTINE sets
-    let correct: Vec<String> = (cfg.faults..cfg.n)
-        .map(|i| format!("\"n{}\"", i))
-        .collect();
+    let correct: Vec<String> = (cfg.faults..cfg.n).map(|i| format!("\"n{}\"", i)).collect();
     writeln!(out, "        CORRECT = Set({}),", correct.join(", ")).unwrap();
-    let byzantine: Vec<String> = (0..cfg.faults)
-        .map(|i| format!("\"n{}\"", i))
-        .collect();
+    let byzantine: Vec<String> = (0..cfg.faults).map(|i| format!("\"n{}\"", i)).collect();
     if byzantine.is_empty() {
         writeln!(out, "        BYZANTINE = Set(),").unwrap();
     } else {
@@ -493,7 +491,11 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "        store_certificate' = store_certificate,").unwrap();
     writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
     writeln!(out, "        parent_refs' = parent_refs,").unwrap();
-    writeln!(out, "        ghost_committed_blocks' = ghost_committed_blocks,").unwrap();
+    writeln!(
+        out,
+        "        ghost_committed_blocks' = ghost_committed_blocks,"
+    )
+    .unwrap();
     writeln!(out, "        leader' = leader,").unwrap();
     writeln!(out, "        replica_state' = replica_state,").unwrap();
     writeln!(out, "        certify_policy' = certify_policy,").unwrap();

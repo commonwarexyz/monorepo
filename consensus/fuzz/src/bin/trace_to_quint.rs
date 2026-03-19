@@ -76,10 +76,7 @@ fn main() {
         converted += 1;
     }
 
-    println!(
-        "Converted {} trace(s), {} error(s)",
-        converted, errors
-    );
+    println!("Converted {} trace(s), {} error(s)", converted, errors);
     if errors > 0 {
         process::exit(1);
     }

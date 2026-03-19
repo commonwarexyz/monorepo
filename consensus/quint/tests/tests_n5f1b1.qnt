@@ -22,8 +22,8 @@ module tests {
     run notarizationCertificateTriggersFinalizeTest = {
         val cert = notarization(FIRST_VIEW, "val_b1", Set("n0", "n1", "n2"), "n0")
 
-        initWithLeaderAndCertify(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 4 -> "n3", 5 -> "n0", 6 -> "n0"),
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
             .then(on_certificate("n3", cert))
@@ -31,15 +31,15 @@ module tests {
                 assert(store_certificate.get("n3").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b1"))),
                 assert(sent_vote.exists(v => vote_sig(v) == "n3" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == Some("val_b1"))),
                 assert(replica_state.get("n3").certified.get(FIRST_VIEW) == Some("val_b1")),
-                assert(replica_state.get("n3").view == 2),
+                assert(replica_state.get("n3").view == 3),
                 unchanged_all,
             })
             .expect(all_invariants)
     }
 
     run timeoutBroadcastsNullifyTest = {
-        initWithLeaderAndCertify(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3"),
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
             .then(on_timeout("n2"))

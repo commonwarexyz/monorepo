@@ -1,6 +1,7 @@
 pub mod bounds;
 pub mod disrupter;
 pub mod invariants;
+pub mod replayer;
 pub mod simplex;
 pub mod strategy;
 pub mod tracing;
@@ -453,8 +454,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        let states = invariants::extract(&reporters, config.n as usize);
+        invariants::check::<P>(config.n, &states);
     });
 }
 
@@ -672,8 +673,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             context.sleep(MAX_SLEEP_DURATION).await;
         }
 
-        let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<P>(config.n, states);
+        let states = invariants::extract(&reporters, config.n as usize);
+        invariants::check::<P>(config.n, &states);
     });
 }
 
@@ -699,7 +700,7 @@ impl FuzzMode for Twinable {
 /// certificates sent), finalization height, and last view. If the Euclidean
 /// distance of this vector is <= 3.0, the trace is considered uninteresting.
 fn is_interesting_trace(entries: &[tracing::sniffer::TraceEntry], max_view: u64) -> bool {
-    use tracing::sniffer::{TracedCert, TracedVote, TraceEntry};
+    use tracing::sniffer::{TraceEntry, TracedCert, TracedVote};
 
     let mut notarize_by_n0: u64 = 0;
     let mut nullify_by_n0: u64 = 0;
@@ -746,9 +747,8 @@ fn is_interesting_trace(entries: &[tracing::sniffer::TraceEntry], max_view: u64)
     let distance = vec.iter().map(|x| x * x).sum::<f64>().sqrt();
 
     // Count how many distinct vote types n0 used
-    let vote_types = (notarize_by_n0 > 0) as u64
-        + (nullify_by_n0 > 0) as u64
-        + (finalize_by_n0 > 0) as u64;
+    let vote_types =
+        (notarize_by_n0 > 0) as u64 + (nullify_by_n0 > 0) as u64 + (finalize_by_n0 > 0) as u64;
 
     // Interesting = meaningful Byzantine activity: distance > 3, at least 2
     // vote types, more than 1 of each vote type, and at least 1 certificate.
@@ -820,10 +820,9 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 let participants = participants_arc.clone();
                 move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
                     let Ok(msg) =
-                        Vote::<
-                            <SimplexEd25519 as simplex::Simplex>::Scheme,
-                            Sha256Digest,
-                        >::decode(message.clone())
+                        Vote::<<SimplexEd25519 as simplex::Simplex>::Scheme, Sha256Digest>::decode(
+                            message.clone(),
+                        )
                     else {
                         return Some(recipients.clone());
                     };
@@ -842,9 +841,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                     let Ok(msg) = Certificate::<
                         <SimplexEd25519 as simplex::Simplex>::Scheme,
                         Sha256Digest,
-                    >::decode_cfg(
-                        &mut message.as_ref(), &codec
-                    ) else {
+                    >::decode_cfg(&mut message.as_ref(), &codec) else {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
@@ -864,10 +861,10 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             let make_vote_router = || {
                 let participants = participants_arc.clone();
                 move |(sender, message): &(_, IoBuf)| {
-                    let Ok(msg) = Vote::<
-                        <SimplexEd25519 as simplex::Simplex>::Scheme,
-                        Sha256Digest,
-                    >::decode(message.clone())
+                    let Ok(msg) =
+                        Vote::<<SimplexEd25519 as simplex::Simplex>::Scheme, Sha256Digest>::decode(
+                            message.clone(),
+                        )
                     else {
                         return SplitTarget::None;
                     };
@@ -881,16 +878,13 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                     let Ok(msg) = Certificate::<
                         <SimplexEd25519 as simplex::Simplex>::Scheme,
                         Sha256Digest,
-                    >::decode_cfg(
-                        &mut message.as_ref(), &codec
-                    ) else {
+                    >::decode_cfg(&mut message.as_ref(), &codec) else {
                         return SplitTarget::None;
                     };
                     strategy.route(msg.view(), sender, participants.as_ref())
                 }
             };
-            let make_resolver_router =
-                || move |(_sender, _message): &(_, IoBuf)| SplitTarget::Both;
+            let make_resolver_router = || move |(_sender, _message): &(_, IoBuf)| SplitTarget::Both;
 
             let (vote_sender, vote_receiver) = vote_network;
             let (certificate_sender, certificate_receiver) = certificate_network;
@@ -911,8 +905,8 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 );
             let (resolver_sender_primary, resolver_sender_secondary) =
                 resolver_sender.split_with(make_resolver_forwarder());
-            let (resolver_receiver_primary, resolver_receiver_secondary) =
-                resolver_receiver.split_with(
+            let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
+                .split_with(
                     twin_ctx.with_label(&format!("resolver_split_{idx}")),
                     make_resolver_router(),
                 );
@@ -1062,11 +1056,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 fetch_concurrent: 1,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    &secondary_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::from_pooler(&secondary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
             };
             let secondary_engine =
@@ -1174,17 +1164,12 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
         join_all(finalizers).await;
 
         // Run invariant checks
-        let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<SimplexEd25519>(config.n, states);
+        let states = invariants::extract(&reporters, config.n as usize);
+        invariants::check::<SimplexEd25519>(config.n, &states);
 
         // Serialize trace as JSON
         let trace = trace.lock();
-        let max_view = trace
-            .structured
-            .iter()
-            .map(|e| e.view())
-            .max()
-            .unwrap_or(1);
+        let max_view = trace.structured.iter().map(|e| e.view()).max().unwrap_or(1);
 
         let trace_data = TraceData {
             n: config.n as usize,
@@ -1199,8 +1184,8 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             return;
         }
 
-        let artifacts_dir =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts/traces/simplex_ed25519_quint");
+        let artifacts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("artifacts/traces/simplex_ed25519_quint");
         fs::create_dir_all(&artifacts_dir).expect("failed to create artifacts directory");
 
         let json = serde_json::to_string_pretty(&trace_data).expect("failed to serialize trace");
@@ -1379,17 +1364,12 @@ pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
         join_all(finalizers).await;
 
         // Run invariant checks
-        let states = invariants::extract(reporters, config.n as usize);
-        invariants::check::<SimplexEd25519>(config.n, states);
+        let states = invariants::extract(&reporters, config.n as usize);
+        invariants::check::<SimplexEd25519>(config.n, &states);
 
         // Serialize trace as JSON
         let trace = trace.lock();
-        let max_view = trace
-            .structured
-            .iter()
-            .map(|e| e.view())
-            .max()
-            .unwrap_or(1);
+        let max_view = trace.structured.iter().map(|e| e.view()).max().unwrap_or(1);
 
         let trace_data = TraceData {
             n: config.n as usize,
@@ -1397,7 +1377,7 @@ pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             epoch: EPOCH,
             max_view,
             entries: trace.structured.clone(),
-            required_containers: tracing_input.required_containers
+            required_containers: tracing_input.required_containers,
         };
 
         if !is_interesting_trace(&trace.structured, max_view) {

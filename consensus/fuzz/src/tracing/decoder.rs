@@ -1,0 +1,622 @@
+//! Decodes ITF (Informal Trace Format) JSON traces produced by
+//! `quint run --out-itf` into [`TraceData`] and [`ExpectedState`]
+//! for replay against the Rust simplex engine.
+
+use super::data::TraceData;
+use super::sniffer::{TraceEntry, TracedCert, TracedVote};
+use crate::replayer::compare::{ExpectedNodeState, ExpectedState};
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+/// Errors encountered while decoding an ITF trace.
+#[derive(Debug)]
+pub enum DecodeError {
+    /// JSON parsing failed.
+    Json(serde_json::Error),
+    /// A required field is missing from the ITF JSON.
+    MissingField(&'static str),
+    /// The trace contains no states.
+    EmptyTrace,
+    /// The leader map is not compatible with round-robin scheduling.
+    NonRoundRobinLeaders,
+    /// A node ID could not be parsed.
+    InvalidNodeId(String),
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeError::Json(e) => write!(f, "JSON parse error: {e}"),
+            DecodeError::MissingField(field) => write!(f, "missing field: {field}"),
+            DecodeError::EmptyTrace => write!(f, "trace contains no states"),
+            DecodeError::NonRoundRobinLeaders => {
+                write!(f, "leader map is not round-robin; cannot compute epoch")
+            }
+            DecodeError::InvalidNodeId(id) => write!(f, "invalid node ID: {id}"),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+impl From<serde_json::Error> for DecodeError {
+    fn from(e: serde_json::Error) -> Self {
+        DecodeError::Json(e)
+    }
+}
+
+/// Looks up a state variable by suffix in an ITF state object.
+/// ITF variables may be qualified (e.g. `itf_main::r::store_vote`),
+/// so we match by the trailing `::suffix` or exact name.
+fn get_var<'a>(state: &'a Value, suffix: &str) -> &'a Value {
+    if let Value::Object(obj) = state {
+        // Try exact match first
+        if let Some(v) = obj.get(suffix) {
+            return v;
+        }
+        // Try suffix match (::suffix)
+        let pattern = format!("::{suffix}");
+        for (key, val) in obj {
+            if key.ends_with(&pattern) || key == suffix {
+                return val;
+            }
+        }
+    }
+    &Value::Null
+}
+
+/// Parses an ITF-encoded integer (JSON number or `{"#bigint": "N"}`).
+fn parse_int(v: &Value) -> u64 {
+    match v {
+        Value::Number(n) => n.as_u64().unwrap_or(0),
+        Value::Object(obj) => {
+            if let Some(s) = obj.get("#bigint").and_then(|v| v.as_str()) {
+                s.parse().unwrap_or(0)
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Parses an ITF-encoded set (`{"#set": [...]}`).
+fn parse_set(v: &Value) -> Vec<&Value> {
+    match v {
+        Value::Object(obj) => {
+            if let Some(arr) = obj.get("#set").and_then(|v| v.as_array()) {
+                arr.iter().collect()
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Parses an ITF-encoded map (`{"#map": [[k, v], ...]}`).
+fn parse_map(v: &Value) -> Vec<(&Value, &Value)> {
+    match v {
+        Value::Object(obj) => {
+            if let Some(arr) = obj.get("#map").and_then(|v| v.as_array()) {
+                arr.iter()
+                    .filter_map(|pair| {
+                        let a = pair.as_array()?;
+                        if a.len() >= 2 {
+                            Some((&a[0], &a[1]))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Converts a Quint block name (e.g. "val_b0") to a deterministic hex digest
+/// (16 chars = 8 bytes). Uses SHA-1 for determinism.
+fn block_to_hex(name: &str, map: &mut HashMap<String, String>) -> String {
+    if let Some(hex) = map.get(name) {
+        return hex.clone();
+    }
+    use sha1::Digest;
+    let hash = sha1::Sha1::digest(name.as_bytes());
+    let hex: String = hash[..8].iter().map(|b| format!("{:02x}", b)).collect();
+    map.insert(name.to_string(), hex.clone());
+    hex
+}
+
+/// Extracts the leader map from an ITF state.
+fn extract_leader_map(state: &Value) -> BTreeMap<u64, String> {
+    let mut map = BTreeMap::new();
+    for (k, v) in parse_map(get_var(state, "leader")) {
+        let view = parse_int(k);
+        if let Some(node) = v.as_str() {
+            map.insert(view, node.to_string());
+        }
+    }
+    map
+}
+
+/// Computes the epoch from a round-robin leader map.
+/// Returns an error if the map is not compatible with round-robin.
+fn compute_epoch(
+    leader_map: &BTreeMap<u64, String>,
+    n: usize,
+) -> Result<u64, DecodeError> {
+    let (&first_view, first_leader) = leader_map
+        .iter()
+        .find(|(&v, _)| v >= 1)
+        .ok_or(DecodeError::NonRoundRobinLeaders)?;
+
+    let leader_idx = first_leader
+        .strip_prefix('n')
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or_else(|| DecodeError::InvalidNodeId(first_leader.clone()))?;
+
+    // (epoch + first_view) % n == leader_idx
+    let n64 = n as u64;
+    let epoch = (leader_idx + n64 - (first_view % n64)) % n64;
+
+    // Verify for all views >= 1
+    for (&view, leader) in leader_map {
+        if view == 0 {
+            continue;
+        }
+        let expected_idx = (epoch + view) % n64;
+        let expected = format!("n{expected_idx}");
+        if leader != &expected {
+            return Err(DecodeError::NonRoundRobinLeaders);
+        }
+    }
+
+    Ok(epoch)
+}
+
+/// Parses a Quint Vote variant into a [`TracedVote`].
+fn parse_itf_vote(
+    v: &Value,
+    block_map: &mut HashMap<String, String>,
+) -> Option<TracedVote> {
+    let tag = v.get("tag")?.as_str()?;
+    let inner = v.get("value")?;
+    match tag {
+        "Notarize" => {
+            let view = parse_int(&inner["view"]);
+            let sig = inner["sig"].as_str()?.to_string();
+            let block_name = inner["block"].as_str()?;
+            let block = block_to_hex(block_name, block_map);
+            Some(TracedVote::Notarize { view, sig, block })
+        }
+        "Nullify" => {
+            let view = parse_int(&inner["view"]);
+            let sig = inner["sig"].as_str()?.to_string();
+            Some(TracedVote::Nullify { view, sig })
+        }
+        "Finalize" => {
+            let view = parse_int(&inner["view"]);
+            let sig = inner["sig"].as_str()?.to_string();
+            let block_name = inner["block"].as_str()?;
+            let block = block_to_hex(block_name, block_map);
+            Some(TracedVote::Finalize { view, sig, block })
+        }
+        _ => None,
+    }
+}
+
+/// Parses a Quint Certificate variant into a [`TracedCert`].
+fn parse_itf_cert(
+    v: &Value,
+    block_map: &mut HashMap<String, String>,
+) -> Option<TracedCert> {
+    let tag = v.get("tag")?.as_str()?;
+    let inner = v.get("value")?;
+    match tag {
+        "Notarization" => {
+            let view = parse_int(&inner["view"]);
+            let block_name = inner["block"].as_str()?;
+            let block = block_to_hex(block_name, block_map);
+            let signers: Vec<String> = parse_set(&inner["signatures"])
+                .iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect();
+            let ghost_sender = inner["ghost_sender"].as_str()?.to_string();
+            Some(TracedCert::Notarization {
+                view,
+                block,
+                signers,
+                ghost_sender,
+            })
+        }
+        "Nullification" => {
+            let view = parse_int(&inner["view"]);
+            let signers: Vec<String> = parse_set(&inner["signatures"])
+                .iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect();
+            let ghost_sender = inner["ghost_sender"].as_str()?.to_string();
+            Some(TracedCert::Nullification {
+                view,
+                signers,
+                ghost_sender,
+            })
+        }
+        "Finalization" => {
+            let view = parse_int(&inner["view"]);
+            let block_name = inner["block"].as_str()?;
+            let block = block_to_hex(block_name, block_map);
+            let signers: Vec<String> = parse_set(&inner["signatures"])
+                .iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect();
+            let ghost_sender = inner["ghost_sender"].as_str()?.to_string();
+            Some(TracedCert::Finalization {
+                view,
+                block,
+                signers,
+                ghost_sender,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Returns the view number from a [`TracedVote`].
+fn vote_view(vote: &TracedVote) -> u64 {
+    match vote {
+        TracedVote::Notarize { view, .. }
+        | TracedVote::Nullify { view, .. }
+        | TracedVote::Finalize { view, .. } => *view,
+    }
+}
+
+/// Returns the view number from a [`TracedCert`].
+fn cert_view(cert: &TracedCert) -> u64 {
+    match cert {
+        TracedCert::Notarization { view, .. }
+        | TracedCert::Nullification { view, .. }
+        | TracedCert::Finalization { view, .. } => *view,
+    }
+}
+
+/// Collects stored votes for each node from `store_vote` in a state.
+fn collect_store_vote(state: &Value) -> HashMap<String, Vec<Value>> {
+    let mut result = HashMap::new();
+    for (k, v) in parse_map(get_var(state, "store_vote")) {
+        if let Some(node) = k.as_str() {
+            let votes: Vec<Value> = parse_set(v).into_iter().cloned().collect();
+            result.insert(node.to_string(), votes);
+        }
+    }
+    result
+}
+
+/// Collects stored certificates for each node from `store_certificate` in a state.
+fn collect_store_certificate(state: &Value) -> HashMap<String, Vec<Value>> {
+    let mut result = HashMap::new();
+    for (k, v) in parse_map(get_var(state, "store_certificate")) {
+        if let Some(node) = k.as_str() {
+            let certs: Vec<Value> = parse_set(v).into_iter().cloned().collect();
+            result.insert(node.to_string(), certs);
+        }
+    }
+    result
+}
+
+/// Finds new votes delivered between two consecutive states.
+/// Returns `(receiver, sender, vote)` triples.
+fn diff_store_vote(
+    prev_store: &HashMap<String, Vec<Value>>,
+    next_store: &HashMap<String, Vec<Value>>,
+    block_map: &mut HashMap<String, String>,
+) -> Vec<(String, String, TracedVote)> {
+    let mut new_entries = Vec::new();
+
+    for (node, next_votes) in next_store {
+        let prev_votes = prev_store.get(node);
+        let prev_list = prev_votes.map(|v| v.as_slice()).unwrap_or(&[]);
+
+        for vote_val in next_votes {
+            if !prev_list.iter().any(|pv| pv == vote_val) {
+                if let Some(vote) = parse_itf_vote(vote_val, block_map) {
+                    let sender = match &vote {
+                        TracedVote::Notarize { sig, .. }
+                        | TracedVote::Nullify { sig, .. }
+                        | TracedVote::Finalize { sig, .. } => sig.clone(),
+                    };
+                    new_entries.push((node.clone(), sender, vote));
+                }
+            }
+        }
+    }
+    new_entries
+}
+
+/// Finds new certificates delivered between two consecutive states.
+/// Returns `(receiver, sender, cert)` triples.
+fn diff_store_certificate(
+    prev_store: &HashMap<String, Vec<Value>>,
+    next_store: &HashMap<String, Vec<Value>>,
+    block_map: &mut HashMap<String, String>,
+) -> Vec<(String, String, TracedCert)> {
+    let mut new_entries = Vec::new();
+
+    for (node, next_certs) in next_store {
+        let prev_certs = prev_store.get(node);
+        let prev_list = prev_certs.map(|v| v.as_slice()).unwrap_or(&[]);
+
+        for cert_val in next_certs {
+            if !prev_list.iter().any(|pc| pc == cert_val) {
+                if let Some(cert) = parse_itf_cert(cert_val, block_map) {
+                    let sender = match &cert {
+                        TracedCert::Notarization { ghost_sender, .. }
+                        | TracedCert::Nullification { ghost_sender, .. }
+                        | TracedCert::Finalization { ghost_sender, .. } => ghost_sender.clone(),
+                    };
+                    new_entries.push((node.clone(), sender, cert));
+                }
+            }
+        }
+    }
+    new_entries
+}
+
+/// Extracts expected observable state from the final ITF state.
+fn extract_expected_state(
+    state: &Value,
+    correct_nodes: &[String],
+    block_map: &HashMap<String, String>,
+) -> ExpectedState {
+    let store_cert_map = collect_store_certificate(state);
+    let store_vote_map = collect_store_vote(state);
+    let replica_state_entries = parse_map(get_var(state, "replica_state"));
+    let committed_entries = parse_map(get_var(state, "ghost_committed_blocks"));
+
+    let mut nodes = BTreeMap::new();
+    for node in correct_nodes {
+        // Extract notarized/nullified/finalized from store_certificate
+        let mut notarizations = BTreeMap::new();
+        let mut nullifications = BTreeSet::new();
+        let mut finalizations = BTreeMap::new();
+
+        if let Some(certs) = store_cert_map.get(node) {
+            for cert_val in certs {
+                let Some(tag) = cert_val.get("tag").and_then(|t| t.as_str()) else {
+                    continue;
+                };
+                let Some(inner) = cert_val.get("value") else {
+                    continue;
+                };
+                match tag {
+                    "Notarization" => {
+                        let view = parse_int(&inner["view"]);
+                        let block_name = inner["block"].as_str().unwrap_or("");
+                        let hex = block_map.get(block_name).cloned().unwrap_or_default();
+                        notarizations.insert(view, hex);
+                    }
+                    "Nullification" => {
+                        let view = parse_int(&inner["view"]);
+                        nullifications.insert(view);
+                    }
+                    "Finalization" => {
+                        let view = parse_int(&inner["view"]);
+                        let block_name = inner["block"].as_str().unwrap_or("");
+                        let hex = block_map.get(block_name).cloned().unwrap_or_default();
+                        finalizations.insert(view, hex);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Extract votes from store_vote
+        let mut notarize_votes: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+        let mut nullify_votes: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+        let mut finalize_votes: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+
+        if let Some(votes) = store_vote_map.get(node) {
+            for vote_val in votes {
+                let Some(tag) = vote_val.get("tag").and_then(|t| t.as_str()) else {
+                    continue;
+                };
+                let Some(inner) = vote_val.get("value") else {
+                    continue;
+                };
+                match tag {
+                    "Notarize" => {
+                        let view = parse_int(&inner["view"]);
+                        let sig = inner["sig"].as_str().unwrap_or("").to_string();
+                        notarize_votes.entry(view).or_default().insert(sig);
+                    }
+                    "Nullify" => {
+                        let view = parse_int(&inner["view"]);
+                        let sig = inner["sig"].as_str().unwrap_or("").to_string();
+                        nullify_votes.entry(view).or_default().insert(sig);
+                    }
+                    "Finalize" => {
+                        let view = parse_int(&inner["view"]);
+                        let sig = inner["sig"].as_str().unwrap_or("").to_string();
+                        finalize_votes.entry(view).or_default().insert(sig);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Extract last_finalized from replica_state
+        let last_finalized = replica_state_entries
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(node.as_str()))
+            .map(|(_, v)| parse_int(&v["last_finalized"]))
+            .unwrap_or(0);
+
+        // Extract committed sequence from ghost_committed_blocks
+        let committed_sequence = committed_entries
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(node.as_str()))
+            .and_then(|(_, v)| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| {
+                        let block_name = b.as_str()?;
+                        finalizations
+                            .iter()
+                            .find(|(_, hex)| {
+                                block_map
+                                    .get(block_name)
+                                    .map(|h| h == hex.as_str())
+                                    .unwrap_or(false)
+                            })
+                            .map(|(&v, _)| v)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        nodes.insert(
+            node.clone(),
+            ExpectedNodeState {
+                notarizations,
+                nullifications,
+                finalizations,
+                notarize_votes,
+                nullify_votes,
+                finalize_votes,
+                last_finalized,
+                committed_sequence,
+            },
+        );
+    }
+
+    ExpectedState { nodes }
+}
+
+/// Identifies the correct node set from the ITF state.
+/// Correct nodes are those with entries in `replica_state`.
+fn identify_correct_nodes(state: &Value) -> Vec<String> {
+    let mut nodes: Vec<String> = parse_map(get_var(state, "replica_state"))
+        .iter()
+        .filter_map(|(k, _)| k.as_str().map(String::from))
+        .collect();
+    nodes.sort();
+    nodes
+}
+
+/// Determines total node count from the leader map (all distinct node IDs).
+fn count_nodes(state: &Value) -> usize {
+    let mut all_nodes: BTreeSet<String> = BTreeSet::new();
+    // Collect from leader map
+    for (_, v) in parse_map(get_var(state, "leader")) {
+        if let Some(node) = v.as_str() {
+            all_nodes.insert(node.to_string());
+        }
+    }
+    // Collect from store_vote keys
+    for (k, _) in parse_map(get_var(state, "store_vote")) {
+        if let Some(node) = k.as_str() {
+            all_nodes.insert(node.to_string());
+        }
+    }
+    all_nodes.len()
+}
+
+/// Decodes an ITF trace JSON string into a [`TraceData`] and [`ExpectedState`].
+///
+/// If `n` and `faults` are not provided (set to 0), they are inferred from
+/// the trace. `n` is the total node count and `faults` = n - correct_count.
+pub fn decode_itf(
+    json: &str,
+    n_override: usize,
+    faults_override: usize,
+) -> Result<(TraceData, ExpectedState), DecodeError> {
+    let itf: Value = serde_json::from_str(json)?;
+    let states = itf["states"]
+        .as_array()
+        .ok_or(DecodeError::MissingField("states"))?;
+
+    if states.is_empty() {
+        return Err(DecodeError::EmptyTrace);
+    }
+
+    let state0 = &states[0];
+
+    // Identify nodes and configuration
+    let correct_nodes = identify_correct_nodes(state0);
+    let n = if n_override > 0 {
+        n_override
+    } else {
+        count_nodes(state0)
+    };
+    let faults = if faults_override > 0 || n_override > 0 {
+        if faults_override > 0 {
+            faults_override
+        } else {
+            n - correct_nodes.len()
+        }
+    } else {
+        n - correct_nodes.len()
+    };
+
+    // Extract leader map and compute epoch
+    let leader_map = extract_leader_map(state0);
+    let epoch = compute_epoch(&leader_map, n)?;
+
+    // Block name -> hex digest mapping (populated during parsing)
+    let mut block_map: HashMap<String, String> = HashMap::new();
+
+    // Diff consecutive states to extract trace entries
+    let mut entries = Vec::new();
+    let mut max_view = 0u64;
+
+    let mut prev_votes = collect_store_vote(state0);
+    let mut prev_certs = collect_store_certificate(state0);
+
+    for next in states.iter().skip(1) {
+        let next_votes = collect_store_vote(next);
+        let next_certs = collect_store_certificate(next);
+
+        // Diff votes
+        for (receiver, sender, vote) in diff_store_vote(&prev_votes, &next_votes, &mut block_map) {
+            max_view = max_view.max(vote_view(&vote));
+            entries.push(TraceEntry::Vote {
+                sender,
+                receiver,
+                vote,
+            });
+        }
+
+        // Diff certificates
+        for (receiver, sender, cert) in
+            diff_store_certificate(&prev_certs, &next_certs, &mut block_map)
+        {
+            max_view = max_view.max(cert_view(&cert));
+            entries.push(TraceEntry::Certificate {
+                sender,
+                receiver,
+                cert,
+            });
+        }
+
+        prev_votes = next_votes;
+        prev_certs = next_certs;
+    }
+
+    // Extract expected state from final state
+    let final_state = states.last().unwrap();
+    let expected = extract_expected_state(final_state, &correct_nodes, &block_map);
+
+    let trace_data = TraceData {
+        n,
+        faults,
+        epoch,
+        max_view,
+        entries,
+        required_containers: 0,
+    };
+
+    Ok((trace_data, expected))
+}

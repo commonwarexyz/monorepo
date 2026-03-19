@@ -158,3 +158,17 @@ path = "src/bin/trace_to_quint.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "replay_trace"
+path = "src/bin/replay_trace.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "itf_to_trace"
+path = "src/bin/itf_to_trace.rs"
+test = false
+doc = false
+bench = false

@@ -11,4 +11,5 @@ examples/flood/assets
 **/quint/_apalache-out/
 **/quint/out*/
 **/quint/traces/
+**/quint/itf_traces
 CLAUDE.md

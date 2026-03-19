@@ -1,7 +1,7 @@
 use crate::{
     bounds,
     simplex::Simplex,
-    types::{Finalization, Notarization, Nullification, ReplicaState},
+    types::{Finalization, Notarization, Nullification, ReplicaState, ReplayedReplicaState},
 };
 use commonware_codec::{Encode, Read};
 use commonware_consensus::simplex::{
@@ -14,22 +14,20 @@ use commonware_cryptography::{
 use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 
-pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
+pub fn check<P: Simplex>(n: u32, replicas: &[ReplicaState]) {
     let threshold = bounds::quorum(n) as usize;
 
     // Invariant: agreement
     // All replicas that finalized a given view must have the same digest for that view.
     let all_views: HashSet<u64> = replicas
         .iter()
-        .flat_map(|(_, _, finalizations)| finalizations.keys().cloned())
+        .flat_map(|r| r.2.keys().cloned())
         .collect();
     for view in all_views {
         let finalizations_for_view: Vec<(usize, Sha256Digest)> = replicas
             .iter()
             .enumerate()
-            .filter_map(|(idx, (_, _, finalizations))| {
-                finalizations.get(&view).map(|d| (idx, d.payload))
-            })
+            .filter_map(|(idx, r)| r.2.get(&view).map(|d| (idx, d.payload)))
             .collect();
 
         if let Some((first_idx, first_digest)) = finalizations_for_view.first() {
@@ -46,12 +44,12 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     // If any replica finalized view v, no replica may have a nullification for view v.
     let finalized_views: HashMap<u64, Sha256Digest> = replicas
         .iter()
-        .flat_map(|(_, _, finalizations)| finalizations.iter().map(|(&view, d)| (view, d.payload)))
+        .flat_map(|r| r.2.iter().map(|(&view, d)| (view, d.payload)))
         .collect();
     for finalized_view in finalized_views.keys() {
-        for (idx, (_, nullifications, _)) in replicas.iter().enumerate() {
+        for (idx, r) in replicas.iter().enumerate() {
             assert!(
-                !nullifications.contains_key(finalized_view),
+                !r.1.contains_key(finalized_view),
                 "Invariant violation: replica {idx} nullified view {finalized_view} but it is finalized",
             );
         }
@@ -59,8 +57,8 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
 
     // Invariant: no_conflicting_notarization_in_finalized_view
     // If any replica finalized view v for a digest, no replica may have a notarization for a different digest.
-    for (idx, (notarizations, _, _)) in replicas.iter().enumerate() {
-        for (&view, data) in notarizations.iter() {
+    for (idx, r) in replicas.iter().enumerate() {
+        for (&view, data) in r.0.iter() {
             if let Some(&finalized_digest) = finalized_views.get(&view) {
                 assert_eq!(
                     finalized_digest, data.payload,
@@ -74,8 +72,8 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     // Invariant: no_conflicting_quorum_notarizations
     // In any view, there cannot be quorum notarizations for multiple digests.
     let mut per_view: HashMap<u64, HashSet<Sha256Digest>> = HashMap::new();
-    for (notarizations, _, _) in replicas.iter() {
-        for (v, d) in notarizations {
+    for r in replicas.iter() {
+        for (v, d) in &r.0 {
             let is_quorum = d.signature_count.is_none_or(|c| c >= threshold);
             if is_quorum {
                 per_view.entry(*v).or_default().insert(d.payload);
@@ -93,10 +91,10 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     // If any replica nullified view v, no replica may finalize v.
     let nullified: HashSet<u64> = replicas
         .iter()
-        .flat_map(|(_, nulls, _)| nulls.keys().cloned())
+        .flat_map(|r| r.1.keys().cloned())
         .collect();
-    for (idx, (_, _, finals)) in replicas.iter().enumerate() {
-        for v in finals.keys() {
+    for (idx, r) in replicas.iter().enumerate() {
+        for v in r.2.keys() {
             assert!(
                 !nullified.contains(v),
                 "Invariant violation: replica {idx} finalized view {v} which is nullified"
@@ -108,10 +106,10 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     // Any finalization must be backed by some notarization for the same (view, payload).
     let notarized: HashSet<(u64, Sha256Digest)> = replicas
         .iter()
-        .flat_map(|(notarizations, _, _)| notarizations.iter().map(|(&v, d)| (v, d.payload)))
+        .flat_map(|r| r.0.iter().map(|(&v, d)| (v, d.payload)))
         .collect();
-    for (_, _, finalizations) in replicas.iter() {
-        for (&v, d) in finalizations.iter() {
+    for r in replicas.iter() {
+        for (&v, d) in r.2.iter() {
             assert!(
                 notarized.contains(&(v, d.payload)),
                 "Invariant violation: finalization without notarization: view {v}, payload={:?}",
@@ -121,10 +119,10 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
     }
 
     // Enforce per-replica invariants
-    for (notarizations, nullifications, finalizations) in replicas.iter() {
+    for r in replicas.iter() {
         // Invariant: certificates_are_valid
         // Certificates have the correct number of signatures.
-        for (view, data) in nullifications.iter() {
+        for (view, data) in r.1.iter() {
             if <P::Scheme as CertificateScheme>::is_attributable() {
                 let count = data
                     .signature_count
@@ -141,7 +139,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
             }
         }
 
-        for (view, data) in notarizations.iter() {
+        for (view, data) in r.0.iter() {
             if <P::Scheme as CertificateScheme>::is_attributable() {
                 let count = data
                     .signature_count
@@ -158,7 +156,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
             }
         }
 
-        for (view, data) in finalizations.iter() {
+        for (view, data) in r.2.iter() {
             if <P::Scheme as CertificateScheme>::is_attributable() {
                 let count = data
                     .signature_count
@@ -176,9 +174,9 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         }
 
         // Invariant: no_nullification_and_finalization_in_the_same_view
-        for view in nullifications.keys() {
+        for view in r.1.keys() {
             assert!(
-                !finalizations.contains_key(view),
+                !r.2.contains_key(view),
                 "Invariant violation: view {view} has both nullification and finalization",
             );
         }
@@ -201,7 +199,7 @@ fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
 }
 
 pub fn extract<E, S, L>(
-    reporters: Vec<Reporter<E, S, L, Sha256Digest>>,
+    reporters: &[Reporter<E, S, L, Sha256Digest>],
     max_participants: usize,
 ) -> Vec<ReplicaState>
 where
@@ -212,57 +210,159 @@ where
     reporters
         .iter()
         .map(|reporter| {
-            let notarizations = reporter.notarizations.lock();
-            let notarization_data = notarizations
-                .iter()
-                .map(|(view, cert)| {
-                    (
-                        view.get(),
-                        Notarization {
-                            payload: cert.proposal.payload,
-                            signature_count: get_signature_count::<S>(
-                                &cert.certificate,
-                                max_participants,
-                            ),
-                        },
-                    )
-                })
-                .collect();
-
-            let nullifications = reporter.nullifications.lock();
-            let nullification_data = nullifications
-                .iter()
-                .map(|(view, cert)| {
-                    (
-                        view.get(),
-                        Nullification {
-                            signature_count: get_signature_count::<S>(
-                                &cert.certificate,
-                                max_participants,
-                            ),
-                        },
-                    )
-                })
-                .collect();
-
-            let finalizations = reporter.finalizations.lock();
-            let finalization_data = finalizations
-                .iter()
-                .map(|(view, cert)| {
-                    (
-                        view.get(),
-                        Finalization {
-                            payload: cert.proposal.payload,
-                            signature_count: get_signature_count::<S>(
-                                &cert.certificate,
-                                max_participants,
-                            ),
-                        },
-                    )
-                })
-                .collect();
-
+            let notarization_data = extract_notarizations::<S>(reporter, max_participants);
+            let nullification_data = extract_nullifications::<S>(reporter, max_participants);
+            let finalization_data = extract_finalizations::<S>(reporter, max_participants);
             (notarization_data, nullification_data, finalization_data)
+        })
+        .collect()
+}
+
+/// Extract replayed state including individual votes (for replayer comparison).
+pub fn extract_replayed<E, S, L>(
+    reporters: &[Reporter<E, S, L, Sha256Digest>],
+    participants: &[S::PublicKey],
+    max_participants: usize,
+) -> Vec<ReplayedReplicaState>
+where
+    E: CryptoRngCore,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
+{
+    // Build pk -> node ID mapping
+    let pk_to_id: HashMap<S::PublicKey, String> = participants
+        .iter()
+        .enumerate()
+        .map(|(i, pk)| (pk.clone(), format!("n{i}")))
+        .collect();
+
+    reporters
+        .iter()
+        .map(|reporter| {
+            let notarizations = extract_notarizations::<S>(reporter, max_participants);
+            let nullifications = extract_nullifications::<S>(reporter, max_participants);
+            let finalizations = extract_finalizations::<S>(reporter, max_participants);
+
+            // Extract notarize votes: HashMap<View, HashMap<D, HashSet<PK>>> -> HashMap<u64, HashSet<String>>
+            let notarize_votes = {
+                let votes = reporter.notarizes.lock();
+                votes
+                    .iter()
+                    .map(|(view, by_digest)| {
+                        let signers: HashSet<String> = by_digest
+                            .values()
+                            .flat_map(|pks| pks.iter())
+                            .filter_map(|pk| pk_to_id.get(pk).cloned())
+                            .collect();
+                        (view.get(), signers)
+                    })
+                    .collect()
+            };
+
+            // Extract nullify votes: HashMap<View, HashSet<PK>> -> HashMap<u64, HashSet<String>>
+            let nullify_votes = {
+                let votes = reporter.nullifies.lock();
+                votes
+                    .iter()
+                    .map(|(view, pks)| {
+                        let signers: HashSet<String> = pks
+                            .iter()
+                            .filter_map(|pk| pk_to_id.get(pk).cloned())
+                            .collect();
+                        (view.get(), signers)
+                    })
+                    .collect()
+            };
+
+            // Extract finalize votes: HashMap<View, HashMap<D, HashSet<PK>>> -> HashMap<u64, HashSet<String>>
+            let finalize_votes = {
+                let votes = reporter.finalizes.lock();
+                votes
+                    .iter()
+                    .map(|(view, by_digest)| {
+                        let signers: HashSet<String> = by_digest
+                            .values()
+                            .flat_map(|pks| pks.iter())
+                            .filter_map(|pk| pk_to_id.get(pk).cloned())
+                            .collect();
+                        (view.get(), signers)
+                    })
+                    .collect()
+            };
+
+            ReplayedReplicaState {
+                notarizations,
+                nullifications,
+                finalizations,
+                notarize_votes,
+                nullify_votes,
+                finalize_votes,
+            }
+        })
+        .collect()
+}
+
+fn extract_notarizations<S: Scheme<Sha256Digest>>(
+    reporter: &Reporter<impl CryptoRngCore, S, impl Elector<S>, Sha256Digest>,
+    max_participants: usize,
+) -> HashMap<u64, Notarization> {
+    let notarizations = reporter.notarizations.lock();
+    notarizations
+        .iter()
+        .map(|(view, cert)| {
+            (
+                view.get(),
+                Notarization {
+                    payload: cert.proposal.payload,
+                    signature_count: get_signature_count::<S>(
+                        &cert.certificate,
+                        max_participants,
+                    ),
+                },
+            )
+        })
+        .collect()
+}
+
+fn extract_nullifications<S: Scheme<Sha256Digest>>(
+    reporter: &Reporter<impl CryptoRngCore, S, impl Elector<S>, Sha256Digest>,
+    max_participants: usize,
+) -> HashMap<u64, Nullification> {
+    let nullifications = reporter.nullifications.lock();
+    nullifications
+        .iter()
+        .map(|(view, cert)| {
+            (
+                view.get(),
+                Nullification {
+                    signature_count: get_signature_count::<S>(
+                        &cert.certificate,
+                        max_participants,
+                    ),
+                },
+            )
+        })
+        .collect()
+}
+
+fn extract_finalizations<S: Scheme<Sha256Digest>>(
+    reporter: &Reporter<impl CryptoRngCore, S, impl Elector<S>, Sha256Digest>,
+    max_participants: usize,
+) -> HashMap<u64, Finalization> {
+    let finalizations = reporter.finalizations.lock();
+    finalizations
+        .iter()
+        .map(|(view, cert)| {
+            (
+                view.get(),
+                Finalization {
+                    payload: cert.proposal.payload,
+                    signature_count: get_signature_count::<S>(
+                        &cert.certificate,
+                        max_participants,
+                    ),
+                },
+            )
         })
         .collect()
 }

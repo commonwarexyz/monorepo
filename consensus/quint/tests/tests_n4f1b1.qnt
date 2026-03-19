@@ -28,8 +28,8 @@ module tests {
             sig: sig_of("n3")
         }
 
-        initWithLeaderAndCertify(
-            Map(0 -> "n0", 1 -> "n3", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n0"),
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n3", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
             .then(inject_proposal(invalid_proposal))
@@ -45,7 +45,7 @@ module tests {
             .then(replica_receives_nullify_vote("n0", FIRST_VIEW, "n2"))
             .then(all {
                 assert(store_certificate.get("n0").exists(c => cert_kind(c) == NullificationKind and cert_view(c) == FIRST_VIEW)),
-                assert(replica_state.get("n0").view == 2),
+                assert(replica_state.get("n0").view == 3),
                 unchanged_all,
             })
             .expect(all_invariants)
@@ -54,14 +54,14 @@ module tests {
     run finalizationCertificateAdvancesViewTest = {
         val cert = finalization(FIRST_VIEW, "val_b0", Set("n0", "n1", "n2"), "n2")
 
-        initWithLeaderAndCertify(
-            Map(0 -> "n0", 1 -> "n1", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n0"),
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
             .then(on_certificate("n2", cert))
             .then(all {
                 assert(store_certificate.get("n2").exists(c => cert_kind(c) == FinalizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b0"))),
-                assert(replica_state.get("n2").view == 2),
+                assert(replica_state.get("n2").view == 3),
                 assert(replica_state.get("n2").last_finalized == FIRST_VIEW),
                 assert(ghost_committed_blocks.get("n2").length() == 1),
                 assert(ghost_committed_blocks.get("n2")[0] == "val_b0"),

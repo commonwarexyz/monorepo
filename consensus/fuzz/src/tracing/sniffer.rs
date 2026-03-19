@@ -28,9 +28,20 @@ pub enum ChannelKind {
 /// Structured representation of a traced vote.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TracedVote {
-    Notarize { view: u64, sig: String, block: String },
-    Nullify { view: u64, sig: String },
-    Finalize { view: u64, sig: String, block: String },
+    Notarize {
+        view: u64,
+        sig: String,
+        block: String,
+    },
+    Nullify {
+        view: u64,
+        sig: String,
+    },
+    Finalize {
+        view: u64,
+        sig: String,
+        block: String,
+    },
 }
 
 /// Structured representation of a traced certificate.
@@ -295,10 +306,7 @@ where
             ChannelKind::Vote => {
                 if let Ok(vote) = Ed25519Vote::decode(payload.clone()) {
                     let formatted = format_vote(&vote);
-                    let entry = format!(
-                        "// {} -> {}: {}",
-                        sender_id, self.node_id, formatted
-                    );
+                    let entry = format!("// {} -> {}: {}", sender_id, self.node_id, formatted);
                     let structured = TraceEntry::Vote {
                         sender: sender_id.clone(),
                         receiver: self.node_id.clone(),
@@ -314,10 +322,7 @@ where
                     Ed25519Certificate::decode_cfg(payload.clone(), &self.cert_codec_cfg)
                 {
                     let formatted = format_certificate(&cert, &sender_id);
-                    let entry = format!(
-                        "// {} -> {}: {}",
-                        sender_id, self.node_id, formatted
-                    );
+                    let entry = format!("// {} -> {}: {}", sender_id, self.node_id, formatted);
                     let structured = TraceEntry::Certificate {
                         sender: sender_id.clone(),
                         receiver: self.node_id.clone(),

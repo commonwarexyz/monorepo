@@ -23,7 +23,8 @@ module types {
     pure val GENESIS_BLOCK: Block = "GENESIS_BLOCK"
 
     pure val GENESIS_VIEW = 0
-    pure val FIRST_VIEW = 1
+    pure val INIT_VIEW = 1
+    pure val FIRST_VIEW = 2
 
     pure val NotarizeKind = "NOTARIZE_KIND"
     pure val NullifyKind = "NULLIFY_KIND"

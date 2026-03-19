@@ -28,8 +28,8 @@ module tests {
     pure val CERTIFY_FAIL_INV_B3 = Replicas.mapBy(_ => CERTIFY_FAIL_INV_B3_BLOCK)
 
     run initTest = {
-        initWithLeaderAndCertify(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n0"),
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
             .then(all {
@@ -51,8 +51,8 @@ module tests {
             sig: sig_of("n0")
         }
 
-        initWithLeaderAndCertify(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n0"),
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
             .then(inject_proposal(proposal))
@@ -67,7 +67,7 @@ module tests {
             .then(all {
                 assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b0"))),
                 assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == Some("val_b0"))),
-                assert(replica_state.get("n0").view == 2),
+                assert(replica_state.get("n0").view == 3),
                 unchanged_all,
             })
 
@@ -85,8 +85,8 @@ module tests {
     }
 
     run certificationAlwaysTrueTriggersFinalizeTest = {
-        initWithLeaderAndCertify(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n0"),
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
             .then(replica_receives_notarize_vote("n0", "inv_b3", FIRST_VIEW, "n0"))
@@ -96,15 +96,15 @@ module tests {
                 assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("inv_b3"))),
                 assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == Some("inv_b3"))),
                 assert(not(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_nullify(v)))),
-                assert(replica_state.get("n0").view == 2),
+                assert(replica_state.get("n0").view == 3),
                 unchanged_all,
             })
             .expect(all_invariants)
     }
 
     run leaderNullifyTest = {
-        initWithLeaderAndCertify(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n0"),
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
             .then(replica_receives_nullify_vote("n1", FIRST_VIEW, "n0"))
@@ -121,11 +121,11 @@ module tests {
     }
 
     run localProposalFailureTest = {
-        initWithLeaderAndCertify(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n0"),
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
-            // Force proposer failure with an invalid parent for view 1.
+            // Force proposer failure with an invalid parent for FIRST_VIEW.
             .then(proposer_step("n0", "val_b0", "val_b1", GENESIS_VIEW))
             .then(all {
                 assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_nullify(v))),
@@ -141,11 +141,11 @@ module tests {
     }
 
     run runCertifyTest = {
-        initWithLeaderAndCertify(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n0", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n0"),
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n0", 3 -> "n0", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_FAIL_INV_B3
         )
-            // Build notarization(inv_b3, 1) at n0; certification should fail.
+            // Build notarization(inv_b3, FIRST_VIEW) at n0; certification should fail.
             .then(replica_receives_notarize_vote("n0", "inv_b3", FIRST_VIEW, "n0"))
             .then(replica_receives_notarize_vote("n0", "inv_b3", FIRST_VIEW, "n1"))
             .then(replica_receives_notarize_vote("n0", "inv_b3", FIRST_VIEW, "n2"))
@@ -157,20 +157,20 @@ module tests {
                 assert(replica_state.get("n0").view == FIRST_VIEW),
                 unchanged_all,
             })
-            // Enter view 2 via nullification certificate for view 1.
+            // Enter view 3 via nullification certificate for FIRST_VIEW.
             .then(replica_receives_nullify_vote("n0", FIRST_VIEW, "n0"))
             .then(replica_receives_nullify_vote("n0", FIRST_VIEW, "n1"))
             .then(replica_receives_nullify_vote("n0", FIRST_VIEW, "n2"))
             .then(all {
                 assert(store_certificate.get("n0").exists(c => cert_kind(c) == NullificationKind and cert_view(c) == FIRST_VIEW)),
-                assert(replica_state.get("n0").view == 2),
+                assert(replica_state.get("n0").view == 3),
                 unchanged_all,
             })
-            // In view 2, n0 is leader but must refuse to build on uncertified inv_b3.
+            // In view 3, n0 is leader but must refuse to build on uncertified inv_b3.
             .then(proposer_step("n0", "val_b0", "inv_b3", FIRST_VIEW))
             .then(all {
-                assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == 2 and is_nullify(v))),
-                assert(not(sent_proposal.exists(p => p.sig == "n0" and p.view == 2 and p.block_parent == "inv_b3" and p.view_parent == FIRST_VIEW))),
+                assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == 3 and is_nullify(v))),
+                assert(not(sent_proposal.exists(p => p.sig == "n0" and p.view == 3 and p.block_parent == "inv_b3" and p.view_parent == FIRST_VIEW))),
                 unchanged_all,
             })
             .expect(all_invariants)
@@ -185,8 +185,8 @@ module tests {
             sig: sig_of("n0")
         }
 
-        initWithLeaderAndCertify(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n0"),
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
             .then(inject_proposal(invalid_proposal))
