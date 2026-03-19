@@ -66,6 +66,7 @@ fn main() {
             faults: trace_data.faults,
             epoch: trace_data.epoch,
             max_view: trace_data.max_view,
+            required_containers: trace_data.required_containers,
         };
 
         let qnt = encoder::encode(&trace_data.entries, &cfg);

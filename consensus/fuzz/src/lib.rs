@@ -1192,6 +1192,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             epoch: EPOCH,
             max_view,
             entries: trace.structured.clone(),
+            required_containers: tracing_input.required_containers,
         };
 
         if !is_interesting_trace(&trace.structured, max_view) {
@@ -1396,6 +1397,7 @@ pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             epoch: EPOCH,
             max_view,
             entries: trace.structured.clone(),
+            required_containers: tracing_input.required_containers
         };
 
         if !is_interesting_trace(&trace.structured, max_view) {

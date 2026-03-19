@@ -9,4 +9,5 @@ pub struct TraceData {
     pub epoch: u64,
     pub max_view: u64,
     pub entries: Vec<TraceEntry>,
+    pub required_containers: u64
 }

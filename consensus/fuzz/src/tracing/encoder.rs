@@ -28,6 +28,8 @@ pub struct EncoderConfig {
     pub epoch: u64,
     /// Maximum view to include in VIEWS range.
     pub max_view: u64,
+    /// Expected finalized containers for each honest node.
+    pub required_containers: u64,
 }
 
 /// Encodes trace entries into a quint test module.
@@ -145,6 +147,7 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
         for action in *chunk {
             writeln!(out, "            .then({})", action).unwrap();
         }
+        writeln!(out, "            .expect(all_invariants)").unwrap();
         writeln!(out).unwrap();
     }
 
@@ -157,6 +160,17 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     writeln!(out, "    run traceTest =").unwrap();
     writeln!(out, "        {}", last_part).unwrap();
     writeln!(out, "            .expect(all_invariants)").unwrap();
+    // Assert that all correct nodes finalized the expected number of containers
+    if cfg.required_containers > 0 {
+        for i in cfg.faults..cfg.n {
+            writeln!(
+                out,
+                "            .expect(replica_state.get(\"n{}\").last_finalized >= {})",
+                i, cfg.required_containers
+            )
+            .unwrap();
+        }
+    }
     writeln!(out).unwrap();
 
     // Helper actions
