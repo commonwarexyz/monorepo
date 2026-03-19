@@ -118,24 +118,27 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         Ok(encoded)
     }
 
-    /// Drains already-queued data messages into `batch`, high priority first.
+    /// Drains already-queued messages into `batch`.
     ///
-    /// Only consumes messages that are already ready (via `try_recv`), so this
-    /// reduces runtime write calls without introducing a per-connection timer
-    /// or extra buffering latency.
+    /// Priority order: control > high > low. Only consumes messages that are
+    /// already ready (via `try_recv`), so this reduces runtime write calls
+    /// without introducing a per-connection timer or extra buffering latency.
     fn extend_send_many<V>(
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
+        control: &mut mpsc::Receiver<Message<C>>,
+        pool: &commonware_runtime::BufferPool,
         high: &mut mpsc::Receiver<EncodedData>,
         low: &mut mpsc::Receiver<EncodedData>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &Family<metrics::Message, Counter>,
     ) -> Result<(), Error> {
         while batch.len() < batch_size {
-            // Preserve the existing priority behavior when draining more work
-            // into the same send: always exhaust already-ready high-priority
-            // data before pulling from the low-priority queue.
+            if let Ok(msg) = control.try_recv() {
+                Self::encode_control(peer, msg, pool, sent_messages, batch)?;
+                continue;
+            }
             if let Ok(msg) = high.try_recv() {
                 let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
                 sent_messages
@@ -144,7 +147,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 batch.push(encoded.payload);
                 continue;
             }
-
             if let Ok(msg) = low.try_recv() {
                 let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
                 sent_messages
@@ -153,10 +155,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 batch.push(encoded.payload);
                 continue;
             }
-
             break;
         }
-
         Ok(())
     }
 
@@ -228,20 +228,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                     batch.push(encoded.payload);
                                 },
                             }
-                            while batch.len() < self.send_batch_size {
-                                match self.control.try_recv() {
-                                    Ok(msg) => Self::encode_control(&peer, msg, &pool, &self.sent_messages, &mut batch)?,
-                                    Err(_) => break,
-                                }
-                            }
                             Self::extend_send_many(
-                                &peer,
-                                self.send_batch_size,
-                                &mut batch,
-                                &mut self.high,
-                                &mut self.low,
-                                &rate_limits,
-                                &self.sent_messages,
+                                &peer, self.send_batch_size, &mut batch,
+                                &mut self.control, &pool, &mut self.high, &mut self.low,
+                                &rate_limits, &self.sent_messages,
                             )?;
                             conn_sender.send_many(batch).await.map_err(Error::SendFailed)?;
                         },
