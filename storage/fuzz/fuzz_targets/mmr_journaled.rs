@@ -94,14 +94,14 @@ fn historical_root(
     leaves: &[Vec<u8>],
     requested_leaves: Location,
 ) -> <Sha256 as commonware_cryptography::Hasher>::Digest {
-    let mut hasher = Standard::<Sha256>::new();
-    let mut mmr = mem::Mmr::new(&mut hasher);
+    let hasher = Standard::<Sha256>::new();
+    let mut mmr = mem::Mmr::new(&hasher);
     let changeset = {
         let mut batch = mmr.new_batch();
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
-            batch = batch.add(&mut hasher, element);
+            batch = batch.add(&hasher, element);
         }
-        batch.merkleize(&mut hasher).finalize()
+        batch.merkleize(&hasher).finalize()
     };
     mmr.apply(changeset).unwrap();
     *mmr.root()
@@ -112,10 +112,10 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let mut leaves = Vec::new();
-        let mut hasher = Standard::<Sha256>::new();
+        let hasher = Standard::<Sha256>::new();
         let mut mmr = Mmr::init(
             context.clone(),
-            &mut hasher,
+            &hasher,
             test_config("fuzz-test-mmr-journaled", &context),
         )
         .await
@@ -139,12 +139,12 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     let size_before = mmr.size();
-                    let (loc, changeset) = {
-                        let batch = mmr.new_batch();
-                        let loc = batch.leaves();
-                        let batch = batch.add(&mut hasher, limited_data);
-                        (loc, batch.merkleize(&mut hasher).finalize())
-                    };
+                    let batch = mmr.new_batch();
+                    let loc = batch.leaves();
+                    let changeset = batch
+                        .add(&hasher, limited_data)
+                        .merkleize(&hasher)
+                        .finalize();
                     mmr.apply(changeset).unwrap();
                     leaves.push(limited_data.to_vec());
                     historical_sizes.push(mmr.leaves());
@@ -175,9 +175,9 @@ fn fuzz(input: FuzzInput) {
                         let mut locations = Vec::with_capacity(items.len());
                         for item in &items {
                             locations.push(batch.leaves());
-                            batch = batch.add(&mut hasher, item);
+                            batch = batch.add(&hasher, item);
                         }
-                        (locations, batch.merkleize(&mut hasher).finalize())
+                        (locations, batch.merkleize(&hasher).finalize())
                     };
                     mmr.apply(changeset).unwrap();
                     assert!(mmr.size() > size_before);
@@ -202,14 +202,10 @@ fn fuzz(input: FuzzInput) {
                         if bounds.contains(&location) {
                             let element = leaves.get(location.as_u64() as usize).unwrap();
 
-                            if let Ok(proof) = mmr.proof(&mut hasher, location).await {
+                            if let Ok(proof) = mmr.proof(&hasher, location).await {
                                 let root = mmr.root();
-                                assert!(proof.verify_element_inclusion(
-                                    &mut hasher,
-                                    element,
-                                    location,
-                                    &root,
-                                ));
+                                assert!(proof
+                                    .verify_element_inclusion(&hasher, element, location, &root,));
                             }
                         }
                     }
@@ -226,10 +222,10 @@ fn fuzz(input: FuzzInput) {
                             && end_loc < mmr.leaves()
                             && mmr.bounds().contains(&range.start)
                         {
-                            if let Ok(proof) = mmr.range_proof(&mut hasher, range.clone()).await {
+                            if let Ok(proof) = mmr.range_proof(&hasher, range.clone()).await {
                                 let root = mmr.root();
                                 assert!(proof.verify_range_inclusion(
-                                    &mut hasher,
+                                    &hasher,
                                     &leaves[range.to_usize_range()],
                                     Location::new(start_loc),
                                     &root
@@ -253,13 +249,13 @@ fn fuzz(input: FuzzInput) {
                     let expected_root = historical_root(&leaves, requested_leaves);
 
                     let result = mmr
-                        .historical_range_proof(&mut hasher, requested_leaves, range.clone())
+                        .historical_range_proof(&hasher, requested_leaves, range.clone())
                         .await;
                     match result {
                         Ok(historical_proof) => {
-                            let mut verify_hasher = Standard::<Sha256>::new();
+                            let verify_hasher = Standard::<Sha256>::new();
                             assert!(historical_proof.verify_range_inclusion(
-                                &mut verify_hasher,
+                                &verify_hasher,
                                 &leaves[range.to_usize_range()],
                                 range.start,
                                 &expected_root
@@ -326,7 +322,7 @@ fn fuzz(input: FuzzInput) {
                         context
                             .with_label("mmr")
                             .with_attribute("instance", restarts),
-                        &mut hasher,
+                        &hasher,
                         test_config("fuzz-test-mmr-journaled", &context),
                     )
                     .await
@@ -362,7 +358,7 @@ fn fuzz(input: FuzzInput) {
                             .with_label("sync")
                             .with_attribute("instance", restarts),
                         sync_config,
-                        &mut hasher,
+                        &hasher,
                     )
                     .await
                     {

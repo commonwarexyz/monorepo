@@ -11,7 +11,7 @@
 //! over elements whose activity state is reflected by the bitmap.
 
 use crate::{
-    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher as MmrHasher},
+    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         self,
@@ -36,7 +36,7 @@ use tracing::{debug, error, warn};
 
 /// Returns a root digest that incorporates bits not yet part of the MMR because they
 /// belong to the last (unfilled) chunk.
-pub(crate) fn partial_chunk_root<H: MmrHasher<mmr::Family>, const N: usize>(
+pub(crate) fn partial_chunk_root<H: Hasher<mmr::Family>, const N: usize>(
     hasher: &H,
     mmr_root: &H::Digest,
     next_bit: u64,
@@ -223,7 +223,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
     /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
     /// bitmap corresponding to `root`.
     pub fn verify_bit_inclusion(
-        hasher: &impl MmrHasher<mmr::Family, Digest = D>,
+        hasher: &impl Hasher<mmr::Family, Digest = D>,
         proof: &Proof<D>,
         chunk: &[u8; N],
         bit: u64,
@@ -300,7 +300,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         context: E,
         partition: &str,
         pool: Option<ThreadPool>,
-        hasher: &impl MmrHasher<mmr::Family, Digest = D>,
+        hasher: &impl Hasher<mmr::Family, Digest = D>,
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig {
             partition: partition.into(),
@@ -454,7 +454,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
     /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
     pub async fn proof(
         &self,
-        hasher: &impl MmrHasher<mmr::Family, Digest = D>,
+        hasher: &impl Hasher<mmr::Family, Digest = D>,
         bit: u64,
     ) -> Result<(Proof<D>, [u8; N]), Error> {
         if bit >= self.len() {
@@ -555,7 +555,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
     /// Merkleize all updates not yet reflected in the bitmap's root.
     pub fn merkleize(
         mut self,
-        hasher: &impl MmrHasher<mmr::Family, Digest = D>,
+        hasher: &impl Hasher<mmr::Family, Digest = D>,
     ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
         // Add newly pushed complete chunks to the batch.
         let mut batch = UnmerkleizedBatch::new(&self.mmr).with_pool(self.pool.clone());
@@ -600,7 +600,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
                     .collect(),
             }
         };
-        let batch = batch.update_leaf_batched(&dirty)?;
+        batch = batch.update_leaf_batched(&dirty)?;
 
         // Merkleize and apply.
         let changeset = batch.merkleize(hasher).finalize();

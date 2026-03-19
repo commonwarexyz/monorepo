@@ -1,7 +1,10 @@
 //! Iterators for traversing MMBs of a given size, and functions for computing various MMB
 //! properties from their output.
 
-use crate::merkle::mmb::{Family, Location, Position};
+use crate::merkle::{
+    mmb::{Family, Location, Position},
+    Family as _,
+};
 
 /// Compute the MMB size required to hold `n` leaves.
 const fn size_for_leaves(n: Location) -> Position {
@@ -29,7 +32,7 @@ pub(crate) fn leaves_for_size(size: Position) -> Option<Location> {
         return Some(Location::new(0));
     }
 
-    if size.as_u64() > <Family as crate::merkle::Family>::MAX_POSITION.as_u64() {
+    if size.as_u64() > Family::MAX_POSITION.as_u64() {
         return None;
     }
 
@@ -107,10 +110,7 @@ impl PeakIterator {
     ///
     /// Panics if `size` exceeds [crate::merkle::Family::MAX_POSITION].
     pub fn to_nearest_size(size: Position) -> Position {
-        assert!(
-            size <= <Family as crate::merkle::Family>::MAX_POSITION,
-            "size exceeds MAX_POSITION"
-        );
+        assert!(size <= Family::MAX_POSITION, "size exceeds MAX_POSITION");
 
         if size.as_u64() == 0 {
             return size;
@@ -365,8 +365,8 @@ mod tests {
     #[test]
     fn test_max_position_and_max_location_consistent() {
         // MAX_POSITION must be a valid MMB size whose leaf count is MAX_LOCATION.
-        let max_pos = <Family as crate::merkle::Family>::MAX_POSITION.as_u64();
-        let max_loc = <Family as crate::merkle::Family>::MAX_LOCATION.as_u64();
+        let max_pos = Family::MAX_POSITION.as_u64();
+        let max_loc = Family::MAX_LOCATION.as_u64();
         assert_eq!(
             leaves_for_size(Position::new(max_pos)),
             Some(Location::new(max_loc)),

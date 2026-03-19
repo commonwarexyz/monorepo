@@ -14,7 +14,6 @@ use crate::merkle::{
 use alloc::collections::btree_set::BTreeSet;
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 use commonware_cryptography::Digest;
-use core::ops::Range;
 
 impl<D: Digest> Proof<Family, D> {
     /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
@@ -138,20 +137,6 @@ impl<D: Digest> Proof<Family, D> {
     }
 }
 
-/// Build a range proof using the fold-based layout.
-pub(crate) fn build_range_proof<D, H>(
-    hasher: &H,
-    leaves: Location,
-    range: Range<Location>,
-    get_node: impl Fn(Position) -> Option<D>,
-) -> Result<Proof<Family, D>, Error>
-where
-    D: Digest,
-    H: Hasher<Family, Digest = D>,
-{
-    merkle_proof::build_range_proof(hasher, leaves, range, get_node, Error::ElementPruned)
-}
-
 /// Returns the positions of the minimal set of nodes whose digests are required to prove the
 /// inclusion of the elements at the specified `locations`.
 #[cfg(any(feature = "std", test))]
@@ -168,7 +153,7 @@ mod tests {
     use crate::merkle::{
         self as merkle,
         mmr::{iterator::PeakIterator, mem::Mmr, StandardHasher as Standard},
-        LocationRangeExt as _,
+        Family as _, LocationRangeExt as _,
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 
@@ -179,15 +164,15 @@ mod tests {
     #[test]
     fn test_proving_digests_from_range() {
         // create a new MMR and add a non-trivial amount (49) of elements
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for element in &elements {
-                batch = batch.add(&mut hasher, element);
+                batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
         let root = mmr.root();
@@ -195,15 +180,10 @@ mod tests {
         // Test 1: compute_digests over the entire range should contain a digest for every node
         // in the tree.
         let proof = mmr
-            .range_proof(&mut hasher, Location::new(0)..mmr.leaves())
+            .range_proof(&hasher, Location::new(0)..mmr.leaves())
             .unwrap();
         let mut node_digests = proof
-            .verify_range_inclusion_and_extract_digests(
-                &mut hasher,
-                &elements,
-                Location::new(0),
-                root,
-            )
+            .verify_range_inclusion_and_extract_digests(&hasher, &elements, Location::new(0), root)
             .unwrap();
         assert_eq!(node_digests.len() as u64, mmr.size());
         node_digests.sort_by_key(|(pos, _)| *pos);
@@ -215,7 +195,7 @@ mod tests {
         let wrong_root = elements[0]; // any other digest will do
         assert!(matches!(
             proof.verify_range_inclusion_and_extract_digests(
-                &mut hasher,
+                &hasher,
                 &elements,
                 Location::new(0),
                 &wrong_root
@@ -225,11 +205,11 @@ mod tests {
 
         // Test 2: Single element range (first element)
         let range = Location::new(0)..Location::new(1);
-        let single_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
+        let single_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
         let range_start = range.start;
         let single_digests = single_proof
             .verify_range_inclusion_and_extract_digests(
-                &mut hasher,
+                &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 root,
@@ -241,10 +221,10 @@ mod tests {
         let mid_idx = 24;
         let range = Location::new(mid_idx)..Location::new(mid_idx + 1);
         let range_start = range.start;
-        let mid_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
+        let mid_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
         let mid_digests = mid_proof
             .verify_range_inclusion_and_extract_digests(
-                &mut hasher,
+                &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 root,
@@ -256,10 +236,10 @@ mod tests {
         let last_idx = elements.len() as u64 - 1;
         let range = Location::new(last_idx)..Location::new(last_idx + 1);
         let range_start = range.start;
-        let last_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
+        let last_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
         let last_digests = last_proof
             .verify_range_inclusion_and_extract_digests(
-                &mut hasher,
+                &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 root,
@@ -270,10 +250,10 @@ mod tests {
         // Test 5: Small range at the beginning
         let range = Location::new(0)..Location::new(5);
         let range_start = range.start;
-        let small_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
+        let small_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
         let small_digests = small_proof
             .verify_range_inclusion_and_extract_digests(
-                &mut hasher,
+                &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 root,
@@ -285,10 +265,10 @@ mod tests {
         // Test 6: Medium range in the middle
         let range = Location::new(10)..Location::new(31);
         let range_start = range.start;
-        let mid_range_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
+        let mid_range_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
         let mid_range_digests = mid_range_proof
             .verify_range_inclusion_and_extract_digests(
-                &mut hasher,
+                &hasher,
                 &elements[range.to_usize_range()],
                 range_start,
                 root,
@@ -303,7 +283,7 @@ mod tests {
         // Test that the validation logic accepts MAX_LOCATION as a valid leaf count.
         // With MAX_LOCATION leaves, valid locations are 0..MAX_LOCATION-1.
         // The range MAX_LOCATION-1..MAX_LOCATION proves the last element.
-        let max_loc = <Family as merkle::Family>::MAX_LOCATION;
+        let max_loc = Family::MAX_LOCATION;
         let max_loc_plus_1 = Location::new(*max_loc + 1);
 
         let result = Blueprint::new(max_loc, max_loc - 1..max_loc);
@@ -325,7 +305,7 @@ mod tests {
     fn test_max_location_multi_proof() {
         // Test that multi_proof can handle MAX_LOCATION
         // Should be able to generate multi-proof for MAX_LOCATION
-        let max_loc = <Family as merkle::Family>::MAX_LOCATION;
+        let max_loc = Family::MAX_LOCATION;
         let result = nodes_required_for_multi_proof(max_loc, &[max_loc - 1]);
         assert!(
             result.is_ok(),
@@ -434,7 +414,7 @@ mod tests {
         let n_for_63_peaks = (1u128 << 63) - 1;
         let size_for_63_peaks = 2 * n_for_63_peaks - 63; // = 2^64 - 65
         assert!(
-            size_for_63_peaks > *<Family as merkle::Family>::MAX_POSITION as u128,
+            size_for_63_peaks > *Family::MAX_POSITION as u128,
             "63 peaks requires size {size_for_63_peaks} > MAX_POSITION",
         );
 
@@ -450,15 +430,15 @@ mod tests {
     /// node at position 0 (L0) which is a sibling within the range peak, not a fold-prefix peak.
     #[test]
     fn test_verify_proof_and_pinned_nodes_sibling_case() {
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&hasher);
         let elements: Vec<Digest> = (0..3).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for e in &elements {
-                batch = batch.add(&mut hasher, e);
+                batch = batch.add(&hasher, e);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
         let root = mmr.root();
@@ -466,7 +446,7 @@ mod tests {
         // Proof for range [1, 3) -- fold prefix is empty, pinned node at position 0 is a sibling.
         let start_loc = Location::new(1);
         let proof = mmr
-            .range_proof(&mut hasher, start_loc..Location::new(3))
+            .range_proof(&hasher, start_loc..Location::new(3))
             .unwrap();
 
         let pinned: Vec<Digest> = mmr
@@ -477,13 +457,7 @@ mod tests {
 
         // Correct pinned nodes must verify.
         assert!(
-            proof.verify_proof_and_pinned_nodes(
-                &mut hasher,
-                &elements[1..],
-                start_loc,
-                &pinned,
-                root,
-            ),
+            proof.verify_proof_and_pinned_nodes(&hasher, &elements[1..], start_loc, &pinned, root,),
             "valid pinned nodes should verify"
         );
 
@@ -491,7 +465,7 @@ mod tests {
         let bad_pinned = vec![test_digest(99)];
         assert!(
             !proof.verify_proof_and_pinned_nodes(
-                &mut hasher,
+                &hasher,
                 &elements[1..],
                 start_loc,
                 &bad_pinned,
@@ -504,7 +478,7 @@ mod tests {
         let extra_pinned = vec![pinned[0], test_digest(42)];
         assert!(
             !proof.verify_proof_and_pinned_nodes(
-                &mut hasher,
+                &hasher,
                 &elements[1..],
                 start_loc,
                 &extra_pinned,
@@ -515,8 +489,7 @@ mod tests {
 
         // Empty pinned nodes must fail (start_loc > 0 requires at least one).
         assert!(
-            !proof
-                .verify_proof_and_pinned_nodes(&mut hasher, &elements[1..], start_loc, &[], root,),
+            !proof.verify_proof_and_pinned_nodes(&hasher, &elements[1..], start_loc, &[], root,),
             "missing pinned nodes should fail"
         );
     }
@@ -524,24 +497,24 @@ mod tests {
     /// Test verify_proof_and_pinned_nodes when pinned nodes ARE fold-prefix peaks.
     #[test]
     fn test_verify_proof_and_pinned_nodes_fold_prefix_case() {
-        let mut hasher: Standard<Sha256> = Standard::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher: Standard<Sha256> = Standard::new();
+        let mut mmr = Mmr::new(&hasher);
         // 10-leaf MMR: peaks at positions covering [0-7] and [8-9].
         // start_loc=8 puts the first peak entirely in the fold prefix.
         let elements: Vec<Digest> = (0..10).map(test_digest).collect();
         let changeset = {
             let mut batch = mmr.new_batch();
             for e in &elements {
-                batch = batch.add(&mut hasher, e);
+                batch = batch.add(&hasher, e);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmr.apply(changeset).unwrap();
         let root = mmr.root();
 
         let start_loc = Location::new(8);
         let proof = mmr
-            .range_proof(&mut hasher, start_loc..Location::new(10))
+            .range_proof(&hasher, start_loc..Location::new(10))
             .unwrap();
 
         let pinned: Vec<Digest> = mmr
@@ -551,20 +524,14 @@ mod tests {
         assert_eq!(pinned.len(), 1, "should have one fold-prefix peak");
 
         assert!(
-            proof.verify_proof_and_pinned_nodes(
-                &mut hasher,
-                &elements[8..],
-                start_loc,
-                &pinned,
-                root,
-            ),
+            proof.verify_proof_and_pinned_nodes(&hasher, &elements[8..], start_loc, &pinned, root,),
             "valid fold-prefix pinned nodes should verify"
         );
 
         // Wrong digest must fail.
         assert!(
             !proof.verify_proof_and_pinned_nodes(
-                &mut hasher,
+                &hasher,
                 &elements[8..],
                 start_loc,
                 &[test_digest(99)],

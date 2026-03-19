@@ -139,8 +139,8 @@ impl<F: Family, D: Digest> Proof<F, D> {
         }
     }
 
-    /// Return true if this proof proves that the elements at the specified locations are
-    /// included in the structure with root digest `root`. A malformed proof will return false.
+    /// Return true if this proof proves that the elements at the specified locations are included
+    /// in the structure with root digest `root`. A malformed proof will return false.
     ///
     /// The order of the elements does not affect the output.
     pub fn verify_multi_inclusion<H, E>(
@@ -153,11 +153,13 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
+        // Empty proof is valid only for an empty tree.
         if elements.is_empty() {
             return self.leaves == Location::new(0)
                 && *root == hasher.root(Location::new(0), core::iter::empty());
         }
 
+        // Collect all required positions with deduplication, and blueprints per element.
         let mut node_positions = BTreeSet::new();
         let mut blueprints = BTreeMap::new();
 
@@ -165,6 +167,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             if !loc.is_valid() {
                 return false;
             }
+            // `loc` is valid so it won't overflro from +1
             let Ok(bp) = Blueprint::new(self.leaves, *loc..*loc + 1) else {
                 return false;
             };
@@ -173,16 +176,19 @@ impl<F: Family, D: Digest> Proof<F, D> {
             blueprints.insert(*loc, bp);
         }
 
+        // Verify we have the exact number of digests needed
         if node_positions.len() != self.digests.len() {
             return false;
         }
 
+        // Build position to digest mapping once
         let node_digests: BTreeMap<Position<F>, D> = node_positions
             .iter()
             .zip(self.digests.iter())
             .map(|(&pos, digest)| (pos, *digest))
             .collect();
 
+        // Verify each element by constructing its sub-proof in fold-based format
         for (element, loc) in elements {
             let bp = &blueprints[loc];
 
@@ -268,7 +274,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
         let bp =
             Blueprint::new(self.leaves, range).map_err(|_| ReconstructionError::InvalidSize)?;
 
-        // Slice self.digests: [folded_prefix? | after_peaks... | siblings...]
+        // Slice self.digests into [folded_prefix? | after_peaks... | siblings...]
         let prefix_digests = usize::from(!bp.fold_prefix.is_empty());
         let expected_min = prefix_digests + bp.fetch_nodes.len();
         if self.digests.len() < expected_min {
@@ -288,6 +294,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             None
         };
 
+        // Reconstruct each range peak and fold into acc.
         let mut sibling_cursor = 0usize;
         let mut elements_iter = elements.iter();
         for peak in &bp.range_peaks {
@@ -310,6 +317,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             acc = Some(acc.map_or(peak_digest, |a| hasher.fold(&a, &peak_digest)));
         }
 
+        // Fold after-peaks digests.
         for (i, &after_peak_pos) in bp.after_peaks.iter().enumerate() {
             let digest = self.digests[after_start + i];
             if let Some(ref mut cd) = collected {
@@ -318,18 +326,21 @@ impl<F: Family, D: Digest> Proof<F, D> {
             acc = Some(acc.map_or(digest, |a| hasher.fold(&a, &digest)));
         }
 
+        // Verify all elements were consumed.
         if elements_iter.next().is_some() {
             return Err(ReconstructionError::ExtraDigests);
         }
+
+        // Verify all siblings were consumed.
         if sibling_cursor != siblings.len() {
             return Err(ReconstructionError::ExtraDigests);
         }
 
-        Ok(if let Some(peaks_acc) = acc {
-            hasher.hash([self.leaves.to_be_bytes().as_slice(), peaks_acc.as_ref()])
-        } else {
-            hasher.digest(&self.leaves.to_be_bytes())
-        })
+        // Hash the leaf count into the final result.
+        Ok(acc.map_or_else(
+            || hasher.digest(&self.leaves.to_be_bytes()),
+            |peaks_acc| hasher.hash([self.leaves.to_be_bytes().as_slice(), peaks_acc.as_ref()]),
+        ))
     }
 }
 
@@ -563,13 +574,12 @@ pub(crate) fn nodes_required_for_multi_proof<F: Family>(
     })
 }
 
-/// Collect sibling positions needed to reconstruct a peak digest from a range of
-/// elements, in left-first DFS order. This mirrors the traversal order of
-/// [`reconstruct_peak_from_range`].
+/// Collect sibling positions needed to reconstruct a peak digest from a range of elements, in
+/// left-first DFS order. This mirrors the traversal order of [`reconstruct_peak_from_range`].
 ///
-/// At each node: if the subtree is entirely outside the range, its root position is
-/// emitted. If it's a leaf in the range, nothing is emitted. Otherwise, recurse into
-/// children via [`Family::children`].
+/// At each node: if the subtree is entirely outside the range, its root position is emitted. If
+/// it's a leaf in the range, nothing is emitted. Otherwise, recurse into children via
+/// [`Family::children`].
 pub(crate) fn collect_siblings_dfs<F: Family>(
     node: Subtree<F>,
     range: &Range<Location<F>>,
@@ -587,14 +597,13 @@ pub(crate) fn collect_siblings_dfs<F: Family>(
     }
 }
 
-/// Reconstruct the digest of a peak subtree from a range of elements and sibling
-/// digests, consuming both in left-first DFS order matching [`collect_siblings_dfs`].
+/// Reconstruct the digest of a peak subtree from a range of elements and sibling digests, consuming
+/// both in left-first DFS order matching [`collect_siblings_dfs`].
 ///
 /// At each node:
 /// - If the subtree is entirely outside the range: consume a sibling digest.
 /// - If it's a leaf in the range: hash the next element.
-/// - Otherwise: recurse into children via [`Family::children`] and compute the node
-///   digest.
+/// - Otherwise: recurse into children via [`Family::children`] and compute the node digest.
 ///
 /// If `collected` is `Some`, every child `(position, digest)` pair encountered during
 /// reconstruction is appended to the vector.
@@ -710,40 +719,36 @@ mod tests {
         mem
     }
 
-    // ---------------------------------------------------------------------------
-    // Generic test functions
-    // ---------------------------------------------------------------------------
-
     fn empty_proof<F: Family>() {
         // Test that an empty proof authenticates an empty structure.
-        let mut hasher = H::new();
-        let mem = Mem::<F, D>::new(&mut hasher);
+        let hasher = H::new();
+        let mem = Mem::<F, D>::new(&hasher);
         let root = mem.root();
         let proof: Proof<F, D> = Proof::default();
-        assert!(proof.verify_range_inclusion(&mut hasher, &[] as &[D], Location::new(0), root));
+        assert!(proof.verify_range_inclusion(&hasher, &[] as &[D], Location::new(0), root));
 
         // Any starting position other than 0 should fail to verify.
-        assert!(!proof.verify_range_inclusion(&mut hasher, &[] as &[D], Location::new(1), root));
+        assert!(!proof.verify_range_inclusion(&hasher, &[] as &[D], Location::new(1), root));
 
         // Invalid root should fail to verify.
         let td = test_digest(0);
-        assert!(!proof.verify_range_inclusion(&mut hasher, &[] as &[D], Location::new(0), &td));
+        assert!(!proof.verify_range_inclusion(&hasher, &[] as &[D], Location::new(0), &td));
 
         // Non-empty elements list should fail to verify.
-        assert!(!proof.verify_range_inclusion(&mut hasher, &[td], Location::new(0), root));
+        assert!(!proof.verify_range_inclusion(&hasher, &[td], Location::new(0), root));
     }
 
     fn verify_element<F: Family>() {
         // Create an 11 element structure and test single-element inclusion proofs.
         let element = D::from(*b"01234567012345670123456701234567");
-        let mut hasher = H::new();
-        let mut mem = Mem::<F, D>::new(&mut hasher);
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let changeset = {
             let mut batch = mem.new_batch();
             for _ in 0..11 {
-                batch = batch.add(&mut hasher, &element);
+                batch = batch.add(&hasher, &element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mem.apply(changeset).unwrap();
         let root = mem.root();
@@ -751,60 +756,61 @@ mod tests {
         // Confirm the proof of inclusion for each leaf verifies.
         for leaf in 0u64..11 {
             let leaf = Location::new(leaf);
-            let proof: Proof<F, D> = mem.proof(&mut hasher, leaf).unwrap();
+            let proof: Proof<F, D> = mem.proof(&hasher, leaf).unwrap();
             assert!(
-                proof.verify_element_inclusion(&mut hasher, &element, leaf, root),
+                proof.verify_element_inclusion(&hasher, &element, leaf, root),
                 "valid proof should verify successfully"
             );
         }
 
-        // Create a valid proof, then confirm various mangling results in verification failure.
+        // Create a valid proof, then confirm various mangling of the proof or proof args results in
+        // verification failure.
         let leaf = Location::<F>::new(10);
-        let proof = mem.proof(&mut hasher, leaf).unwrap();
+        let proof = mem.proof(&hasher, leaf).unwrap();
         assert!(
-            proof.verify_element_inclusion(&mut hasher, &element, leaf, root),
+            proof.verify_element_inclusion(&hasher, &element, leaf, root),
             "proof verification should be successful"
         );
         assert!(
-            !proof.verify_element_inclusion(&mut hasher, &element, leaf + 1, root),
+            !proof.verify_element_inclusion(&hasher, &element, leaf + 1, root),
             "proof verification should fail with incorrect element position"
         );
         assert!(
-            !proof.verify_element_inclusion(&mut hasher, &element, leaf - 1, root),
+            !proof.verify_element_inclusion(&hasher, &element, leaf - 1, root),
             "proof verification should fail with incorrect element position 2"
         );
         assert!(
-            !proof.verify_element_inclusion(&mut hasher, &test_digest(0), leaf, root),
+            !proof.verify_element_inclusion(&hasher, &test_digest(0), leaf, root),
             "proof verification should fail with mangled element"
         );
         let root2 = test_digest(0);
         assert!(
-            !proof.verify_element_inclusion(&mut hasher, &element, leaf, &root2),
+            !proof.verify_element_inclusion(&hasher, &element, leaf, &root2),
             "proof verification should fail with mangled root"
         );
         let mut proof2 = proof.clone();
         proof2.digests[0] = test_digest(0);
         assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, leaf, root),
+            !proof2.verify_element_inclusion(&hasher, &element, leaf, root),
             "proof verification should fail with mangled proof hash"
         );
         proof2 = proof.clone();
         proof2.leaves = Location::new(10);
         assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, leaf, root),
+            !proof2.verify_element_inclusion(&hasher, &element, leaf, root),
             "proof verification should fail with incorrect leaves"
         );
         proof2 = proof.clone();
         proof2.digests.push(test_digest(0));
         assert!(
-            !proof2.verify_element_inclusion(&mut hasher, &element, leaf, root),
+            !proof2.verify_element_inclusion(&hasher, &element, leaf, root),
             "proof verification should fail with extra hash"
         );
         proof2 = proof.clone();
         while !proof2.digests.is_empty() {
             proof2.digests.pop();
             assert!(
-                !proof2.verify_element_inclusion(&mut hasher, &element, leaf, root),
+                !proof2.verify_element_inclusion(&hasher, &element, leaf, root),
                 "proof verification should fail with missing digests"
             );
         }
@@ -816,7 +822,7 @@ mod tests {
             proof2.digests.push(test_digest(0));
             proof2.digests.extend(proof.digests[1..].iter().cloned());
             assert!(
-                !proof2.verify_element_inclusion(&mut hasher, &element, leaf, root),
+                !proof2.verify_element_inclusion(&hasher, &element, leaf, root),
                 "proof verification should fail with extra hash even if it's unused by the computation"
             );
         }
@@ -824,15 +830,15 @@ mod tests {
 
     fn verify_range<F: Family>() {
         // Create a structure and add 49 elements.
-        let mut hasher = H::new();
-        let mut mem = Mem::<F, D>::new(&mut hasher);
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let changeset = {
             let mut batch = mem.new_batch();
             for element in &elements {
-                batch = batch.add(&mut hasher, element);
+                batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mem.apply(changeset).unwrap();
         let root = mem.root();
@@ -841,10 +847,10 @@ mod tests {
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
                 let range = Location::new(i as u64)..Location::new(j as u64);
-                let range_proof = mem.range_proof(&mut hasher, range.clone()).unwrap();
+                let range_proof = mem.range_proof(&hasher, range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
-                        &mut hasher,
+                        &hasher,
                         &elements[range.to_usize_range()],
                         range.start,
                         root,
@@ -856,10 +862,10 @@ mod tests {
 
         // Create a proof over a range, confirm it verifies, then mangle it in various ways.
         let range = Location::new(33)..Location::new(40);
-        let range_proof = mem.range_proof(&mut hasher, range.clone()).unwrap();
+        let range_proof = mem.range_proof(&hasher, range.clone()).unwrap();
         let valid_elements = &elements[range.to_usize_range()];
         assert!(
-            range_proof.verify_range_inclusion(&mut hasher, valid_elements, range.start, root),
+            range_proof.verify_range_inclusion(&hasher, valid_elements, range.start, root),
             "valid range proof should verify successfully"
         );
         // Remove digests from the proof until it's empty.
@@ -867,17 +873,12 @@ mod tests {
         for _i in 0..range_proof.digests.len() {
             invalid_proof.digests.remove(0);
             assert!(
-                !invalid_proof.verify_range_inclusion(
-                    &mut hasher,
-                    valid_elements,
-                    range.start,
-                    root,
-                ),
+                !invalid_proof.verify_range_inclusion(&hasher, valid_elements, range.start, root,),
                 "range proof with removed elements should fail"
             );
         }
-        // Confirm proof verification fails when providing an element range different than the
-        // one used to generate the proof.
+        // Confirm proof verification fails when providing an element range different than the one
+        // used to generate the proof.
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
                 if Location::<F>::from(i) == range.start && Location::<F>::from(j) == range.end {
@@ -885,7 +886,7 @@ mod tests {
                 }
                 assert!(
                     !range_proof.verify_range_inclusion(
-                        &mut hasher,
+                        &hasher,
                         &elements[i..j],
                         range.start,
                         root,
@@ -898,38 +899,28 @@ mod tests {
         let invalid_root = test_digest(1);
         assert!(
             !range_proof.verify_range_inclusion(
-                &mut hasher,
+                &hasher,
                 valid_elements,
                 range.start,
                 &invalid_root,
             ),
             "range proof with invalid root should fail"
         );
-        // Mangle each element of the proof.
+        // Mangle each element of the proof and confirm it fails to verify.
         for i in 0..range_proof.digests.len() {
             let mut invalid_proof = range_proof.clone();
             invalid_proof.digests[i] = test_digest(0);
             assert!(
-                !invalid_proof.verify_range_inclusion(
-                    &mut hasher,
-                    valid_elements,
-                    range.start,
-                    root,
-                ),
+                !invalid_proof.verify_range_inclusion(&hasher, valid_elements, range.start, root,),
                 "mangled range proof should fail verification"
             );
         }
-        // Inserting elements into the proof should also cause it to fail (malleability check).
+        // Inserting elements into the proof should also cause it to fail (malleability check)
         for i in 0..range_proof.digests.len() {
             let mut invalid_proof = range_proof.clone();
             invalid_proof.digests.insert(i, test_digest(0));
             assert!(
-                !invalid_proof.verify_range_inclusion(
-                    &mut hasher,
-                    valid_elements,
-                    range.start,
-                    root,
-                ),
+                !invalid_proof.verify_range_inclusion(&hasher, valid_elements, range.start, root,),
                 "mangled range proof should fail verification. inserted element at: {i}",
             );
         }
@@ -940,7 +931,7 @@ mod tests {
                 continue;
             }
             assert!(
-                !range_proof.verify_range_inclusion(&mut hasher, valid_elements, loc, root),
+                !range_proof.verify_range_inclusion(&hasher, valid_elements, loc, root),
                 "bad start_loc should fail verification {loc}",
             );
         }
@@ -948,15 +939,15 @@ mod tests {
 
     fn retained_nodes_provable_after_pruning<F: Family>() {
         // Create a structure and add 49 elements.
-        let mut hasher = H::new();
-        let mut mem = Mem::<F, D>::new(&mut hasher);
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
         let changeset = {
             let mut batch = mem.new_batch();
             for element in &elements {
-                batch = batch.add(&mut hasher, element);
+                batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mem.apply(changeset).unwrap();
 
@@ -969,13 +960,13 @@ mod tests {
             assert_eq!(root, *pruned_root);
             for loc in 0..elements.len() {
                 let loc = Location::new(loc as u64);
-                let proof = mem.proof(&mut hasher, loc);
+                let proof = mem.proof(&hasher, loc);
                 if loc < prune_loc {
                     continue;
                 }
                 assert!(proof.is_ok());
                 assert!(proof.unwrap().verify_element_inclusion(
-                    &mut hasher,
+                    &hasher,
                     &elements[*loc as usize],
                     loc,
                     &root
@@ -986,15 +977,15 @@ mod tests {
 
     fn ranges_provable_after_pruning<F: Family>() {
         // Create a structure and add 49 elements.
-        let mut hasher = H::new();
-        let mut mem = Mem::<F, D>::new(&mut hasher);
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let mut elements: Vec<_> = (0..49).map(test_digest).collect();
         let changeset = {
             let mut batch = mem.new_batch();
             for element in &elements {
-                batch = batch.add(&mut hasher, element);
+                batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mem.apply(changeset).unwrap();
 
@@ -1003,7 +994,7 @@ mod tests {
         mem.prune(prune_loc).unwrap();
         assert_eq!(mem.bounds().start, prune_loc);
 
-        // Test range proofs over all possible ranges of at least 2 elements.
+        // Test range proofs over all possible ranges of at least 2 elements
         let root = mem.root();
         for i in 0..elements.len() - 1 {
             if Location::<F>::new(i as u64) < prune_loc {
@@ -1011,10 +1002,10 @@ mod tests {
             }
             for j in (i + 2)..elements.len() {
                 let range = Location::new(i as u64)..Location::new(j as u64);
-                let range_proof = mem.range_proof(&mut hasher, range.clone()).unwrap();
+                let range_proof = mem.range_proof(&hasher, range.clone()).unwrap();
                 assert!(
                     range_proof.verify_range_inclusion(
-                        &mut hasher,
+                        &hasher,
                         &elements[range.to_usize_range()],
                         range.start,
                         root,
@@ -1029,9 +1020,9 @@ mod tests {
         let changeset = {
             let mut batch = mem.new_batch();
             for element in &new_elements {
-                batch = batch.add(&mut hasher, element);
+                batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mem.apply(changeset).unwrap();
         elements.extend(new_elements);
@@ -1040,10 +1031,10 @@ mod tests {
 
         let updated_root = mem.root();
         let range = Location::new(elements.len() as u64 - 10)..Location::new(elements.len() as u64);
-        let range_proof = mem.range_proof(&mut hasher, range.clone()).unwrap();
+        let range_proof = mem.range_proof(&hasher, range.clone()).unwrap();
         assert!(
             range_proof.verify_range_inclusion(
-                &mut hasher,
+                &hasher,
                 &elements[range.to_usize_range()],
                 range.start,
                 updated_root,
@@ -1054,24 +1045,24 @@ mod tests {
 
     fn proof_serialization<F: Family>() {
         // Create a structure and add 25 elements.
-        let mut hasher = H::new();
-        let mut mem = Mem::<F, D>::new(&mut hasher);
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..25).map(test_digest).collect();
         let changeset = {
             let mut batch = mem.new_batch();
             for element in &elements {
-                batch = batch.add(&mut hasher, element);
+                batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mem.apply(changeset).unwrap();
 
-        // Generate proofs over all possible ranges and confirm each serializes and deserializes
-        // correctly.
+        // Generate proofs over all possible ranges of elements and confirm each
+        // serializes=>deserializes correctly.
         for i in 0..elements.len() {
             for j in i + 1..elements.len() {
                 let range = Location::new(i as u64)..Location::new(j as u64);
-                let proof = mem.range_proof(&mut hasher, range).unwrap();
+                let proof = mem.range_proof(&hasher, range).unwrap();
 
                 let expected_size = proof.encode_size();
                 let serialized_proof = proof.encode();
@@ -1121,15 +1112,15 @@ mod tests {
 
     fn multi_proof_generation_and_verify<F: Family>() {
         // Create a structure with 20 elements.
-        let mut hasher = H::new();
-        let mut mem = Mem::<F, D>::new(&mut hasher);
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..20).map(test_digest).collect();
         let changeset = {
             let mut batch = mem.new_batch();
             for element in &elements {
-                batch = batch.add(&mut hasher, element);
+                batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mem.apply(changeset).unwrap();
 
@@ -1152,7 +1143,7 @@ mod tests {
 
         // Verify the proof.
         assert!(multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(0)),
                 (elements[5], Location::new(5)),
@@ -1163,7 +1154,7 @@ mod tests {
 
         // Verify in different order.
         assert!(multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[10], Location::new(10)),
                 (elements[5], Location::new(5)),
@@ -1174,7 +1165,7 @@ mod tests {
 
         // Verify with duplicate items.
         assert!(multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(0)),
                 (elements[0], Location::new(0)),
@@ -1186,9 +1177,9 @@ mod tests {
 
         // Verify mangling the location to something invalid should fail.
         let mut wrong_size_proof = multi_proof.clone();
-        wrong_size_proof.leaves = Location::new(*<F as crate::merkle::Family>::MAX_LOCATION + 2);
+        wrong_size_proof.leaves = Location::new(*F::MAX_LOCATION + 2);
         assert!(!wrong_size_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(0)),
                 (elements[5], Location::new(5)),
@@ -1199,7 +1190,7 @@ mod tests {
 
         // Verify with wrong positions.
         assert!(!multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(1)),
                 (elements[5], Location::new(6)),
@@ -1215,7 +1206,7 @@ mod tests {
             vec![249u8, 248u8, 247u8],
         ];
         let wrong_verification = multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (wrong_elements[0].as_slice(), Location::new(0)),
                 (wrong_elements[1].as_slice(), Location::new(5)),
@@ -1227,7 +1218,7 @@ mod tests {
 
         // Verify with out of range element.
         let wrong_verification = multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(0)),
                 (elements[5], Location::new(5)),
@@ -1243,7 +1234,7 @@ mod tests {
         // Verify with wrong root should fail.
         let wrong_root = test_digest(99);
         assert!(!multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(0)),
                 (elements[5], Location::new(5)),
@@ -1253,33 +1244,33 @@ mod tests {
         ));
 
         // Empty multi-proof.
-        let mut hasher = H::new();
-        let empty_mem = Mem::<F, D>::new(&mut hasher);
+        let hasher = H::new();
+        let empty_mem = Mem::<F, D>::new(&hasher);
         let empty_root = empty_mem.root();
         let empty_proof: Proof<F, D> = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[] as &[(D, Location<F>)],
             empty_root
         ));
     }
 
     fn multi_proof_deduplication<F: Family>() {
-        let mut hasher = H::new();
-        let mut mem = Mem::<F, D>::new(&mut hasher);
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..30).map(test_digest).collect();
         let changeset = {
             let mut batch = mem.new_batch();
             for element in &elements {
-                batch = batch.add(&mut hasher, element);
+                batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mem.apply(changeset).unwrap();
 
         // Get individual proofs that will share some digests (elements in same subtree).
-        let proof1 = mem.proof(&mut hasher, Location::new(0)).unwrap();
-        let proof2 = mem.proof(&mut hasher, Location::new(1)).unwrap();
+        let proof1 = mem.proof(&hasher, Location::new(0)).unwrap();
+        let proof2 = mem.proof(&hasher, Location::new(1)).unwrap();
         let total_digests_separate = proof1.digests.len() + proof2.digests.len();
 
         // Generate multi-proof for the same positions.
@@ -1301,7 +1292,7 @@ mod tests {
         // Verify it still works.
         let root = mem.root();
         assert!(multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (elements[0], Location::new(0)),
                 (elements[1], Location::new(1))
@@ -1311,8 +1302,8 @@ mod tests {
     }
 
     fn proof_leaves_malleability<F: Family>() {
-        let mut hasher = H::new();
-        let mut mem = Mem::<F, D>::new(&mut hasher);
+        let hasher = H::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
 
         // 252 leaves. Leaf 240 sits in a peak preceded by prefix peaks.
         let elements: Vec<D> = (0..252u16)
@@ -1321,23 +1312,23 @@ mod tests {
         let changeset = {
             let mut batch = mem.new_batch();
             for e in &elements {
-                batch = batch.add(&mut hasher, e);
+                batch = batch.add(&hasher, e);
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mem.apply(changeset).unwrap();
         let root = mem.root();
 
         let loc = Location::new(240);
-        let proof = mem.proof(&mut hasher, loc).unwrap();
-        assert!(proof.verify_element_inclusion(&mut hasher, &elements[240], loc, root));
+        let proof = mem.proof(&hasher, loc).unwrap();
+        assert!(proof.verify_element_inclusion(&hasher, &elements[240], loc, root));
 
         // Tamper with the leaves field (249 has the same peak layout for leaf 240).
         let mut tampered = proof.clone();
         tampered.leaves = Location::new(249);
         assert_ne!(tampered, proof);
         assert!(
-            !tampered.verify_element_inclusion(&mut hasher, &elements[240], loc, root),
+            !tampered.verify_element_inclusion(&hasher, &elements[240], loc, root),
             "proof with tampered leaves field must not verify"
         );
     }
@@ -1366,20 +1357,20 @@ mod tests {
 
     fn single_element_proof_reconstruction<F: Family>() {
         for n in 1u64..=64 {
-            let mut hasher = H::new();
-            let mem = build_raw::<F>(&mut hasher, n);
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
             let root = *mem.root();
 
             for loc_idx in 0..n {
                 let proof = mem
-                    .proof(&mut hasher, Location::new(loc_idx))
+                    .proof(&hasher, Location::new(loc_idx))
                     .unwrap_or_else(|e| panic!("n={n}, loc={loc_idx}: build failed: {e:?}"));
 
                 let elements = [loc_idx.to_be_bytes()];
                 let start_loc = Location::new(loc_idx);
 
                 let reconstructed = proof
-                    .reconstruct_root(&mut hasher, &elements, start_loc)
+                    .reconstruct_root(&hasher, &elements, start_loc)
                     .unwrap_or_else(|e| panic!("n={n}, loc={loc_idx}: reconstruct failed: {e:?}"));
                 assert_eq!(reconstructed, root, "n={n}, loc={loc_idx}: root mismatch");
             }
@@ -1388,8 +1379,8 @@ mod tests {
 
     fn range_proof_reconstruction<F: Family>() {
         for n in 2u64..=32 {
-            let mut hasher = H::new();
-            let mem = build_raw::<F>(&mut hasher, n);
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
             let root = *mem.root();
 
             let ranges: Vec<(u64, u64)> = vec![
@@ -1405,13 +1396,13 @@ mod tests {
                     continue;
                 }
                 let proof = mem
-                    .range_proof(&mut hasher, Location::new(start)..Location::new(end))
+                    .range_proof(&hasher, Location::new(start)..Location::new(end))
                     .unwrap_or_else(|e| panic!("n={n}, range={start}..{end}: build failed: {e:?}"));
                 let elements: Vec<_> = (start..end).map(|i| i.to_be_bytes()).collect();
                 let start_loc = Location::new(start);
 
                 let reconstructed = proof
-                    .reconstruct_root(&mut hasher, &elements, start_loc)
+                    .reconstruct_root(&hasher, &elements, start_loc)
                     .unwrap_or_else(|e| {
                         panic!("n={n}, range={start}..{end}: reconstruct failed: {e}")
                     });
@@ -1425,23 +1416,23 @@ mod tests {
 
     fn verify_element_inclusion<F: Family>() {
         for n in 1u64..=32 {
-            let mut hasher = H::new();
-            let mem = build_raw::<F>(&mut hasher, n);
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
             let root = *mem.root();
 
             for loc_idx in 0..n {
-                let proof = mem.proof(&mut hasher, Location::new(loc_idx)).unwrap();
+                let proof = mem.proof(&hasher, Location::new(loc_idx)).unwrap();
                 let loc = Location::new(loc_idx);
 
                 assert!(
-                    proof.verify_element_inclusion(&mut hasher, &loc_idx.to_be_bytes(), loc, &root),
+                    proof.verify_element_inclusion(&hasher, &loc_idx.to_be_bytes(), loc, &root),
                     "n={n}, loc={loc_idx}: verification failed"
                 );
 
                 // Wrong element should fail.
                 assert!(
                     !proof.verify_element_inclusion(
-                        &mut hasher,
+                        &hasher,
                         &(loc_idx + 1000).to_be_bytes(),
                         loc,
                         &root,
@@ -1454,16 +1445,16 @@ mod tests {
 
     fn full_range<F: Family>() {
         for n in 1u64..=32 {
-            let mut hasher = H::new();
-            let mem = build_raw::<F>(&mut hasher, n);
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
             let root = *mem.root();
 
             let proof = mem
-                .range_proof(&mut hasher, Location::new(0)..Location::new(n))
+                .range_proof(&hasher, Location::new(0)..Location::new(n))
                 .unwrap();
             let elements: Vec<_> = (0..n).map(|i| i.to_be_bytes()).collect();
             let reconstructed = proof
-                .reconstruct_root(&mut hasher, &elements, Location::new(0))
+                .reconstruct_root(&hasher, &elements, Location::new(0))
                 .unwrap();
             assert_eq!(reconstructed, root, "n={n}: full range failed");
 
@@ -1477,44 +1468,34 @@ mod tests {
     }
 
     fn empty_proof_verifies_empty_tree<F: Family>() {
-        let mut hasher = H::new();
-        let mem = Mem::<F, D>::new(&mut hasher);
+        let hasher = H::new();
+        let mem = Mem::<F, D>::new(&hasher);
         let root = *mem.root();
         let proof = Proof::<F, D>::default();
 
         // Empty proof should verify against the empty root.
-        assert!(proof.verify_range_inclusion(
-            &mut hasher,
-            &[] as &[&[u8]],
-            Location::new(0),
-            &root,
-        ));
+        assert!(proof.verify_range_inclusion(&hasher, &[] as &[&[u8]], Location::new(0), &root,));
 
         // Non-zero start_loc with empty elements should fail.
-        assert!(!proof.verify_range_inclusion(
-            &mut hasher,
-            &[] as &[&[u8]],
-            Location::new(1),
-            &root,
-        ));
+        assert!(!proof.verify_range_inclusion(&hasher, &[] as &[&[u8]], Location::new(1), &root,));
     }
 
     fn every_element_contributes_to_root<F: Family>() {
         for n in [8u64, 13, 20, 32] {
-            let mut hasher = H::new();
-            let mem = build_raw::<F>(&mut hasher, n);
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
             let root = *mem.root();
 
             let start = 1;
             let end = n - 1;
             let proof = mem
-                .range_proof(&mut hasher, Location::new(start)..Location::new(end))
+                .range_proof(&hasher, Location::new(start)..Location::new(end))
                 .unwrap();
             let elements: Vec<_> = (start..end).map(|i| i.to_be_bytes()).collect();
 
             // Valid elements verify.
             assert!(
-                proof.verify_range_inclusion(&mut hasher, &elements, Location::new(start), &root),
+                proof.verify_range_inclusion(&hasher, &elements, Location::new(start), &root),
                 "n={n}: valid range should verify"
             );
 
@@ -1523,12 +1504,7 @@ mod tests {
                 let mut tampered = elements.clone();
                 tampered[flip_idx][0] ^= 0xFF;
                 assert!(
-                    !proof.verify_range_inclusion(
-                        &mut hasher,
-                        &tampered,
-                        Location::new(start),
-                        &root,
-                    ),
+                    !proof.verify_range_inclusion(&hasher, &tampered, Location::new(start), &root,),
                     "n={n}: tampered element at index {flip_idx} should not verify"
                 );
             }
@@ -1536,8 +1512,8 @@ mod tests {
     }
 
     fn multi_proof_generation_and_verify_raw<F: Family>() {
-        let mut hasher = H::new();
-        let mem = build_raw::<F>(&mut hasher, 20);
+        let hasher = H::new();
+        let mem = build_raw::<F>(&hasher, 20);
         let root = *mem.root();
 
         let locations = &[Location::new(0), Location::new(5), Location::new(10)];
@@ -1554,7 +1530,7 @@ mod tests {
 
         // Verify the proof.
         assert!(multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (0u64.to_be_bytes(), Location::new(0)),
                 (5u64.to_be_bytes(), Location::new(5)),
@@ -1565,7 +1541,7 @@ mod tests {
 
         // Different order should also verify.
         assert!(multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (10u64.to_be_bytes(), Location::new(10)),
                 (5u64.to_be_bytes(), Location::new(5)),
@@ -1576,7 +1552,7 @@ mod tests {
 
         // Wrong elements should fail.
         assert!(!multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (99u64.to_be_bytes(), Location::new(0)),
                 (5u64.to_be_bytes(), Location::new(5)),
@@ -1588,7 +1564,7 @@ mod tests {
         // Wrong root should fail.
         let wrong_root = hasher.digest(b"wrong");
         assert!(!multi_proof.verify_multi_inclusion(
-            &mut hasher,
+            &hasher,
             &[
                 (0u64.to_be_bytes(), Location::new(0)),
                 (5u64.to_be_bytes(), Location::new(5)),
@@ -1598,11 +1574,11 @@ mod tests {
         ));
 
         // Empty multi-proof on empty tree.
-        let mut hasher2 = H::new();
-        let empty_mem = Mem::<F, D>::new(&mut hasher2);
+        let hasher2 = H::new();
+        let empty_mem = Mem::<F, D>::new(&hasher2);
         let empty_proof: Proof<F, D> = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
-            &mut hasher2,
+            &hasher2,
             &[] as &[([u8; 8], Location<F>)],
             empty_mem.root()
         ));
@@ -1610,22 +1586,22 @@ mod tests {
 
     fn tampered_proof_digests_rejected<F: Family>() {
         for n in [8u64, 13, 20, 32] {
-            let mut hasher = H::new();
-            let mem = build_raw::<F>(&mut hasher, n);
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
             let root = *mem.root();
 
             for loc_idx in [0, n / 2, n - 1] {
-                let proof = mem.proof(&mut hasher, Location::new(loc_idx)).unwrap();
+                let proof = mem.proof(&hasher, Location::new(loc_idx)).unwrap();
                 let element = loc_idx.to_be_bytes();
                 let loc = Location::new(loc_idx);
 
-                assert!(proof.verify_element_inclusion(&mut hasher, &element, loc, &root));
+                assert!(proof.verify_element_inclusion(&hasher, &element, loc, &root));
 
                 for digest_idx in 0..proof.digests.len() {
                     let mut tampered = proof.clone();
                     tampered.digests[digest_idx].0[0] ^= 1;
                     assert!(
-                        !tampered.verify_element_inclusion(&mut hasher, &element, loc, &root),
+                        !tampered.verify_element_inclusion(&hasher, &element, loc, &root),
                         "n={n}, loc={loc_idx}: tampered digest[{digest_idx}] should not verify"
                     );
                 }
@@ -1636,8 +1612,8 @@ mod tests {
     fn no_duplicate_positions<F: Family>() {
         use alloc::collections::BTreeSet;
         for n in 1u64..=64 {
-            let mut hasher = H::new();
-            let mem = build_raw::<F>(&mut hasher, n);
+            let hasher = H::new();
+            let mem = build_raw::<F>(&hasher, n);
             let leaves = mem.leaves();
             for loc in 0..n {
                 let loc = Location::new(loc);

@@ -21,14 +21,14 @@ mod tests {
     type H = Standard<Sha256>;
 
     fn build_mmb(n: u64) -> (H, Mmb<D>) {
-        let mut hasher = H::new();
-        let mut mmb = Mmb::new(&mut hasher);
+        let hasher = H::new();
+        let mut mmb = Mmb::new(&hasher);
         let changeset = {
             let mut batch = mmb.new_batch();
             for i in 0..n {
-                batch = batch.add(&mut hasher, &i.to_be_bytes());
+                batch = batch.add(&hasher, &i.to_be_bytes());
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmb.apply(changeset).unwrap();
         (hasher, mmb)
@@ -36,16 +36,16 @@ mod tests {
 
     #[test]
     fn test_append_and_size() {
-        let mut hasher = H::new();
-        let mut mmb = Mmb::new(&mut hasher);
+        let hasher = H::new();
+        let mut mmb = Mmb::new(&hasher);
 
         for i in 0u64..8 {
             let changeset = {
                 let mut batch = mmb.new_batch();
                 let loc = batch.leaves();
-                batch = batch.add(&mut hasher, &i.to_be_bytes());
+                batch = batch.add(&hasher, &i.to_be_bytes());
                 assert_eq!(*loc, i);
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmb.apply(changeset).unwrap();
         }
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_prune_and_reinit() {
-        let (mut hasher, mut mmb) = build_mmb(24);
+        let (hasher, mut mmb) = build_mmb(24);
 
         let root = *mmb.root();
         let prune_loc = Location::new(9);
@@ -129,13 +129,13 @@ mod tests {
         assert_eq!(mmb.bounds().start, prune_loc);
         assert_eq!(*mmb.root(), root);
         assert!(matches!(
-            mmb.proof(&mut hasher, Location::new(0)),
+            mmb.proof(&hasher, Location::new(0)),
             Err(Error::ElementPruned(_))
         ));
 
         for loc in *prune_loc..*mmb.leaves() {
             assert!(
-                mmb.proof(&mut hasher, Location::new(loc)).is_ok(),
+                mmb.proof(&hasher, Location::new(loc)).is_ok(),
                 "loc={loc} should remain provable after pruning"
             );
         }
@@ -146,7 +146,7 @@ mod tests {
                 pruned_to: prune_loc,
                 pinned_nodes: mmb.node_digests_to_pin(prune_pos),
             },
-            &mut hasher,
+            &hasher,
         )
         .unwrap();
 
@@ -154,12 +154,12 @@ mod tests {
         assert_eq!(mmb_copy.leaves(), mmb.leaves());
         assert_eq!(mmb_copy.bounds(), mmb.bounds());
         assert_eq!(*mmb_copy.root(), root);
-        assert!(mmb_copy.proof(&mut hasher, Location::new(17)).is_ok());
+        assert!(mmb_copy.proof(&hasher, Location::new(17)).is_ok());
     }
 
     #[test]
     fn test_init_size_validation() {
-        let mut hasher = H::new();
+        let hasher = H::new();
 
         assert!(Mmb::<D>::init(
             Config {
@@ -167,7 +167,7 @@ mod tests {
                 pruned_to: Location::new(0),
                 pinned_nodes: vec![],
             },
-            &mut hasher,
+            &hasher,
         )
         .is_ok());
 
@@ -178,7 +178,7 @@ mod tests {
                     pruned_to: Location::new(0),
                     pinned_nodes: vec![],
                 },
-                &mut hasher,
+                &hasher,
             ),
             Err(Error::InvalidSize(_))
         ));
@@ -193,7 +193,7 @@ mod tests {
                 pruned_to: Location::new(0),
                 pinned_nodes: vec![],
             },
-            &mut hasher,
+            &hasher,
         )
         .is_ok());
 
@@ -207,7 +207,7 @@ mod tests {
                 pruned_to: Location::new(0),
                 pinned_nodes: vec![],
             },
-            &mut hasher,
+            &hasher,
         )
         .is_ok());
 
@@ -224,7 +224,7 @@ mod tests {
                 pruned_to: Location::new(4),
                 pinned_nodes: pinned_nodes.clone(),
             },
-            &mut hasher,
+            &hasher,
         )
         .is_ok());
 
@@ -235,7 +235,7 @@ mod tests {
                     pruned_to: Location::new(2),
                     pinned_nodes,
                 },
-                &mut hasher,
+                &hasher,
             ),
             Err(Error::InvalidSize(_))
         ));

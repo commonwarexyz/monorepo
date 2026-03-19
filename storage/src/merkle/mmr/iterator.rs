@@ -2,7 +2,10 @@
 //! properties from their output. These are lower levels methods that are useful for implementing
 //! new MMR variants or extensions.
 
-use crate::merkle::mmr::{Family, Position};
+use crate::merkle::{
+    mmr::{Family, Position},
+    Family as MerkleFamily,
+};
 
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
 /// in decreasing order of height.
@@ -48,12 +51,9 @@ impl PeakIterator {
     ///
     /// # Panics
     ///
-    /// Panics if `size` exceeds [crate::merkle::Family::MAX_POSITION].
+    /// Panics if `size` exceeds [Family::MAX_POSITION].
     pub fn to_nearest_size(size: Position) -> Position {
-        assert!(
-            size <= <Family as crate::merkle::Family>::MAX_POSITION,
-            "size exceeds MAX_POSITION"
-        );
+        assert!(size <= Family::MAX_POSITION, "size exceeds MAX_POSITION");
 
         // Algorithm: A valid MMR size corresponds to a specific number of leaves N, where:
         // mmr_size(N) = 2*N - popcount(N)
@@ -156,18 +156,18 @@ mod tests {
     fn test_leaf_loc_calculation() {
         // Build MMR with 1000 leaves and make sure we can correctly convert each leaf position to
         // its number and back again.
-        let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher = Standard::<Sha256>::new();
+        let mut mmr = Mmr::new(&hasher);
         let digest = [1u8; 32];
         let (changeset, loc_to_pos) = {
             let mut batch = mmr.new_batch();
             let mut positions = Vec::with_capacity(1000);
             for _ in 0..1000 {
                 let loc = batch.leaves();
-                batch = batch.add(&mut hasher, &digest);
+                batch = batch.add(&hasher, &digest);
                 positions.push(Position::try_from(loc).unwrap());
             }
-            (batch.merkleize(&mut hasher).finalize(), positions)
+            (batch.merkleize(&hasher).finalize(), positions)
         };
         mmr.apply(changeset).unwrap();
 
@@ -187,14 +187,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "size exceeds MAX_POSITION")]
     fn test_to_nearest_size_panic() {
-        PeakIterator::to_nearest_size(<Family as crate::merkle::Family>::MAX_POSITION + 1);
+        PeakIterator::to_nearest_size(Family::MAX_POSITION + 1);
     }
 
     #[test]
     fn test_to_nearest_size() {
         // Build an MMR incrementally and verify to_nearest_size for all intermediate values
-        let mut hasher = Standard::<Sha256>::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher = Standard::<Sha256>::new();
+        let mut mmr = Mmr::new(&hasher);
         let digest = [1u8; 32];
 
         for _ in 0..1000 {
@@ -227,8 +227,8 @@ mod tests {
 
             let changeset = mmr
                 .new_batch()
-                .add(&mut hasher, &digest)
-                .merkleize(&mut hasher)
+                .add(&hasher, &digest)
+                .merkleize(&hasher)
                 .finalize();
             mmr.apply(changeset).unwrap();
         }
@@ -257,7 +257,7 @@ mod tests {
         assert!(rounded <= large_size);
 
         // Test maximum allowed input
-        let largest_valid_size = <Family as crate::merkle::Family>::MAX_POSITION;
+        let largest_valid_size = Family::MAX_POSITION;
         let rounded = PeakIterator::to_nearest_size(largest_valid_size);
         assert!(rounded.is_valid_size());
         assert!(rounded <= largest_valid_size);

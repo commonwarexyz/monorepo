@@ -350,8 +350,8 @@ mod tests {
     #[test]
     fn test_is_valid_size() {
         let mut size_to_check = Position::new(0);
-        let mut hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = mem::Mmr::new(&mut hasher);
+        let hasher = StandardHasher::<Sha256>::new();
+        let mut mmr = mem::Mmr::new(&hasher);
         let digest = [1u8; 32];
         for _i in 0..10000 {
             while size_to_check != mmr.size() {
@@ -366,8 +366,8 @@ mod tests {
             assert!(size_to_check.is_valid_size());
             let changeset = {
                 let mut batch = mmr.new_batch();
-                batch = batch.add(&mut hasher, &digest);
-                batch.merkleize(&mut hasher).finalize()
+                batch = batch.add(&hasher, &digest);
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             size_to_check += 1;

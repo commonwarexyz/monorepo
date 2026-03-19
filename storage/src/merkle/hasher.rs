@@ -97,11 +97,6 @@ impl<H: CHasher> Standard<H> {
     pub fn digest(&self, data: &[u8]) -> H::Digest {
         self.hash(core::iter::once(data))
     }
-
-    /// One step of the root fold: `Hash(acc || peak)`.
-    pub fn fold(&self, acc: &H::Digest, peak: &H::Digest) -> H::Digest {
-        self.hash([acc.as_ref(), peak.as_ref()])
-    }
 }
 
 impl<H: CHasher> Default for Standard<H> {
@@ -114,11 +109,7 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     type Digest = H::Digest;
 
     fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        let mut h = H::new();
-        for part in parts {
-            h.update(part);
-        }
-        h.finalize()
+        Self::hash(self, parts)
     }
 }
 

@@ -29,14 +29,14 @@ mod tests {
 
     /// Build an in-memory MMB with `n` elements (element i = i.to_be_bytes()).
     fn make_mmb(n: u64) -> (H, Mmb<D>) {
-        let mut hasher = H::new();
-        let mut mmb = Mmb::new(&mut hasher);
+        let hasher = H::new();
+        let mut mmb = Mmb::new(&hasher);
         let changeset = {
             let mut batch = mmb.new_batch();
             for i in 0..n {
-                batch = batch.add(&mut hasher, &i.to_be_bytes());
+                batch = batch.add(&hasher, &i.to_be_bytes());
             }
-            batch.merkleize(&mut hasher).finalize()
+            batch.merkleize(&hasher).finalize()
         };
         mmb.apply(changeset).unwrap();
         (hasher, mmb)
@@ -46,7 +46,7 @@ mod tests {
     fn test_last_element_proof_size_is_two() {
         // An MMB property is that the most recent item always has a small proof
         // (at most 2 digests). Verify this holds as the tree grows.
-        let mut hasher = H::new();
+        let hasher = H::new();
         let (_, mut mmb) = make_mmb(1000);
         let mut n = 1000u64;
 
@@ -67,10 +67,10 @@ mod tests {
             );
 
             // Verify the proof actually works.
-            let proof = mmb.proof(&mut hasher, Location::new(loc)).unwrap();
+            let proof = mmb.proof(&hasher, Location::new(loc)).unwrap();
             assert!(
                 proof.verify_element_inclusion(
-                    &mut hasher,
+                    &hasher,
                     &loc.to_be_bytes(),
                     Location::new(loc),
                     &root,
@@ -82,9 +82,9 @@ mod tests {
             let changeset = {
                 let mut batch = mmb.new_batch();
                 for i in n..n + 100 {
-                    batch = batch.add(&mut hasher, &i.to_be_bytes());
+                    batch = batch.add(&hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmb.apply(changeset).unwrap();
             n += 100;

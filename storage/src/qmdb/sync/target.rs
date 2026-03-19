@@ -1,4 +1,11 @@
-use crate::{mmr::Location, qmdb::sync::{self, error::EngineError}};
+#[cfg(feature = "arbitrary")]
+use crate::merkle::Family as _;
+#[cfg(feature = "arbitrary")]
+use crate::mmr::Family;
+use crate::{
+    mmr::Location,
+    qmdb::sync::{self, error::EngineError},
+};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
@@ -49,7 +56,7 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let root = u.arbitrary()?;
-        let max_loc = <Family as crate::merkle::Family>::MAX_LOCATION;
+        let max_loc = Family::MAX_LOCATION;
         let lower = u.int_in_range(0..=*max_loc - 1)?;
         let upper = u.int_in_range(lower + 1..=*max_loc)?;
         Ok(Self {
