@@ -21,6 +21,7 @@ pub struct Config<C: PublicKey> {
     pub gossip_bit_vec_frequency: Duration,
     pub max_peer_set_size: u64,
     pub peer_gossip_max_count: usize,
+    pub max_send_batch: usize,
     pub info_verifier: InfoVerifier<C>,
 
     pub sent_messages: Family<metrics::Message, Counter>,

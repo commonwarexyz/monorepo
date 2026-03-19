@@ -27,6 +27,7 @@ pub struct Actor<
 
     mailbox_size: usize,
     ping_frequency: std::time::Duration,
+    max_send_batch: usize,
 
     receiver: mpsc::Receiver<Message<Si, St, C>>,
 
@@ -71,6 +72,7 @@ impl<
                 context: ContextCell::new(context),
                 mailbox_size: cfg.mailbox_size,
                 ping_frequency: cfg.ping_frequency,
+                max_send_batch: cfg.max_send_batch,
                 receiver,
                 sent_messages,
                 received_messages,
@@ -127,6 +129,7 @@ impl<
                                     context,
                                     peer::Config {
                                         ping_frequency: self.ping_frequency,
+                                        max_send_batch: self.max_send_batch,
                                         sent_messages,
                                         received_messages,
                                         dropped_messages,

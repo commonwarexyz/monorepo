@@ -154,6 +154,7 @@ impl<
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
                 max_peer_set_size: self.cfg.max_peer_set_size,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
+                max_send_batch: self.cfg.max_send_batch,
                 info_verifier: self.info_verifier,
             },
         );

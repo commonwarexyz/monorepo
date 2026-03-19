@@ -61,6 +61,10 @@ impl<S: crate::Sink> crate::Sink for Sink<S> {
         self.metrics.outbound_bandwidth.inc_by(len as u64);
         Ok(())
     }
+
+    async fn flush(&mut self) -> Result<(), crate::Error> {
+        self.inner.flush().await
+    }
 }
 
 /// Receives from the `inner` stream and tracks metrics for it.

@@ -146,6 +146,7 @@ impl<
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
                 ping_frequency: self.cfg.ping_frequency,
+                max_send_batch: self.cfg.max_send_batch,
             },
         );
         let mut spawner_task =

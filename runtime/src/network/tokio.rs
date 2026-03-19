@@ -1,7 +1,7 @@
 use crate::{BufferPool, Error, IoBufs};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
+    io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader, BufWriter},
     net::{
         tcp::{OwnedReadHalf, OwnedWriteHalf},
         TcpListener, TcpStream,
@@ -11,9 +11,14 @@ use tokio::{
 use tracing::warn;
 
 /// Implementation of [crate::Sink] for the [tokio] runtime.
+///
+/// When [`Config::write_buffer_size`] is non-zero, wraps the TCP write half
+/// in a [`BufWriter`] to coalesce multiple small writes into fewer syscalls.
+/// Callers must then invoke [`flush`](crate::Sink::flush) to ensure buffered
+/// data is sent to the peer. The default buffer size is 0 (write-through).
 pub struct Sink {
     write_timeout: Duration,
-    sink: OwnedWriteHalf,
+    sink: BufWriter<OwnedWriteHalf>,
 }
 
 impl Sink {
@@ -43,10 +48,19 @@ impl crate::Sink for Sink {
             }
         };
 
-        // Time out if we take too long to write
         timeout(write_timeout, send)
             .await
             .map_err(|_| Error::Timeout)?
+    }
+
+    async fn flush(&mut self) -> Result<(), Error> {
+        timeout(
+            self.write_timeout,
+            tokio::io::AsyncWriteExt::flush(&mut self.sink),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::SendFailed)
     }
 }
 
@@ -115,16 +129,16 @@ impl crate::Listener for Listener {
         }
 
         // Return the sink and stream
-        let (stream, sink) = stream.into_split();
+        let (read_half, write_half) = stream.into_split();
         Ok((
             addr,
             Sink {
                 write_timeout: self.cfg.write_timeout,
-                sink,
+                sink: BufWriter::with_capacity(self.cfg.write_buffer_size, write_half),
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
-                stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
+                stream: BufReader::with_capacity(self.cfg.read_buffer_size, read_half),
                 pool: self.pool.clone(),
             },
         ))
@@ -164,6 +178,12 @@ pub struct Config {
     /// A larger buffer reduces syscall overhead by reading more data per call,
     /// but uses more memory per connection. Defaults to 64 KB.
     read_buffer_size: usize,
+    /// Size of the write buffer for batching network writes.
+    ///
+    /// When non-zero, multiple messages written between
+    /// [`flush`](crate::Sink::flush) calls are coalesced into fewer syscalls.
+    /// Defaults to 0 (write-through, preserving pre-buffer behavior).
+    write_buffer_size: usize,
 }
 
 #[cfg_attr(feature = "iouring-network", allow(dead_code))]
@@ -194,6 +214,11 @@ impl Config {
         self.read_buffer_size = read_buffer_size;
         self
     }
+    /// See [Config]
+    pub const fn with_write_buffer_size(mut self, write_buffer_size: usize) -> Self {
+        self.write_buffer_size = write_buffer_size;
+        self
+    }
 
     // Getters
     /// See [Config]
@@ -216,6 +241,10 @@ impl Config {
     pub const fn read_buffer_size(&self) -> usize {
         self.read_buffer_size
     }
+    /// See [Config]
+    pub const fn write_buffer_size(&self) -> usize {
+        self.write_buffer_size
+    }
 }
 
 impl Default for Config {
@@ -226,6 +255,7 @@ impl Default for Config {
             read_timeout: Duration::from_secs(60),
             write_timeout: Duration::from_secs(30),
             read_buffer_size: 64 * 1024, // 64 KB
+            write_buffer_size: 0,
         }
     }
 }
@@ -282,15 +312,15 @@ impl crate::Network for Network {
         }
 
         // Return the sink and stream
-        let (stream, sink) = stream.into_split();
+        let (read_half, write_half) = stream.into_split();
         Ok((
             Sink {
                 write_timeout: self.cfg.write_timeout,
-                sink,
+                sink: BufWriter::with_capacity(self.cfg.write_buffer_size, write_half),
             },
             Stream {
                 read_timeout: self.cfg.read_timeout,
-                stream: BufReader::with_capacity(self.cfg.read_buffer_size, stream),
+                stream: BufReader::with_capacity(self.cfg.read_buffer_size, read_half),
                 pool: self.pool.clone(),
             },
         ))
@@ -513,6 +543,32 @@ mod tests {
         // Connect and send data
         let (mut sink, _stream) = network.dial(addr).await.unwrap();
         sink.send(b"hello world").await.unwrap();
+
+        reader.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_buffered_write_requires_flush() {
+        let network = TokioNetwork::Network::new(
+            TokioNetwork::Config::default()
+                .with_write_buffer_size(64 * 1024)
+                .with_read_timeout(Duration::from_secs(5))
+                .with_write_timeout(Duration::from_secs(5)),
+            test_pool(),
+        );
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let received = stream.recv(5).await.unwrap();
+            assert_eq!(received.coalesce(), &[1u8, 2, 3, 4, 5]);
+        });
+
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
+        sink.flush().await.unwrap();
 
         reader.await.unwrap();
     }

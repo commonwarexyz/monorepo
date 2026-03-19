@@ -92,6 +92,15 @@ pub struct Config<C: Signer> {
     /// key).
     pub tracked_peer_sets: usize,
 
+    /// Maximum number of data messages to coalesce per send batch.
+    ///
+    /// After dequeuing one data message, the peer actor drains up to
+    /// `max_send_batch - 1` more ready messages (high-priority first)
+    /// before flushing. Pair with a non-zero write buffer on the
+    /// runtime network config to benefit from syscall coalescing.
+    /// Defaults to 1 (no batching).
+    pub max_send_batch: usize,
+
     /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
 }
@@ -124,6 +133,7 @@ impl<C: Signer> Config<C> {
             ping_frequency: Duration::from_secs(50),
             dial_frequency: Duration::from_secs(1),
             tracked_peer_sets: 4,
+            max_send_batch: 1,
             block_duration: Duration::from_hours(4),
         }
     }
@@ -155,6 +165,7 @@ impl<C: Signer> Config<C> {
             ping_frequency: Duration::from_secs(5),
             dial_frequency: Duration::from_millis(500),
             tracked_peer_sets: 4,
+            max_send_batch: 1,
             block_duration: Duration::from_hours(1),
         }
     }
@@ -181,6 +192,7 @@ impl<C: Signer> Config<C> {
             ping_frequency: Duration::from_secs(1),
             dial_frequency: Duration::from_millis(200),
             tracked_peer_sets: 4,
+            max_send_batch: 1,
             block_duration: Duration::from_mins(1),
         }
     }
