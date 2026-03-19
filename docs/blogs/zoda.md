@@ -39,7 +39,7 @@ The simplest approach is to have the leader send the data to every follower.
 The leader's transmission cost is $m \cdot D$ bytes, and the followers' cost
 is $0$ bytes, since they send nothing.
 
-![Figure 1: A leader transmits a block of data to 4 followers](/imgs/zoda-000.png)
+![Figure 1: A leader transmits a block of data to 4 followers](../imgs/zoda-000.png)
 
 Networked protocols are often bottlenecked by sending data, since moving
 bits around the planet, a country, or a building is hopelessly slow compared
@@ -75,7 +75,7 @@ All together, the participants hold it all, distributed as thinly as possible.
 (They do still need to communicate to recover the data, of course, but it is
 recoverable).
 
-![Figure 2: A leader splits data into 4 chunks, each sent to 1 follower](/imgs/zoda-001.png)
+![Figure 2: A leader splits data into 4 chunks, each sent to 1 follower](../imgs/zoda-001.png)
 
 In this case, the leader's transmission cost is now just $m \cdot \frac{D}{m} = D$,
 quite the improvement.
@@ -141,7 +141,7 @@ Each shard can be a row of this matrix.
 Given $n$ shards, the original matrix can be recovered, proceeding columnwise
 once more.
 
-![Figure 3: Data is encoded, growing from 2 pieces into 4, and split across the followers](/imgs/zoda-002.png)
+![Figure 3: Data is encoded, growing from 2 pieces into 4, and split across the followers](../imgs/zoda-002.png)
 
 The cost of this scheme is now:
 
@@ -186,7 +186,7 @@ in the vector is that of the shard.
 A binary Merkle Tree is an example of such a scheme (but others might work better,
 e.g. playing with arity, or using a Polynomial Commitment Scheme).
 
-![Figure 4: The encoded rows are hashed into a tree](/imgs/zoda-003.png)
+![Figure 4: The encoded rows are hashed into a tree](../imgs/zoda-003.png)
 
 As a side-effect, our scheme now produces a fingerprint, attesting uniquely to
 the encoded data.
@@ -251,7 +251,7 @@ of randomness in what follows, according to the _Fiat-Shamir_ paradigm.
 
 Whereas in the plain coding scheme, we received one particular row of $Y$,
 here we receive $S$ rows, sampled at random.
-(We may modify $m$ and $n$ to accomodate this fact).
+(We may modify $m$ and $n$ to accommodate this fact).
 We also receive proofs of inclusion for each row.
 
 In order to convince us that our rows $Y_S$ came from $G X$,
