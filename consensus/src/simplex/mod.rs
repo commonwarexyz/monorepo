@@ -68,6 +68,14 @@
 //! These certificates serve as a standalone proof of consensus progress that downstream systems can ingest without executing
 //! the protocol._
 //!
+//! ### Lazy Vote Broadcast
+//!
+//! Honest participants vote lazily, emitting votes only when their local state machine indicates
+//! it may be helpful for progress (rather than gossiping a vote whenever strictly possible).
+//!
+//! This means, for example, that a participant that observes a `finalization(c,v)` and has not
+//! yet broadcast `finalize(c,v)` will not do so.
+//!
 //! ### Joining Consensus
 //!
 //! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
