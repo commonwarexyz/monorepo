@@ -227,10 +227,10 @@ fn select<M: Faults>(
         let tail = head.split_off(required);
         (head, tail)
     };
-    let mut checked = DealerLog::batch_check(rng, info, first_required, strategy);
+    let mut checked = DealerLog::batch_check::<M>(rng, info, first_required, strategy);
     let missing = required.saturating_sub(checked.len());
     if missing > 0 {
-        let rest = DealerLog::batch_check(rng, info, rest, strategy);
+        let rest = DealerLog::batch_check::<M>(rng, info, rest, strategy);
         if rest.len() < missing {
             return Err(Error::DkgFailed);
         }
@@ -363,7 +363,7 @@ impl EncodeSize for DealerLog {
 #[allow(dead_code)]
 impl DealerLog {
     #[allow(dead_code)]
-    fn batch_check(
+    fn batch_check<M: Faults>(
         rng: &mut impl CryptoRngCore,
         info: &Info,
         batch: impl IntoIterator<Item = (PublicKey, Self)>,
@@ -387,7 +387,7 @@ impl DealerLog {
             .into_iter()
             .filter_map(|(d, dealing)| {
                 let mask_commitments = mask_commitments.get_value(&d)?;
-                if !dealing.check(rng, info, &d, mask_commitments, strategy) {
+                if !dealing.check::<M>(rng, info, &d, mask_commitments, strategy) {
                     return None;
                 }
                 Some((d, dealing))
@@ -448,7 +448,7 @@ impl Dealing {
     }
 
     #[must_use]
-    fn check(
+    fn check<M: Faults>(
         &self,
         rng: &mut impl CryptoRngCore,
         info: &Info,
@@ -456,6 +456,10 @@ impl Dealing {
         mask_commitments: &Map<PublicKey, G1>,
         strategy: &impl Strategy,
     ) -> bool {
+        if self.poly.degree_exact() != info.degree::<M>() {
+            return false;
+        }
+
         // If this is a reshare, the constant of the dealing polynomial must match
         // the dealer's share commitment from the previous round.
         if let Some(previous) = info.previous.as_ref() {
@@ -831,8 +835,43 @@ mod test_plan {
                     None
                 };
 
-                let mut signed = deal::<N3f1>(&mut rng, &info, dk, share)
-                    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                // P5: shift polynomial degree
+                //
+                // Manually construct a dealing with a wrong-degree poly
+                // evaluated at the correct player scalars. Because
+                // golden_dkg has no explicit degree check, this dealing
+                // passes Dealing::check() and gets selected -- the test
+                // verifies this by NOT considering shift_degree dealers
+                // as "bad".
+                let mut signed = if let Some(&shift) = self.shift_degrees.get(&i) {
+                    let current_degree = info.degree::<N3f1>();
+                    let new_degree = (current_degree as i32 + shift).max(0) as u32;
+                    if new_degree != current_degree {
+                        let constant = info
+                            .unwrap_or_random_share(
+                                &mut rng,
+                                share.as_ref().map(|s| s.private.clone().expose_unwrap()),
+                            )
+                            .expect("share should be available");
+                        let poly = Poly::new_with_constant(&mut rng, new_degree, constant);
+                        let nonce = Summary::random(&mut rng);
+                        let (masks, commitments) =
+                            dk.vrf_batch_checked(&nonce, info.players.iter().cloned());
+                        let dealing = Dealing::reckon(&info, nonce, poly, masks)
+                            .expect("reckon should succeed");
+                        DealerLog {
+                            dealing,
+                            commitments,
+                        }
+                        .sign(dk)
+                    } else {
+                        deal::<N3f1>(&mut rng, &info, dk, share)
+                            .map_err(|e| anyhow::anyhow!("{e:?}"))?
+                    }
+                } else {
+                    deal::<N3f1>(&mut rng, &info, dk, share)
+                        .map_err(|e| anyhow::anyhow!("{e:?}"))?
+                };
 
                 // P1: corrupt signature
                 if self.bad_signatures.contains(&i) {
@@ -881,16 +920,6 @@ mod test_plan {
                                 .try_collect()
                                 .unwrap();
                             log.dealing.masked_shares = new_shares;
-                        }
-                    }
-
-                    // P5: shift polynomial degree
-                    if let Some(&shift) = self.shift_degrees.get(&i) {
-                        let current_degree = log.dealing.poly.degree();
-                        let new_degree = (current_degree as i32 + shift).max(0) as u32;
-                        if new_degree != current_degree {
-                            let scalar_poly: Poly<Scalar> = Poly::new(&mut rng, new_degree);
-                            log.dealing.poly = Poly::commit(scalar_poly);
                         }
                     }
 
@@ -1087,7 +1116,7 @@ mod tests {
         Plan::new(4, 7, 3)
             .shift_degree(0, 1)
             .run(42)
-            .expect("plan should succeed with 1 wrong degree dealer");
+            .expect("plan should succeed with 1 wrong degree dealer filtered");
     }
 
     #[test]
