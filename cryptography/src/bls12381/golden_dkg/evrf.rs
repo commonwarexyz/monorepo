@@ -207,6 +207,7 @@ impl Display for PublicKey {
     }
 }
 
+#[derive(Clone)]
 struct Proof {}
 
 impl Write for Proof {
@@ -236,6 +237,7 @@ impl EncodeSize for VrfCommitments {
 ///
 /// These commitments bind the output value for each receiver, without revealing
 /// what it is.
+#[derive(Clone)]
 pub struct VrfCommitments {
     proof: Proof,
     commitments: Map<PublicKey, G1>,
