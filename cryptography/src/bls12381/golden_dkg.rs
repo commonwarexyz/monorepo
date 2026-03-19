@@ -1,3 +1,92 @@
+//! Non-interactive Distributed Key Generation (DKG) and Resharing for BLS12-381.
+//!
+//! This module implements a non-interactive DKG and Resharing protocol for the BLS12-381
+//! curve. Unlike the interactive [`super::dkg`] protocol, this construction requires no
+//! back-and-forth between dealers and players. Each dealer publishes a single message,
+//! and any observer can verify correctness and compute the public output without private
+//! key material.
+//!
+//! # Overview
+//!
+//! The protocol involves _dealers_ and _players_. Dealers jointly create (or redistribute)
+//! a shared secret key, with each player receiving a private share. An optional previous
+//! [`Output`] enables resharing: dealers use their existing shares as inputs, and the
+//! resulting group public key is preserved.
+//!
+//! # Properties
+//!
+//! - **Non-interactive**: each dealer produces a single message; no rounds of communication
+//!   between dealers and players are needed.
+//! - **Publicly verifiable**: any observer can verify dealings and compute the public output.
+//! - **Resharing**: supports redistributing an existing shared key to a new set of players
+//!   while preserving the group public key.
+//! - **Robust**: malformed or invalid dealings are filtered out; the protocol succeeds as
+//!   long as a quorum of honest dealers participate.
+//!
+//! # Usage
+//!
+//! ## Core Types
+//!
+//! * [`Info`]: Configuration for a DKG/Reshare round (dealers, players, optional previous output)
+//! * [`Output`]: The public result of a successful round (public polynomial, participant sets)
+//! * [`PrivateKey`] / [`PublicKey`]: Key pair used for dealing and share recovery
+//! * [`SignedDealerLog`]: A dealer's signed dealing, ready for broadcast
+//! * [`DealerLog`]: The verified contents of a dealer's dealing
+//!
+//! ## Protocol Flow
+//!
+//! ### Step 1: Initialize Round
+//!
+//! Create an [`Info`] using [`Info::new`] with:
+//! - Round number
+//! - Optional previous [`Output`] (for resharing)
+//! - Set of dealers
+//! - Set of players
+//!
+//! ### Step 2: Dealing
+//!
+//! Each dealer calls [`deal`] with their private key and optional previous share
+//! (required for resharing). This produces a [`SignedDealerLog`] to broadcast.
+//!
+//! ### Step 3: Verification and Finalization
+//!
+//! Collected [`SignedDealerLog`]s are verified via [`SignedDealerLog::identify`], which
+//! checks the signature and extracts the dealer's public key and [`DealerLog`].
+//!
+//! Then:
+//! - Observers call [`observe`] with the verified logs to compute the public [`Sharing`]
+//! - Players call [`play`] with their private key to compute both the public [`Sharing`]
+//!   and their private share
+//!
+//! Both functions select a quorum of valid dealings, filtering out invalid ones.
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use commonware_cryptography::bls12381::golden_dkg::*;
+//!
+//! // Generate keys for dealers and players.
+//! let dealer_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+//! let player_keys: Vec<PrivateKey> = (0..7).map(|_| PrivateKey::random(&mut rng)).collect();
+//!
+//! // Create round info.
+//! let info = Info::new(0, None, dealer_set, player_set);
+//!
+//! // Each dealer produces a signed dealing.
+//! let mut logs = BTreeMap::new();
+//! for dk in &dealer_keys {
+//!     let signed = deal::<N3f1>(&mut rng, &info, dk, None)?;
+//!     let (pk, log) = signed.identify().expect("valid signature");
+//!     logs.insert(pk, log);
+//! }
+//!
+//! // Observer computes the public output.
+//! let sharing = observe::<N3f1>(&mut rng, &info, logs.clone(), &Sequential)?;
+//!
+//! // Player computes their share and the public output.
+//! let (sharing, share) = play::<N3f1>(&mut rng, &info, logs, &player_keys[0], &Sequential)?;
+//! ```
+
 #[allow(dead_code)]
 mod evrf;
 
@@ -31,11 +120,20 @@ use std::{borrow::Cow, collections::BTreeMap, num::NonZeroU32};
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_GOLDEN_DKG";
 
+/// The error type for the golden DKG protocol.
+///
+/// [`Error::DkgFailed`] is the only error that can occur through no fault of the
+/// caller (e.g. too few valid dealings). The other variants indicate configuration
+/// or usage mistakes.
 #[derive(Debug)]
 pub enum Error {
+    /// Too few valid dealings to complete the protocol.
     DkgFailed,
+    /// A reshare round requires the dealer's previous share, but none was provided.
     MissingDealerShare,
+    /// The caller's key is not in the set of dealers.
     UnknownDealer(String),
+    /// The caller's key is not in the set of players.
     UnknownPlayer,
 }
 
@@ -83,6 +181,10 @@ impl<P: Ord + Clone> Output<P> {
     }
 }
 
+/// Configuration for a round of the golden DKG.
+///
+/// Binds the round number, dealer set, and player set into a transcript, and
+/// optionally carries the [`Output`] of a previous round for resharing.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct Info {
@@ -96,6 +198,9 @@ pub struct Info {
 
 #[allow(dead_code)]
 impl Info {
+    /// Create a new round configuration.
+    ///
+    /// Pass a previous [`Output`] to perform a reshare; pass `None` for a fresh DKG.
     pub fn new(
         round: u64,
         previous: Option<Output<PublicKey>>,
@@ -121,6 +226,7 @@ impl Info {
         }
     }
 
+    /// Return the transcript summary for this round.
     pub fn summary(&self) -> &Summary {
         &self.summary
     }
@@ -180,6 +286,13 @@ impl Info {
     }
 }
 
+/// Produce a signed dealing for this round.
+///
+/// The dealer must be in `info`'s dealer set. For a reshare round, `share` must
+/// contain the dealer's share from the previous round; for a fresh DKG it should
+/// be `None`.
+///
+/// Returns a [`SignedDealerLog`] ready for broadcast.
 pub fn deal<M: Faults>(
     rng: &mut impl CryptoRngCore,
     info: &Info,
@@ -297,6 +410,11 @@ fn select<M: Faults>(
     })
 }
 
+/// Compute the public output of the DKG without recovering a private share.
+///
+/// This is the observer path: given the verified dealer logs, select a quorum of
+/// valid dealings and derive the resulting [`Sharing`]. Returns
+/// [`Error::DkgFailed`] if too few valid dealings are available.
 pub fn observe<M: Faults>(
     rng: &mut impl CryptoRngCore,
     info: &Info,
@@ -309,6 +427,10 @@ pub fn observe<M: Faults>(
     Ok(Sharing::new(info.mode, NZU32!(n), public))
 }
 
+/// Compute the public output and recover this player's private share.
+///
+/// This is the player path: like [`observe`], but additionally recovers the
+/// caller's [`Share`]. The caller must be in `info`'s player set.
 pub fn play<M: Faults>(
     rng: &mut impl CryptoRngCore,
     info: &Info,
@@ -361,6 +483,10 @@ pub fn play<M: Faults>(
     Ok((sharing, share))
 }
 
+/// A [`DealerLog`] signed by its dealer.
+///
+/// Use [`SignedDealerLog::identify`] to verify the signature and extract the
+/// dealer's public key and log.
 pub struct SignedDealerLog {
     dealer: PublicKey,
     signature: ed25519::Signature,
@@ -380,6 +506,10 @@ impl SignedDealerLog {
     }
 }
 
+/// The verified contents of a single dealer's dealing.
+///
+/// Obtained from [`SignedDealerLog::identify`] after signature verification.
+/// Passed to [`observe`] or [`play`] for finalization.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct DealerLog {
