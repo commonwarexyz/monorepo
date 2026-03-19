@@ -52,10 +52,7 @@
 //! ```
 
 use crate::merkle::{
-    hasher::Hasher,
-    path::{PathIterator, MAX_PATH_LEN},
-    proof::Proof,
-    Error, Family, Location, Position, Readable,
+    hasher::Hasher, path, proof::Proof, Error, Family, Location, Position, Readable,
 };
 use alloc::{
     collections::{BTreeMap, BTreeSet},
@@ -230,9 +227,9 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
                 continue;
             }
 
-            let mut buf = [(Position::new(0), Position::new(0), 0u32); MAX_PATH_LEN];
+            let mut buf = [(Position::new(0), Position::new(0), 0u32); path::MAX_PATH_LEN];
             let mut len = 0;
-            for item in PathIterator::new(peak_pos, height, first_leaf, loc) {
+            for item in path::Iterator::new(peak_pos, height, first_leaf, loc) {
                 buf[len] = item;
                 len += 1;
             }

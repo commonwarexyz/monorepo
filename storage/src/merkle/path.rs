@@ -1,13 +1,13 @@
 //! Generic peak-to-leaf path iterator for Merkle-family data structures.
 //!
-//! [`PathIterator`] traverses the path from a peak to a leaf within a perfect binary tree,
+//! [`Iterator`] traverses the path from a peak to a leaf within a perfect binary tree,
 //! yielding `(parent_pos, sibling_pos, height)` tuples at each level. The traversal is top-down
 //! (peak first), using [`Family::children`] for child positions and leaf locations for the
 //! left/right decision at each level.
 
 use crate::merkle::{Family, Location, Position};
 
-/// Maximum number of items a [`PathIterator`] can yield. A peak of height `h` has `2^h`
+/// Maximum number of items a [`Iterator`] can yield. A peak of height `h` has `2^h`
 /// leaves, and leaf counts are stored as `u64`, so the maximum peak height is `u64::BITS - 1`.
 pub(super) const MAX_PATH_LEN: usize = u64::BITS as usize - 1;
 
@@ -26,19 +26,19 @@ pub(super) const MAX_PATH_LEN: usize = u64::BITS as usize - 1;
 ///     0   1 3   4
 /// ```
 ///
-/// `PathIterator` yields: `[(6, 2, 2), (5, 4, 1)]`
+/// `path::Iterator` yields: `[(6, 2, 2), (5, 4, 1)]`
 /// - Node 6 (height 2): left child 2 is the sibling, right child 5 is on the path.
 /// - Node 5 (height 1): right child 4 is the sibling, left child 3 is the target leaf.
 #[derive(Debug)]
-pub struct PathIterator<F: Family> {
+pub struct Iterator<F: Family> {
     target_loc: Location<F>, // leaf we are navigating toward
     node_pos: Position<F>,   // current node on the path (starts at peak)
     first_leaf: u64,         // location of the leftmost leaf in the current subtree
     height: u32,             // height of the current node
 }
 
-impl<F: Family> PathIterator<F> {
-    /// Create a new `PathIterator` from a peak to a leaf.
+impl<F: Family> Iterator<F> {
+    /// Create a new path iterator from a peak to a leaf.
     ///
     /// - `peak_pos`: position of the peak node.
     /// - `height`: height of the peak.
@@ -59,7 +59,7 @@ impl<F: Family> PathIterator<F> {
     }
 }
 
-impl<F: Family> Iterator for PathIterator<F> {
+impl<F: Family> core::iter::Iterator for Iterator<F> {
     /// `(parent_pos, sibling_pos, height)` where height is the parent's height.
     type Item = (Position<F>, Position<F>, u32);
 
