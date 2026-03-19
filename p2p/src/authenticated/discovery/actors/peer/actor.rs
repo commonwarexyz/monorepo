@@ -1,6 +1,7 @@
 use super::{Config, Error, Message};
 use crate::authenticated::{
     data::EncodedData,
+    relay::recv_prioritized,
     discovery::{
         actors::tracker,
         channels::Channels,
@@ -209,12 +210,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             )?;
                             conn_sender.send_batch(batch).await.map_err(Error::SendFailed)?;
                         },
-                        msg = async {
-                            select! {
-                                msg = self.high.recv() => msg,
-                                msg = self.low.recv() => msg,
-                            }
-                        } => {
+                        msg = recv_prioritized(&mut self.high, &mut self.low) => {
                             let encoded = Self::validate_outbound_msg(msg, &rate_limits)?;
                             self.sent_messages
                                 .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))

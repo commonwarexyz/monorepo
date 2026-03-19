@@ -1,3 +1,4 @@
+use commonware_macros::select;
 use commonware_utils::channel::mpsc::{self, error::TrySendError};
 
 #[derive(Clone, Debug)]
@@ -19,6 +20,17 @@ impl<T> Relay<T> {
     pub fn send(&self, message: T, priority: bool) -> Result<(), TrySendError<T>> {
         let sender = if priority { &self.high } else { &self.low };
         sender.try_send(message)
+    }
+}
+
+/// Awaits data from either the high or low priority receiver.
+pub async fn recv_prioritized<T>(
+    high: &mut mpsc::Receiver<T>,
+    low: &mut mpsc::Receiver<T>,
+) -> Option<T> {
+    select! {
+        msg = high.recv() => msg,
+        msg = low.recv() => msg,
     }
 }
 

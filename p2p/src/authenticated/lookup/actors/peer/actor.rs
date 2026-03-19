@@ -2,7 +2,7 @@ use super::{ingress::Message, Config, Error};
 use crate::authenticated::{
     data::EncodedData,
     lookup::{channels::Channels, metrics, types},
-    relay::Relay,
+    relay::{recv_prioritized, Relay},
     Mailbox,
 };
 use commonware_codec::Decode;
@@ -170,12 +170,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         } => match msg {
                             Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                         },
-                        msg = async {
-                            select! {
-                                msg = self.high.recv() => msg,
-                                msg = self.low.recv() => msg,
-                            }
-                        } => {
+                        msg = recv_prioritized(&mut self.high, &mut self.low) => {
                             let encoded = Self::validate_outbound_msg(msg, &rate_limits)?;
                             self.sent_messages
                                 .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
