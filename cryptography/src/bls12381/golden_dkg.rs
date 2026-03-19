@@ -340,6 +340,7 @@ impl SignedDealerLog {
     }
 }
 
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct DealerLog {
     commitments: VrfCommitments,
@@ -406,6 +407,7 @@ impl DealerLog {
     }
 }
 
+#[derive(Clone)]
 struct Dealing {
     nonce: Summary,
     poly: Poly<G1>,
@@ -534,22 +536,31 @@ mod test_plan {
     use super::*;
     use crate::transcript::Transcript;
     use commonware_codec::Encode;
-    use commonware_math::algebra::Random;
+    use commonware_math::{algebra::Random, poly::Poly};
     use commonware_parallel::Sequential;
     use commonware_utils::N3f1;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// A golden DKG test plan.
     ///
     /// Generates a fresh DKG with the given number of dealers and players,
     /// then verifies that a particular "star" player ends up with a valid share.
+    /// Supports perturbations to test adversarial/failure paths.
     #[derive(Debug)]
     pub struct Plan {
         num_dealers: u32,
         num_players: u32,
         star: u32,
+        bad_signatures: BTreeSet<u32>,
+        bad_shares: BTreeSet<(u32, u32)>,
+        bad_commitments: BTreeSet<u32>,
+        missing_shares: BTreeSet<(u32, u32)>,
+        shift_degrees: BTreeMap<u32, i32>,
+        drop_dealers: BTreeSet<u32>,
+        reshare: bool,
+        replace_shares: BTreeSet<u32>,
     }
 
     impl Plan {
@@ -558,32 +569,140 @@ mod test_plan {
                 num_dealers,
                 num_players,
                 star,
+                bad_signatures: BTreeSet::new(),
+                bad_shares: BTreeSet::new(),
+                bad_commitments: BTreeSet::new(),
+                missing_shares: BTreeSet::new(),
+                shift_degrees: BTreeMap::new(),
+                drop_dealers: BTreeSet::new(),
+                reshare: false,
+                replace_shares: BTreeSet::new(),
             }
         }
 
-        fn validate(&self) -> anyhow::Result<()> {
+        pub fn bad_signature(mut self, dealer: u32) -> Self {
+            self.bad_signatures.insert(dealer);
+            self
+        }
+
+        pub fn bad_share(mut self, dealer: u32, player: u32) -> Self {
+            self.bad_shares.insert((dealer, player));
+            self
+        }
+
+        pub fn bad_commitment(mut self, dealer: u32) -> Self {
+            self.bad_commitments.insert(dealer);
+            self
+        }
+
+        pub fn missing_share(mut self, dealer: u32, player: u32) -> Self {
+            self.missing_shares.insert((dealer, player));
+            self
+        }
+
+        pub fn shift_degree(mut self, dealer: u32, shift: i32) -> Self {
+            self.shift_degrees.insert(dealer, shift);
+            self
+        }
+
+        pub fn drop_dealer(mut self, dealer: u32) -> Self {
+            self.drop_dealers.insert(dealer);
+            self
+        }
+
+        pub const fn reshare(mut self) -> Self {
+            self.reshare = true;
+            self
+        }
+
+        pub fn replace_share(mut self, dealer: u32) -> Self {
+            self.replace_shares.insert(dealer);
+            self
+        }
+
+        pub fn validate(&self) -> anyhow::Result<()> {
             anyhow::ensure!(self.num_dealers >= 1, "need at least 1 dealer");
             anyhow::ensure!(self.num_players >= 1, "need at least 1 player");
             anyhow::ensure!(
                 self.star < self.num_players,
                 "star must be a valid player index"
             );
+            for &d in &self.bad_signatures {
+                anyhow::ensure!(d < self.num_dealers, "bad_signature dealer out of range");
+            }
+            for &(d, p) in &self.bad_shares {
+                anyhow::ensure!(d < self.num_dealers, "bad_share dealer out of range");
+                anyhow::ensure!(p < self.num_players, "bad_share player out of range");
+            }
+            for &d in &self.bad_commitments {
+                anyhow::ensure!(d < self.num_dealers, "bad_commitment dealer out of range");
+            }
+            for &(d, p) in &self.missing_shares {
+                anyhow::ensure!(d < self.num_dealers, "missing_share dealer out of range");
+                anyhow::ensure!(p < self.num_players, "missing_share player out of range");
+            }
+            for &d in self.shift_degrees.keys() {
+                anyhow::ensure!(d < self.num_dealers, "shift_degree dealer out of range");
+            }
+            for &d in &self.drop_dealers {
+                anyhow::ensure!(d < self.num_dealers, "drop_dealer dealer out of range");
+            }
+            for &d in &self.replace_shares {
+                anyhow::ensure!(d < self.num_dealers, "replace_share dealer out of range");
+                anyhow::ensure!(self.reshare, "replace_share requires reshare");
+            }
             Ok(())
         }
 
-        pub fn run(self, seed: u64) -> anyhow::Result<()> {
-            self.validate()?;
+        /// Is this dealer "bad" (will be filtered by check)?
+        fn is_bad_dealer(&self, dealer: u32) -> bool {
+            self.bad_commitments.contains(&dealer)
+                || self.shift_degree_effective(dealer)
+                || self.replace_shares.contains(&dealer)
+                || self.bad_shares.iter().any(|&(d, _)| d == dealer)
+                || self.missing_shares.iter().any(|&(d, _)| d == dealer)
+        }
 
-            let mut rng = StdRng::seed_from_u64(seed);
+        /// Does the shift_degree perturbation actually change the polynomial degree?
+        fn shift_degree_effective(&self, dealer: u32) -> bool {
+            let Some(&shift) = self.shift_degrees.get(&dealer) else {
+                return false;
+            };
+            let degree = N3f1::quorum(self.num_players).saturating_sub(1);
+            let new_degree = (degree as i32 + shift).max(0) as u32;
+            new_degree != degree
+        }
 
-            // Generate separate keys for dealers and players.
-            let dealer_keys: Vec<PrivateKey> = (0..self.num_dealers)
-                .map(|_| PrivateKey::random(&mut rng))
-                .collect();
-            let player_keys: Vec<PrivateKey> = (0..self.num_players)
-                .map(|_| PrivateKey::random(&mut rng))
-                .collect();
+        /// Count how many honest (non-dropped, non-bad-sig, non-bad) dealers remain.
+        fn honest_dealer_count(&self) -> u32 {
+            (0..self.num_dealers)
+                .filter(|d| {
+                    !self.drop_dealers.contains(d)
+                        && !self.bad_signatures.contains(d)
+                        && !self.is_bad_dealer(*d)
+                })
+                .count() as u32
+        }
 
+        fn expect_failure(&self) -> bool {
+            let required = N3f1::quorum(self.num_dealers);
+            let previous_quorum = if self.reshare {
+                // In reshare, dealers == players from previous round.
+                N3f1::quorum(self.num_dealers)
+            } else {
+                0
+            };
+            let required = required.max(previous_quorum);
+            self.honest_dealer_count() < required
+        }
+
+        fn make_info(
+            round: u64,
+            previous: Option<Output<PublicKey>>,
+            dealer_keys: &[PrivateKey],
+            player_keys: &[PrivateKey],
+        ) -> Info {
+            let mode = Mode::default();
             let dealer_set: Set<PublicKey> = dealer_keys
                 .iter()
                 .map(|k| k.public())
@@ -594,10 +713,6 @@ mod test_plan {
                 .map(|k| k.public())
                 .try_collect()
                 .unwrap();
-
-            // Build Info for a fresh DKG (no previous round).
-            let round = 0u64;
-            let mode = Mode::default();
             let summary = {
                 let mut transcript = Transcript::new(NAMESPACE);
                 transcript
@@ -606,54 +721,273 @@ mod test_plan {
                     .commit(player_set.encode());
                 transcript.summarize()
             };
-            let info = Info {
+            Info {
                 summary,
                 round,
-                previous: None,
+                previous,
                 mode,
                 dealers: dealer_set,
                 players: player_set,
-            };
+            }
+        }
 
-            // Each dealer deals.
+        /// Run a fresh (honest) DKG round and return the output and per-player shares.
+        pub fn run_fresh(
+            rng: &mut StdRng,
+            dealer_keys: &[PrivateKey],
+            player_keys: &[PrivateKey],
+        ) -> anyhow::Result<(Output<PublicKey>, Vec<Share>)> {
+            let info = Self::make_info(0, None, dealer_keys, player_keys);
+
             let mut logs = BTreeMap::new();
-            for dk in &dealer_keys {
+            for dk in dealer_keys {
                 let signed =
-                    deal::<N3f1>(&mut rng, &info, dk, None).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                    deal::<N3f1>(rng, &info, dk, None).map_err(|e| anyhow::anyhow!("{e:?}"))?;
                 let (pk, log) = signed
                     .identify()
-                    .ok_or_else(|| anyhow::anyhow!("dealer signature verification failed"))?;
+                    .ok_or_else(|| anyhow::anyhow!("identify failed"))?;
                 logs.insert(pk, log);
             }
 
-            // Star player plays.
-            let star_key = &player_keys[self.star as usize];
-            let (sharing, share) = play::<N3f1>(&mut rng, &info, logs, star_key, &Sequential)
+            // Observe to get the public polynomial.
+            let sharing = observe::<N3f1>(rng, &info, logs.clone(), &Sequential)
                 .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
+            // Each player plays to get their share.
+            let mut shares = Vec::new();
+            for pk in player_keys {
+                let (_, share) = play::<N3f1>(rng, &info, logs.clone(), pk, &Sequential)
+                    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                shares.push(share);
+            }
+
+            let dealers: Set<PublicKey> = dealer_keys
+                .iter()
+                .map(|k| k.public())
+                .try_collect()
+                .unwrap();
+            let players: Set<PublicKey> = player_keys
+                .iter()
+                .map(|k| k.public())
+                .try_collect()
+                .unwrap();
+            let output = Output {
+                summary: info.summary,
+                public: sharing,
+                dealers,
+                players: players.clone(),
+                revealed: players,
+            };
+            Ok((output, shares))
+        }
+
+        pub fn run(self, seed: u64) -> anyhow::Result<()> {
+            self.validate()?;
+            let expect_failure = self.expect_failure();
+
+            let mut rng = StdRng::seed_from_u64(seed);
+
+            let dealer_keys: Vec<PrivateKey> = (0..self.num_dealers)
+                .map(|_| PrivateKey::random(&mut rng))
+                .collect();
+            let player_keys: Vec<PrivateKey> = (0..self.num_players)
+                .map(|_| PrivateKey::random(&mut rng))
+                .collect();
+
+            // If reshare, run an honest fresh round first where dealers == players.
+            let (previous, previous_shares) = if self.reshare {
+                let (output, shares) = Self::run_fresh(&mut rng, &dealer_keys, &dealer_keys)?;
+                (Some(output), Some(shares))
+            } else {
+                (None, None)
+            };
+
+            let info = Self::make_info(
+                if self.reshare { 1 } else { 0 },
+                previous,
+                &dealer_keys,
+                &player_keys,
+            );
+
+            // Each dealer deals (with perturbations).
+            let mut signed_logs: Vec<(u32, SignedDealerLog)> = Vec::new();
+            for (i, dk) in dealer_keys.iter().enumerate() {
+                let i = i as u32;
+                if self.drop_dealers.contains(&i) {
+                    continue;
+                }
+
+                let share = if self.reshare {
+                    let shares = previous_shares.as_ref().unwrap();
+                    if self.replace_shares.contains(&i) {
+                        Some(Share::new(
+                            shares[i as usize].index,
+                            Private::new(Scalar::random(&mut rng)),
+                        ))
+                    } else {
+                        Some(shares[i as usize].clone())
+                    }
+                } else {
+                    None
+                };
+
+                let mut signed = deal::<N3f1>(&mut rng, &info, dk, share)
+                    .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+                // P1: corrupt signature
+                if self.bad_signatures.contains(&i) {
+                    let mut sig_bytes = signed.signature.encode_mut();
+                    sig_bytes[0] ^= 0xFF;
+                    signed.signature = commonware_codec::ReadExt::read(&mut sig_bytes)
+                        .expect("signature should decode");
+                }
+
+                signed_logs.push((i, signed));
+            }
+
+            // Identify (filter bad signatures) and collect logs.
+            let mut logs = BTreeMap::new();
+            for (i, signed) in signed_logs {
+                if let Some((pk, mut log)) = signed.identify() {
+                    // P2: corrupt masked shares
+                    for &(d, p) in &self.bad_shares {
+                        if d == i {
+                            let player_pk = &player_keys[p as usize].public();
+                            if let Some(share_val) =
+                                log.dealing.masked_shares.get_value_mut(player_pk)
+                            {
+                                *share_val += &Scalar::random(&mut rng);
+                            }
+                        }
+                    }
+
+                    // P3: corrupt polynomial commitment
+                    if self.bad_commitments.contains(&i) {
+                        let corruption: Poly<Scalar> =
+                            Poly::new(&mut rng, log.dealing.poly.degree());
+                        log.dealing.poly += &Poly::commit(corruption);
+                    }
+
+                    // P4: remove player's share
+                    for &(d, p) in &self.missing_shares {
+                        if d == i {
+                            let player_pk = player_keys[p as usize].public();
+                            let new_shares: Map<PublicKey, Scalar> = log
+                                .dealing
+                                .masked_shares
+                                .iter_pairs()
+                                .filter(|(pk, _)| **pk != player_pk)
+                                .map(|(pk, v)| (pk.clone(), v.clone()))
+                                .try_collect()
+                                .unwrap();
+                            log.dealing.masked_shares = new_shares;
+                        }
+                    }
+
+                    // P5: shift polynomial degree
+                    if let Some(&shift) = self.shift_degrees.get(&i) {
+                        let current_degree = log.dealing.poly.degree();
+                        let new_degree = (current_degree as i32 + shift).max(0) as u32;
+                        if new_degree != current_degree {
+                            let scalar_poly: Poly<Scalar> = Poly::new(&mut rng, new_degree);
+                            log.dealing.poly = Poly::commit(scalar_poly);
+                        }
+                    }
+
+                    logs.insert(pk, log);
+                }
+                // If identify() returned None (bad sig), log is silently dropped.
+            }
+
+            // Run observe and play.
+            let observe_result = observe::<N3f1>(&mut rng, &info, logs.clone(), &Sequential);
+            let star_key = &player_keys[self.star as usize];
+            let play_result = play::<N3f1>(&mut rng, &info, logs, star_key, &Sequential);
+
+            if expect_failure {
+                assert!(
+                    observe_result.is_err() || play_result.is_err(),
+                    "expected DkgFailed but both succeeded"
+                );
+                return Ok(());
+            }
+
+            let observe_sharing = observe_result.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            let (play_sharing, share) = play_result.map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+            // Verify observe and play produce the same public polynomial.
+            assert_eq!(
+                observe_sharing, play_sharing,
+                "observe and play should produce the same public polynomial"
+            );
+
             // Verify share matches public polynomial.
-            let expected = sharing
+            let expected = play_sharing
                 .partial_public(share.index)
                 .map_err(|e| anyhow::anyhow!("{e:?}"))?;
             let actual = share.public::<MinPk>();
             assert_eq!(expected, actual, "share should match public polynomial");
 
+            // In reshare, verify group public key is preserved.
+            if self.reshare {
+                let prev_public = info.previous.as_ref().unwrap().public().public();
+                let new_public = play_sharing.public();
+                assert_eq!(
+                    prev_public, new_public,
+                    "reshare should preserve group public key"
+                );
+            }
+
             Ok(())
         }
     }
 
-    #[cfg(feature = "arbitrary")]
+    #[cfg(any(feature = "arbitrary", test))]
     impl<'a> arbitrary::Arbitrary<'a> for Plan {
         fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
             const MAX: u32 = 10;
             let num_dealers = u.int_in_range(1..=MAX)?;
             let num_players = u.int_in_range(1..=MAX)?;
             let star = u.int_in_range(0..=num_players - 1)?;
-            let plan = Self {
-                num_dealers,
-                num_players,
-                star,
-            };
+            let mut plan = Self::new(num_dealers, num_players, star);
+
+            // Randomly apply perturbations.
+            for d in 0..num_dealers {
+                if u.ratio(1, 8)? {
+                    plan.bad_signatures.insert(d);
+                }
+                if u.ratio(1, 8)? {
+                    plan.bad_commitments.insert(d);
+                }
+                if u.ratio(1, 8)? {
+                    plan.drop_dealers.insert(d);
+                }
+                if u.ratio(1, 10)? {
+                    let shift = u.int_in_range(-2..=2i32)?;
+                    if shift != 0 {
+                        plan.shift_degrees.insert(d, shift);
+                    }
+                }
+                for p in 0..num_players {
+                    if u.ratio(1, 12)? {
+                        plan.bad_shares.insert((d, p));
+                    }
+                    if u.ratio(1, 12)? {
+                        plan.missing_shares.insert((d, p));
+                    }
+                }
+            }
+
+            // Optionally enable reshare.
+            if u.ratio(1, 4)? {
+                plan = plan.reshare();
+                for d in 0..num_dealers {
+                    if u.ratio(1, 6)? {
+                        plan.replace_shares.insert(d);
+                    }
+                }
+            }
+
             plan.validate()
                 .map_err(|_| arbitrary::Error::IncorrectFormat)?;
             Ok(plan)
@@ -666,8 +1000,14 @@ pub use test_plan::Plan as FuzzPlan;
 
 #[cfg(test)]
 mod tests {
-    use super::test_plan::Plan;
+    use super::{test_plan::Plan, *};
+    use crate::bls12381::primitives::sharing::Mode;
+    use commonware_codec::Encode;
     use commonware_invariants::minifuzz;
+    use commonware_math::algebra::Random;
+    use commonware_utils::N3f1;
+
+    // Happy path tests
 
     #[test]
     fn single_dealer_single_player() {
@@ -684,16 +1024,239 @@ mod tests {
         Plan::new(10, 5, 0).run(42).expect("plan should succeed");
     }
 
+    // Perturbation tests
+
+    #[test]
+    fn bad_signature_filtered() {
+        // 1 bad sig out of 4 dealers, DKG succeeds
+        Plan::new(4, 7, 3)
+            .bad_signature(0)
+            .run(42)
+            .expect("plan should succeed with 1 bad sig");
+    }
+
+    #[test]
+    fn bad_signature_too_many() {
+        // 3 bad sigs out of 4 dealers. quorum(4) = 3, so only 1 honest < 3.
+        Plan::new(4, 7, 3)
+            .bad_signature(0)
+            .bad_signature(1)
+            .bad_signature(2)
+            .run(42)
+            .expect("plan should handle expected failure");
+    }
+
+    #[test]
+    fn bad_share_filtered() {
+        // 1 dealer sends bad share, DKG succeeds
+        Plan::new(4, 7, 3)
+            .bad_share(0, 1)
+            .run(42)
+            .expect("plan should succeed with 1 bad share");
+    }
+
+    #[test]
+    fn bad_share_too_many() {
+        // 3 out of 4 dealers send bad shares. quorum(4) = 3, so only 1 honest < 3.
+        Plan::new(4, 7, 3)
+            .bad_share(0, 1)
+            .bad_share(1, 2)
+            .bad_share(2, 3)
+            .run(42)
+            .expect("plan should handle expected failure");
+    }
+
+    #[test]
+    fn bad_commitment_filtered() {
+        Plan::new(4, 7, 3)
+            .bad_commitment(0)
+            .run(42)
+            .expect("plan should succeed with 1 bad commitment");
+    }
+
+    #[test]
+    fn missing_share_filtered() {
+        Plan::new(4, 7, 3)
+            .missing_share(0, 1)
+            .run(42)
+            .expect("plan should succeed with 1 missing share");
+    }
+
+    #[test]
+    fn shift_degree_filtered() {
+        Plan::new(4, 7, 3)
+            .shift_degree(0, 1)
+            .run(42)
+            .expect("plan should succeed with 1 wrong degree dealer");
+    }
+
+    #[test]
+    fn insufficient_dealers() {
+        // Drop 3 out of 4 dealers. quorum(4) = 3, so only 1 < 3.
+        Plan::new(4, 7, 3)
+            .drop_dealer(0)
+            .drop_dealer(1)
+            .drop_dealer(2)
+            .run(42)
+            .expect("plan should handle expected failure");
+    }
+
+    // Reshare tests
+
+    #[test]
+    fn reshare_happy_path() {
+        Plan::new(4, 7, 3)
+            .reshare()
+            .run(42)
+            .expect("reshare should succeed");
+    }
+
+    #[test]
+    fn reshare_replace_share_filtered() {
+        Plan::new(4, 7, 3)
+            .reshare()
+            .replace_share(0)
+            .run(42)
+            .expect("reshare should succeed with 1 replaced share");
+    }
+
+    #[test]
+    fn reshare_replace_share_fails() {
+        // 3 out of 4 dealers use wrong previous share. quorum(4) = 3, only 1 honest.
+        Plan::new(4, 7, 3)
+            .reshare()
+            .replace_share(0)
+            .replace_share(1)
+            .replace_share(2)
+            .run(42)
+            .expect("plan should handle expected failure");
+    }
+
+    // Error tests (standalone, outside Plan)
+
+    #[test]
+    fn unknown_dealer() {
+        let mut rng = commonware_utils::test_rng();
+        let dealer_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let player_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let dealer_set: Set<PublicKey> = dealer_keys
+            .iter()
+            .map(|k| k.public())
+            .try_collect()
+            .unwrap();
+        let player_set: Set<PublicKey> = player_keys
+            .iter()
+            .map(|k| k.public())
+            .try_collect()
+            .unwrap();
+
+        let info = Info {
+            summary: crate::transcript::Summary::random(&mut rng),
+            round: 0,
+            previous: None,
+            mode: Mode::default(),
+            dealers: dealer_set,
+            players: player_set,
+        };
+
+        let outsider = PrivateKey::random(&mut rng);
+        let result = deal::<N3f1>(&mut rng, &info, &outsider, None);
+        assert!(matches!(result, Err(Error::UnknownDealer(_))));
+    }
+
+    #[test]
+    fn unknown_player() {
+        let mut rng = commonware_utils::test_rng();
+        let dealer_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let player_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let dealer_set: Set<PublicKey> = dealer_keys
+            .iter()
+            .map(|k| k.public())
+            .try_collect()
+            .unwrap();
+        let player_set: Set<PublicKey> = player_keys
+            .iter()
+            .map(|k| k.public())
+            .try_collect()
+            .unwrap();
+
+        let info = Info {
+            summary: crate::transcript::Summary::random(&mut rng),
+            round: 0,
+            previous: None,
+            mode: Mode::default(),
+            dealers: dealer_set,
+            players: player_set,
+        };
+
+        // Deal honestly, then try to play as an outsider.
+        let mut logs = std::collections::BTreeMap::new();
+        for dk in &dealer_keys {
+            let signed = deal::<N3f1>(&mut rng, &info, dk, None).unwrap();
+            let (pk, log) = signed.identify().unwrap();
+            logs.insert(pk, log);
+        }
+
+        let outsider = PrivateKey::random(&mut rng);
+        let result = play::<N3f1>(
+            &mut rng,
+            &info,
+            logs,
+            &outsider,
+            &commonware_parallel::Sequential,
+        );
+        assert!(matches!(result, Err(Error::UnknownPlayer)));
+    }
+
+    #[test]
+    fn missing_dealer_share_in_reshare() {
+        let mut rng = commonware_utils::test_rng();
+        let dealer_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let player_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+
+        // Run a fresh round to get an output.
+        let (output, _shares) = Plan::run_fresh(&mut rng, &dealer_keys, &dealer_keys).unwrap();
+
+        let dealer_set: Set<PublicKey> = dealer_keys
+            .iter()
+            .map(|k| k.public())
+            .try_collect()
+            .unwrap();
+        let player_set: Set<PublicKey> = player_keys
+            .iter()
+            .map(|k| k.public())
+            .try_collect()
+            .unwrap();
+
+        let summary = {
+            let mut transcript = crate::transcript::Transcript::new(NAMESPACE);
+            transcript
+                .commit(1u64.encode())
+                .commit(dealer_set.encode())
+                .commit(player_set.encode());
+            transcript.summarize()
+        };
+
+        let info = Info {
+            summary,
+            round: 1,
+            previous: Some(output),
+            mode: Mode::default(),
+            dealers: dealer_set,
+            players: player_set,
+        };
+
+        // Call deal with share: None in reshare mode -> MissingDealerShare
+        let result = deal::<N3f1>(&mut rng, &info, &dealer_keys[0], None);
+        assert!(matches!(result, Err(Error::MissingDealerShare)));
+    }
+
     #[test]
     fn fuzz_plan() {
         minifuzz::test(|u| {
-            let num_dealers = u.int_in_range(1..=10u32)?;
-            let num_players = u.int_in_range(1..=10u32)?;
-            let star = u.int_in_range(0..=num_players - 1)?;
+            let plan: Plan = u.arbitrary()?;
             let seed: u64 = u.arbitrary()?;
-            Plan::new(num_dealers, num_players, star)
-                .run(seed)
-                .expect("plan should succeed");
+            plan.run(seed).expect("plan should not panic");
             Ok(())
         });
     }

@@ -14,5 +14,5 @@ fuzz_target!(|input: FuzzInput| {
     input
         .plan
         .run(input.seed)
-        .expect("fuzz should succeed");
+        .expect("fuzz should not panic");
 });
