@@ -11,8 +11,5 @@ struct FuzzInput {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    input
-        .plan
-        .run(input.seed)
-        .expect("fuzz should not panic");
+    input.plan.run(input.seed).expect("fuzz should not panic");
 });

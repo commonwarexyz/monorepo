@@ -128,7 +128,7 @@ impl PrivateKey {
         (
             scalars,
             VrfCommitments {
-                proof: Proof {},
+                proof: Proof { key: self.clone() },
                 commitments,
             },
         )
@@ -209,16 +209,38 @@ impl Display for PublicKey {
     }
 }
 
+/// An insecure "proof" that simply contains the sender's private key.
+///
+/// This is NOT a real zero-knowledge proof. It reveals the private key,
+/// completely breaking the VRF's secrecy property. We use this placeholder
+/// so that commitment checking works while the real ZK proof is being developed.
 #[derive(Clone)]
-struct Proof {}
+struct Proof {
+    key: PrivateKey,
+}
+
+impl Proof {
+    /// Check that each commitment matches the VRF output for the corresponding receiver.
+    fn check(&self, msg: &Summary, sender: &PublicKey, commitments: &Map<PublicKey, G1>) -> bool {
+        if self.key.public() != *sender {
+            return false;
+        }
+        commitments.iter_pairs().all(|(receiver, commitment)| {
+            let expected = G1::generator() * &self.key.vrf(msg, receiver);
+            *commitment == expected
+        })
+    }
+}
 
 impl Write for Proof {
-    fn write(&self, _buf: &mut impl BufMut) {}
+    fn write(&self, buf: &mut impl BufMut) {
+        self.key.inner.expose(|key| key.as_bytes().write(buf));
+    }
 }
 
 impl EncodeSize for Proof {
     fn encode_size(&self) -> usize {
-        0
+        32
     }
 }
 
@@ -246,12 +268,24 @@ pub struct VrfCommitments {
 }
 
 impl VrfCommitments {
+    /// Shift the commitment for `receiver` by `delta`.
+    ///
+    /// This exists to allow tests to simulate an adversary who provides
+    /// fake mask commitments (exploiting the empty proof).
+    pub(super) fn perturb(&mut self, receiver: &PublicKey, delta: &G1) {
+        if let Some(c) = self.commitments.get_value_mut(receiver) {
+            *c += delta;
+        }
+    }
+
     /// Extract the VRF output commitments, after checking their integrity.
     ///
     /// For a given message and sender, we can check that the commitments contain
     /// what [`PrivateKey::vrf`] would produce for that receiver.
-    pub fn check(self, _msg: &Summary, _sender: &PublicKey) -> Option<Map<PublicKey, G1>> {
-        // NOTE: when we have a real proof, this function will have meat.
+    pub fn check(self, msg: &Summary, sender: &PublicKey) -> Option<Map<PublicKey, G1>> {
+        if !self.proof.check(msg, sender, &self.commitments) {
+            return None;
+        }
         Some(self.commitments)
     }
 
