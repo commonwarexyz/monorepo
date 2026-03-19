@@ -181,7 +181,7 @@ impl merkle::Family for Family {
     }
 
     fn is_valid_size(size: Position) -> bool {
-        iterator::leaves_for_size(size).is_some()
+        Location::try_from(size).is_ok()
     }
 
     fn parent_heights(size: Position) -> impl Iterator<Item = u32> {

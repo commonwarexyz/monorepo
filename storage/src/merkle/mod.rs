@@ -37,12 +37,17 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     /// Maximum valid `Location` value (the largest valid leaf count).
     const MAX_LOCATION: Location<Self>;
 
-    /// Convert a leaf location (0-based leaf index) to its node position.
+    /// Convert a leaf location to its node position, or equivalently, convert a leaf count to the
+    /// corresponding total node count (size).
     ///
-    /// The caller guarantees `loc <= MAX_LOCATION`.
+    /// Valid for any `loc` whose result does not overflow `u64`. Callers that stay within
+    /// `loc <= MAX_LOCATION` are always safe; values slightly above may also be valid
+    /// (e.g., for probing the next size boundary).
     fn location_to_position(loc: Location<Self>) -> Position<Self>;
 
     /// Convert a node position to its leaf location, or `None` if the position is not a leaf.
+    /// Equivalently, convert a total node count (size) to the corresponding leaf count, returning
+    /// `None` if the size is not valid.
     ///
     /// The caller guarantees `pos <= MAX_POSITION`.
     fn position_to_location(pos: Position<Self>) -> Option<Location<Self>>;

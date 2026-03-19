@@ -6,47 +6,6 @@ use crate::merkle::{
     Family as _,
 };
 
-/// Compute the MMB size required to hold `n` leaves.
-const fn size_for_leaves(n: Location) -> Position {
-    let n_val = n.as_u64();
-    if n_val == 0 {
-        return Position::new(0);
-    }
-    Position::new(2 * n_val - (n_val + 1).ilog2() as u64)
-}
-
-/// Use an O(1) estimation formula to find the baseline leaf count `N` for a given MMB size.
-///
-/// This provides a starting estimate that is accurate to within +/- 1 of the true leaf count.
-const fn estimate_leaves(size: Position) -> Location {
-    let size_val = size.as_u64();
-    let n = size_val / 2;
-    Location::new((size_val + (n + 1).ilog2() as u64) / 2)
-}
-
-/// Given an MMB size, return the number of leaves N such that `size_for_leaves(N) == size`.
-///
-/// Returns `None` if `size` is not a valid MMB size. Returns `Some(0)` for size 0.
-pub(crate) fn leaves_for_size(size: Position) -> Option<Location> {
-    if size.as_u64() == 0 {
-        return Some(Location::new(0));
-    }
-
-    if size.as_u64() > Family::MAX_POSITION.as_u64() {
-        return None;
-    }
-
-    let n = estimate_leaves(size);
-    if size_for_leaves(n) == size {
-        return Some(n);
-    }
-    if size_for_leaves(Location::new(n.as_u64() + 1)) == size {
-        return Some(Location::new(n.as_u64() + 1));
-    }
-
-    None
-}
-
 /// A PeakIterator yields `(position, height)` for each peak in an MMB with the given size, in
 /// order from **oldest** (leftmost) to **newest** (rightmost). Heights are always non-increasing.
 ///
@@ -82,7 +41,7 @@ impl PeakIterator {
     ///
     /// Panics if size is not a valid MMB size.
     pub fn new(size: Position) -> Self {
-        let n = leaves_for_size(size).expect("size is not a valid MMB size");
+        let n = Location::try_from(size).expect("size is not a valid MMB size");
         if n.as_u64() == 0 {
             return Self::default();
         }
@@ -116,19 +75,18 @@ impl PeakIterator {
             return size;
         }
 
+        // Use an O(1) estimate to find the baseline leaf count, then check if n+1
+        // fits within the size boundary. location_to_position is monotonic, so one
+        // refinement step from the estimate always suffices.
         let s = size.as_u64();
+        let mut n = s / 2;
+        n = (s + (n + 1).ilog2() as u64) / 2;
 
-        // Use the O(1) estimation formula to find the baseline leaf count N.
-        let n = estimate_leaves(size);
-
-        // Check if n+1 fits within the size boundary. If it does, we use n+1.
-        // If it overshoots, we safely fall back to n.
-        let next_size = size_for_leaves(Location::new(n.as_u64() + 1));
-
-        if next_size.as_u64() <= s {
-            next_size
+        let candidate = Family::location_to_position(Location::new(n + 1));
+        if *candidate <= s {
+            candidate
         } else {
-            size_for_leaves(n)
+            Family::location_to_position(Location::new(n))
         }
     }
 }
@@ -191,8 +149,9 @@ pub(super) const fn child_leaves(parent_leaf: Location, height: u32) -> (Locatio
 /// position of the leaf it births (its own position) or the position of the parent it births (if
 /// any).
 ///
-/// A leaf created alongside `birth_leaf` has position `size_for_leaves(birth_leaf)`. A parent
-/// created alongside `birth_leaf` has position `size_for_leaves(birth_leaf) + 1`.
+/// A leaf created alongside `birth_leaf` has position
+/// `Family::location_to_position(birth_leaf)`. A parent created alongside `birth_leaf` has
+/// position `Family::location_to_position(birth_leaf) + 1`.
 ///
 /// # Warning
 ///
@@ -200,19 +159,19 @@ pub(super) const fn child_leaves(parent_leaf: Location, height: u32) -> (Locatio
 /// `birth_leaf` where no parent was actually birthed, it blindly returns the position of the next
 /// appended leaf instead. It is the caller's responsibility to ensure a parent node functionally
 /// exists at the provided `birth_leaf`.
-pub(super) const fn birthed_node_pos(birth_leaf: Location, is_leaf: bool) -> Position {
+pub(super) fn birthed_node_pos(birth_leaf: Location, is_leaf: bool) -> Position {
     if is_leaf {
-        size_for_leaves(birth_leaf)
+        Family::location_to_position(birth_leaf)
     } else {
-        Position::new(size_for_leaves(birth_leaf).as_u64() + 1)
+        Position::new(Family::location_to_position(birth_leaf).as_u64() + 1)
     }
 }
 
 /// Compute the birth leaf of a parent node from its position.
 ///
-/// A parent created alongside `birth_leaf` has position `size_for_leaves(birth_leaf) + 1`. This
-/// function inverts that formula. Returns `None` if `pos` is not a valid parent position
-/// (e.g., if it's a leaf).
+/// A parent created alongside `birth_leaf` has position
+/// `Family::location_to_position(birth_leaf) + 1`. This function inverts that formula. Returns
+/// `None` if `pos` is not a valid parent position (e.g., if it's a leaf).
 fn parent_birth_leaf(pos: Position) -> Option<Location> {
     let p = pos.as_u64();
 
@@ -223,14 +182,14 @@ fn parent_birth_leaf(pos: Position) -> Option<Location> {
 
     // Every position in an MMB is strictly either a leaf or a parent.
     // If a position coincides with an MMB footprint boundary
-    // (meaning `leaves_for_size(p).is_some()`), it is a leaf and we must reject it.
-    if leaves_for_size(pos).is_some() {
+    // (meaning `Family::position_to_location(p).is_some()`), it is a leaf and we must reject it.
+    if Family::position_to_location(pos).is_some() {
         return None;
     }
 
-    // Since a parent's position is exactly size_for_leaves(s) + 1, we can simply invert
+    // Since a parent's position is exactly location_to_position(s) + 1, we can simply invert
     // the formula by checking if `p - 1` corresponds to a valid tree size.
-    leaves_for_size(Position::new(p - 1))
+    Family::position_to_location(Position::new(p - 1))
 }
 
 /// Compute the positions of the left and right children of a parent node.
@@ -270,8 +229,8 @@ pub(super) const fn peak_birth_leaf(last_leaf: Location, height: u32) -> Locatio
 
 /// Compute the position of the `leaf_index`-th leaf.
 #[inline]
-pub(crate) const fn leaf_pos(leaf_index: Location) -> Position {
-    size_for_leaves(leaf_index)
+pub(crate) fn leaf_pos(leaf_index: Location) -> Position {
+    Family::location_to_position(leaf_index)
 }
 
 /// Return the set of pruned node positions (pos < `prune_pos`) that must be retained after
@@ -347,18 +306,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_size_for_leaves() {
-        assert_eq!(size_for_leaves(Location::new(1)).as_u64(), 1);
-        assert_eq!(size_for_leaves(Location::new(2)).as_u64(), 3);
-        assert_eq!(size_for_leaves(Location::new(3)).as_u64(), 4);
-        assert_eq!(size_for_leaves(Location::new(4)).as_u64(), 6);
+    fn test_location_to_position() {
+        assert_eq!(Family::location_to_position(Location::new(1)).as_u64(), 1);
+        assert_eq!(Family::location_to_position(Location::new(2)).as_u64(), 3);
+        assert_eq!(Family::location_to_position(Location::new(3)).as_u64(), 4);
+        assert_eq!(Family::location_to_position(Location::new(4)).as_u64(), 6);
     }
 
     #[test]
-    fn test_leaves_for_size_roundtrip() {
+    fn test_position_to_location_roundtrip() {
         for n in 1u64..=1000 {
-            let size = size_for_leaves(Location::new(n));
-            assert_eq!(leaves_for_size(size), Some(Location::new(n)), "N={n}");
+            let size = Family::location_to_position(Location::new(n));
+            assert_eq!(
+                Family::position_to_location(size),
+                Some(Location::new(n)),
+                "N={n}"
+            );
         }
     }
 
@@ -368,27 +331,27 @@ mod tests {
         let max_pos = Family::MAX_POSITION.as_u64();
         let max_loc = Family::MAX_LOCATION.as_u64();
         assert_eq!(
-            leaves_for_size(Position::new(max_pos)),
+            Location::try_from(Position::new(max_pos)).ok(),
             Some(Location::new(max_loc)),
             "MAX_POSITION should correspond to MAX_LOCATION leaves"
         );
 
         // The size formula should agree.
         assert_eq!(
-            size_for_leaves(Location::new(max_loc)).as_u64(),
+            Position::try_from(Location::new(max_loc)).unwrap().as_u64(),
             max_pos,
-            "size_for_leaves(MAX_LOCATION) should equal MAX_POSITION"
+            "location_to_position(MAX_LOCATION) should equal MAX_POSITION"
         );
 
         // One more leaf should exceed MAX_POSITION.
-        let over_size = size_for_leaves(Location::new(max_loc + 1)).as_u64();
+        let over_size = *Family::location_to_position(Location::new(max_loc + 1));
         assert!(
             over_size > max_pos,
             "one more leaf should exceed MAX_POSITION"
         );
 
-        // leaves_for_size must reject sizes above MAX_POSITION.
-        assert_eq!(leaves_for_size(Position::new(max_pos + 1)), None);
+        // Invalid sizes above MAX_POSITION should be rejected.
+        assert!(Location::try_from(Position::new(max_pos + 1)).is_err());
     }
 
     /// Slow reference implementation for `nodes_to_pin` that recurses into every retained branch.
@@ -426,7 +389,7 @@ mod tests {
     #[test]
     fn test_child_leaves_matches_children() {
         for n in 1u64..=256 {
-            let size = size_for_leaves(Location::new(n));
+            let size = Position::try_from(Location::new(n)).unwrap();
             for (pos, height) in PeakIterator::new(size) {
                 if height == 0 {
                     continue;
@@ -450,7 +413,7 @@ mod tests {
     fn test_birthed_node_pos() {
         // Verify birthed_node_pos matches PeakIterator output for all peaks.
         for n in 1u64..=256 {
-            let size = size_for_leaves(Location::new(n));
+            let size = Position::try_from(Location::new(n)).unwrap();
             let mut first_leaf = 0u64;
             for (pos, height) in PeakIterator::new(size) {
                 let leaves_in_peak = 1u64 << height;
@@ -469,7 +432,7 @@ mod tests {
             let size = if n == 0 {
                 Position::new(0)
             } else {
-                size_for_leaves(Location::new(n))
+                Position::try_from(Location::new(n)).unwrap()
             };
             for prune in 0..=size.as_u64() {
                 let prune_pos = Position::new(prune);
@@ -481,16 +444,15 @@ mod tests {
     }
 
     #[test]
-    fn test_leaves_for_size_rejects_invalid() {
-        // Sizes between valid MMB sizes should return None.
+    fn test_invalid_sizes_rejected() {
+        // Sizes between valid MMB sizes should fail conversion.
         for n in 1u64..=500 {
-            let valid = size_for_leaves(Location::new(n)).as_u64();
-            let next_valid = size_for_leaves(Location::new(n + 1)).as_u64();
+            let valid = *Position::try_from(Location::new(n)).unwrap();
+            let next_valid = *Position::try_from(Location::new(n + 1)).unwrap();
             for gap in (valid + 1)..next_valid {
-                assert_eq!(
-                    leaves_for_size(Position::new(gap)),
-                    None,
-                    "size={gap} (between n={n} and n={}",
+                assert!(
+                    Location::try_from(Position::new(gap)).is_err(),
+                    "size={gap} (between n={n} and n={}) should be invalid",
                     n + 1
                 );
             }
@@ -542,7 +504,7 @@ mod tests {
     fn test_peak_birth_leaf() {
         // Verify peak_birth_leaf matches the inline computation used in test_birthed_node_pos.
         for n in 1u64..=256 {
-            let size = size_for_leaves(Location::new(n));
+            let size = Position::try_from(Location::new(n)).unwrap();
             let mut first_leaf = 0u64;
             for (pos, height) in PeakIterator::new(size) {
                 let leaves_in_peak = 1u64 << height;
@@ -582,10 +544,10 @@ mod tests {
 
         // Valid sizes map to themselves; gaps map to the previous valid size.
         for n in 1u64..=500 {
-            let size = size_for_leaves(Location::new(n));
+            let size = Position::try_from(Location::new(n)).unwrap();
             assert_eq!(PeakIterator::to_nearest_size(size), size, "n={n}");
 
-            let next_size = size_for_leaves(Location::new(n + 1));
+            let next_size = Position::try_from(Location::new(n + 1)).unwrap();
             for s in *size + 1..*next_size {
                 assert_eq!(
                     PeakIterator::to_nearest_size(Position::new(s)),
