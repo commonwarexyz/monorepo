@@ -50,8 +50,8 @@ impl<D: commonware_cryptography::Digest> Mmr<D> {
 mod tests {
     use super::*;
     use crate::{
-        merkle::hasher::Hasher as _,
-        mmr::{conformance::build_test_mmr, Error, Location, StandardHasher as Standard},
+        merkle::{conformance::build_test_mmr, hasher::Hasher as _},
+        mmr::{Error, Location, StandardHasher as Standard},
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_runtime::{deterministic, tokio, Runner, ThreadPooler};

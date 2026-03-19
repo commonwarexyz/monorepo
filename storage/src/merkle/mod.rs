@@ -6,6 +6,8 @@
 //! logic lives here.
 
 pub mod batch;
+#[cfg(test)]
+pub(crate) mod conformance;
 pub mod hasher;
 mod location;
 pub mod mem;

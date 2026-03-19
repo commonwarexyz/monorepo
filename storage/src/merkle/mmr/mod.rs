@@ -78,9 +78,6 @@ pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 /// MMR-specific type alias for `merkle::proof::Proof`.
 pub type Proof<D> = merkle::proof::Proof<Family, D>;
 
-#[cfg(test)]
-pub(crate) mod conformance;
-
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         pub mod journaled;

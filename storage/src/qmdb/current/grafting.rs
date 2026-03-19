@@ -330,13 +330,11 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::merkle::conformance::build_test_mmr;
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
-    use mmr::{
-        conformance::build_test_mmr, iterator::PeakIterator, mem::Mmr, verification, Location,
-        Position, StandardHasher,
-    };
+    use mmr::{iterator::PeakIterator, mem::Mmr, verification, Location, Position, StandardHasher};
 
     /// Precompute grafted leaf digests and return a [Mmr] in grafted-space.
     ///

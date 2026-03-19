@@ -167,7 +167,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             if !loc.is_valid() {
                 return false;
             }
-            // `loc` is valid so it won't overflro from +1
+            // `loc` is valid so it won't overflow from +1
             let Ok(bp) = Blueprint::new(self.leaves, *loc..*loc + 1) else {
                 return false;
             };
