@@ -159,7 +159,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             self.sent_messages
                                 .get_or_create(&metrics::Message::new_ping(&peer))
                                 .inc();
-                            batch.clear();
                             batch.push(types::Message::Ping.encode_with_pool(&pool).into());
                             Self::extend_send_many(
                                 &peer, self.send_batch_size, &mut batch,
@@ -173,7 +172,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         // drain already-queued messages into a single runtime write.
                         // Priority order: control > high > low.
                         msg = recv_prioritized(&mut self.control, &mut self.high, &mut self.low) => {
-                            batch.clear();
                             match msg {
                                 Prioritized::Closed => return Err(Error::PeerDisconnected),
                                 Prioritized::Control(msg) => match msg {

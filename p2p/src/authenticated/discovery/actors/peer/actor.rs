@@ -210,7 +210,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         // drain already-queued messages into a single runtime write.
                         // Priority order: control > high > low.
                         msg = recv_prioritized(&mut self.control, &mut self.high, &mut self.low) => {
-                            batch.clear();
                             match msg {
                                 Prioritized::Closed => return Err(Error::PeerDisconnected),
                                 Prioritized::Control(msg) => {
