@@ -303,6 +303,11 @@ pub struct Sender<O> {
 }
 
 impl<O: Sink> Sender<O> {
+    /// Build one complete encrypted frame in contiguous memory.
+    ///
+    /// Keeping each frame contiguous lets callers batch multiple frames together
+    /// with `IoBufs` while preserving message boundaries and avoiding a second
+    /// concatenation copy.
     fn encrypt_frame(
         &mut self,
         bufs: impl Into<IoBufs>,
@@ -357,6 +362,8 @@ impl<O: Sink> Sender<O> {
     {
         let mut frames = IoBufs::default();
         for buf in bufs {
+            // Each item is framed independently so the receiver can continue to
+            // consume one message at a time even when the runtime write is batched.
             frames.append(self.encrypt_frame(buf)?);
         }
 

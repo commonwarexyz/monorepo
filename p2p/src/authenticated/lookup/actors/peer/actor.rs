@@ -100,6 +100,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         sent_messages: &Family<metrics::Message, Counter>,
         batch: Vec<(metrics::Message, IoBufs)>,
     ) -> Result<(), Error> {
+        // Keep metrics aligned with the logical messages even when they share a
+        // single runtime write.
         let mut metrics_to_inc = Vec::with_capacity(batch.len());
         let mut payloads = Vec::with_capacity(batch.len());
         for (metric, payload) in batch {
@@ -126,6 +128,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         rate_limits: &HashMap<u64, V>,
     ) -> Result<(), Error> {
         while batch.len() < batch_size {
+            // Preserve the existing priority behavior when draining more work
+            // into the same send: always exhaust already-ready high-priority
+            // data before pulling from the low-priority queue.
             if let Ok(msg) = high.try_recv() {
                 let encoded = Self::validate_outbound_msg(Some(msg), rate_limits)?;
                 batch.push((
@@ -212,6 +217,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 metrics::Message::new_data(&peer, encoded.channel),
                                 encoded.payload,
                             ));
+                            // Only drain messages that are already queued. This
+                            // reduces runtime write calls without introducing a
+                            // per-connection timer or extra buffering latency.
                             Self::extend_send_batch(
                                 &peer,
                                 self.send_batch_size,
@@ -234,6 +242,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 metrics::Message::new_data(&peer, encoded.channel),
                                 encoded.payload,
                             ));
+                            // Only drain messages that are already queued. This
+                            // reduces runtime write calls without introducing a
+                            // per-connection timer or extra buffering latency.
                             Self::extend_send_batch(
                                 &peer,
                                 self.send_batch_size,
