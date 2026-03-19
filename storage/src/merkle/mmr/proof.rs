@@ -5,10 +5,12 @@
 //! These lower-level functions are kept outside of the `Proof` structure and not re-exported by the
 //! parent module.
 
+#[cfg(any(feature = "std", test))]
+use crate::merkle::proof as merkle_proof;
 use crate::merkle::{
     hasher::Hasher,
     mmr::{iterator::nodes_to_pin, Error, Family, Location, Position},
-    proof::{self as merkle_proof, Blueprint, Proof},
+    proof::{Blueprint, Proof},
 };
 #[cfg(any(feature = "std", test))]
 use alloc::collections::btree_set::BTreeSet;

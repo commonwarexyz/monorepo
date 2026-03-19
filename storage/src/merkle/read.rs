@@ -46,8 +46,8 @@ pub trait Readable: Send + Sync {
         Location::try_from(self.size()).expect("invalid merkle size")
     }
 
-    /// `[start, end)` range of retained node positions.
-    fn bounds(&self) -> Range<Position<Self::Family>> {
-        self.pruned_to_pos()..self.size()
+    /// `[start, end)` range of retained leaf locations.
+    fn bounds(&self) -> Range<Location<Self::Family>> {
+        Location::try_from(self.pruned_to_pos()).expect("valid pruned_to_pos")..self.leaves()
     }
 }
