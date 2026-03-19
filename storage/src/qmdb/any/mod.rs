@@ -88,9 +88,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecFixedShared, Read};
 use commonware_cryptography::Hasher;
-use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use std::num::{NonZeroU64, NonZeroUsize};
+use commonware_runtime::{Clock, Metrics, Storage};
 use tracing::warn;
 
 pub mod batch;
@@ -107,75 +105,27 @@ pub mod unordered;
 /// Configuration for an `Any` authenticated db with fixed-size values.
 #[derive(Clone)]
 pub struct FixedConfig<T: Translator> {
-    /// The name of the [Storage] partition used for the MMR's backing journal.
-    pub mmr_journal_partition: String,
+    /// Configuration for the MMR backing the authenticated journal.
+    pub mmr: MmrConfig,
 
-    /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: NonZeroUsize,
-
-    /// The name of the [Storage] partition used for the MMR's metadata.
-    pub mmr_metadata_partition: String,
-
-    /// The name of the [Storage] partition used to persist the (pruned) log of operations.
-    pub log_journal_partition: String,
-
-    /// The items per blob configuration value used by the log journal.
-    pub log_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: NonZeroUsize,
+    /// Configuration for the fixed-size operations log journal.
+    pub log: FConfig,
 
     /// The translator used by the compressed index.
     pub translator: T,
-
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
 }
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
 #[derive(Clone)]
 pub struct VariableConfig<T: Translator, C> {
-    /// The name of the [Storage] partition used for the MMR's backing journal.
-    pub mmr_journal_partition: String,
+    /// Configuration for the MMR backing the authenticated journal.
+    pub mmr: MmrConfig,
 
-    /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: NonZeroUsize,
-
-    /// The name of the [Storage] partition used for the MMR's metadata.
-    pub mmr_metadata_partition: String,
-
-    /// The name of the [Storage] partition used to persist the log of operations.
-    pub log_partition: String,
-
-    /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: NonZeroUsize,
-
-    /// Optional compression level (using `zstd`) to apply to log data before storing.
-    pub log_compression: Option<u8>,
-
-    /// The codec configuration to use for encoding and decoding log items.
-    pub log_codec_config: C,
-
-    /// The number of items to put in each blob of the journal.
-    pub log_items_per_blob: NonZeroU64,
+    /// Configuration for the variable-size operations log journal.
+    pub log: VConfig<C>,
 
     /// The translator used by the compressed index.
     pub translator: T,
-
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
 }
 
 /// Shared initialization logic for fixed-sized value [db::Db].
@@ -196,26 +146,10 @@ where
     NewIndex: FnOnce(E, T) -> I,
     Operation<U>: CodecFixedShared + Committable,
 {
-    let mmr_config = MmrConfig {
-        journal_partition: cfg.mmr_journal_partition,
-        metadata_partition: cfg.mmr_metadata_partition,
-        items_per_blob: cfg.mmr_items_per_blob,
-        write_buffer: cfg.mmr_write_buffer,
-        thread_pool: cfg.thread_pool,
-        page_cache: cfg.page_cache.clone(),
-    };
-
-    let journal_config = FConfig {
-        partition: cfg.log_journal_partition,
-        items_per_blob: cfg.log_items_per_blob,
-        write_buffer: cfg.log_write_buffer,
-        page_cache: cfg.page_cache,
-    };
-
     let mut log = authenticated::Journal::<_, FJournal<_, _>, _>::new(
         context.with_label("log"),
-        mmr_config,
-        journal_config,
+        cfg.mmr,
+        cfg.log,
         Operation::is_commit,
     )
     .await?;
@@ -249,28 +183,10 @@ where
     NewIndex: FnOnce(E, T) -> I,
     Operation<U>: Codec + Committable,
 {
-    let mmr_config = MmrConfig {
-        journal_partition: cfg.mmr_journal_partition,
-        metadata_partition: cfg.mmr_metadata_partition,
-        items_per_blob: cfg.mmr_items_per_blob,
-        write_buffer: cfg.mmr_write_buffer,
-        thread_pool: cfg.thread_pool,
-        page_cache: cfg.page_cache.clone(),
-    };
-
-    let journal_config = VConfig {
-        partition: cfg.log_partition,
-        items_per_section: cfg.log_items_per_blob,
-        compression: cfg.log_compression,
-        codec_config: cfg.log_codec_config,
-        page_cache: cfg.page_cache,
-        write_buffer: cfg.log_write_buffer,
-    };
-
     let mut log = authenticated::Journal::<_, VJournal<_, _>, _>::new(
         context.with_label("log"),
-        mmr_config,
-        journal_config,
+        cfg.mmr,
+        cfg.log,
         Operation::is_commit,
     )
     .await?;
@@ -291,11 +207,12 @@ where
 pub(crate) mod test {
     use super::*;
     use crate::{
-        qmdb::any::{FixedConfig, VariableConfig},
+        journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+        qmdb::any::{FixedConfig, MmrConfig, VariableConfig},
         translator::OneCap,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
-    use std::num::NonZeroU16;
+    use std::num::{NonZeroU16, NonZeroUsize};
 
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -305,17 +222,23 @@ pub(crate) mod test {
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            mmr_journal_partition: format!("journal-{suffix}"),
-            mmr_metadata_partition: format!("metadata-{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_journal_partition: format!("log-journal-{suffix}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
+            mmr: MmrConfig {
+                journal_partition: format!("journal-{suffix}"),
+                metadata_partition: format!("metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            log: FConfig {
+                partition: format!("log-journal-{suffix}"),
+                items_per_blob: NZU64!(7),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
             translator: T::default(),
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -323,19 +246,25 @@ pub(crate) mod test {
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ((), ())> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            mmr_journal_partition: format!("journal-{suffix}"),
-            mmr_metadata_partition: format!("metadata-{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log-journal-{suffix}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: ((), ()),
+            mmr: MmrConfig {
+                journal_partition: format!("journal-{suffix}"),
+                metadata_partition: format!("metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            log: VConfig {
+                partition: format!("log-journal-{suffix}"),
+                items_per_section: NZU64!(7),
+                compression: None,
+                codec_config: ((), ()),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
             translator: T::default(),
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -345,7 +274,7 @@ pub(crate) mod test {
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_runtime::{deterministic::Context, BufferPooler};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic::Context, BufferPooler};
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
 

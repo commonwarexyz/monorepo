@@ -30,10 +30,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    mmr::{
-        self, hasher::Hasher as _, journaled::Config as MmrConfig, Location, Position,
-        StandardHasher,
-    },
+    mmr::{self, hasher::Hasher as _, Location, Position, StandardHasher},
     qmdb::{
         self,
         any::{
@@ -47,8 +44,7 @@ use crate::{
                 fixed::{Operation as UnorderedFixedOp, Update as UnorderedFixedUpdate},
                 variable::{Operation as UnorderedVariableOp, Update as UnorderedVariableUpdate},
             },
-            FixedConfig as AnyFixedConfig, FixedValue, VariableConfig as AnyVariableConfig,
-            VariableValue,
+            FixedValue, VariableValue,
         },
         current::{
             db, grafting,
@@ -79,8 +75,7 @@ impl<T: Translator> Config for FixedConfig<T> {
     type JournalConfig = fixed::Config;
 
     fn journal_config(&self) -> Self::JournalConfig {
-        let any_config: AnyFixedConfig<T> = self.clone().into();
-        <AnyFixedConfig<T> as Config>::journal_config(&any_config)
+        self.log.clone()
     }
 }
 
@@ -88,32 +83,7 @@ impl<T: Translator, C: Clone> Config for VariableConfig<T, C> {
     type JournalConfig = variable::Config<C>;
 
     fn journal_config(&self) -> Self::JournalConfig {
-        let any_config: AnyVariableConfig<T, C> = self.clone().into();
-        <AnyVariableConfig<T, C> as Config>::journal_config(&any_config)
-    }
-}
-
-/// Extract MMR config from [FixedConfig].
-fn mmr_config_from_fixed<T: Translator>(config: &FixedConfig<T>) -> MmrConfig {
-    MmrConfig {
-        journal_partition: config.mmr_journal_partition.clone(),
-        metadata_partition: config.mmr_metadata_partition.clone(),
-        items_per_blob: config.mmr_items_per_blob,
-        write_buffer: config.mmr_write_buffer,
-        thread_pool: config.thread_pool.clone(),
-        page_cache: config.page_cache.clone(),
-    }
-}
-
-/// Extract MMR config from [VariableConfig].
-fn mmr_config_from_variable<T: Translator, C>(config: &VariableConfig<T, C>) -> MmrConfig {
-    MmrConfig {
-        journal_partition: config.mmr_journal_partition.clone(),
-        metadata_partition: config.mmr_metadata_partition.clone(),
-        items_per_blob: config.mmr_items_per_blob,
-        write_buffer: config.mmr_write_buffer,
-        thread_pool: config.thread_pool.clone(),
-        page_cache: config.page_cache.clone(),
+        self.log.clone()
     }
 }
 
@@ -127,7 +97,7 @@ fn mmr_config_from_variable<T: Translator, C>(config: &VariableConfig<T, C>) -> 
 #[allow(clippy::too_many_arguments)]
 async fn build_db<E, U, I, H, J, const N: usize>(
     context: E,
-    mmr_config: MmrConfig,
+    mmr_config: mmr::journaled::Config,
     log: J,
     index: I,
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -287,9 +257,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = mmr_config_from_fixed(&config);
+        let mmr_config = config.mmr.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.thread_pool.clone();
+        let thread_pool = config.mmr.thread_pool.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, UnorderedFixedUpdate<K, V>, _, H, _, N>(
             context,
@@ -336,9 +306,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = mmr_config_from_variable(&config);
+        let mmr_config = config.mmr.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.thread_pool.clone();
+        let thread_pool = config.mmr.thread_pool.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, UnorderedVariableUpdate<K, V>, _, H, _, N>(
             context,
@@ -384,9 +354,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = mmr_config_from_fixed(&config);
+        let mmr_config = config.mmr.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.thread_pool.clone();
+        let thread_pool = config.mmr.thread_pool.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, OrderedFixedUpdate<K, V>, _, H, _, N>(
             context,
@@ -433,9 +403,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = mmr_config_from_variable(&config);
+        let mmr_config = config.mmr.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.thread_pool.clone();
+        let thread_pool = config.mmr.thread_pool.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, OrderedVariableUpdate<K, V>, _, H, _, N>(
             context,

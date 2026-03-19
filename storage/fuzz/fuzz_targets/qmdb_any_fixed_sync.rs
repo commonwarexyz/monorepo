@@ -4,6 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
+    journal::contiguous::fixed::Config as FConfig,
+    mmr::journaled::Config as MmrConfig,
     qmdb::{
         any::{
             unordered::fixed::{Db, Operation as FixedOperation},
@@ -89,17 +91,23 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
 fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
+    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
-        mmr_journal_partition: format!("{test_name}-mmr"),
-        mmr_metadata_partition: format!("{test_name}-meta"),
-        mmr_items_per_blob: NZU64!(3),
-        mmr_write_buffer: NZUsize!(1024),
-        log_journal_partition: format!("{test_name}-log"),
-        log_items_per_blob: NZU64!(3),
-        log_write_buffer: NZUsize!(1024),
+        mmr: MmrConfig {
+            journal_partition: format!("{test_name}-mmr"),
+            metadata_partition: format!("{test_name}-meta"),
+            items_per_blob: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        log: FConfig {
+            partition: format!("{test_name}-log"),
+            items_per_blob: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            page_cache,
+        },
         translator: TwoCap,
-        thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1)),
     }
 }
 

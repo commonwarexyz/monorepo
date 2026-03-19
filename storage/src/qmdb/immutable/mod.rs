@@ -72,15 +72,9 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
-use std::{
-    collections::BTreeMap,
-    num::{NonZeroU64, NonZeroUsize},
-    ops::Range,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, num::NonZeroU64, ops::Range, sync::Arc};
 use tracing::warn;
 
 pub mod batch;
@@ -94,41 +88,14 @@ pub mod sync;
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
-    /// The name of the [RStorage] partition used for the MMR's backing journal.
-    pub mmr_journal_partition: String,
+    /// Configuration for the MMR backing the authenticated journal.
+    pub mmr: MmrConfig,
 
-    /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: NonZeroUsize,
-
-    /// The name of the [RStorage] partition used for the MMR's metadata.
-    pub mmr_metadata_partition: String,
-
-    /// The name of the [RStorage] partition used to persist the log of operations.
-    pub log_partition: String,
-
-    /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: NonZeroUsize,
-
-    /// Optional compression level (using `zstd`) to apply to log data before storing.
-    pub log_compression: Option<u8>,
-
-    /// The codec configuration to use for encoding and decoding log items.
-    pub log_codec_config: C,
-
-    /// The number of items to put in each section of the journal.
-    pub log_items_per_section: NonZeroU64,
+    /// Configuration for the variable-size operations log journal.
+    pub log: JournalConfig<C>,
 
     /// The translator used by the compressed index.
     pub translator: T,
-
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
 }
 
 /// An authenticated database that only supports adding new keyed values (no updates or
@@ -306,28 +273,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         context: E,
         cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mmr_cfg = MmrConfig {
-            journal_partition: cfg.mmr_journal_partition,
-            metadata_partition: cfg.mmr_metadata_partition,
-            items_per_blob: cfg.mmr_items_per_blob,
-            write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
-            page_cache: cfg.page_cache.clone(),
-        };
-
-        let journal_cfg = JournalConfig {
-            partition: cfg.log_partition,
-            items_per_section: cfg.log_items_per_section,
-            compression: cfg.log_compression,
-            codec_config: cfg.log_codec_config,
-            page_cache: cfg.page_cache.clone(),
-            write_buffer: cfg.log_write_buffer,
-        };
-
         let mut journal = Journal::new(
             context.clone(),
-            mmr_cfg,
-            journal_cfg,
+            cfg.mmr,
+            cfg.log,
             Operation::<K, V>::is_commit,
         )
         .await?;
@@ -449,9 +398,9 @@ pub(super) mod test {
     use crate::{mmr::StandardHasher, qmdb::verify_proof, translator::TwoCap};
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, BufferPooler, Runner as _};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
-    use std::num::NonZeroU16;
+    use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
@@ -461,19 +410,25 @@ pub(super) mod test {
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            mmr_journal_partition: format!("journal-{suffix}"),
-            mmr_metadata_partition: format!("metadata-{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log-{suffix}"),
-            log_items_per_section: NZU64!(ITEMS_PER_SECTION),
-            log_compression: None,
-            log_codec_config: ((0..=10000).into(), ()),
-            log_write_buffer: NZUsize!(1024),
+            mmr: MmrConfig {
+                journal_partition: format!("journal-{suffix}"),
+                metadata_partition: format!("metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            log: JournalConfig {
+                partition: format!("log-{suffix}"),
+                items_per_section: NZU64!(ITEMS_PER_SECTION),
+                compression: None,
+                codec_config: ((0..=10000).into(), ()),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
             translator: TwoCap,
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -1335,11 +1290,9 @@ pub(super) mod test {
     fn test_immutable_batch_sequential_key_override() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                // Use items_per_section=1 so pruning is granular.
-                log_items_per_section: NZU64!(1),
-                ..db_config("key-override", &context)
-            };
+            let mut cfg = db_config("key-override", &context);
+            // Use items_per_section=1 so pruning is granular.
+            cfg.log.items_per_section = NZU64!(1);
             let mut db: Db = Immutable::init(context.with_label("db"), cfg)
                 .await
                 .unwrap();

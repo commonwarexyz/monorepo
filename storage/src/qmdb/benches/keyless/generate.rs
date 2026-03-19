@@ -7,7 +7,11 @@ use commonware_runtime::{
     tokio::{Config, Context},
     BufferPooler, ThreadPooler,
 };
-use commonware_storage::qmdb::keyless::{Config as KConfig, Keyless};
+use commonware_storage::{
+    journal::contiguous::variable::Config as VConfig,
+    mmr::journaled::Config as MmrConfig,
+    qmdb::keyless::{Config as KConfig, Keyless},
+};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -34,18 +38,24 @@ const THREADS: NonZeroUsize = NZUsize!(8);
 fn keyless_cfg(
     context: &(impl BufferPooler + ThreadPooler),
 ) -> KConfig<(commonware_codec::RangeCfg<usize>, ())> {
+    let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
     KConfig::<(commonware_codec::RangeCfg<usize>, ())> {
-        mmr_journal_partition: format!("journal-{PARTITION_SUFFIX}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
-        mmr_items_per_blob: ITEMS_PER_BLOB,
-        mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("log-journal-{PARTITION_SUFFIX}"),
-        log_codec_config: ((0..=10000).into(), ()),
-        log_items_per_section: ITEMS_PER_BLOB,
-        log_write_buffer: NZUsize!(1024),
-        log_compression: None,
-        thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        mmr: MmrConfig {
+            journal_partition: format!("journal-{PARTITION_SUFFIX}"),
+            metadata_partition: format!("metadata-{PARTITION_SUFFIX}"),
+            items_per_blob: ITEMS_PER_BLOB,
+            write_buffer: NZUsize!(1024),
+            thread_pool: Some(context.create_thread_pool(THREADS).unwrap()),
+            page_cache: page_cache.clone(),
+        },
+        log: VConfig {
+            partition: format!("log-journal-{PARTITION_SUFFIX}"),
+            items_per_section: ITEMS_PER_BLOB,
+            compression: None,
+            codec_config: ((0..=10000).into(), ()),
+            page_cache,
+            write_buffer: NZUsize!(1024),
+        },
     }
 }
 

@@ -171,19 +171,25 @@ pub(crate) mod test {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            mmr_journal_partition: format!("journal-{seed}"),
-            mmr_metadata_partition: format!("metadata-{seed}"),
-            mmr_items_per_blob: NZU64!(13),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log-journal-{seed}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: ((), ((0..=10000).into(), ())),
+            mmr: crate::mmr::journaled::Config {
+                journal_partition: format!("journal-{seed}"),
+                metadata_partition: format!("metadata-{seed}"),
+                items_per_blob: NZU64!(13),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            log: crate::journal::contiguous::variable::Config {
+                partition: format!("log-journal-{seed}"),
+                items_per_section: NZU64!(7),
+                write_buffer: NZUsize!(1024),
+                compression: None,
+                codec_config: ((), ((0..=10000).into(), ())),
+                page_cache,
+            },
             translator: TwoCap,
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
