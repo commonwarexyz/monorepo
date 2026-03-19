@@ -8,10 +8,22 @@ use super::sniffer::{TracedCert, TracedVote, TraceEntry};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
+/// Returns true if the node ID (e.g. "n0") is Byzantine (index < faults).
+fn is_byzantine_node(node: &str, faults: usize) -> bool {
+    if let Some(idx_str) = node.strip_prefix('n') {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            return idx < faults;
+        }
+    }
+    false
+}
+
 /// Configuration for the quint test encoder.
 pub struct EncoderConfig {
     /// Number of validators.
     pub n: usize,
+    /// Number of Byzantine (faulty) validators.
+    pub faults: usize,
     /// Epoch used by the round-robin elector.
     pub epoch: u64,
     /// Maximum view to include in VIEWS range.
@@ -20,8 +32,20 @@ pub struct EncoderConfig {
 
 /// Encodes trace entries into a quint test module.
 pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
-    let block_map = build_block_map(entries);
-    let certify_policy = build_certify_policy(entries, &block_map);
+    // Filter out entries where the receiver is Byzantine (no state in quint model)
+    let correct_entries: Vec<TraceEntry> = entries
+        .iter()
+        .filter(|e| {
+            let receiver = match e {
+                TraceEntry::Vote { receiver, .. } => receiver,
+                TraceEntry::Certificate { receiver, .. } => receiver,
+            };
+            !is_byzantine_node(receiver, cfg.faults)
+        })
+        .cloned()
+        .collect();
+
+    let block_map = build_block_map(&correct_entries);
     let leader_map = build_leader_map(cfg);
 
     let block_names: Vec<&str> = block_map.iter().map(|(_, n)| n.as_str()).collect();
@@ -49,10 +73,19 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     writeln!(out, "        F = {},", f).unwrap();
     writeln!(out, "        Q = {},", q).unwrap();
 
-    // CORRECT set
-    let replicas: Vec<String> = (0..cfg.n).map(|i| format!("\"n{}\"", i)).collect();
-    writeln!(out, "        CORRECT = Set({}),", replicas.join(", ")).unwrap();
-    writeln!(out, "        BYZANTINE = Set(),").unwrap();
+    // CORRECT / BYZANTINE sets
+    let correct: Vec<String> = (cfg.faults..cfg.n)
+        .map(|i| format!("\"n{}\"", i))
+        .collect();
+    writeln!(out, "        CORRECT = Set({}),", correct.join(", ")).unwrap();
+    let byzantine: Vec<String> = (0..cfg.faults)
+        .map(|i| format!("\"n{}\"", i))
+        .collect();
+    if byzantine.is_empty() {
+        writeln!(out, "        BYZANTINE = Set(),").unwrap();
+    } else {
+        writeln!(out, "        BYZANTINE = Set({}),", byzantine.join(", ")).unwrap();
+    }
 
     // REPLICA_KEYS
     let keys: Vec<String> = (0..cfg.n)
@@ -74,8 +107,7 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     writeln!(out, "    pure val CERTIFY_POLICY = Map(").unwrap();
     writeln!(out, "        GENESIS_BLOCK -> true,").unwrap();
     for name in &block_names {
-        let val = certify_policy.get(*name).copied().unwrap_or(true);
-        writeln!(out, "        \"{}\" -> {},", name, val).unwrap();
+        writeln!(out, "        \"{}\" -> true,", name).unwrap();
     }
     writeln!(out, "    )").unwrap();
     writeln!(
@@ -100,7 +132,7 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     writeln!(out, "        )").unwrap();
 
     // Generate actions with self-vote injection
-    let actions = build_actions(entries, &block_map, cfg);
+    let actions = build_actions(&correct_entries, &block_map, cfg);
     for action in &actions {
         writeln!(out, "            .then({})", action).unwrap();
     }
@@ -130,7 +162,7 @@ enum VoteKey {
 fn build_actions(
     entries: &[TraceEntry],
     block_map: &[(String, String)],
-    _cfg: &EncoderConfig,
+    cfg: &EncoderConfig,
 ) -> Vec<String> {
     let mut actions = Vec::new();
     let mut self_delivered: HashSet<VoteKey> = HashSet::new();
@@ -190,6 +222,10 @@ fn build_actions(
 
                 if let Some(signers) = unique_signers.get(&(view, vtype)) {
                     for (sig, block) in signers {
+                        // Skip self-delivery for Byzantine nodes
+                        if is_byzantine_node(sig, cfg.faults) {
+                            continue;
+                        }
                         let key = match vtype {
                             "notarize" => VoteKey::Notarize(
                                 sig.clone(),
@@ -289,64 +325,6 @@ fn build_block_map(entries: &[TraceEntry]) -> Vec<(String, String)> {
         }
     }
     map
-}
-
-/// Returns a HashMap from val_bN -> bool indicating certify policy.
-///
-/// A block fails certification if it appears in notarize votes for a view
-/// but that view also has nullify votes (meaning certification was rejected).
-fn build_certify_policy(
-    entries: &[TraceEntry],
-    block_map: &[(String, String)],
-) -> HashMap<String, bool> {
-    let hash_to_name: HashMap<&str, &str> = block_map
-        .iter()
-        .map(|(h, n)| (h.as_str(), n.as_str()))
-        .collect();
-
-    // Track which views have notarize blocks and which views have nullify/finalize
-    let mut view_block: HashMap<u64, String> = HashMap::new();
-    let mut view_has_finalize: HashMap<u64, bool> = HashMap::new();
-    let mut view_has_nullify: HashMap<u64, bool> = HashMap::new();
-
-    for entry in entries {
-        match entry {
-            TraceEntry::Vote {
-                vote: TracedVote::Notarize { view, block, .. },
-                ..
-            } => {
-                view_block.entry(*view).or_insert_with(|| block.clone());
-            }
-            TraceEntry::Vote {
-                vote: TracedVote::Finalize { view, .. },
-                ..
-            } => {
-                view_has_finalize.insert(*view, true);
-            }
-            TraceEntry::Vote {
-                vote: TracedVote::Nullify { view, .. },
-                ..
-            } => {
-                // Only count nullify as certification failure if the view also has notarize
-                if view_block.contains_key(view) {
-                    view_has_nullify.insert(*view, true);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut policy = HashMap::new();
-    for (view, hash) in &view_block {
-        if let Some(name) = hash_to_name.get(hash.as_str()) {
-            // Block fails certification if the view has nullify but no finalize
-            let has_fin = view_has_finalize.get(view).copied().unwrap_or(false);
-            let has_null = view_has_nullify.get(view).copied().unwrap_or(false);
-            let certify = has_fin || !has_null;
-            policy.insert(name.to_string(), certify);
-        }
-    }
-    policy
 }
 
 /// Builds the leader map: view -> replica ID using round-robin.

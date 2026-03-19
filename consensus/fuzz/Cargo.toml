@@ -146,6 +146,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_ed25519_quint_disrupter"
+path = "fuzz_targets/simplex_ed25519_quint_disrupter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "trace_to_quint"
 path = "src/bin/trace_to_quint.rs"
 test = false

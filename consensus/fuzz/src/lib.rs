@@ -9,7 +9,7 @@ pub mod utils;
 
 use crate::{
     disrupter::Disrupter,
-    strategy::{AnyScope, FutureScope, SmallScope, StrategyChoice},
+    strategy::{AnyScope, FutureScope, SmallScope, SmallScopeForTracing, StrategyChoice},
     tracing::{
         data::TraceData,
         sniffer::{ChannelKind, SniffingReceiver, TraceLog},
@@ -98,8 +98,6 @@ impl Configuration {
 pub const N4F1C3: Configuration = Configuration::new(4, 1, 3);
 /// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
 pub const N4F3C1: Configuration = Configuration::new(4, 3, 1);
-/// 4 nodes, 0 faulty, 4 correct (all-honest for quint tracing)
-pub const N4F0C4: Configuration = Configuration::new(4, 0, 4);
 
 async fn setup_degraded_network<E: Clock>(
     oracle: &mut Oracle<Ed25519PublicKey, E>,
@@ -695,7 +693,87 @@ impl FuzzMode for Twinable {
     const TWIN: bool = true;
 }
 
-/// Run all-honest consensus with quint tracing, capturing messages as JSON.
+/// Returns `true` if the trace is interesting enough to save.
+///
+/// Computes a feature vector from Byzantine node 0 activity (votes sent,
+/// certificates sent), finalization height, and last view. If the Euclidean
+/// distance of this vector is <= 3.0, the trace is considered uninteresting.
+fn is_interesting_trace(entries: &[tracing::sniffer::TraceEntry], max_view: u64) -> bool {
+    use tracing::sniffer::{TracedCert, TracedVote, TraceEntry};
+
+    let mut notarize_by_n0: u64 = 0;
+    let mut nullify_by_n0: u64 = 0;
+    let mut finalize_by_n0: u64 = 0;
+    let mut certs_by_n0: u64 = 0;
+    let mut finalized_views = std::collections::HashSet::new();
+    for entry in entries {
+        match entry {
+            TraceEntry::Vote { vote, .. } => {
+                // Count votes signed by n0 (sig field)
+                let sig = match vote {
+                    TracedVote::Notarize { sig, .. } => sig,
+                    TracedVote::Nullify { sig, .. } => sig,
+                    TracedVote::Finalize { sig, .. } => sig,
+                };
+                if sig == "n0" {
+                    match vote {
+                        TracedVote::Notarize { .. } => notarize_by_n0 += 1,
+                        TracedVote::Nullify { .. } => nullify_by_n0 += 1,
+                        TracedVote::Finalize { .. } => finalize_by_n0 += 1,
+                    }
+                }
+            }
+            TraceEntry::Certificate { sender, cert, .. } => {
+                if sender == "n0" {
+                    certs_by_n0 += 1;
+                }
+                if let TracedCert::Finalization { view, .. } = cert {
+                    finalized_views.insert(*view);
+                }
+            }
+        }
+    }
+    let height = finalized_views.len() as u64;
+
+    // Distance uses only Byzantine-specific metrics (not max_view/height
+    // which dominate and make every trace appear interesting).
+    let vec = [
+        notarize_by_n0 as f64,
+        nullify_by_n0 as f64,
+        finalize_by_n0 as f64,
+        certs_by_n0 as f64,
+    ];
+    let distance = vec.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+    // Count how many distinct vote types n0 used
+    let vote_types = (notarize_by_n0 > 0) as u64
+        + (nullify_by_n0 > 0) as u64
+        + (finalize_by_n0 > 0) as u64;
+
+    // Interesting = meaningful Byzantine activity: distance > 3, at least 2
+    // vote types, more than 1 of each vote type, and at least 1 certificate.
+    let interesting = distance > 3.0
+        && vote_types >= 2
+        && certs_by_n0 > 0
+        && notarize_by_n0 > 1
+        && nullify_by_n0 > 1
+        && finalize_by_n0 > 1;
+
+    if !interesting {
+        println!(
+            "skipping uninteresting trace (distance={:.2}, vote_types={}, notarize_n0={}, nullify_n0={}, finalize_n0={}, certs_n0={}, height={}, max_view={})",
+            distance, vote_types, notarize_by_n0, nullify_by_n0, finalize_by_n0, certs_by_n0, height, max_view
+        );
+        return false;
+    }
+    println!(
+        "interesting trace (distance={:.2}, vote_types={}, notarize_n0={}, nullify_n0={}, finalize_n0={}, certs_n0={}, height={}, max_view={})",
+        distance, vote_types, notarize_by_n0, nullify_by_n0, finalize_by_n0, certs_by_n0, height, max_view
+    );
+    true
+}
+
+/// Run consensus with a Byzantine twin- and disruptor-node and quint tracing, capturing messages as JSON.
 pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
@@ -706,21 +784,19 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
     let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
 
     executor.start(|mut context| async move {
-        // Force all-honest, connected configuration
+        // N4F1C3: node 0 is Byzantine twin, nodes 1-3 are honest
         let tracing_input = FuzzInput {
             raw_bytes: input.raw_bytes.clone(),
             required_containers: input.required_containers,
             degraded_network: false,
-            configuration: N4F0C4,
+            configuration: N4F1C3,
             partition: Partition::Connected,
-            strategy: StrategyChoice::SmallScope {
-                fault_rounds: 0,
-                fault_rounds_bound: 0,
-            },
+            strategy: input.strategy,
         };
 
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<SimplexEd25519>(&mut context, &tracing_input).await;
+        let participants_arc: Arc<[_]> = participants.clone().into();
 
         let trace = Arc::new(Mutex::new(TraceLog::default()));
         let relay = Arc::new(relay::Relay::new());
@@ -728,15 +804,288 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
         let mut reporters = Vec::new();
         let config = tracing_input.configuration;
 
-        // Spawn all validators with sniffing receivers
-        for i in 0..(config.n as usize) {
+        // Node 0: Byzantine twin
+        {
+            let idx = 0;
+            let validator = participants[idx].clone();
+            let twin_ctx = context.with_label(&format!("twin_{idx}"));
+            let scheme = schemes[idx].clone();
+            let (vote_network, certificate_network, resolver_network) = registrations
+                .remove(&validator)
+                .expect("validator should be registered");
+
+            let strategy = Strategy::View;
+
+            let make_vote_forwarder = || {
+                let participants = participants_arc.clone();
+                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
+                    let Ok(msg) =
+                        Vote::<
+                            <SimplexEd25519 as simplex::Simplex>::Scheme,
+                            Sha256Digest,
+                        >::decode(message.clone())
+                    else {
+                        return Some(recipients.clone());
+                    };
+                    let (primary, secondary) =
+                        strategy.partitions(msg.view(), participants.as_ref());
+                    match origin {
+                        SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                        SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                    }
+                }
+            };
+            let make_certificate_forwarder = || {
+                let codec = schemes[idx].certificate_codec_config();
+                let participants = participants_arc.clone();
+                move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
+                    let Ok(msg) = Certificate::<
+                        <SimplexEd25519 as simplex::Simplex>::Scheme,
+                        Sha256Digest,
+                    >::decode_cfg(
+                        &mut message.as_ref(), &codec
+                    ) else {
+                        return Some(recipients.clone());
+                    };
+                    let (primary, secondary) =
+                        strategy.partitions(msg.view(), participants.as_ref());
+                    match origin {
+                        SplitOrigin::Primary => Some(Recipients::Some(primary)),
+                        SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
+                    }
+                }
+            };
+            let make_resolver_forwarder = || {
+                move |_: SplitOrigin, recipients: &Recipients<_>, _: &IoBuf| {
+                    Some(recipients.clone())
+                }
+            };
+
+            let make_vote_router = || {
+                let participants = participants_arc.clone();
+                move |(sender, message): &(_, IoBuf)| {
+                    let Ok(msg) = Vote::<
+                        <SimplexEd25519 as simplex::Simplex>::Scheme,
+                        Sha256Digest,
+                    >::decode(message.clone())
+                    else {
+                        return SplitTarget::None;
+                    };
+                    strategy.route(msg.view(), sender, participants.as_ref())
+                }
+            };
+            let make_certificate_router = || {
+                let codec = schemes[idx].certificate_codec_config();
+                let participants = participants_arc.clone();
+                move |(sender, message): &(_, IoBuf)| {
+                    let Ok(msg) = Certificate::<
+                        <SimplexEd25519 as simplex::Simplex>::Scheme,
+                        Sha256Digest,
+                    >::decode_cfg(
+                        &mut message.as_ref(), &codec
+                    ) else {
+                        return SplitTarget::None;
+                    };
+                    strategy.route(msg.view(), sender, participants.as_ref())
+                }
+            };
+            let make_resolver_router =
+                || move |(_sender, _message): &(_, IoBuf)| SplitTarget::Both;
+
+            let (vote_sender, vote_receiver) = vote_network;
+            let (certificate_sender, certificate_receiver) = certificate_network;
+            let (resolver_sender, resolver_receiver) = resolver_network;
+
+            let (vote_sender_primary, vote_sender_secondary) =
+                vote_sender.split_with(make_vote_forwarder());
+            let (vote_receiver_primary, vote_receiver_secondary) = vote_receiver.split_with(
+                twin_ctx.with_label(&format!("pending_split_{idx}")),
+                make_vote_router(),
+            );
+            let (certificate_sender_primary, certificate_sender_secondary) =
+                certificate_sender.split_with(make_certificate_forwarder());
+            let (certificate_receiver_primary, certificate_receiver_secondary) =
+                certificate_receiver.split_with(
+                    twin_ctx.with_label(&format!("recovered_split_{idx}")),
+                    make_certificate_router(),
+                );
+            let (resolver_sender_primary, resolver_sender_secondary) =
+                resolver_sender.split_with(make_resolver_forwarder());
+            let (resolver_receiver_primary, resolver_receiver_secondary) =
+                resolver_receiver.split_with(
+                    twin_ctx.with_label(&format!("resolver_split_{idx}")),
+                    make_resolver_router(),
+                );
+
+            // Wrap primary split receivers with sniffers (captures messages
+            // received by the twin's legitimate engine). The Disrupter's
+            // secondary receivers are NOT sniffed because it generates
+            // mutated/garbage traffic that would cause unbounded trace growth.
+            let node_id = format!("n{}", idx);
+            let sniffing_vote_primary = SniffingReceiver::new(
+                vote_receiver_primary,
+                ChannelKind::Vote,
+                node_id.clone(),
+                participants.clone(),
+                trace.clone(),
+            );
+            let sniffing_cert_primary = SniffingReceiver::new(
+                certificate_receiver_primary,
+                ChannelKind::Certificate,
+                node_id,
+                participants.clone(),
+                trace.clone(),
+            );
+
+            // Primary: legitimate engine
+            let primary_label = format!("twin_{idx}_primary");
+            let primary_context = twin_ctx.with_label(&primary_label);
+            let primary_elector = RoundRobin::<Sha256Hasher>::default();
+            let reporter_cfg = reporter::Config {
+                participants: participants
+                    .as_slice()
+                    .try_into()
+                    .expect("public keys are unique"),
+                scheme: scheme.clone(),
+                elector: primary_elector.clone(),
+            };
+            let reporter =
+                reporter::Reporter::new(primary_context.with_label("reporter"), reporter_cfg);
+
+            let app_cfg = application::Config {
+                hasher: Sha256Hasher::default(),
+                relay: relay.clone(),
+                me: validator.clone(),
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: application::Certifier::Sometimes,
+            };
+            let (actor, application) =
+                application::Application::new(primary_context.with_label("application"), app_cfg);
+            actor.start();
+
+            let blocker = oracle.control(validator.clone());
+            let engine_cfg = config::Config {
+                blocker,
+                scheme: scheme.clone(),
+                elector: primary_elector,
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: primary_label,
+                mailbox_size: 1024,
+                epoch: Epoch::new(EPOCH),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout: Delta::new(10),
+                skip_timeout: Delta::new(5),
+                fetch_concurrent: 1,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+            let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);
+            engine.start(
+                (vote_sender_primary, sniffing_vote_primary),
+                (certificate_sender_primary, sniffing_cert_primary),
+                (resolver_sender_primary, resolver_receiver_primary),
+            );
+
+            // Secondary: twin engine with sniffing receivers
+            let secondary_label = format!("twin_{idx}_secondary");
+            let secondary_context = twin_ctx.with_label(&secondary_label);
+            let secondary_elector = RoundRobin::<Sha256Hasher>::default();
+            let secondary_reporter_cfg = reporter::Config {
+                participants: participants
+                    .as_slice()
+                    .try_into()
+                    .expect("public keys are unique"),
+                scheme: scheme.clone(),
+                elector: secondary_elector.clone(),
+            };
+            let secondary_reporter = reporter::Reporter::new(
+                secondary_context.with_label("reporter"),
+                secondary_reporter_cfg,
+            );
+
+            let secondary_app_cfg = application::Config {
+                hasher: Sha256Hasher::default(),
+                relay: relay.clone(),
+                me: validator.clone(),
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: application::Certifier::Sometimes,
+            };
+            let (secondary_actor, secondary_application) = application::Application::new(
+                secondary_context.with_label("application"),
+                secondary_app_cfg,
+            );
+            secondary_actor.start();
+
+            let sniffing_vote_secondary = SniffingReceiver::new(
+                vote_receiver_secondary,
+                ChannelKind::Vote,
+                format!("n{}", idx),
+                participants.clone(),
+                trace.clone(),
+            );
+            let sniffing_cert_secondary = SniffingReceiver::new(
+                certificate_receiver_secondary,
+                ChannelKind::Certificate,
+                format!("n{}", idx),
+                participants.clone(),
+                trace.clone(),
+            );
+
+            let secondary_blocker = oracle.control(validator.clone());
+            let secondary_engine_cfg = config::Config {
+                blocker: secondary_blocker,
+                scheme: scheme.clone(),
+                elector: secondary_elector,
+                automaton: secondary_application.clone(),
+                relay: secondary_application.clone(),
+                reporter: secondary_reporter.clone(),
+                partition: secondary_label,
+                mailbox_size: 1024,
+                epoch: Epoch::new(EPOCH),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout: Delta::new(10),
+                skip_timeout: Delta::new(5),
+                fetch_concurrent: 1,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(
+                    &secondary_context,
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                ),
+                strategy: Sequential,
+            };
+            let secondary_engine =
+                Engine::new(secondary_context.with_label("engine"), secondary_engine_cfg);
+            secondary_engine.start(
+                (vote_sender_secondary, sniffing_vote_secondary),
+                (certificate_sender_secondary, sniffing_cert_secondary),
+                (resolver_sender_secondary, resolver_receiver_secondary),
+            );
+        }
+
+        // Nodes 1-3: honest validators with sniffing receivers
+        for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
             let (vote_network, cert_network, resolver_network) =
                 registrations.remove(&validator).unwrap();
             let ctx = context.with_label(&format!("validator_{validator}"));
             let node_id = format!("n{}", i);
 
-            // Wrap vote and certificate receivers with sniffers
             let (vote_sender, vote_receiver) = vote_network;
             let (cert_sender, cert_receiver) = cert_network;
             let (resolver_sender, resolver_receiver) = resolver_network;
@@ -756,7 +1105,6 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 trace.clone(),
             );
 
-            // Build engine inline (can't use spawn_honest_validator with wrapped receivers)
             let reporter_cfg = reporter::Config {
                 participants: participants
                     .as_slice()
@@ -765,8 +1113,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 scheme: schemes[i].clone(),
                 elector: elector.clone(),
             };
-            let reporter =
-                reporter::Reporter::new(ctx.with_label("reporter"), reporter_cfg);
+            let reporter = reporter::Reporter::new(ctx.with_label("reporter"), reporter_cfg);
             reporters.push(reporter.clone());
 
             let app_cfg = application::Config {
@@ -813,7 +1160,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             );
         }
 
-        // Wait for finalization
+        // Wait for finalization (honest nodes only)
         let mut finalizers = Vec::new();
         for reporter in reporters.iter_mut() {
             let required_containers = tracing_input.required_containers;
@@ -841,13 +1188,222 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
 
         let trace_data = TraceData {
             n: config.n as usize,
+            faults: config.faults as usize,
             epoch: EPOCH,
             max_view,
             entries: trace.structured.clone(),
         };
 
+        if !is_interesting_trace(&trace.structured, max_view) {
+            return;
+        }
+
         let artifacts_dir =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts/traces/simplex_ed25519_quint");
+        fs::create_dir_all(&artifacts_dir).expect("failed to create artifacts directory");
+
+        let json = serde_json::to_string_pretty(&trace_data).expect("failed to serialize trace");
+        let json_path = artifacts_dir.join(format!("{}.json", hash_hex));
+        fs::write(&json_path, &json).expect("failed to write trace JSON");
+        println!(
+            "wrote {} trace entries to {}",
+            trace.structured.len(),
+            json_path.display()
+        );
+    });
+}
+
+/// Run consensus with a Disrupter as node 0 and quint tracing, capturing messages as JSON.
+pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
+    let rng = FuzzRng::new(input.raw_bytes.clone());
+    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let executor = deterministic::Runner::new(cfg);
+
+    // Hash the raw corpus entry for a unique artifact filename (matches libFuzzer's SHA1 naming)
+    let hash = sha1::Sha1::digest(corpus_bytes);
+    let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+
+    executor.start(|mut context| async move {
+        // N4F1C3: node 0 is Disrupter, nodes 1-3 are honest
+        let tracing_input = FuzzInput {
+            raw_bytes: input.raw_bytes.clone(),
+            required_containers: input.required_containers,
+            degraded_network: false,
+            configuration: N4F1C3,
+            partition: Partition::Connected,
+            strategy: input.strategy,
+        };
+
+        let (oracle, participants, schemes, mut registrations) =
+            setup_network::<SimplexEd25519>(&mut context, &tracing_input).await;
+
+        let trace = Arc::new(Mutex::new(TraceLog::default()));
+        let relay = Arc::new(relay::Relay::new());
+        let elector = RoundRobin::<Sha256Hasher>::default();
+        let mut reporters = Vec::new();
+        let config = tracing_input.configuration;
+
+        // Node 0: Disrupter with sniffing receivers
+        {
+            let validator = participants[0].clone();
+            let (vote_network, cert_network, resolver_network) =
+                registrations.remove(&validator).unwrap();
+            let ctx = context.with_label(&format!("validator_{validator}"));
+            let node_id = "n0".to_string();
+
+            let (vote_sender, vote_receiver) = vote_network;
+            let (cert_sender, cert_receiver) = cert_network;
+            let (resolver_sender, resolver_receiver) = resolver_network;
+
+            let sniffing_vote = SniffingReceiver::new(
+                vote_receiver,
+                ChannelKind::Vote,
+                node_id.clone(),
+                participants.clone(),
+                trace.clone(),
+            );
+            let sniffing_cert = SniffingReceiver::new(
+                cert_receiver,
+                ChannelKind::Certificate,
+                node_id,
+                participants.clone(),
+                trace.clone(),
+            );
+
+            let disrupter = Disrupter::new(
+                ctx.with_label("disrupter"),
+                schemes[0].clone(),
+                SmallScopeForTracing::new(2, 5),
+            );
+            disrupter.start(
+                (vote_sender, sniffing_vote),
+                (cert_sender, sniffing_cert),
+                (resolver_sender, resolver_receiver),
+            );
+        }
+
+        // Nodes 1-3: honest validators with sniffing receivers
+        for i in (config.faults as usize)..(config.n as usize) {
+            let validator = participants[i].clone();
+            let (vote_network, cert_network, resolver_network) =
+                registrations.remove(&validator).unwrap();
+            let ctx = context.with_label(&format!("validator_{validator}"));
+            let node_id = format!("n{}", i);
+
+            let (vote_sender, vote_receiver) = vote_network;
+            let (cert_sender, cert_receiver) = cert_network;
+            let (resolver_sender, resolver_receiver) = resolver_network;
+
+            let sniffing_vote = SniffingReceiver::new(
+                vote_receiver,
+                ChannelKind::Vote,
+                node_id.clone(),
+                participants.clone(),
+                trace.clone(),
+            );
+            let sniffing_cert = SniffingReceiver::new(
+                cert_receiver,
+                ChannelKind::Certificate,
+                node_id,
+                participants.clone(),
+                trace.clone(),
+            );
+
+            let reporter_cfg = reporter::Config {
+                participants: participants
+                    .as_slice()
+                    .try_into()
+                    .expect("public keys are unique"),
+                scheme: schemes[i].clone(),
+                elector: elector.clone(),
+            };
+            let reporter = reporter::Reporter::new(ctx.with_label("reporter"), reporter_cfg);
+            reporters.push(reporter.clone());
+
+            let app_cfg = application::Config {
+                hasher: Sha256Hasher::default(),
+                relay: relay.clone(),
+                me: validator.clone(),
+                propose_latency: (10.0, 5.0),
+                verify_latency: (10.0, 5.0),
+                certify_latency: (10.0, 5.0),
+                should_certify: application::Certifier::Sometimes,
+            };
+            let (actor, application) =
+                application::Application::new(ctx.with_label("application"), app_cfg);
+            actor.start();
+
+            let blocker = oracle.control(validator.clone());
+            let engine_cfg = config::Config {
+                blocker,
+                scheme: schemes[i].clone(),
+                elector: elector.clone(),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: validator.to_string(),
+                mailbox_size: 1024,
+                epoch: Epoch::new(EPOCH),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
+                fetch_timeout: Duration::from_secs(1),
+                activity_timeout: Delta::new(10),
+                skip_timeout: Delta::new(5),
+                fetch_concurrent: 1,
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+                strategy: Sequential,
+            };
+            let engine = Engine::new(ctx.with_label("engine"), engine_cfg);
+            engine.start(
+                (vote_sender, sniffing_vote),
+                (cert_sender, sniffing_cert),
+                (resolver_sender, resolver_receiver),
+            );
+        }
+
+        // Wait for finalization (honest nodes only)
+        let mut finalizers = Vec::new();
+        for reporter in reporters.iter_mut() {
+            let required_containers = tracing_input.required_containers;
+            let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
+            finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
+                while latest.get() < required_containers {
+                    latest = monitor.recv().await.expect("event missing");
+                }
+            }));
+        }
+        join_all(finalizers).await;
+
+        // Run invariant checks
+        let states = invariants::extract(reporters, config.n as usize);
+        invariants::check::<SimplexEd25519>(config.n, states);
+
+        // Serialize trace as JSON
+        let trace = trace.lock();
+        let max_view = trace
+            .structured
+            .iter()
+            .map(|e| e.view())
+            .max()
+            .unwrap_or(1);
+
+        let trace_data = TraceData {
+            n: config.n as usize,
+            faults: config.faults as usize,
+            epoch: EPOCH,
+            max_view,
+            entries: trace.structured.clone(),
+        };
+
+        if !is_interesting_trace(&trace.structured, max_view) {
+            return;
+        }
+
+        let artifacts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("artifacts/traces/simplex_ed25519_quint_disrupter");
         fs::create_dir_all(&artifacts_dir).expect("failed to create artifacts directory");
 
         let json = serde_json::to_string_pretty(&trace_data).expect("failed to serialize trace");

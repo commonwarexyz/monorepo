@@ -14,8 +14,8 @@ set -euo pipefail
 
 TEST_DIR="${1:-traces}"
 TRACES_ROOT="${2:-../fuzz/artifacts/traces}"
-CRASHES_DIR="../fuzz/crashes/traces"
-MAX_LINES=1439
+CRASHES_DIR="../fuzz/artifacts/tracing_crashes/"
+MAX_LINES=1900
 PASS=0
 FAIL=0
 SKIP=0
@@ -38,7 +38,11 @@ for qnt_file in "$TEST_DIR"/trace_*.qnt; do
         continue
     fi
     echo "Testing: $qnt_file"
-    cmd=(quint test --main=tests "$qnt_file")
+    heap_mb=24576
+    quint_bin="$(command -v quint)"
+    cmd=(node --stack-size=65500 "$quint_bin" test --main=tests "$qnt_file")
+
+    NODE_OPTIONS="--max-old-space-size=$heap_mb" "${cmd[@]}"
     if "${cmd[@]}"; then
         PASS=$((PASS + 1))
     else

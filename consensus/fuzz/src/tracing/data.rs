@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub struct TraceData {
     pub n: usize,
+    pub faults: usize,
     pub epoch: u64,
     pub max_view: u64,
     pub entries: Vec<TraceEntry>,

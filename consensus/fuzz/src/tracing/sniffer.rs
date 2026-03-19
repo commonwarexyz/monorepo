@@ -59,12 +59,12 @@ pub enum TracedCert {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TraceEntry {
     Vote {
-        _sender: String,
+        sender: String,
         receiver: String,
         vote: TracedVote,
     },
     Certificate {
-        _sender: String,
+        sender: String,
         receiver: String,
         cert: TracedCert,
     },
@@ -300,7 +300,7 @@ where
                         sender_id, self.node_id, formatted
                     );
                     let structured = TraceEntry::Vote {
-                        _sender: sender_id.clone(),
+                        sender: sender_id.clone(),
                         receiver: self.node_id.clone(),
                         vote: extract_vote(&vote),
                     };
@@ -319,7 +319,7 @@ where
                         sender_id, self.node_id, formatted
                     );
                     let structured = TraceEntry::Certificate {
-                        _sender: sender_id.clone(),
+                        sender: sender_id.clone(),
                         receiver: self.node_id.clone(),
                         cert: extract_cert(&cert, &sender_id),
                     };

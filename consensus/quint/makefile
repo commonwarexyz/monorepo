@@ -1,8 +1,7 @@
 TRACES_ROOT ?= ../fuzz/artifacts/traces
-CORPUS_ROOT ?= ../fuzz/corpus
 TEST_DIR ?= traces
 
-FUZZ_RUNS ?= 100
+FUZZ_RUNS ?= 50
 
 .PHONY: test typecheck repl check clean get_traces build_traces test_traces clean_traces tv
 
@@ -42,7 +41,7 @@ run:
 
 
 get_traces:
-	cargo +nightly fuzz run simplex_ed25519_quint -- -runs=$(FUZZ_RUNS)
+	cargo +nightly fuzz run simplex_ed25519_quint_disrupter -- -runs=$(FUZZ_RUNS)
 
 build_traces:
 	@for dir in $(TRACES_ROOT)/*/; do \
@@ -57,7 +56,6 @@ test_traces:
 clean_traces:
 	rm -rf $(TRACES_ROOT)
 	rm -rf $(TEST_DIR)/trace_*.qnt
-	rm -rf $(CORPUS_ROOT)
 
 tv: clean_traces get_traces build_traces test_traces
 

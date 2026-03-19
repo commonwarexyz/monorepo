@@ -63,6 +63,7 @@ fn main() {
 
         let cfg = EncoderConfig {
             n: trace_data.n,
+            faults: trace_data.faults,
             epoch: trace_data.epoch,
             max_view: trace_data.max_view,
         };
