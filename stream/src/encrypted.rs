@@ -364,6 +364,8 @@ impl<O: Sink> Sender<O> {
     {
         let max_ciphertext_size = self.max_message_size.saturating_add(TAG_SIZE) as usize;
 
+        // First pass: validate each message and compute the exact aggregate size
+        // so we can allocate the output buffer once.
         let bufs = bufs.into_iter();
         let (lower, _) = bufs.size_hint();
         let mut messages = Vec::with_capacity(lower);
@@ -383,12 +385,16 @@ impl<O: Sink> Sender<O> {
             return Ok(());
         }
 
+        // Second pass: write each framed ciphertext back-to-back into the shared
+        // buffer while preserving per-message boundaries for the receiver.
         let mut frame = self.pool.alloc(total);
         for mut msg in messages {
             let ciphertext_len = msg.len() + TAG_SIZE as usize;
             let prefix = UInt(ciphertext_len as u32);
             prefix.write(&mut frame);
 
+            // Encrypt only the bytes for this message, leaving previously written
+            // frames intact in the aggregate buffer.
             let plaintext_offset = frame.len();
             frame.put(&mut msg);
 
