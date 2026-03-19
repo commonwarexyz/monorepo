@@ -51,9 +51,9 @@ impl PeakIterator {
     ///
     /// # Panics
     ///
-    /// Panics if `size` exceeds [Family::MAX_POSITION].
+    /// Panics if `size` exceeds [Family::MAX_NODES].
     pub fn to_nearest_size(size: Position) -> Position {
-        assert!(size <= Family::MAX_POSITION, "size exceeds MAX_POSITION");
+        assert!(size <= Family::MAX_NODES, "size exceeds MAX_NODES");
 
         // Algorithm: A valid MMR size corresponds to a specific number of leaves N, where:
         // mmr_size(N) = 2*N - popcount(N)
@@ -185,9 +185,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "size exceeds MAX_POSITION")]
+    #[should_panic(expected = "size exceeds MAX_NODES")]
     fn test_to_nearest_size_panic() {
-        PeakIterator::to_nearest_size(Family::MAX_POSITION + 1);
+        PeakIterator::to_nearest_size(Family::MAX_NODES + 1);
     }
 
     #[test]
@@ -256,8 +256,8 @@ mod tests {
         assert!(rounded.is_valid_size());
         assert!(rounded <= large_size);
 
-        // Test maximum allowed input
-        let largest_valid_size = Family::MAX_POSITION;
+        // Test maximum allowed input.
+        let largest_valid_size = Family::MAX_NODES;
         let rounded = PeakIterator::to_nearest_size(largest_valid_size);
         assert!(rounded.is_valid_size());
         assert!(rounded <= largest_valid_size);

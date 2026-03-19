@@ -164,7 +164,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
         let mut blueprints = BTreeMap::new();
 
         for (_, loc) in elements {
-            if !loc.is_valid() {
+            if !loc.is_valid_index() {
                 return false;
             }
             // `loc` is valid so it won't overflow from +1
@@ -260,7 +260,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             }
             return Err(ReconstructionError::MissingElements);
         }
-        if !start_loc.is_valid() {
+        if !start_loc.is_valid_index() {
             return Err(ReconstructionError::InvalidStartLoc);
         }
         let end_loc = start_loc
@@ -564,7 +564,7 @@ pub(crate) fn nodes_required_for_multi_proof<F: Family>(
         return Err(super::Error::Empty);
     }
     locations.iter().try_fold(BTreeSet::new(), |mut acc, loc| {
-        if !loc.is_valid() {
+        if !loc.is_valid_index() {
             return Err(super::Error::LocationOverflow(*loc));
         }
         let bp = Blueprint::new(leaves, *loc..*loc + 1)?;
@@ -1177,7 +1177,7 @@ mod tests {
 
         // Verify mangling the location to something invalid should fail.
         let mut wrong_size_proof = multi_proof.clone();
-        wrong_size_proof.leaves = Location::new(*F::MAX_LOCATION + 2);
+        wrong_size_proof.leaves = Location::new(*F::MAX_LEAVES + 2);
         assert!(!wrong_size_proof.verify_multi_inclusion(
             &hasher,
             &[

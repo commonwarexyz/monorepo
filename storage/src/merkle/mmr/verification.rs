@@ -158,7 +158,7 @@ impl<D: Digest> ProofStore<D> {
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if any location in `range` > [crate::merkle::Family::MAX_LOCATION]
+/// Returns [Error::LocationOverflow] if any location in `range` > [crate::merkle::Family::MAX_LEAVES]
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
@@ -176,7 +176,7 @@ pub async fn range_proof<D: Digest, H: Hasher<Family, Digest = D>, S: Storage<Di
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if any location in `range` > [crate::merkle::Family::MAX_LOCATION]
+/// Returns [Error::LocationOverflow] if any location in `range` > [crate::merkle::Family::MAX_LEAVES]
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `leaves`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
@@ -223,7 +223,7 @@ pub async fn historical_range_proof<
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::merkle::Family::MAX_LOCATION]
+/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::merkle::Family::MAX_LEAVES]
 /// Returns [Error::RangeOutOfBounds] if any location in `locations` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty

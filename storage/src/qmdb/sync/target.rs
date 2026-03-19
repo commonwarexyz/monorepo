@@ -56,7 +56,7 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let root = u.arbitrary()?;
-        let max_loc = Family::MAX_LOCATION;
+        let max_loc = Family::MAX_LEAVES;
         let lower = u.int_in_range(0..=*max_loc - 1)?;
         let upper = u.int_in_range(lower + 1..=*max_loc)?;
         Ok(Self {

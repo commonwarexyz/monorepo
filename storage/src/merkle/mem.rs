@@ -119,7 +119,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// Returns [`Error::InvalidPinnedNodes`] if the provided pinned node count is invalid for the
     /// given state.
     ///
-    /// Returns [`Error::LocationOverflow`] if `pruned_to` exceeds [`Family::MAX_LOCATION`].
+    /// Returns [`Error::LocationOverflow`] if `pruned_to` exceeds [`Family::MAX_LEAVES`].
     pub fn from_components(
         hasher: &impl Hasher<F, Digest = D>,
         nodes: Vec<D>,
@@ -241,7 +241,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOverflow`] if `loc` exceeds [`Family::MAX_LOCATION`].
+    /// Returns [`Error::LocationOverflow`] if `loc` exceeds [`Family::MAX_LEAVES`].
     /// Returns [`Error::LeafOutOfBounds`] if `loc` exceeds the current leaf count.
     pub fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
         if loc > self.leaves() {
@@ -284,7 +284,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
         hasher: &impl Hasher<F, Digest = D>,
         loc: Location<F>,
     ) -> Result<Proof<F, D>, Error<F>> {
-        if !loc.is_valid() {
+        if !loc.is_valid_index() {
             return Err(Error::LocationOverflow(loc));
         }
         // loc is valid so it won't overflow from + 1

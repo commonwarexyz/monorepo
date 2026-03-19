@@ -132,10 +132,10 @@ pub struct Family;
 
 impl merkle::Family for Family {
     /// Maximum valid position (node count): `2^63 - 2` (the size for `2^62 + 30` leaves).
-    const MAX_POSITION: Position = Position::new(0x7FFF_FFFF_FFFF_FFFE);
+    const MAX_NODES: Position = Position::new(0x7FFF_FFFF_FFFF_FFFE);
 
     /// Maximum valid location (leaf count): `2^62 + 30`.
-    const MAX_LOCATION: Location = Location::new(0x4000_0000_0000_001E);
+    const MAX_LEAVES: Location = Location::new(0x4000_0000_0000_001E);
 
     fn location_to_position(loc: Location) -> Position {
         let loc = loc.as_u64();

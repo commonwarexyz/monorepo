@@ -282,44 +282,40 @@ mod tests {
 
     #[test]
     fn test_max_location_is_provable() {
-        // Test that the validation logic accepts MAX_LOCATION as a valid leaf count.
-        // With MAX_LOCATION leaves, valid locations are 0..MAX_LOCATION-1.
-        // The range MAX_LOCATION-1..MAX_LOCATION proves the last element.
-        let max_loc = Family::MAX_LOCATION;
+        // MAX_LEAVES is the largest valid leaf count.
+        let max_loc = Family::MAX_LEAVES;
         let max_loc_plus_1 = Location::new(*max_loc + 1);
 
         let result = Blueprint::new(max_loc, max_loc - 1..max_loc);
         assert!(
             result.is_ok(),
-            "Should be able to prove with MAX_LOCATION leaves"
+            "Should be able to prove with MAX_LEAVES leaves"
         );
 
-        // MAX_LOCATION + 1 should be rejected (exceeds MAX_LOCATION)
+        // MAX_LEAVES + 1 should be rejected.
         let result_overflow = Blueprint::new(max_loc_plus_1, max_loc..max_loc_plus_1);
         assert!(
             result_overflow.is_err(),
-            "Should reject location > MAX_LOCATION"
+            "Should reject location > MAX_LEAVES"
         );
         matches!(result_overflow, Err(merkle::Error::LocationOverflow(_)));
     }
 
     #[test]
     fn test_max_location_multi_proof() {
-        // Test that multi_proof can handle MAX_LOCATION
-        // Should be able to generate multi-proof for MAX_LOCATION
-        let max_loc = Family::MAX_LOCATION;
+        let max_loc = Family::MAX_LEAVES;
         let result = nodes_required_for_multi_proof(max_loc, &[max_loc - 1]);
         assert!(
             result.is_ok(),
-            "Should be able to generate multi-proof for MAX_LOCATION"
+            "Should be able to generate multi-proof for MAX_LEAVES"
         );
 
-        // Should reject MAX_LOCATION + 1
+        // MAX_LEAVES + 1 should be rejected.
         let invalid_loc = max_loc + 1;
         let result_overflow = nodes_required_for_multi_proof(invalid_loc, &[max_loc]);
         assert!(
             result_overflow.is_err(),
-            "Should reject location > MAX_LOCATION in multi-proof"
+            "Should reject location > MAX_LEAVES in multi-proof"
         );
     }
 
@@ -411,13 +407,13 @@ mod tests {
         //
         // For 63 peaks: N = 2^63 - 1 (63 bits set), size = 2*(2^63 - 1) - 63 = 2^64 - 65
 
-        // This exceeds MAX_POSITION, so is_valid_size() returns false.
+        // This exceeds MAX_NODES, so is_valid_size() returns false.
 
         let n_for_63_peaks = (1u128 << 63) - 1;
         let size_for_63_peaks = 2 * n_for_63_peaks - 63; // = 2^64 - 65
         assert!(
-            size_for_63_peaks > *Family::MAX_POSITION as u128,
-            "63 peaks requires size {size_for_63_peaks} > MAX_POSITION",
+            size_for_63_peaks > *Family::MAX_NODES as u128,
+            "63 peaks requires size {size_for_63_peaks} > MAX_NODES",
         );
 
         let size_truncated = size_for_63_peaks as u64;

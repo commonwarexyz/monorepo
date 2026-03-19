@@ -67,9 +67,9 @@ impl PeakIterator {
     ///
     /// # Panics
     ///
-    /// Panics if `size` exceeds [crate::merkle::Family::MAX_POSITION].
+    /// Panics if `size` exceeds [crate::merkle::Family::MAX_NODES].
     pub fn to_nearest_size(size: Position) -> Position {
-        assert!(size <= Family::MAX_POSITION, "size exceeds MAX_POSITION");
+        assert!(size <= Family::MAX_NODES, "size exceeds MAX_NODES");
 
         if size.as_u64() == 0 {
             return size;
@@ -327,31 +327,32 @@ mod tests {
 
     #[test]
     fn test_max_position_and_max_location_consistent() {
-        // MAX_POSITION must be a valid MMB size whose leaf count is MAX_LOCATION.
-        let max_pos = Family::MAX_POSITION.as_u64();
-        let max_loc = Family::MAX_LOCATION.as_u64();
+        let max_pos = Family::MAX_NODES.as_u64();
+        let max_loc = Family::MAX_LEAVES.as_u64();
+
+        // MAX_NODES should correspond to MAX_LEAVES leaves.
         assert_eq!(
             Location::try_from(Position::new(max_pos)).ok(),
             Some(Location::new(max_loc)),
-            "MAX_POSITION should correspond to MAX_LOCATION leaves"
+            "MAX_NODES should correspond to MAX_LEAVES leaves"
         );
 
         // The size formula should agree.
         assert_eq!(
             Position::try_from(Location::new(max_loc)).unwrap().as_u64(),
             max_pos,
-            "location_to_position(MAX_LOCATION) should equal MAX_POSITION"
+            "location_to_position(MAX_LEAVES) should equal MAX_NODES"
         );
 
-        // One more leaf should exceed MAX_POSITION.
+        // One more leaf should exceed MAX_NODES.
         let over_size = *Family::location_to_position(Location::new(max_loc + 1));
         assert!(
             over_size > max_pos,
-            "one more leaf should exceed MAX_POSITION"
+            "one more leaf should exceed MAX_NODES"
         );
 
-        // Invalid sizes above MAX_POSITION should be rejected.
-        assert!(Location::try_from(Position::new(max_pos + 1)).is_err());
+        // Sizes above MAX_NODES should be rejected.
+        assert!(!Position::new(max_pos + 1).is_valid());
     }
 
     /// Slow reference implementation for `nodes_to_pin` that recurses into every retained branch.

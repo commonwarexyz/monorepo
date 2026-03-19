@@ -31,25 +31,25 @@ use thiserror::Error;
 /// Provides the per-family constants and conversion functions that differentiate
 /// MMR from MMB (or other future Merkle structures).
 pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
-    /// Maximum valid `Position` value (the largest valid node count / size).
-    const MAX_POSITION: Position<Self>;
+    /// Maximum valid node count / size.
+    const MAX_NODES: Position<Self>;
 
-    /// Maximum valid `Location` value (the largest valid leaf count).
-    const MAX_LOCATION: Location<Self>;
+    /// Maximum valid leaf count.
+    const MAX_LEAVES: Location<Self>;
 
     /// Convert a leaf location to its node position, or equivalently, convert a leaf count to the
     /// corresponding total node count (size).
     ///
-    /// Valid for any `loc` whose result does not overflow `u64`. Callers that stay within
-    /// `loc <= MAX_LOCATION` are always safe; values slightly above may also be valid
-    /// (e.g., for probing the next size boundary).
+    /// The public, guaranteed domain is `loc <= MAX_LEAVES`. Some implementations may also accept
+    /// slightly larger temporary values for internal probing (for example, when checking the next
+    /// size boundary), but callers must not rely on that behavior.
     fn location_to_position(loc: Location<Self>) -> Position<Self>;
 
     /// Convert a node position to its leaf location, or `None` if the position is not a leaf.
     /// Equivalently, convert a total node count (size) to the corresponding leaf count, returning
     /// `None` if the size is not valid.
     ///
-    /// The caller guarantees `pos <= MAX_POSITION`.
+    /// The caller guarantees `pos <= MAX_NODES`.
     fn position_to_location(pos: Position<Self>) -> Option<Location<Self>>;
 
     /// Whether `size` is a valid tree size for this Merkle structure.
@@ -85,11 +85,11 @@ pub enum Error<F: Family> {
     NonLeaf(Position<F>),
 
     /// The position exceeds the valid range.
-    #[error("{0} > MAX_POSITION")]
+    #[error("{0} > MAX_NODES")]
     PositionOverflow(Position<F>),
 
     /// The location exceeds the valid range.
-    #[error("{0} > MAX_LOCATION")]
+    #[error("{0} > MAX_LEAVES")]
     LocationOverflow(Location<F>),
 
     /// The range is empty but must contain at least one element.

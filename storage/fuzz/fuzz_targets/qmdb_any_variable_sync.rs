@@ -90,7 +90,7 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             5 => Ok(Operation::GetMetadata),
             6 => {
-                let start_loc = u.arbitrary::<u64>()? % (*Family::MAX_LOCATION + 1);
+                let start_loc = u.arbitrary::<u64>()? % (*Family::MAX_LEAVES + 1);
                 let start_loc = Location::new(start_loc);
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
@@ -98,7 +98,7 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             7 => {
                 let size = u.arbitrary()?;
-                let start_loc = u.arbitrary::<u64>()? % (*Family::MAX_LOCATION + 1);
+                let start_loc = u.arbitrary::<u64>()? % (*Family::MAX_LEAVES + 1);
                 let start_loc = Location::new(start_loc);
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);

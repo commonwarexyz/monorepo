@@ -92,10 +92,10 @@ pub struct Family;
 
 impl merkle::Family for Family {
     /// Maximum valid position: the largest MMR size for 2^62 leaves is `2^63 - 1`.
-    const MAX_POSITION: Position = Position::new(0x7FFFFFFFFFFFFFFF); // (1 << 63) - 1
+    const MAX_NODES: Position = Position::new(0x7FFFFFFFFFFFFFFF); // (1 << 63) - 1
 
     /// Maximum valid location: the largest leaf count is `2^62`.
-    const MAX_LOCATION: Location = Location::new(0x4000_0000_0000_0000); // 2^62
+    const MAX_LEAVES: Location = Location::new(0x4000_0000_0000_0000); // 2^62
 
     fn location_to_position(loc: Location) -> Position {
         let loc = *loc;
@@ -115,7 +115,7 @@ impl merkle::Family for Family {
         }
 
         // Find the height of the perfect binary tree containing this position.
-        // Safe: pos + 1 cannot overflow since pos <= MAX_POSITION (checked by caller).
+        // Safe: pos + 1 cannot overflow since pos <= MAX_NODES (checked by caller).
         let start = u64::MAX >> (pos + 1).leading_zeros();
         let height = start.trailing_ones();
         // Height 0 means this position is a peak (not a leaf in a tree).
@@ -220,8 +220,8 @@ mod tests {
     use super::*;
     use commonware_cryptography::Sha256;
 
-    const MAX_POSITION: Position = <Family as crate::merkle::Family>::MAX_POSITION;
-    const MAX_LOCATION: Location = <Family as crate::merkle::Family>::MAX_LOCATION;
+    const MAX_NODES: Position = <Family as crate::merkle::Family>::MAX_NODES;
+    const MAX_LEAVES: Location = <Family as crate::merkle::Family>::MAX_LEAVES;
 
     // --- Position tests ---
 
@@ -256,11 +256,17 @@ mod tests {
         let pos = Position::new(10);
         assert_eq!(pos.checked_add(5).unwrap(), 15);
         assert!(Position::new(u64::MAX).checked_add(1).is_none());
-        assert!(MAX_POSITION.checked_add(1).is_none());
-        assert!(Position::new(*MAX_POSITION - 5).checked_add(10).is_none());
+        assert!(MAX_NODES.checked_add(1).is_none());
+        assert!(Position::new(*MAX_NODES - 5).checked_add(10).is_none());
+        // MAX_NODES - 10 + 10 = MAX_NODES, which IS valid (inclusive bound)
         assert_eq!(
-            Position::new(*MAX_POSITION - 10).checked_add(10).unwrap(),
-            MAX_POSITION
+            Position::new(*MAX_NODES - 10).checked_add(10).unwrap(),
+            *MAX_NODES
+        );
+        // MAX_NODES - 11 + 10 = MAX_NODES - 1, also valid
+        assert_eq!(
+            Position::new(*MAX_NODES - 11).checked_add(10).unwrap(),
+            *MAX_NODES - 1
         );
     }
 
@@ -275,12 +281,13 @@ mod tests {
     fn test_position_saturating_add() {
         let pos = Position::new(10);
         assert_eq!(pos.saturating_add(5), 15);
-        assert_eq!(Position::new(u64::MAX).saturating_add(1), MAX_POSITION);
-        assert_eq!(MAX_POSITION.saturating_add(1), MAX_POSITION);
-        assert_eq!(MAX_POSITION.saturating_add(1000), MAX_POSITION);
+        // Saturates AT MAX_NODES (inclusive bound)
+        assert_eq!(Position::new(u64::MAX).saturating_add(1), *MAX_NODES);
+        assert_eq!(MAX_NODES.saturating_add(1), *MAX_NODES);
+        assert_eq!(MAX_NODES.saturating_add(1000), *MAX_NODES);
         assert_eq!(
-            Position::new(*MAX_POSITION - 5).saturating_add(10),
-            MAX_POSITION
+            Position::new(*MAX_NODES - 5).saturating_add(10),
+            *MAX_NODES
         );
     }
 
@@ -332,16 +339,16 @@ mod tests {
     fn test_max_position() {
         let max_leaves = 1u64 << 62;
         let max_size = 2 * max_leaves - 1;
-        assert_eq!(*MAX_POSITION, max_size);
-        assert_eq!(*MAX_POSITION, (1u64 << 63) - 1);
+        assert_eq!(*MAX_NODES, max_size);
+        assert_eq!(*MAX_NODES, (1u64 << 63) - 1);
         assert_eq!(max_size.leading_zeros(), 1);
 
         let overflow_size = 2 * (max_leaves + 1) - 1;
         assert_eq!(overflow_size.leading_zeros(), 0);
 
-        let pos = Position::try_from(MAX_LOCATION).unwrap();
-        assert_eq!(pos, MAX_POSITION);
-        assert!(pos.is_valid());
+        // MAX_LEAVES is a valid location (inclusive bound), and converts to MAX_NODES.
+        let pos = Position::try_from(MAX_LEAVES).unwrap();
+        assert_eq!(pos, MAX_NODES);
     }
 
     #[test]
@@ -372,7 +379,7 @@ mod tests {
         assert!(!Position::new(u64::MAX).is_valid_size());
         assert!(Position::new(u64::MAX >> 1).is_valid_size());
         assert!(!Position::new((u64::MAX >> 1) + 1).is_valid_size());
-        assert!(MAX_POSITION.is_valid_size());
+        assert!(MAX_NODES.is_valid_size());
     }
 
     #[test]
@@ -385,17 +392,21 @@ mod tests {
         let pos = Position::new(12345);
         assert_eq!(Position::read(&mut pos.encode().as_ref()).unwrap(), pos);
 
+        // MAX_NODES is a valid value (inclusive bound), so it should decode successfully
         assert_eq!(
-            Position::read(&mut MAX_POSITION.encode().as_ref()).unwrap(),
-            MAX_POSITION
+            Position::read(&mut MAX_NODES.encode().as_ref()).unwrap(),
+            MAX_NODES
         );
+
+        let pos = MAX_NODES - 1;
+        assert_eq!(Position::read(&mut pos.encode().as_ref()).unwrap(), pos);
     }
 
     #[test]
     fn test_position_read_cfg_invalid_values() {
         use commonware_codec::{varint::UInt, Encode, ReadExt};
 
-        let encoded = UInt(*MAX_POSITION + 1).encode();
+        let encoded = UInt(*MAX_NODES + 1).encode();
         assert!(matches!(
             Position::read(&mut encoded.as_ref()),
             Err(commonware_codec::Error::Invalid("Position", _))
@@ -471,10 +482,11 @@ mod tests {
             merkle::Error::PositionOverflow(p) if p == overflow_pos
         ));
 
-        let loc = Location::try_from(MAX_POSITION).unwrap();
-        assert_eq!(loc, MAX_LOCATION);
+        // MAX_NODES is a valid position (inclusive bound) and converts to MAX_LEAVES.
+        let loc = Location::try_from(MAX_NODES).unwrap();
+        assert_eq!(loc, MAX_LEAVES);
 
-        let overflow_pos = MAX_POSITION + 1;
+        let overflow_pos = MAX_NODES + 1;
         assert!(matches!(
             Location::try_from(overflow_pos).unwrap_err(),
             merkle::Error::PositionOverflow(p) if p == overflow_pos
@@ -486,9 +498,13 @@ mod tests {
         let loc = Location::new(10);
         assert_eq!(loc.checked_add(5).unwrap(), 15);
         assert!(Location::new(u64::MAX).checked_add(1).is_none());
-        assert!(MAX_LOCATION.checked_add(1).is_none());
-        let loc = Location::new(*MAX_LOCATION - 10);
-        assert_eq!(loc.checked_add(10).unwrap(), *MAX_LOCATION);
+        assert!(MAX_LEAVES.checked_add(1).is_none());
+        // MAX_LEAVES - 10 + 10 = MAX_LEAVES, which IS valid (inclusive bound)
+        let loc = Location::new(*MAX_LEAVES - 10);
+        assert_eq!(loc.checked_add(10).unwrap(), *MAX_LEAVES);
+        // MAX_LEAVES - 11 + 10 = MAX_LEAVES - 1, also valid
+        let loc = Location::new(*MAX_LEAVES - 11);
+        assert_eq!(loc.checked_add(10).unwrap(), *MAX_LEAVES - 1);
     }
 
     #[test]
@@ -502,9 +518,10 @@ mod tests {
     fn test_location_saturating_add() {
         let loc = Location::new(10);
         assert_eq!(loc.saturating_add(5), 15);
-        assert_eq!(Location::new(u64::MAX).saturating_add(1), MAX_LOCATION);
-        assert_eq!(MAX_LOCATION.saturating_add(1), MAX_LOCATION);
-        assert_eq!(MAX_LOCATION.saturating_add(1000), MAX_LOCATION);
+        // Saturates AT MAX_LEAVES (inclusive bound)
+        assert_eq!(Location::new(u64::MAX).saturating_add(1), *MAX_LEAVES);
+        assert_eq!(MAX_LEAVES.saturating_add(1), *MAX_LEAVES);
+        assert_eq!(MAX_LEAVES.saturating_add(1000), *MAX_LEAVES);
     }
 
     #[test]
@@ -555,24 +572,28 @@ mod tests {
     fn test_location_is_valid() {
         assert!(Location::new(0).is_valid());
         assert!(Location::new(1000).is_valid());
-        assert!(MAX_LOCATION.is_valid());
+        // MAX_LEAVES IS valid (inclusive bound)
+        assert!(MAX_LEAVES.is_valid());
+        assert!((MAX_LEAVES - 1).is_valid());
+        assert!(!Location::new(*MAX_LEAVES + 1).is_valid());
         assert!(!Location::new(u64::MAX).is_valid());
     }
 
     #[test]
     fn test_max_location_boundary() {
-        assert!(MAX_LOCATION.is_valid());
-        let pos = Position::try_from(MAX_LOCATION).unwrap();
-        assert_eq!(pos, MAX_POSITION);
+        // MAX_LEAVES IS valid (inclusive bound) and round-trips through Position as MAX_NODES.
+        assert!(MAX_LEAVES.is_valid());
+        let pos = Position::try_from(MAX_LEAVES).unwrap();
+        assert_eq!(pos, MAX_NODES);
         assert!(pos.is_valid());
 
         let loc = Location::try_from(pos).unwrap();
-        assert_eq!(loc, MAX_LOCATION);
+        assert_eq!(loc, MAX_LEAVES);
     }
 
     #[test]
     fn test_overflow_location_returns_error() {
-        let over_loc = Location::new(*MAX_LOCATION + 1);
+        let over_loc = Location::new(*MAX_LEAVES + 1);
         assert!(!over_loc.is_valid());
         assert!(matches!(
             Position::try_from(over_loc).unwrap_err(),
@@ -590,17 +611,21 @@ mod tests {
         let loc = Location::new(12345);
         assert_eq!(Location::read(&mut loc.encode().as_ref()).unwrap(), loc);
 
+        // MAX_LEAVES is a valid value (inclusive bound), so it should decode successfully
         assert_eq!(
-            Location::read(&mut MAX_LOCATION.encode().as_ref()).unwrap(),
-            MAX_LOCATION
+            Location::read(&mut MAX_LEAVES.encode().as_ref()).unwrap(),
+            MAX_LEAVES
         );
+
+        let loc = MAX_LEAVES - 1;
+        assert_eq!(Location::read(&mut loc.encode().as_ref()).unwrap(), loc);
     }
 
     #[test]
     fn test_location_read_cfg_invalid_values() {
         use commonware_codec::{varint::UInt, Encode, ReadExt};
 
-        let encoded = UInt(*MAX_LOCATION + 1).encode();
+        let encoded = UInt(*MAX_LEAVES + 1).encode();
         assert!(matches!(
             Location::read(&mut encoded.as_ref()),
             Err(commonware_codec::Error::Invalid("Location", _))

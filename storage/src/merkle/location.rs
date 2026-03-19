@@ -21,7 +21,7 @@ pub struct Location<F: Family>(u64, PhantomData<F>);
 #[cfg(feature = "arbitrary")]
 impl<F: Family> arbitrary::Arbitrary<'_> for Location<F> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let value = u.int_in_range(0..=F::MAX_LOCATION.as_u64())?;
+        let value = u.int_in_range(0..=F::MAX_LEAVES.as_u64())?;
         Ok(Self(value, PhantomData))
     }
 }
@@ -39,11 +39,16 @@ impl<F: Family> Location<F> {
         self.0
     }
 
-    /// Returns `true` iff this value is within the valid range (`<= MAX`).
-    /// This covers both leaf indices (`< MAX`) and leaf counts (`<= MAX`).
+    /// Returns `true` iff this value is a valid leaf count (`<= MAX_LEAVES`).
     #[inline]
     pub const fn is_valid(self) -> bool {
-        self.0 <= F::MAX_LOCATION.as_u64()
+        self.0 <= F::MAX_LEAVES.as_u64()
+    }
+
+    /// Returns `true` iff this value is a valid 0-based leaf index (`< MAX_LEAVES`).
+    #[inline]
+    pub const fn is_valid_index(self) -> bool {
+        self.0 < F::MAX_LEAVES.as_u64()
     }
 
     /// Return `self + rhs` returning `None` on overflow or if result exceeds the maximum.
@@ -51,7 +56,7 @@ impl<F: Family> Location<F> {
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {
         match self.0.checked_add(rhs) {
             Some(value) => {
-                if value <= F::MAX_LOCATION.as_u64() {
+                if value <= F::MAX_LEAVES.as_u64() {
                     Some(Self::new(value))
                 } else {
                     None
@@ -74,8 +79,8 @@ impl<F: Family> Location<F> {
     #[inline]
     pub const fn saturating_add(self, rhs: u64) -> Self {
         let result = self.0.saturating_add(rhs);
-        if result > F::MAX_LOCATION.as_u64() {
-            F::MAX_LOCATION
+        if result > F::MAX_LEAVES.as_u64() {
+            F::MAX_LEAVES
         } else {
             Self::new(result)
         }
@@ -203,7 +208,7 @@ impl<F: Family> commonware_codec::Read for Location<F> {
         } else {
             Err(commonware_codec::Error::Invalid(
                 "Location",
-                "value exceeds MAX_LOCATION",
+                "value exceeds MAX_LEAVES",
             ))
         }
     }
@@ -211,8 +216,10 @@ impl<F: Family> commonware_codec::Read for Location<F> {
 
 /// Attempt to derive the [Location] of a given node [Position].
 ///
-/// Returns an error if the position does not correspond to a leaf or if position
-/// overflow occurs.
+/// Equivalently, convert a total node count (size) to the corresponding leaf count.
+///
+/// Returns an error if `pos` exceeds the valid range or if it is neither a leaf position nor a
+/// valid size.
 impl<F: Family> TryFrom<Position<F>> for Location<F> {
     type Error = super::Error<F>;
 

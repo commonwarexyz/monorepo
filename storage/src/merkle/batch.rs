@@ -481,7 +481,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Readable
         hasher: &impl Hasher<F, Digest = D>,
         loc: Location<F>,
     ) -> Result<Proof<F, D>, Error<F>> {
-        if !loc.is_valid() {
+        if !loc.is_valid_index() {
             return Err(Error::LocationOverflow(loc));
         }
         self.range_proof(hasher, loc..loc + 1).map_err(|e| match e {

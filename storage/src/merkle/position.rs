@@ -7,14 +7,21 @@ use core::{
     ops::{Add, AddAssign, Deref, Sub, SubAssign},
 };
 
-/// A [Position] is an index into a Merkle structure's nodes.
-/// This is in contrast to a [Location], which is an index into the structure's _leaves_.
+/// A [Position] is a node index or node count in a Merkle structure.
+/// This is in contrast to a [Location], which is a leaf index or leaf count.
+///
+/// # Limits
+///
+/// Values up to the family's maximum are valid (see [Position::is_valid]). As a 0-based node
+/// index, valid indices are `0..MAX - 1`. As a node count or total size, the maximum is `MAX`
+/// itself. Use [Position::is_valid_size] to ask whether a count is a structurally valid size for
+/// the specific Merkle family.
 pub struct Position<F: Family>(u64, PhantomData<F>);
 
 #[cfg(feature = "arbitrary")]
 impl<F: Family> arbitrary::Arbitrary<'_> for Position<F> {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let value = u.int_in_range(0..=F::MAX_POSITION.as_u64())?;
+        let value = u.int_in_range(0..=F::MAX_NODES.as_u64())?;
         Ok(Self::new(value))
     }
 }
@@ -32,11 +39,16 @@ impl<F: Family> Position<F> {
         self.0
     }
 
-    /// Returns `true` iff this value is within the valid range (`<= MAX`).
-    /// This covers both node indices (`< MAX`) and node counts (`<= MAX`).
+    /// Returns `true` iff this value is a valid node count or size (`<= MAX_NODES`).
     #[inline]
     pub const fn is_valid(self) -> bool {
-        self.0 <= F::MAX_POSITION.as_u64()
+        self.0 <= F::MAX_NODES.as_u64()
+    }
+
+    /// Returns `true` iff this value is a valid 0-based node index (`< MAX_NODES`).
+    #[inline]
+    pub const fn is_valid_index(self) -> bool {
+        self.0 < F::MAX_NODES.as_u64()
     }
 
     /// Return `self + rhs` returning `None` on overflow or if result exceeds the maximum.
@@ -44,7 +56,7 @@ impl<F: Family> Position<F> {
     pub const fn checked_add(self, rhs: u64) -> Option<Self> {
         match self.0.checked_add(rhs) {
             Some(value) => {
-                if value <= F::MAX_POSITION.as_u64() {
+                if value <= F::MAX_NODES.as_u64() {
                     Some(Self::new(value))
                 } else {
                     None
@@ -67,8 +79,8 @@ impl<F: Family> Position<F> {
     #[inline]
     pub const fn saturating_add(self, rhs: u64) -> Self {
         let result = self.0.saturating_add(rhs);
-        if result > F::MAX_POSITION.as_u64() {
-            F::MAX_POSITION
+        if result > F::MAX_NODES.as_u64() {
+            F::MAX_NODES
         } else {
             Self::new(result)
         }
@@ -181,7 +193,9 @@ impl<F: Family> From<Position<F>> for u64 {
     }
 }
 
-/// Try to convert a leaf [Location] to its node [Position].
+/// Convert a leaf [Location] to its corresponding node [Position].
+///
+/// Equivalently, convert a leaf count to the corresponding total node count (size).
 ///
 /// Returns [`super::Error::LocationOverflow`] if `!loc.is_valid()`.
 impl<F: Family> TryFrom<Location<F>> for Position<F> {
@@ -333,7 +347,7 @@ impl<F: Family> commonware_codec::Read for Position<F> {
         } else {
             Err(commonware_codec::Error::Invalid(
                 "Position",
-                "value exceeds MAX_POSITION",
+                "value exceeds MAX_NODES",
             ))
         }
     }
@@ -385,18 +399,25 @@ mod tests {
         // Overflow returns None
         assert!(Position::new(u64::MAX).checked_add(1).is_none());
 
-        // Exceeding MAX_POSITION returns None
-        assert!(MmrFamily::MAX_POSITION.checked_add(1).is_none());
-        assert!(Position::new(*MmrFamily::MAX_POSITION - 5)
+        // Exceeding MAX_NODES returns None, but MAX_NODES itself IS valid (inclusive bound)
+        assert!(MmrFamily::MAX_NODES.checked_add(1).is_none());
+        assert!(Position::new(*MmrFamily::MAX_NODES - 5)
             .checked_add(10)
             .is_none());
-
-        // At MAX_POSITION is OK
+        // MAX_NODES - 10 + 10 = MAX_NODES, which IS valid (inclusive bound)
         assert_eq!(
-            Position::new(*MmrFamily::MAX_POSITION - 10)
+            Position::new(*MmrFamily::MAX_NODES - 10)
                 .checked_add(10)
                 .unwrap(),
-            MmrFamily::MAX_POSITION
+            *MmrFamily::MAX_NODES
+        );
+
+        // MAX_NODES - 11 + 10 = MAX_NODES - 1, also valid
+        assert_eq!(
+            Position::new(*MmrFamily::MAX_NODES - 11)
+                .checked_add(10)
+                .unwrap(),
+            *MmrFamily::MAX_NODES - 1
         );
     }
 
@@ -412,22 +433,22 @@ mod tests {
         let pos = Position::new(10);
         assert_eq!(pos.saturating_add(5), 15);
 
-        // Saturates at MAX_POSITION, not u64::MAX
+        // Saturates AT MAX_NODES (inclusive bound)
         assert_eq!(
             Position::new(u64::MAX).saturating_add(1),
-            MmrFamily::MAX_POSITION
+            *MmrFamily::MAX_NODES
         );
         assert_eq!(
-            MmrFamily::MAX_POSITION.saturating_add(1),
-            MmrFamily::MAX_POSITION
+            MmrFamily::MAX_NODES.saturating_add(1),
+            *MmrFamily::MAX_NODES
         );
         assert_eq!(
-            MmrFamily::MAX_POSITION.saturating_add(1000),
-            MmrFamily::MAX_POSITION
+            MmrFamily::MAX_NODES.saturating_add(1000),
+            *MmrFamily::MAX_NODES
         );
         assert_eq!(
-            Position::new(*MmrFamily::MAX_POSITION - 5).saturating_add(10),
-            MmrFamily::MAX_POSITION
+            Position::new(*MmrFamily::MAX_NODES - 5).saturating_add(10),
+            *MmrFamily::MAX_NODES
         );
     }
 
@@ -492,21 +513,20 @@ mod tests {
 
     #[test]
     fn test_max_position() {
-        // MAX_POSITION = max MMR size = 2^63 - 1 (for 2^62 leaves).
+        // MAX_NODES = max MMR size = 2^63 - 1 (for 2^62 leaves).
         let max_leaves = 1u64 << 62;
         let max_size = 2 * max_leaves - 1; // 2^63 - 1
-        assert_eq!(*MmrFamily::MAX_POSITION, max_size);
-        assert_eq!(*MmrFamily::MAX_POSITION, (1u64 << 63) - 1);
+        assert_eq!(*MmrFamily::MAX_NODES, max_size);
+        assert_eq!(*MmrFamily::MAX_NODES, (1u64 << 63) - 1);
         assert_eq!(max_size.leading_zeros(), 1); // top bit clear
 
         // One more leaf would overflow: size = 2^63, top bit set.
         let overflow_size = 2 * (max_leaves + 1) - 1;
         assert_eq!(overflow_size.leading_zeros(), 0);
 
-        // MAX_LOCATION converts to MAX_POSITION.
-        let pos = Position::try_from(MmrFamily::MAX_LOCATION).unwrap();
-        assert_eq!(pos, MmrFamily::MAX_POSITION);
-        assert!(pos.is_valid());
+        // MAX_LEAVES is a valid location (inclusive bound) and converts to MAX_NODES.
+        let pos = Position::try_from(MmrFamily::MAX_LEAVES).unwrap();
+        assert_eq!(pos, MmrFamily::MAX_NODES);
     }
 
     #[test]
@@ -539,9 +559,9 @@ mod tests {
 
         // Test overflow boundaries.
         assert!(!Position::new(u64::MAX).is_valid_size());
-        assert!(Position::new(u64::MAX >> 1).is_valid_size()); // 2^63 - 1 = MAX_POSITION
+        assert!(Position::new(u64::MAX >> 1).is_valid_size()); // 2^63 - 1 = MAX_NODES
         assert!(!Position::new((u64::MAX >> 1) + 1).is_valid_size());
-        assert!(MmrFamily::MAX_POSITION.is_valid_size()); // MAX_POSITION is the largest valid MMR size
+        assert!(MmrFamily::MAX_NODES.is_valid_size()); // MAX_NODES is the largest valid MMR size
     }
 
     #[test]
@@ -560,8 +580,14 @@ mod tests {
         let decoded = Position::read(&mut encoded.as_ref()).unwrap();
         assert_eq!(decoded, pos);
 
-        // Test MAX_POSITION (boundary)
-        let pos = MmrFamily::MAX_POSITION;
+        // MAX_NODES is a valid value (inclusive bound), so it should decode successfully
+        let pos = MmrFamily::MAX_NODES;
+        let encoded = pos.encode();
+        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        assert_eq!(decoded, pos);
+
+        // MAX_NODES - 1 is also valid
+        let pos = MmrFamily::MAX_NODES - 1;
         let encoded = pos.encode();
         let decoded = Position::read(&mut encoded.as_ref()).unwrap();
         assert_eq!(decoded, pos);
@@ -571,8 +597,8 @@ mod tests {
     fn test_read_cfg_invalid_values() {
         use commonware_codec::{varint::UInt, Encode, ReadExt};
 
-        // Encode MAX_POSITION + 1 as a raw varint, then try to decode as Position
-        let invalid_value = *MmrFamily::MAX_POSITION + 1;
+        // Encode MAX_NODES + 1 as a raw varint, then try to decode as Position
+        let invalid_value = *MmrFamily::MAX_NODES + 1;
         let encoded = UInt(invalid_value).encode();
         let result = Position::read(&mut encoded.as_ref());
         assert!(result.is_err());
