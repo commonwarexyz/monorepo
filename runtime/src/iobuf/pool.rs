@@ -650,6 +650,17 @@ pub(crate) struct BufferPoolInner {
     metrics: PoolMetrics,
 }
 
+impl Drop for BufferPoolInner {
+    fn drop(&mut self) {
+        for class in &self.classes {
+            while let Some(buffer) = class.global.pop() {
+                class.created.fetch_sub(1, Ordering::Relaxed);
+                drop(buffer);
+            }
+        }
+    }
+}
+
 impl BufferPoolInner {
     /// Try to allocate a buffer from the given size class.
     ///
@@ -1894,6 +1905,39 @@ mod tests {
         let _buf = pool
             .try_alloc(page)
             .expect("thread-exited local buffer should be reusable");
+    }
+
+    #[test]
+    fn test_pool_drop_drains_global_freelist() {
+        // Dropping the pool should immediately reclaim globally-visible free
+        // tracked buffers, while leaving TLS-cached buffers alone.
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(test_config(page, page, 2), &mut registry);
+        let class_index = pool
+            .inner
+            .config
+            .class_index(page)
+            .expect("class exists for page-sized buffer");
+        let class = Arc::clone(&pool.inner.classes[class_index]);
+
+        // Return one buffer to the current thread's local cache and overflow
+        // the other into the shared global freelist.
+        let buf1 = pool.try_alloc(page).unwrap();
+        let buf2 = pool.try_alloc(page).unwrap();
+        drop(buf1);
+        drop(buf2);
+
+        assert_eq!(class.global.len(), 1);
+        assert_eq!(get_local_len(&class), 1);
+
+        // Pool drop should drain only the global freelist. The thread-local
+        // cache remains untouched until thread exit.
+        drop(pool);
+
+        assert_eq!(class.global.len(), 0);
+        assert_eq!(get_local_len(&class), 1);
+        assert_eq!(class.created.load(Ordering::Relaxed), 1);
     }
 
     #[test]
