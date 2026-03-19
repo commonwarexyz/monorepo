@@ -528,3 +528,173 @@ impl Dealing {
         lhs == rhs
     }
 }
+
+#[cfg(any(feature = "arbitrary", test))]
+mod test_plan {
+    use super::*;
+    use crate::transcript::Transcript;
+    use commonware_codec::Encode;
+    use commonware_math::algebra::Random;
+    use commonware_parallel::Sequential;
+    use commonware_utils::N3f1;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use std::collections::BTreeMap;
+
+    /// A golden DKG test plan.
+    ///
+    /// Generates a fresh DKG with the given number of dealers and players,
+    /// then verifies that a particular "star" player ends up with a valid share.
+    #[derive(Debug)]
+    pub struct Plan {
+        num_dealers: u32,
+        num_players: u32,
+        star: u32,
+    }
+
+    impl Plan {
+        pub const fn new(num_dealers: u32, num_players: u32, star: u32) -> Self {
+            Self {
+                num_dealers,
+                num_players,
+                star,
+            }
+        }
+
+        fn validate(&self) -> anyhow::Result<()> {
+            anyhow::ensure!(self.num_dealers >= 1, "need at least 1 dealer");
+            anyhow::ensure!(self.num_players >= 1, "need at least 1 player");
+            anyhow::ensure!(
+                self.star < self.num_players,
+                "star must be a valid player index"
+            );
+            Ok(())
+        }
+
+        pub fn run(self, seed: u64) -> anyhow::Result<()> {
+            self.validate()?;
+
+            let mut rng = StdRng::seed_from_u64(seed);
+
+            // Generate separate keys for dealers and players.
+            let dealer_keys: Vec<PrivateKey> = (0..self.num_dealers)
+                .map(|_| PrivateKey::random(&mut rng))
+                .collect();
+            let player_keys: Vec<PrivateKey> = (0..self.num_players)
+                .map(|_| PrivateKey::random(&mut rng))
+                .collect();
+
+            let dealer_set: Set<PublicKey> = dealer_keys
+                .iter()
+                .map(|k| k.public())
+                .try_collect()
+                .unwrap();
+            let player_set: Set<PublicKey> = player_keys
+                .iter()
+                .map(|k| k.public())
+                .try_collect()
+                .unwrap();
+
+            // Build Info for a fresh DKG (no previous round).
+            let round = 0u64;
+            let mode = Mode::default();
+            let summary = {
+                let mut transcript = Transcript::new(NAMESPACE);
+                transcript
+                    .commit(round.encode())
+                    .commit(dealer_set.encode())
+                    .commit(player_set.encode());
+                transcript.summarize()
+            };
+            let info = Info {
+                summary,
+                round,
+                previous: None,
+                mode,
+                dealers: dealer_set,
+                players: player_set,
+            };
+
+            // Each dealer deals.
+            let mut logs = BTreeMap::new();
+            for dk in &dealer_keys {
+                let signed =
+                    deal::<N3f1>(&mut rng, &info, dk, None).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+                let (pk, log) = signed
+                    .identify()
+                    .ok_or_else(|| anyhow::anyhow!("dealer signature verification failed"))?;
+                logs.insert(pk, log);
+            }
+
+            // Star player plays.
+            let star_key = &player_keys[self.star as usize];
+            let (sharing, share) = play::<N3f1>(&mut rng, &info, logs, star_key, &Sequential)
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+            // Verify share matches public polynomial.
+            let expected = sharing
+                .partial_public(share.index)
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            let actual = share.public::<MinPk>();
+            assert_eq!(expected, actual, "share should match public polynomial");
+
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    impl<'a> arbitrary::Arbitrary<'a> for Plan {
+        fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+            const MAX: u32 = 10;
+            let num_dealers = u.int_in_range(1..=MAX)?;
+            let num_players = u.int_in_range(1..=MAX)?;
+            let star = u.int_in_range(0..=num_players - 1)?;
+            let plan = Self {
+                num_dealers,
+                num_players,
+                star,
+            };
+            plan.validate()
+                .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+            Ok(plan)
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+pub use test_plan::Plan as FuzzPlan;
+
+#[cfg(test)]
+mod tests {
+    use super::test_plan::Plan;
+    use commonware_invariants::minifuzz;
+
+    #[test]
+    fn single_dealer_single_player() {
+        Plan::new(1, 1, 0).run(42).expect("plan should succeed");
+    }
+
+    #[test]
+    fn multiple_dealers_multiple_players() {
+        Plan::new(4, 7, 3).run(42).expect("plan should succeed");
+    }
+
+    #[test]
+    fn many_dealers() {
+        Plan::new(10, 5, 0).run(42).expect("plan should succeed");
+    }
+
+    #[test]
+    fn fuzz_plan() {
+        minifuzz::test(|u| {
+            let num_dealers = u.int_in_range(1..=10u32)?;
+            let num_players = u.int_in_range(1..=10u32)?;
+            let star = u.int_in_range(0..=num_players - 1)?;
+            let seed: u64 = u.arbitrary()?;
+            Plan::new(num_dealers, num_players, star)
+                .run(seed)
+                .expect("plan should succeed");
+            Ok(())
+        });
+    }
+}
