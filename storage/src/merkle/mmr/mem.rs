@@ -6,52 +6,12 @@ pub type Mmr<D> = crate::merkle::mem::Mem<super::Family, D>;
 /// Configuration for initializing an [Mmr].
 pub type Config<D> = crate::merkle::mem::Config<super::Family, D>;
 
-#[cfg(any(feature = "std", test))]
-use super::{Family, Position};
-#[cfg(any(feature = "std", test))]
-use alloc::collections::BTreeMap;
-
-#[cfg(any(feature = "std", test))]
-impl<D: commonware_cryptography::Digest> Mmr<D> {
-    /// Pin extra nodes. It's up to the caller to ensure this set is valid.
-    #[cfg(any(feature = "std", test))]
-    pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position, D>) {
-        for (pos, node) in pinned_nodes.into_iter() {
-            self.pinned_nodes.insert(pos, node);
-        }
-    }
-
-    /// Truncate the MMR to a smaller valid size, discarding all nodes beyond that size.
-    /// Recomputes the root after truncation.
-    ///
-    /// `new_size` must be a valid MMR size (i.e., `new_size.is_valid_size()`) and must be
-    /// >= `pruned_to_pos`.
-    #[cfg(feature = "std")]
-    pub(crate) fn truncate(
-        &mut self,
-        new_size: Position,
-        hasher: &impl crate::merkle::hasher::Hasher<Family, Digest = D>,
-    ) {
-        debug_assert!(new_size.is_valid_size());
-        debug_assert!(new_size >= self.pruned_to_pos);
-        let keep = (*new_size - *self.pruned_to_pos) as usize;
-        self.nodes.truncate(keep);
-        self.root = Self::compute_root(hasher, &self.nodes, &self.pinned_nodes, self.pruned_to_pos);
-    }
-
-    /// Return the nodes this MMR currently has pinned.
-    #[cfg(test)]
-    pub(super) fn pinned_nodes(&self) -> BTreeMap<Position, D> {
-        self.pinned_nodes.clone()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         merkle::{conformance::build_test_mmr, hasher::Hasher as _},
-        mmr::{Error, Location, StandardHasher as Standard},
+        mmr::{Error, Location, Position, StandardHasher as Standard},
     };
     use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_runtime::{deterministic, tokio, Runner, ThreadPooler};

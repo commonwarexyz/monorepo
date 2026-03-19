@@ -1,12 +1,10 @@
 //! A basic, no_std compatible MMB where all nodes are stored in-memory.
 
-use super::Family;
-
 /// A basic MMB where all nodes are stored in-memory.
-pub type Mmb<D> = crate::merkle::mem::Mem<Family, D>;
+pub type Mmb<D> = crate::merkle::mem::Mem<super::Family, D>;
 
 /// Configuration for initializing an [Mmb].
-pub type Config<D> = crate::merkle::mem::Config<Family, D>;
+pub type Config<D> = crate::merkle::mem::Config<super::Family, D>;
 
 #[cfg(test)]
 mod tests {

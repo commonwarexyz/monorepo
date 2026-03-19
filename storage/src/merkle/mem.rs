@@ -325,6 +325,34 @@ impl<F: Family, D: Digest> Mem<F, D> {
             .collect()
     }
 
+    /// Pin extra nodes. It's up to the caller to ensure this set is valid.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position<F>, D>) {
+        for (pos, node) in pinned_nodes {
+            self.pinned_nodes.insert(pos, node);
+        }
+    }
+
+    /// Truncate the structure to a smaller valid size, discarding all nodes beyond that size.
+    /// Recomputes the root after truncation.
+    ///
+    /// `new_size` must be a valid size (i.e., `new_size.is_valid_size()`) and must be
+    /// `>= pruned_to_pos`.
+    #[cfg(feature = "std")]
+    pub(crate) fn truncate(&mut self, new_size: Position<F>, hasher: &impl Hasher<F, Digest = D>) {
+        debug_assert!(new_size.is_valid_size());
+        debug_assert!(new_size >= self.pruned_to_pos);
+        let keep = (*new_size - *self.pruned_to_pos) as usize;
+        self.nodes.truncate(keep);
+        self.root = Self::compute_root(hasher, &self.nodes, &self.pinned_nodes, self.pruned_to_pos);
+    }
+
+    /// Return the nodes this structure currently has pinned.
+    #[cfg(test)]
+    pub(crate) fn pinned_nodes(&self) -> BTreeMap<Position<F>, D> {
+        self.pinned_nodes.clone()
+    }
+
     /// Create a new speculative batch with this structure as its parent.
     pub fn new_batch(&self) -> crate::merkle::batch::UnmerkleizedBatch<'_, F, D, Self> {
         crate::merkle::batch::UnmerkleizedBatch::new(self)
