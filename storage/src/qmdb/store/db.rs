@@ -4,6 +4,7 @@
 //!
 //! ```rust
 //! use commonware_storage::{
+//!     journal::contiguous::variable::Config as JournalConfig,
 //!     qmdb::store::db::{Config, Db},
 //!     translator::TwoCap,
 //! };
@@ -19,13 +20,15 @@
 //! let executor = Runner::default();
 //! executor.start(|mut ctx| async move {
 //!     let config = Config {
-//!         log_partition: "test-partition".into(),
-//!         log_write_buffer: NZUsize!(64 * 1024),
-//!         log_compression: None,
-//!         log_codec_config: ((), ()),
-//!         log_items_per_section: NZU64!(4),
+//!         log: JournalConfig {
+//!             partition: "test-partition".into(),
+//!             write_buffer: NZUsize!(64 * 1024),
+//!             compression: None,
+//!             codec_config: ((), ()),
+//!             items_per_section: NZU64!(4),
+//!             page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+//!         },
 //!         translator: TwoCap,
-//!         page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!     };
 //!     let mut db =
 //!         Db::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
