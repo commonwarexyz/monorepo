@@ -1,0 +1,48 @@
+[package]
+name = "commonware-commitment"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Commit to polynomials with compact proofs and efficient verification."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/commitment"
+documentation = "https://docs.rs/commonware-commitment"
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = { workspace = true }
+bytemuck = { version = "1.21.0", features = ["derive"] }
+commonware-macros.workspace = true
+rand = { workspace = true }
+rand_core.workspace = true
+rayon = { workspace = true, optional = true }
+sha2 = { workspace = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+
+[lib]
+bench = false
+
+[features]
+default = ["std", "parallel"]
+std = [
+	"blake3/std",
+	"rand/std",
+	"rand/std_rng",
+	"sha2/std",
+	"thiserror/std",
+]
+parallel = ["dep:rayon"]
+
+[[bench]]
+name = "commitment"
+harness = false
+path = "benches/commitment.rs"

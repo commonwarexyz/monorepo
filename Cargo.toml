@@ -4,6 +4,7 @@ members = [
     "codec",
     "coding",
     "collector",
+    "commitment",
     "conformance",
     "conformance/macros",
     "consensus",
@@ -91,6 +92,7 @@ commonware-broadcast = { version = "2026.3.0", path = "broadcast" }
 commonware-codec = { version = "2026.3.0", path = "codec", default-features = false }
 commonware-coding = { version = "2026.3.0", path = "coding" }
 commonware-collector = { version = "2026.3.0", path = "collector" }
+commonware-commitment = { version = "2026.3.0", path = "commitment" }
 commonware-conformance = { version = "2026.3.0", path = "conformance" }
 commonware-conformance-macros = { version = "2026.3.0", path = "conformance/macros" }
 commonware-consensus = { version = "2026.3.0", path = "consensus" }
