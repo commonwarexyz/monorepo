@@ -201,11 +201,16 @@ where
         // skip many view numbers at once, so we only fast-timeout when a quorum has been active
         // within `skip_timeout`, and the selected leader has not.
         // Prune all stale activity timestamps.
-        let min_time = self.context
+        let min_time = self
+            .context
             .current()
             .checked_sub(self.skip_timeout)
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        while self.last_activity.peek().is_some_and(|(_, a)| *a < min_time) {
+        while self
+            .last_activity
+            .peek()
+            .is_some_and(|(_, a)| *a < min_time)
+        {
             self.last_activity.pop();
         }
 
