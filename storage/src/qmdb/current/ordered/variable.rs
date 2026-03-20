@@ -116,6 +116,7 @@ mod test {
         qmdb::{
             any::ordered::variable::Operation,
             current::{
+                batch::BitmapRead,
                 ordered::{db::KeyValueProof, variable::Db},
                 proof::{OperationProof, RangeProof},
                 tests::{apply_random_ops, variable_config},
@@ -156,7 +157,7 @@ mod test {
             let finalized = db
                 .new_batch()
                 .write(k, Some(v1))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -199,7 +200,7 @@ mod test {
             let finalized = db
                 .new_batch()
                 .write(k, Some(v2))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -345,7 +346,12 @@ mod test {
             let mut db = apply_random_ops::<CurrentTest>(200, true, rng_seed, db)
                 .await
                 .unwrap();
-            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            let finalized = db
+                .new_batch()
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
@@ -392,7 +398,12 @@ mod test {
             let mut db = apply_random_ops::<CurrentTest>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            let finalized = db
+                .new_batch()
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
@@ -487,7 +498,7 @@ mod test {
                 let finalized = db
                     .new_batch()
                     .write(k, Some(v))
-                    .merkleize(None)
+                    .merkleize(None, &db)
                     .await
                     .unwrap()
                     .finalize();
@@ -542,7 +553,7 @@ mod test {
             let finalized = db
                 .new_batch()
                 .write(key_exists_1, Some(v1))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -590,7 +601,7 @@ mod test {
             let finalized = db
                 .new_batch()
                 .write(key_exists_2, Some(v2))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -679,7 +690,7 @@ mod test {
                 .new_batch()
                 .write(key_exists_1, None)
                 .write(key_exists_2, None)
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();

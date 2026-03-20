@@ -81,7 +81,11 @@ mod harnesses {
                         Operation::CommitFloor(_, _) => {}
                     }
                 }
-                batch.merkleize(None::<Digest>).await.unwrap().finalize()
+                batch
+                    .merkleize(None::<Digest>, &db)
+                    .await
+                    .unwrap()
+                    .finalize()
             };
             db.apply_batch(finalized).await.unwrap();
             db
@@ -150,7 +154,11 @@ mod harnesses {
                         Operation::CommitFloor(_, _) => {}
                     }
                 }
-                batch.merkleize(None::<Digest>).await.unwrap().finalize()
+                batch
+                    .merkleize(None::<Digest>, &db)
+                    .await
+                    .unwrap()
+                    .finalize()
             };
             db.apply_batch(finalized).await.unwrap();
             db
@@ -219,7 +227,11 @@ mod harnesses {
                         Operation::CommitFloor(_, _) => {}
                     }
                 }
-                batch.merkleize(None::<Digest>).await.unwrap().finalize()
+                batch
+                    .merkleize(None::<Digest>, &db)
+                    .await
+                    .unwrap()
+                    .finalize()
             };
             db.apply_batch(finalized).await.unwrap();
             db
@@ -288,7 +300,11 @@ mod harnesses {
                         Operation::CommitFloor(_, _) => {}
                     }
                 }
-                batch.merkleize(None::<Digest>).await.unwrap().finalize()
+                batch
+                    .merkleize(None::<Digest>, &db)
+                    .await
+                    .unwrap()
+                    .finalize()
             };
             db.apply_batch(finalized).await.unwrap();
             db

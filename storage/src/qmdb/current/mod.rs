@@ -7,7 +7,7 @@
 //! // Simple mode: apply a batch, then durably commit it.
 //! let merkleized = db.new_batch()
 //!     .write(key, Some(value))
-//!     .merkleize(None).await?;
+//!     .merkleize(None, &db).await?;
 //! let finalized = merkleized.finalize();
 //! db.apply_batch(finalized).await?;
 //! db.commit().await?;
@@ -21,15 +21,15 @@
 //! // Batches can still fork before you apply them.
 //! let parent = db.new_batch()
 //!     .write(key_a, Some(val_a))
-//!     .merkleize(None).await?;
+//!     .merkleize(None, &db).await?;
 //!
 //! let child_a = parent.new_batch()
 //!     .write(key_b, Some(val_b))
-//!     .merkleize(None).await?;
+//!     .merkleize(None, &db).await?;
 //!
 //! let child_b = parent.new_batch()
 //!     .write(key_c, Some(val_c))
-//!     .merkleize(None).await?;
+//!     .merkleize(None, &db).await?;
 //!
 //! // Only one fork can be applied; the others become stale.
 //! db.apply_batch(child_a.finalize()).await?;
@@ -41,14 +41,16 @@
 //! // batch from the newly published state.
 //! let parent_finalized = db.new_batch()
 //!     .write(key_a, Some(val_a))
-//!     .merkleize(None).await?.finalize();
+//!     .merkleize(None, &db).await?
+//!     .finalize();
 //! db.apply_batch(parent_finalized).await?;
 //!
 //! let (child_finalized, commit_result) = futures::join!(
 //!     async {
 //!         db.new_batch()
 //!             .write(key_b, Some(val_b))
-//!             .merkleize(None).await.map(|batch| batch.finalize())
+//!             .merkleize(None, &db).await
+//!             .map(|batch| batch.finalize())
 //!     },
 //!     db.commit(),
 //! );
@@ -249,7 +251,10 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::ThreadPool;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
+};
 
 pub mod batch;
 pub mod db;
@@ -450,8 +455,8 @@ where
 
     Ok(db::Db {
         any,
-        status,
-        grafted_mmr,
+        status: batch::BitmapBatch::Base(Arc::new(status)),
+        grafted_mmr: crate::mmr::batch::MerkleizedBatch::Base(grafted_mmr),
         metadata: AsyncMutex::new(metadata),
         thread_pool,
         root,
@@ -529,8 +534,8 @@ where
 
     Ok(db::Db {
         any,
-        status,
-        grafted_mmr,
+        status: batch::BitmapBatch::Base(Arc::new(status)),
+        grafted_mmr: crate::mmr::batch::MerkleizedBatch::Base(grafted_mmr),
         metadata: AsyncMutex::new(metadata),
         thread_pool: pool,
         root,
@@ -634,7 +639,7 @@ pub mod tests {
         for (k, v) in writes {
             batch = batch.write(k, v);
         }
-        let finalized = batch.merkleize(None).await?.finalize();
+        let finalized = batch.merkleize(None, db).await?.finalize();
         db.apply_batch(finalized).await?;
         db.commit().await?;
         Ok(())
@@ -734,7 +739,12 @@ pub mod tests {
             db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
-            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            let finalized = db
+                .new_batch()
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             db.sync().await.unwrap();
 
@@ -759,7 +769,12 @@ pub mod tests {
             db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
-            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            let finalized = db
+                .new_batch()
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             db.sync().await.unwrap();
 
@@ -951,10 +966,13 @@ pub mod tests {
 
             // Apply random operations with commits to advance the inactivity floor.
             db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db).await.unwrap();
-            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            let finalized = db.new_batch().merkleize(None, &db).await.unwrap().finalize();
             db.apply_batch(finalized).await.unwrap();
 
-            // The bitmap should have been pruned during commit().
+            // Prune to flatten bitmap layers and advance pruned_chunks.
+            let floor = db.inactivity_floor_loc().await;
+            db.prune(floor).await.unwrap();
+
             let pruned_bits_before = db.pruned_bits();
             warn!(
                 "pruned_bits_before={}, inactivity_floor={}, op_count={}",
@@ -966,11 +984,10 @@ pub mod tests {
             // Verify we actually have some pruning (otherwise the test is meaningless).
             assert!(
                 pruned_bits_before > 0,
-                "Expected bitmap to have pruned bits after merkleization"
+                "Expected bitmap to have pruned bits after prune()"
             );
 
-            // Call sync() WITHOUT calling prune(). The bitmap pruning boundary was set
-            // during commit(), and sync() should persist it.
+            // Call sync() to persist the bitmap pruning boundary.
             db.sync().await.unwrap();
 
             // Record the root before dropping.
@@ -1052,7 +1069,7 @@ pub mod tests {
                     map.remove(&k);
                 }
 
-                batch.merkleize(None).await.unwrap().finalize()
+                batch.merkleize(None, &db).await.unwrap().finalize()
             };
             db.apply_batch(finalized).await.unwrap();
 
@@ -1108,12 +1125,12 @@ pub mod tests {
             let changeset_a = {
                 let mut batch = db.new_batch();
                 batch = batch.write(key1, Some(value1.clone()));
-                batch.merkleize(None).await.unwrap().finalize()
+                batch.merkleize(None, &db).await.unwrap().finalize()
             };
             let changeset_b = {
                 let mut batch = db.new_batch();
                 batch = batch.write(key2, Some(value2));
-                batch.merkleize(None).await.unwrap().finalize()
+                batch.merkleize(None, &db).await.unwrap().finalize()
             };
 
             db.apply_batch(changeset_a).await.unwrap();
@@ -1374,7 +1391,7 @@ pub mod tests {
             for i in 0..10 {
                 batch = batch.write(key(i), Some(val(i)));
             }
-            let merkleized = batch.merkleize(None).await.unwrap();
+            let merkleized = batch.merkleize(None, &db).await.unwrap();
             let speculative_root = merkleized.root();
             let ops_root = merkleized.ops_root();
 
@@ -1410,7 +1427,7 @@ pub mod tests {
             {
                 let mut batch = db.new_batch();
                 batch = batch.write(ka, Some(val(0)));
-                let finalized = batch.merkleize(None).await.unwrap().finalize();
+                let finalized = batch.merkleize(None, &db).await.unwrap().finalize();
                 db.apply_batch(finalized).await.unwrap();
             }
 
@@ -1420,11 +1437,11 @@ pub mod tests {
             let mut batch = db.new_batch();
             batch = batch.write(ka, Some(va2));
             batch = batch.write(kb, Some(vb));
-            let merkleized = batch.merkleize(None).await.unwrap();
+            let merkleized = batch.merkleize(None, &db).await.unwrap();
 
-            assert_eq!(merkleized.get(&ka).await.unwrap(), Some(va2));
-            assert_eq!(merkleized.get(&kb).await.unwrap(), Some(vb));
-            assert_eq!(merkleized.get(&kc).await.unwrap(), None);
+            assert_eq!(merkleized.get(&ka, &db).await.unwrap(), Some(va2));
+            assert_eq!(merkleized.get(&kb, &db).await.unwrap(), Some(vb));
+            assert_eq!(merkleized.get(&kc, &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1447,22 +1464,22 @@ pub mod tests {
             for i in 0..5 {
                 parent = parent.write(key(i), Some(val(i)));
             }
-            let parent_m = parent.merkleize(None).await.unwrap();
+            let parent_m = parent.merkleize(None, &db).await.unwrap();
 
             // Child batch writes keys 5..10 and overrides key 0.
-            let mut child = parent_m.new_batch();
+            let mut child = parent_m.new_batch::<Sha256>();
             for i in 5..10 {
                 child = child.write(key(i), Some(val(i)));
             }
             child = child.write(key(0), Some(val(999)));
-            let child_m = child.merkleize(None).await.unwrap();
+            let child_m = child.merkleize(None, &db).await.unwrap();
 
             let child_root = child_m.root();
 
             // Child get reads through all layers.
-            assert_eq!(child_m.get(&key(0)).await.unwrap(), Some(val(999)));
-            assert_eq!(child_m.get(&key(3)).await.unwrap(), Some(val(3)));
-            assert_eq!(child_m.get(&key(7)).await.unwrap(), Some(val(7)));
+            assert_eq!(child_m.get(&key(0), &db).await.unwrap(), Some(val(999)));
+            assert_eq!(child_m.get(&key(3), &db).await.unwrap(), Some(val(3)));
+            assert_eq!(child_m.get(&key(7), &db).await.unwrap(), Some(val(7)));
 
             let finalized = child_m.finalize();
             db.apply_batch(finalized).await.unwrap();
@@ -1495,7 +1512,7 @@ pub mod tests {
             let finalized = db
                 .new_batch()
                 .write(key(0), Some(val(0)))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -1532,7 +1549,7 @@ pub mod tests {
             let parent_finalized = {
                 let mut batch = db.new_batch();
                 batch = batch.write(key(0), Some(val(0)));
-                batch.merkleize(None).await.unwrap().finalize()
+                batch.merkleize(None, &db).await.unwrap().finalize()
             };
             db.apply_batch(parent_finalized).await.unwrap();
 
@@ -1541,7 +1558,10 @@ pub mod tests {
                     assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
                     let mut child = db.new_batch();
                     child = child.write(key(1), Some(val(1)));
-                    child.merkleize(None).await.map(|batch| batch.finalize())
+                    child
+                        .merkleize(None, &db)
+                        .await
+                        .map(|batch| batch.finalize())
                 },
                 db.commit(),
             );
@@ -1550,6 +1570,247 @@ pub mod tests {
 
             db.apply_batch(child_finalized).await.unwrap();
             db.commit().await.unwrap();
+
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Apply parent via finalize(), then child via finalize_from(). Both keys
+    /// present and canonical root matches a fresh single-batch build.
+    #[test_traced("INFO")]
+    fn test_current_finalize_from() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("ff", &ctx))
+                    .await
+                    .unwrap();
+
+            // Parent batch: insert key(0).
+            let parent_m = db
+                .new_batch()
+                .write(key(0), Some(val(0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            // Child batch on parent: insert key(1).
+            let child_m = parent_m
+                .new_batch::<Sha256>()
+                .write(key(1), Some(val(1)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            // Apply parent.
+            db.apply_batch(parent_m.finalize()).await.unwrap();
+            let current_db_size = *db.any.last_commit_loc + 1;
+
+            // Apply child via finalize_from.
+            db.apply_batch(child_m.finalize_from(current_db_size))
+                .await
+                .unwrap();
+
+            // Both keys present.
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+
+            // Build the same result via two sequential plain batches in a fresh DB
+            // and verify the roots match.
+            let ctx2 = context.with_label("db2");
+            let mut db2: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx2.clone(), variable_config::<OneCap>("ff2", &ctx2))
+                    .await
+                    .unwrap();
+            let f1 = db2
+                .new_batch()
+                .write(key(0), Some(val(0)))
+                .merkleize(None, &db2)
+                .await
+                .unwrap()
+                .finalize();
+            db2.apply_batch(f1).await.unwrap();
+            let f2 = db2
+                .new_batch()
+                .write(key(1), Some(val(1)))
+                .merkleize(None, &db2)
+                .await
+                .unwrap()
+                .finalize();
+            db2.apply_batch(f2).await.unwrap();
+
+            assert_eq!(db.root(), db2.root());
+
+            db.destroy().await.unwrap();
+            db2.destroy().await.unwrap();
+        });
+    }
+
+    /// to_batch() produces a MerkleizedBatch that can be used to chain further
+    /// batches via new_batch().
+    #[test_traced("INFO")]
+    fn test_current_to_batch_then_chain() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("tb", &ctx))
+                    .await
+                    .unwrap();
+
+            // Apply an initial batch.
+            let f = db
+                .new_batch()
+                .write(key(0), Some(val(0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(f).await.unwrap();
+
+            // Get an owned batch from the committed state.
+            let snapshot = db.to_batch();
+            assert_eq!(snapshot.root(), db.root());
+
+            // Chain a child batch from the snapshot.
+            let child = snapshot
+                .new_batch::<Sha256>()
+                .write(key(1), Some(val(1)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            // The child's root should differ from the snapshot.
+            assert_ne!(child.root(), snapshot.root());
+
+            // Apply child.
+            db.apply_batch(child.finalize()).await.unwrap();
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// flatten() is a no-op on a freshly initialized DB (no layers to collapse).
+    #[test_traced("INFO")]
+    fn test_flatten_noop_on_fresh_db() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-noop", &ctx))
+                    .await
+                    .unwrap();
+
+            let root_before = db.root();
+            db.flatten();
+            assert_eq!(db.root(), root_before);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// flatten() preserves the root and data after multiple apply_batch calls.
+    #[test_traced("INFO")]
+    fn test_flatten_preserves_root_after_batches() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-root", &ctx))
+                    .await
+                    .unwrap();
+
+            // Apply several batches to accumulate layers.
+            for i in 0u64..5 {
+                let f = db
+                    .new_batch()
+                    .write(key(i), Some(val(i)))
+                    .merkleize(None, &db)
+                    .await
+                    .unwrap()
+                    .finalize();
+                db.apply_batch(f).await.unwrap();
+            }
+
+            let root_before = db.root();
+            db.flatten();
+            assert_eq!(db.root(), root_before);
+
+            // Data is still readable.
+            for i in 0u64..5 {
+                assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i)));
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// flatten() is idempotent: a second call is a no-op.
+    #[test_traced("INFO")]
+    fn test_flatten_idempotent() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-idem", &ctx))
+                    .await
+                    .unwrap();
+
+            let f = db
+                .new_batch()
+                .write(key(0), Some(val(0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(f).await.unwrap();
+
+            db.flatten();
+            let root_after_first = db.root();
+
+            db.flatten();
+            assert_eq!(db.root(), root_after_first);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// New batches built after flatten() produce correct roots and can be applied.
+    #[test_traced("INFO")]
+    fn test_flatten_then_new_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("fl-then", &ctx))
+                    .await
+                    .unwrap();
+
+            // Apply a batch, flatten, then apply another.
+            let f = db
+                .new_batch()
+                .write(key(0), Some(val(0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(f).await.unwrap();
+            db.flatten();
+
+            let f = db
+                .new_batch()
+                .write(key(1), Some(val(1)))
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(f).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));

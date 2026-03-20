@@ -2,6 +2,7 @@
 //!
 //! The impl blocks in this file define shared functionality across all Current QMDB variants.
 
+use super::batch::BitmapRead;
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
@@ -36,6 +37,7 @@ use commonware_utils::{bitmap::Prunable as BitMap, sequence::prefixed_u64::U64, 
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use rayon::prelude::*;
+use std::{collections::BTreeMap, sync::Arc};
 use tracing::{error, warn};
 
 /// Prefix used for the metadata key for grafted MMR pinned nodes.
@@ -59,14 +61,20 @@ pub struct Db<
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
-    pub(super) status: BitMap<N>,
+    ///
+    /// Stored as a [`BitmapBatch`](super::batch::BitmapBatch) so that `apply_batch` can
+    /// push layers in O(changeset) instead of deep-cloning.
+    pub(super) status: super::batch::BitmapBatch<N>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.
     /// See the [grafted leaf formula](super) in the module documentation.
     ///
     /// Internal nodes are hashed using their position in the ops MMR rather than their
     /// grafted position.
-    pub(super) grafted_mmr: mmr::mem::Mmr<H::Digest>,
+    ///
+    /// Stored as a [`mmr::batch::MerkleizedBatch`] so that `apply_batch` can push layers
+    /// in O(changeset) instead of deep-cloning.
+    pub(super) grafted_mmr: mmr::batch::MerkleizedBatch<H::Digest>,
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
@@ -165,29 +173,30 @@ where
         self.any.log.root()
     }
 
+    /// O(1) snapshot of the grafted MMR for use in batch chains.
+    ///
+    /// Wraps in a `Snapshot` when the state has layers, so that `base_size() == size()` for the
+    /// batch chain. When the state is already `Base`, `base_size()` naturally equals the tip.
+    pub(super) fn grafted_snapshot(&self) -> mmr::batch::MerkleizedBatch<H::Digest> {
+        let state = self.grafted_mmr.clone();
+        if matches!(state, mmr::batch::MerkleizedBatch::Base(_)) {
+            return state;
+        }
+        let size = state.size();
+        mmr::batch::MerkleizedBatch::Snapshot {
+            inner: Arc::new(state),
+            size,
+        }
+    }
+
     /// Create a new speculative batch of operations with this database as its parent.
-    #[allow(clippy::type_complexity)]
-    pub fn new_batch(
-        &self,
-    ) -> super::batch::UnmerkleizedBatch<
-        '_,
-        E,
-        C,
-        I,
-        H,
-        U,
-        mmr::journaled::Mmr<E, H::Digest>,
-        mmr::mem::Mmr<H::Digest>,
-        BitMap<N>,
-        N,
-    > {
+    pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<H, U, N> {
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
-            self,
             Vec::new(),
             Vec::new(),
-            &self.grafted_mmr,
-            &self.status,
+            self.grafted_snapshot(),
+            self.status.clone(),
         )
     }
 
@@ -263,6 +272,21 @@ where
         self.any.pinned_nodes_at(loc).await
     }
 
+    /// Collapse accumulated `Layer` chains in the bitmap and grafted MMR into flat `Base`
+    /// representations.
+    ///
+    /// Each [`Db::apply_batch`] pushes a new `Layer` on both the bitmap and the grafted MMR.
+    /// These layers are cheap to create (O(changeset)) but make subsequent reads walk the full
+    /// chain. Calling `flatten` collapses the chain into a single `Base`, bounding lookup cost
+    /// to O(1) and reducing memory overhead from stale intermediate layers.
+    ///
+    /// This is called automatically by [`Db::prune`]. Callers that apply many batches without
+    /// pruning should call this periodically.
+    pub fn flatten(&mut self) {
+        self.status.flatten();
+        self.grafted_mmr.flatten();
+    }
+
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
@@ -271,6 +295,52 @@ where
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [mmr::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
+        self.flatten();
+
+        // Prune bitmap chunks below the inactivity floor.
+        let super::batch::BitmapBatch::Base(base) = &mut self.status else {
+            unreachable!("flatten() guarantees Base");
+        };
+        Arc::make_mut(base).prune_to_bit(*self.any.inactivity_floor_loc);
+
+        // Prune the grafted MMR to match the bitmap's pruned chunks.
+        let pruned_chunks = self.status.pruned_chunks() as u64;
+        if pruned_chunks > 0 {
+            let prune_loc_grafted = Location::new(pruned_chunks);
+            let bounds_start = self.grafted_mmr.pruned_to_pos();
+            let grafted_prune_pos =
+                Position::try_from(prune_loc_grafted).expect("valid leaf count");
+            if grafted_prune_pos > bounds_start {
+                let root = self.grafted_mmr.root();
+                let size = self.grafted_mmr.size();
+
+                let mut pinned = BTreeMap::new();
+                for (pos, _) in PeakIterator::new(grafted_prune_pos) {
+                    pinned.insert(
+                        pos,
+                        self.grafted_mmr
+                            .get_node(pos)
+                            .expect("pinned peak must exist"),
+                    );
+                }
+                let mut retained = Vec::with_capacity((*size - *grafted_prune_pos) as usize);
+                for p in *grafted_prune_pos..*size {
+                    retained.push(
+                        self.grafted_mmr
+                            .get_node(Position::new(p))
+                            .expect("retained node must exist"),
+                    );
+                }
+                self.grafted_mmr =
+                    mmr::batch::MerkleizedBatch::Base(mmr::mem::Mmr::from_pruned_with_retained(
+                        root,
+                        grafted_prune_pos,
+                        pinned,
+                        retained,
+                    ));
+            }
+        }
+
         // Persist grafted MMR pruning state before pruning the ops log. If the subsequent
         // `any.prune` fails, the metadata is ahead of the log, which is safe: on recovery,
         // `build_grafted_mmr` will recompute from the (un-pruned) log and the metadata
@@ -374,38 +444,17 @@ where
         &mut self,
         batch: super::batch::Changeset<U::Key, H::Digest, Operation<U>, N>,
     ) -> Result<Range<Location>, Error> {
-        // 1. Apply inner any batch (writes ops, updates snapshot).
+        // Apply inner any batch (writes ops, updates snapshot).
         let range = self.any.apply_batch(batch.inner).await?;
 
-        // 2. Push new bits FIRST. Must happen before clears because for chained batches, some
-        //    clears target locations within the push range (ancestor-segment superseded ops that
-        //    were pushed as active by an ancestor and then superseded by a descendant).
-        for &bit in &batch.bitmap_pushes {
-            self.status.push(bit);
-        }
+        // Push bitmap mutations as a layer (O(changeset), no deep clone).
+        self.status
+            .push_changeset(batch.bitmap_pushes, batch.bitmap_clears);
 
-        // 3. Clear superseded locations: previous commit inactivation, diff base_old_locs, and
-        //    ancestor-segment superseded locations (chaining).
-        for loc in &batch.bitmap_clears {
-            self.status.set_bit(**loc, false);
-        }
+        // Push grafted changeset as a layer (O(changeset), no deep clone).
+        self.grafted_mmr.push_changeset(batch.grafted_changeset);
 
-        // 4. Apply precomputed grafted MMR changeset from merkleize().
-        self.grafted_mmr.apply(batch.grafted_changeset)?;
-
-        // 5. Prune bitmap chunks fully below the inactivity floor.
-        self.status.prune_to_bit(*self.any.inactivity_floor_loc);
-
-        // 6. Prune the grafted MMR to match.
-        let pruned_chunks = self.status.pruned_chunks() as u64;
-        if pruned_chunks > 0 {
-            let prune_loc = Location::new(pruned_chunks);
-            if prune_loc > self.grafted_mmr.bounds().start {
-                self.grafted_mmr.prune(prune_loc)?;
-            }
-        }
-
-        // 7. Use precomputed canonical root from merkleize().
+        // Use precomputed canonical root from merkleize().
         self.root = batch.canonical_root;
 
         Ok(range)

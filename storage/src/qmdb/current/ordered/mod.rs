@@ -70,7 +70,7 @@ pub mod tests {
             let finalized = db
                 .new_batch()
                 .write(k1, Some(v1.clone()))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -94,7 +94,7 @@ pub mod tests {
             let finalized = db
                 .new_batch()
                 .write(k1, None)
-                .merkleize(Some(metadata.clone()))
+                .merkleize(Some(metadata.clone()), &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -110,7 +110,12 @@ pub mod tests {
 
             // Repeated delete of same key should fail (key already deleted).
             assert!(db.get(&k1).await.unwrap().is_none());
-            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            let finalized = db
+                .new_batch()
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             db.commit().await.unwrap();
             let root3 = db.root();
@@ -127,7 +132,7 @@ pub mod tests {
             let finalized = db
                 .new_batch()
                 .write(k1, Some(v1))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
