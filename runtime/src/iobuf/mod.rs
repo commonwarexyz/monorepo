@@ -2416,8 +2416,8 @@ mod tests {
         prepend_noop.prepend(IoBuf::default());
         assert_eq!(prepend_noop.coalesce(), b"x");
 
-        let mut prepend_into_empty = IoBufs::default();
         // Prepending into an empty aggregate should stay on the single-buffer fast path.
+        let mut prepend_into_empty = IoBufs::default();
         prepend_into_empty.prepend(IoBuf::from(b"z"));
         assert!(prepend_into_empty.is_single());
         assert_eq!(prepend_into_empty.coalesce(), b"z");
@@ -3619,13 +3619,13 @@ mod tests {
         assert_eq!(coalesced, b"hello world");
         assert!(coalesced.is_pooled());
 
+        // Four chunks force the deque-backed coalesce path instead of pair/triple fast paths.
         let bufs = IoBufsMut::from(vec![
             IoBufMut::from(b"a"),
             IoBufMut::from(b"b"),
             IoBufMut::from(b"c"),
             IoBufMut::from(b"d"),
         ]);
-        // Four chunks force the deque-backed coalesce path instead of pair/triple fast paths.
         let coalesced = bufs.coalesce_with_pool(&pool);
         assert_eq!(coalesced, b"abcd");
         assert!(coalesced.is_pooled());
@@ -4311,6 +4311,7 @@ mod tests {
         let (first, second) = wrapped.as_slices();
         assert!(!first.is_empty());
         assert!(!second.is_empty());
+
         // Force `advance_mut` to consume across the wrapped second slice as well.
         let to_advance = first.len() + 1;
         let mut chunked = IoBufsMut {
