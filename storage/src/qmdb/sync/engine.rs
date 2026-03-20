@@ -6,7 +6,7 @@ use crate::{
         sync::{
             database::Config as _,
             error::EngineError,
-            requests::Requests,
+            requests::{Id as RequestId, Requests},
             resolver::{FetchResult, Resolver},
             target::validate_update,
             Database, Error as SyncError, Journal, Target,
@@ -51,12 +51,14 @@ enum Event<Op, D: Digest, E> {
     UpdateChannelClosed,
 }
 
-/// Result from a fetch operation with its starting location
+/// Result from a fetch operation with its request ID and starting location.
 #[derive(Debug)]
 pub(super) struct IndexedFetchResult<Op, D: Digest, E> {
-    /// The location of the first operation in the batch
+    /// Unique ID assigned when the request was scheduled.
+    pub id: RequestId,
+    /// The location of the first operation in the batch.
     pub start_loc: Location,
-    /// The result of the fetch operation
+    /// The result of the fetch operation.
     pub result: Result<FetchResult<Op, D>, E>,
 }
 
@@ -242,14 +244,20 @@ where
             let start_loc = self.target.range.start();
             let resolver = self.resolver.clone();
             let (cancel_tx, cancel_rx) = oneshot::channel();
-            self.outstanding_requests.add(
+            let id = self.outstanding_requests.next_id();
+            self.outstanding_requests.insert(
+                id,
                 start_loc,
                 cancel_tx,
                 Box::pin(async move {
                     let result = resolver
                         .get_operations(target_size, start_loc, NZU64!(1), true, cancel_rx)
                         .await;
-                    IndexedFetchResult { start_loc, result }
+                    IndexedFetchResult {
+                        id,
+                        start_loc,
+                        result,
+                    }
                 }),
             );
         }
@@ -287,7 +295,9 @@ where
             // Schedule the request
             let resolver = self.resolver.clone();
             let (cancel_tx, cancel_rx) = oneshot::channel();
-            self.outstanding_requests.add(
+            let id = self.outstanding_requests.next_id();
+            self.outstanding_requests.insert(
+                id,
                 gap_range.start,
                 cancel_tx,
                 Box::pin(async move {
@@ -295,6 +305,7 @@ where
                         .get_operations(target_size, gap_range.start, batch_size, false, cancel_rx)
                         .await;
                     IndexedFetchResult {
+                        id,
                         start_loc: gap_range.start,
                         result,
                     }
@@ -316,12 +327,8 @@ where
         new_target: Target<DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
         self.journal.resize(new_target.range.start()).await?;
-        // Remove requests at or before the new start. The +1 ensures we also
-        // clear the new start location itself, which schedule_requests will
-        // reuse for a pinned-nodes request (two futures sharing one location
-        // entry would cause the second to be silently discarded).
         self.outstanding_requests
-            .remove_before(new_target.range.start().checked_add(1).unwrap());
+            .remove_before(new_target.range.start());
         self.fetched_operations.clear();
         self.pinned_nodes = None;
 
@@ -443,8 +450,10 @@ where
         &mut self,
         fetch_result: IndexedFetchResult<DB::Op, DB::Digest, R::Error>,
     ) -> Result<(), Error<DB, R>> {
-        // Discard results for requests removed by a target update.
-        if !self.outstanding_requests.remove(fetch_result.start_loc) {
+        // Discard results for stale requests (removed by a target update).
+        // Using the request ID prevents a stale future from consuming the
+        // tracking entry of a fresh request at the same location.
+        if !self.outstanding_requests.remove(fetch_result.id) {
             return Ok(());
         }
 
@@ -618,41 +627,14 @@ mod tests {
     use commonware_utils::channel::oneshot;
     use std::{future::Future, pin::Pin};
 
-    #[test]
-    fn test_outstanding_requests() {
-        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
-        assert_eq!(requests.len(), 0);
-
-        // Test adding requests
-        let fut = Box::pin(async {
-            IndexedFetchResult {
-                start_loc: Location::new(0),
-                result: Ok(FetchResult {
-                    proof: Proof {
-                        leaves: Location::new(0),
-                        digests: vec![],
-                    },
-                    operations: vec![],
-                    success_tx: oneshot::channel().0,
-                    pinned_nodes: None,
-                }),
-            }
-        });
-        requests.add(Location::new(10), oneshot::channel().0, fut);
-        assert_eq!(requests.len(), 1);
-        assert!(requests.locations().any(|l| l == &Location::new(10)));
-
-        // Test removing requests
-        requests.remove(Location::new(10));
-        assert!(!requests.locations().any(|l| l == &Location::new(10)));
-    }
-
     /// Create a no-op fetch result future for testing request tracking.
     fn dummy_future(
+        id: RequestId,
         loc: u64,
     ) -> Pin<Box<dyn Future<Output = IndexedFetchResult<i32, sha256::Digest, ()>> + Send>> {
         Box::pin(async move {
             IndexedFetchResult {
+                id,
                 start_loc: Location::new(loc),
                 result: Ok(FetchResult {
                     proof: Proof {
@@ -667,34 +649,58 @@ mod tests {
         })
     }
 
+    /// Helper to add a request at a given location.
+    fn add(requests: &mut Requests<i32, sha256::Digest, ()>, loc: u64) -> RequestId {
+        let id = requests.next_id();
+        requests.insert(
+            id,
+            Location::new(loc),
+            oneshot::channel().0,
+            dummy_future(id, loc),
+        );
+        id
+    }
+
+    #[test]
+    fn test_add_and_remove() {
+        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+        assert_eq!(requests.len(), 0);
+
+        let id = add(&mut requests, 10);
+        assert_eq!(requests.len(), 1);
+        assert!(requests.contains(&Location::new(10)));
+
+        assert!(requests.remove(id));
+        assert!(!requests.contains(&Location::new(10)));
+        assert!(!requests.remove(id));
+    }
+
     #[test]
     fn test_remove_before() {
         let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
 
-        requests.add(Location::new(5), oneshot::channel().0, dummy_future(5));
-        requests.add(Location::new(10), oneshot::channel().0, dummy_future(10));
-        requests.add(Location::new(15), oneshot::channel().0, dummy_future(15));
-        requests.add(Location::new(20), oneshot::channel().0, dummy_future(20));
+        add(&mut requests, 5);
+        add(&mut requests, 10);
+        add(&mut requests, 15);
+        add(&mut requests, 20);
         assert_eq!(requests.len(), 4);
 
-        // Remove requests before location 10 -- should drop loc 5
         requests.remove_before(Location::new(10));
         assert_eq!(requests.len(), 3);
-        assert!(!requests.locations().any(|l| l == &Location::new(5)));
-        assert!(requests.locations().any(|l| l == &Location::new(10)));
-        assert!(requests.locations().any(|l| l == &Location::new(15)));
-        assert!(requests.locations().any(|l| l == &Location::new(20)));
+        assert!(!requests.contains(&Location::new(5)));
+        assert!(requests.contains(&Location::new(10)));
+        assert!(requests.contains(&Location::new(15)));
+        assert!(requests.contains(&Location::new(20)));
     }
 
     #[test]
     fn test_remove_before_all() {
         let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
 
-        requests.add(Location::new(5), oneshot::channel().0, dummy_future(5));
-        requests.add(Location::new(10), oneshot::channel().0, dummy_future(10));
+        add(&mut requests, 5);
+        add(&mut requests, 10);
         assert_eq!(requests.len(), 2);
 
-        // Remove all requests
         requests.remove_before(Location::new(100));
         assert_eq!(requests.len(), 0);
     }
@@ -710,42 +716,51 @@ mod tests {
     fn test_remove_before_none() {
         let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
 
-        requests.add(Location::new(10), oneshot::channel().0, dummy_future(10));
-        requests.add(Location::new(20), oneshot::channel().0, dummy_future(20));
+        add(&mut requests, 10);
+        add(&mut requests, 20);
         assert_eq!(requests.len(), 2);
 
-        // Cutoff before all requests -- nothing removed
         requests.remove_before(Location::new(5));
         assert_eq!(requests.len(), 2);
-        assert!(requests.locations().any(|l| l == &Location::new(10)));
-        assert!(requests.locations().any(|l| l == &Location::new(20)));
+        assert!(requests.contains(&Location::new(10)));
+        assert!(requests.contains(&Location::new(20)));
     }
 
     #[test]
-    fn test_remove_returns_tracked_status() {
+    fn test_superseded_request() {
         let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
 
-        requests.add(Location::new(10), oneshot::channel().0, dummy_future(10));
-        assert!(requests.remove(Location::new(10)));
-        assert!(!requests.remove(Location::new(10)));
-        assert!(!requests.remove(Location::new(99)));
+        // Old request at location 10
+        let old_id = add(&mut requests, 10);
+        assert_eq!(requests.len(), 1);
+
+        // New request supersedes at same location
+        let new_id = add(&mut requests, 10);
+        assert_eq!(requests.len(), 1);
+
+        // Old ID is no longer tracked (superseded by insert)
+        assert!(!requests.remove(old_id));
+
+        // New ID is still tracked and by_location is intact
+        assert!(requests.contains(&Location::new(10)));
+        assert!(requests.remove(new_id));
+        assert!(!requests.contains(&Location::new(10)));
     }
 
     #[test]
-    fn test_remove_after_remove_before() {
+    fn test_stale_id_after_remove_before() {
         let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
 
-        requests.add(Location::new(5), oneshot::channel().0, dummy_future(5));
-        requests.add(Location::new(10), oneshot::channel().0, dummy_future(10));
-        requests.add(Location::new(15), oneshot::channel().0, dummy_future(15));
-
-        // Discard locations before 10
+        let old_id = add(&mut requests, 5);
+        add(&mut requests, 15);
         requests.remove_before(Location::new(10));
 
-        // Discarded location: remove returns false
-        assert!(!requests.remove(Location::new(5)));
-        // Retained location: remove returns true
-        assert!(requests.remove(Location::new(10)));
-        assert!(requests.remove(Location::new(15)));
+        // Old ID at location 5 was discarded by remove_before
+        assert!(!requests.remove(old_id));
+
+        // New request at the same location gets a different ID
+        let new_id = add(&mut requests, 5);
+        assert_ne!(old_id, new_id);
+        assert!(requests.remove(new_id));
     }
 }
