@@ -41,6 +41,7 @@ std = [
 	"thiserror/std",
 ]
 parallel = ["dep:rayon"]
+sha256-rows = []
 
 [[bench]]
 name = "commitment"

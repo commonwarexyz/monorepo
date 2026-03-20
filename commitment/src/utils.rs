@@ -167,23 +167,38 @@ fn extract_index_from_field<F: BinaryFieldElement>(elem: &F, max_n: usize) -> us
     idx & (max_n - 1)
 }
 
-/// Hash a row of field elements using BLAKE3.
+/// Hash a row of field elements for Merkle leaf commitment.
 ///
-/// Matches [`crate::encode::hash_row`] — both must produce identical
-/// digests for prover/verifier consistency.
+/// Uses BLAKE3 by default, or SHA-256 when the `sha256-rows` feature
+/// is enabled (for cross-verification with implementations that use
+/// SHA-256 row hashing).
 #[inline(always)]
 pub fn hash_row<F: BinaryFieldElement>(row: &[F]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&(row.len() as u32).to_le_bytes());
-
     // SAFETY: BinaryFieldElement types are repr(transparent) over primitive
     // integers with no padding. Viewing the contiguous slice as bytes is sound.
     let row_bytes = unsafe {
         core::slice::from_raw_parts(row.as_ptr() as *const u8, core::mem::size_of_val(row))
     };
-    hasher.update(row_bytes);
 
-    *hasher.finalize().as_bytes()
+    #[cfg(not(feature = "sha256-rows"))]
+    {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&(row.len() as u32).to_le_bytes());
+        hasher.update(row_bytes);
+        *hasher.finalize().as_bytes()
+    }
+
+    #[cfg(feature = "sha256-rows")]
+    {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update((row.len() as u32).to_le_bytes());
+        hasher.update(row_bytes);
+        let result = hasher.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&result);
+        out
+    }
 }
 
 /// Verify Ligero opening consistency.
