@@ -55,8 +55,10 @@
 //! - **Future Secrecy**: If a peer's static private key is compromised, future sessions will be exposed.
 //! - **0-RTT**: The protocol does not support 0-RTT handshakes (resumed sessions).
 
-use crate::utils::codec::{recv_frame, send_frame, send_frame_with};
-use commonware_codec::{DecodeExt, Encode as _, EncodeSize, Error as CodecError, Write};
+use crate::utils::codec::{build_frame, recv_frame, send_frame};
+use commonware_codec::{
+    varint::UInt, DecodeExt, Encode as _, EncodeSize, Error as CodecError, Write,
+};
 use commonware_cryptography::{
     handshake::{
         self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
@@ -301,16 +303,19 @@ pub struct Sender<O> {
 }
 
 impl<O: Sink> Sender<O> {
-    /// Encrypts and sends a message to the peer.
+    /// Build one complete encrypted frame in contiguous memory.
     ///
-    /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
-    /// and sends the ciphertext.
-    pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
+    /// Keeping each frame contiguous lets callers batch multiple frames together
+    /// with `IoBufs` while preserving message boundaries and avoiding a second
+    /// concatenation copy.
+    fn encrypt_frame(
+        &mut self,
+        bufs: impl Into<IoBufs>,
+    ) -> Result<commonware_runtime::IoBuf, Error> {
         let mut bufs = bufs.into();
         let ciphertext_len = bufs.len() + TAG_SIZE as usize;
 
-        send_frame_with(
-            &mut self.sink,
+        build_frame(
             ciphertext_len,
             self.max_message_size.saturating_add(TAG_SIZE),
             |prefix| {
@@ -333,10 +338,73 @@ impl<O: Sink> Sender<O> {
                 // Append tag.
                 frame.put_slice(&tag);
 
-                Ok(frame.freeze().into())
+                Ok(frame.freeze())
             },
         )
-        .await
+    }
+
+    /// Encrypts and sends a message to the peer.
+    ///
+    /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
+    /// and sends the ciphertext.
+    pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
+        let frame = self.encrypt_frame(bufs)?;
+        self.sink.send(frame).await.map_err(Error::SendFailed)
+    }
+
+    /// Encrypts and sends multiple messages in a single runtime write.
+    ///
+    /// Each message is framed independently so receivers still observe the
+    /// original message boundaries. All frames are written into a single
+    /// pre-allocated buffer to avoid per-message runtime buffers.
+    pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error>
+    where
+        B: Into<IoBufs>,
+        I: IntoIterator<Item = B>,
+    {
+        let max_ciphertext_size = self.max_message_size.saturating_add(TAG_SIZE) as usize;
+
+        // First pass: validate each message and compute the exact aggregate size
+        // so we can allocate the output buffer once.
+        let bufs = bufs.into_iter();
+        let (lower, _) = bufs.size_hint();
+        let mut messages = Vec::with_capacity(lower);
+        let mut total = 0usize;
+        for buf in bufs {
+            let msg = buf.into();
+            let ciphertext_len = msg.len() + TAG_SIZE as usize;
+            if ciphertext_len > max_ciphertext_size {
+                return Err(Error::SendTooLarge(ciphertext_len));
+            }
+            let prefix_len = UInt(ciphertext_len as u32).encode_size();
+            total = total.saturating_add(prefix_len + ciphertext_len);
+            messages.push(msg);
+        }
+
+        if messages.is_empty() {
+            return Ok(());
+        }
+
+        // Second pass: write each framed ciphertext back-to-back into the shared
+        // buffer while preserving per-message boundaries for the receiver.
+        let mut frame = self.pool.alloc(total);
+        for mut msg in messages {
+            let ciphertext_len = msg.len() + TAG_SIZE as usize;
+            let prefix = UInt(ciphertext_len as u32);
+            prefix.write(&mut frame);
+
+            // Encrypt only the bytes for this message, leaving previously written
+            // frames intact in the aggregate buffer.
+            let plaintext_offset = frame.len();
+            frame.put(&mut msg);
+
+            let tag = self
+                .cipher
+                .send_in_place(&mut frame.as_mut()[plaintext_offset..])?;
+            frame.put_slice(&tag);
+        }
+
+        self.sink.send(frame.freeze()).await.map_err(Error::SendFailed)
     }
 }
 
@@ -381,10 +449,35 @@ impl<I: Stream> Receiver<I> {
 mod test {
     use super::*;
     use commonware_cryptography::{ed25519::PrivateKey, Signer};
-    use commonware_runtime::{deterministic, mocks, Runner as _, Spawner as _};
+    use commonware_runtime::{
+        deterministic, mocks, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
+
+    struct CountingSink<S> {
+        inner: S,
+        sends: Arc<AtomicUsize>,
+    }
+
+    impl<S> CountingSink<S> {
+        fn new(inner: S, sends: Arc<AtomicUsize>) -> Self {
+            Self { inner, sends }
+        }
+    }
+
+    impl<S: commonware_runtime::Sink> commonware_runtime::Sink for CountingSink<S> {
+        async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), RuntimeError> {
+            self.sends.fetch_add(1, Ordering::Relaxed);
+            self.inner.send(bufs).await
+        }
+    }
 
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {
@@ -446,6 +539,84 @@ mod test {
                 let ack = dialer_receiver.recv().await?;
                 assert_eq!(ack.coalesce(), *msg);
             }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_send_many_uses_single_runtime_send() -> Result<(), Error> {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let dialer_crypto = PrivateKey::from_seed(42);
+            let listener_crypto = PrivateKey::from_seed(24);
+
+            let (dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, dialer_stream) = mocks::Channel::init();
+            let sends = Arc::new(AtomicUsize::new(0));
+
+            let dialer_config = Config {
+                signing_key: dialer_crypto.clone(),
+                namespace: NAMESPACE.to_vec(),
+                max_message_size: MAX_MESSAGE_SIZE,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_secs(1),
+            };
+
+            let listener_config = Config {
+                signing_key: listener_crypto.clone(),
+                namespace: NAMESPACE.to_vec(),
+                max_message_size: MAX_MESSAGE_SIZE,
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(1),
+                handshake_timeout: Duration::from_secs(1),
+            };
+
+            let listener_handle = context.clone().spawn(move |context| async move {
+                listen(
+                    context,
+                    |_| async { true },
+                    listener_config,
+                    listener_stream,
+                    listener_sink,
+                )
+                .await
+            });
+
+            let (mut dialer_sender, _dialer_receiver) = dial(
+                context,
+                dialer_config,
+                listener_crypto.public_key(),
+                dialer_stream,
+                CountingSink::new(dialer_sink, sends.clone()),
+            )
+            .await?;
+
+            let (_listener_peer, _listener_sender, mut listener_receiver) =
+                listener_handle.await.unwrap()?;
+            sends.store(0, Ordering::Relaxed);
+
+            dialer_sender
+                .send_many(vec![
+                    IoBufs::from(IoBuf::from(b"alpha")),
+                    IoBufs::from(IoBuf::from(b"beta")),
+                    IoBufs::from(IoBuf::from(b"gamma")),
+                ])
+                .await?;
+
+            assert_eq!(sends.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                listener_receiver.recv().await?.coalesce(),
+                IoBuf::from(b"alpha")
+            );
+            assert_eq!(
+                listener_receiver.recv().await?.coalesce(),
+                IoBuf::from(b"beta")
+            );
+            assert_eq!(
+                listener_receiver.recv().await?.coalesce(),
+                IoBuf::from(b"gamma")
+            );
             Ok(())
         })
     }
