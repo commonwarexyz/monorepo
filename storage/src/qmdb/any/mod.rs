@@ -78,7 +78,7 @@ use crate::{
             variable::{Config as VConfig, Journal as VJournal},
         },
     },
-    mmr::{journaled::Config as MmrConfig, Location},
+    mmr::{self, journaled::Config as MmrConfig, Location},
     qmdb::{
         any::operation::{Operation, Update},
         operation::Committable,
@@ -146,7 +146,7 @@ where
     NewIndex: FnOnce(E, T) -> I,
     Operation<U>: CodecFixedShared + Committable,
 {
-    let mut log = authenticated::Journal::<_, FJournal<_, _>, _>::new(
+    let mut log = authenticated::Journal::<mmr::Family, _, FJournal<_, _>, _>::new(
         context.with_label("log"),
         cfg.mmr,
         cfg.log,
@@ -183,7 +183,7 @@ where
     NewIndex: FnOnce(E, T) -> I,
     Operation<U>: Codec + Committable,
 {
-    let mut log = authenticated::Journal::<_, VJournal<_, _>, _>::new(
+    let mut log = authenticated::Journal::<mmr::Family, _, VJournal<_, _>, _>::new(
         context.with_label("log"),
         cfg.mmr,
         cfg.log,

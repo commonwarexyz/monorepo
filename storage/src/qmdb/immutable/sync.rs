@@ -71,13 +71,14 @@ where
         )
         .await?;
 
-        let journal = authenticated::Journal::<_, _, _>::from_components(
-            mmr,
-            log,
-            hasher,
-            apply_batch_size as u64,
-        )
-        .await?;
+        let journal =
+            authenticated::Journal::<crate::merkle::mmr::Family, _, _, _>::from_components(
+                mmr,
+                log,
+                hasher,
+                apply_batch_size as u64,
+            )
+            .await?;
 
         let mut snapshot: Index<T, Location> =
             Index::new(context.with_label("snapshot"), db_config.translator.clone());

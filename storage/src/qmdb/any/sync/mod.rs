@@ -78,7 +78,7 @@ where
     )
     .await?;
 
-    let log = authenticated::Journal::<_, _, _>::from_components(
+    let log = authenticated::Journal::<crate::merkle::mmr::Family, _, _, _>::from_components(
         mmr,
         log,
         hasher,

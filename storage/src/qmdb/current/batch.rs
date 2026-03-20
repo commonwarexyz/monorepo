@@ -751,7 +751,7 @@ where
         I,
         H,
         U,
-        authenticated::MerkleizedBatch<'a, H, P, Operation<U>>,
+        authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<U>>,
         mmr::MerkleizedBatch<'a, H::Digest, G>,
         BitmapDiff<'a, B, N>,
         N,

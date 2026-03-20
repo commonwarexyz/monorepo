@@ -43,7 +43,7 @@ where
     pub(super) immutable: &'a Immutable<E, K, V, H, T>,
 
     /// Authenticated journal batch for computing the speculative MMR root.
-    pub(super) journal_batch: authenticated::UnmerkleizedBatch<'a, H, P, Operation<K, V>>,
+    pub(super) journal_batch: authenticated::UnmerkleizedBatch<'a, mmr::Family, H, P, Operation<K, V>>,
 
     /// Pending mutations.
     pub(super) mutations: BTreeMap<K, V>,
@@ -79,7 +79,7 @@ where
     immutable: &'a Immutable<E, K, V, H, T>,
 
     /// Merkleized authenticated journal batch (provides the speculative MMR root).
-    journal_batch: authenticated::MerkleizedBatch<'a, H, P, Operation<K, V>>,
+    journal_batch: authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<K, V>>,
 
     /// All uncommitted key-level changes in this batch chain.
     diff: Arc<BTreeMap<K, DiffEntry<V>>>,
@@ -97,7 +97,7 @@ where
 /// An owned changeset that can be applied to the database.
 pub struct Changeset<K: Array, D: Digest, V: VariableValue> {
     /// The finalized authenticated journal batch (MMR changeset + item chain).
-    pub(super) journal_finalized: authenticated::Changeset<D, Operation<K, V>>,
+    pub(super) journal_finalized: authenticated::Changeset<mmr::Family, D, Operation<K, V>>,
 
     /// Snapshot mutations to apply, in order.
     pub(super) snapshot_diffs: Vec<SnapshotDiff<K>>,
@@ -224,7 +224,7 @@ where
         V,
         H,
         T,
-        authenticated::MerkleizedBatch<'a, H, P, Operation<K, V>>,
+        authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<K, V>>,
     > {
         UnmerkleizedBatch {
             immutable: self.immutable,

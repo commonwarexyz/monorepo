@@ -26,7 +26,7 @@ where
     pub(super) keyless: &'a Keyless<E, V, H>,
 
     /// Authenticated journal batch for computing the speculative MMR root.
-    pub(super) journal_batch: authenticated::UnmerkleizedBatch<'a, H, P, Operation<V>>,
+    pub(super) journal_batch: authenticated::UnmerkleizedBatch<'a, mmr::Family, H, P, Operation<V>>,
 
     /// Pending appends.
     pub(super) appends: Vec<V>,
@@ -57,7 +57,7 @@ where
     keyless: &'a Keyless<E, V, H>,
 
     /// Merkleized authenticated journal batch (provides the speculative MMR root).
-    journal_batch: authenticated::MerkleizedBatch<'a, H, P, Operation<V>>,
+    journal_batch: authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<V>>,
 
     /// One Arc segment of operations per batch in the chain (chronological order).
     base_operations: Vec<Arc<Vec<Operation<V>>>>,
@@ -72,7 +72,7 @@ where
 /// An owned changeset that can be applied to the database.
 pub struct Changeset<D: Digest, V: VariableValue> {
     /// The finalized authenticated journal batch (MMR changeset + item chain).
-    pub(super) journal_finalized: authenticated::Changeset<D, Operation<V>>,
+    pub(super) journal_finalized: authenticated::Changeset<mmr::Family, D, Operation<V>>,
 
     /// Total operation count after this batch.
     pub(super) total_size: u64,
@@ -199,7 +199,7 @@ where
     #[allow(clippy::type_complexity)]
     pub fn new_batch(
         &self,
-    ) -> UnmerkleizedBatch<'_, E, V, H, authenticated::MerkleizedBatch<'a, H, P, Operation<V>>>
+    ) -> UnmerkleizedBatch<'_, E, V, H, authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<V>>>
     {
         UnmerkleizedBatch {
             keyless: self.keyless,

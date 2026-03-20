@@ -134,7 +134,7 @@ where
     db: &'a Db<E, C, I, H, U>,
 
     /// Authenticated journal batch for computing the speculative MMR root.
-    journal_batch: authenticated::UnmerkleizedBatch<'a, H, P, Operation<U>>,
+    journal_batch: authenticated::UnmerkleizedBatch<'a, mmr::Family, H, P, Operation<U>>,
 
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
@@ -178,7 +178,7 @@ where
     db: &'a Db<E, C, I, H, U>,
 
     /// Merkleized authenticated journal batch (provides the speculative MMR root).
-    pub(crate) journal_batch: authenticated::MerkleizedBatch<'a, H, P, Operation<U>>,
+    pub(crate) journal_batch: authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<U>>,
 
     /// All uncommitted key-level changes in this batch chain.
     pub(crate) diff: Arc<BTreeMap<U::Key, DiffEntry<U::Value>>>,
@@ -205,7 +205,7 @@ where
 /// An owned changeset that can be applied to the database.
 pub struct Changeset<K, D: Digest, Item: Send> {
     /// The finalized authenticated journal batch (MMR changeset + item chain).
-    journal_finalized: authenticated::Changeset<D, Item>,
+    journal_finalized: authenticated::Changeset<mmr::Family, D, Item>,
 
     /// Snapshot mutations to apply, in order.
     snapshot_diffs: Vec<SnapshotDiff<K>>,
@@ -243,7 +243,7 @@ where
         + BatchChain<Operation<U>>,
 {
     db: &'a Db<E, C, I, H, U>,
-    journal_batch: authenticated::UnmerkleizedBatch<'a, H, P, Operation<U>>,
+    journal_batch: authenticated::UnmerkleizedBatch<'a, mmr::Family, H, P, Operation<U>>,
     base_diff: Arc<BTreeMap<U::Key, DiffEntry<U::Value>>>,
     base_operations: Vec<Arc<Vec<Operation<U>>>>,
     base_size: u64,
@@ -988,7 +988,7 @@ where
     #[allow(clippy::type_complexity)]
     pub fn new_batch(
         &self,
-    ) -> UnmerkleizedBatch<'_, E, C, I, H, U, authenticated::MerkleizedBatch<'a, H, P, Operation<U>>>
+    ) -> UnmerkleizedBatch<'_, E, C, I, H, U, authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<U>>>
     {
         UnmerkleizedBatch {
             db: self.db,

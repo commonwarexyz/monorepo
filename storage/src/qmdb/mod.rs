@@ -113,11 +113,11 @@ pub enum Error {
     StaleChangeset { expected: u64, actual: u64 },
 }
 
-impl From<crate::journal::authenticated::Error> for Error {
-    fn from(e: crate::journal::authenticated::Error) -> Self {
+impl From<crate::journal::authenticated::Error<crate::merkle::mmr::Family>> for Error {
+    fn from(e: crate::journal::authenticated::Error<crate::merkle::mmr::Family>) -> Self {
         match e {
             crate::journal::authenticated::Error::Journal(j) => Self::Journal(j),
-            crate::journal::authenticated::Error::Mmr(m) => Self::Mmr(m),
+            crate::journal::authenticated::Error::Merkle(m) => Self::Mmr(m),
         }
     }
 }

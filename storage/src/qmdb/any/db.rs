@@ -20,7 +20,8 @@ use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::NonZeroU64;
 
 /// Type alias for the authenticated journal used by [Db].
-pub(crate) type AuthenticatedLog<E, C, H> = authenticated::Journal<E, C, H>;
+pub(crate) type AuthenticatedLog<E, C, H> =
+    authenticated::Journal<crate::merkle::mmr::Family, E, C, H>;
 
 /// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:

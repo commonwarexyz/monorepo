@@ -84,7 +84,8 @@ pub struct Config<C> {
 }
 
 /// A keyless QMDB for variable length data.
-type Journal<E, V, H> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H>;
+type Journal<E, V, H> =
+    authenticated::Journal<crate::merkle::mmr::Family, E, ContiguousJournal<E, Operation<V>>, H>;
 
 /// A keyless authenticated database for variable-length data.
 pub struct Keyless<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
