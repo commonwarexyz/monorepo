@@ -113,12 +113,6 @@ pub enum Error {
     StaleChangeset { expected: u64, actual: u64 },
 }
 
-impl From<crate::merkle::Error> for Error {
-    fn from(e: crate::merkle::Error) -> Self {
-        Self::Mmr(e.into())
-    }
-}
-
 impl From<crate::journal::authenticated::Error> for Error {
     fn from(e: crate::journal::authenticated::Error) -> Self {
         match e {

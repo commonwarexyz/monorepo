@@ -5,7 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    mmr::{hasher::Standard, journaled::Config as MmrConfig, Location},
+    mmr::{journaled::Config as MmrConfig, Location, StandardHasher as Standard},
     qmdb::{
         keyless::{Config, Keyless},
         verify_proof,

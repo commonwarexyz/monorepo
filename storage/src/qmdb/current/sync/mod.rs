@@ -30,7 +30,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    mmr::{self, hasher::Hasher as _, Location, Position, StandardHasher},
+    mmr::{self, Location, Position, StandardHasher},
     qmdb::{
         self,
         any::{
