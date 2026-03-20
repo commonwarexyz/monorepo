@@ -240,7 +240,7 @@ use crate::{
         any::{
             self,
             operation::{Operation, Update},
-            FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
+            Config as AnyConfig,
         },
         operation::{Committable, Key},
         Error,
@@ -260,14 +260,18 @@ pub mod proof;
 pub(crate) mod sync;
 pub mod unordered;
 
-/// Configuration for a `Current` authenticated db with fixed-size values.
+/// Configuration for a `Current` authenticated db.
+///
+/// The `LC` parameter selects the log journal variant:
+/// - [FConfig] for fixed-size values
+/// - [VConfig]`<C>` for variable-size values
 #[derive(Clone)]
-pub struct FixedConfig<T: Translator> {
+pub struct Config<T: Translator, LC> {
     /// Configuration for the MMR backing the authenticated journal.
     pub mmr: MmrConfig,
 
-    /// Configuration for the fixed-size operations log journal.
-    pub log: FConfig,
+    /// Configuration for the operations log journal.
+    pub log: LC,
 
     /// The name of the storage partition used for the grafted MMR metadata.
     pub grafted_mmr_metadata_partition: String,
@@ -276,8 +280,8 @@ pub struct FixedConfig<T: Translator> {
     pub translator: T,
 }
 
-impl<T: Translator> From<FixedConfig<T>> for AnyFixedConfig<T> {
-    fn from(cfg: FixedConfig<T>) -> Self {
+impl<T: Translator, LC> From<Config<T, LC>> for AnyConfig<T, LC> {
+    fn from(cfg: Config<T, LC>) -> Self {
         Self {
             mmr: cfg.mmr,
             log: cfg.log,
@@ -285,195 +289,118 @@ impl<T: Translator> From<FixedConfig<T>> for AnyFixedConfig<T> {
         }
     }
 }
+
+/// Configuration for a `Current` authenticated db with fixed-size values.
+pub type FixedConfig<T> = Config<T, FConfig>;
 
 /// Configuration for a `Current` authenticated db with variable-sized values.
-#[derive(Clone)]
-pub struct VariableConfig<T: Translator, C> {
-    /// Configuration for the MMR backing the authenticated journal.
-    pub mmr: MmrConfig,
+pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
 
-    /// Configuration for the variable-size operations log journal.
-    pub log: VConfig<C>,
-
-    /// The name of the storage partition used for the grafted MMR metadata.
-    pub grafted_mmr_metadata_partition: String,
-
-    /// The translator used by the compressed index.
-    pub translator: T,
-}
-
-impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
-    fn from(cfg: VariableConfig<T, C>) -> Self {
-        Self {
-            mmr: cfg.mmr,
-            log: cfg.log,
-            translator: cfg.translator,
-        }
-    }
-}
-
-/// Shared initialization logic for fixed-sized value Current [db::Db].
-pub(super) async fn init_fixed<E, U, H, T, I, const N: usize, NewIndex>(
-    context: E,
-    config: FixedConfig<T>,
-    new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<U>>, I, H, U, N>, Error>
-where
-    E: Storage + Clock + Metrics,
-    U: Update + Send + Sync,
-    U::Key: Array,
-    H: Hasher,
-    T: Translator,
-    I: UnorderedIndex<Value = Location>,
-    NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: CodecFixedShared + Committable,
-{
-    // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-    const {
-        // A compile-time assertion that the chunk size is some multiple of digest size. A multiple
-        // of 1 is optimal with respect to proof size, but a higher multiple allows for a smaller
-        // (RAM resident) merkle tree over the structure.
-        assert!(
-            N.is_multiple_of(H::Digest::SIZE),
-            "chunk size must be some multiple of the digest size",
-        );
-        // A compile-time assertion that chunk size is a power of 2, which is necessary to allow
-        // the status bitmap tree to be aligned with the underlying operations MMR.
-        assert!(N.is_power_of_two(), "chunk size must be a power of 2");
-    }
-
-    let thread_pool = config.mmr.thread_pool.clone();
-    let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-
-    // Load bitmap metadata (pruned_chunks + pinned nodes for grafted MMR).
-    let (metadata, pruned_chunks, pinned_nodes) =
-        db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
-
-    // Initialize the activity status bitmap.
-    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| Error::DataCorrupted("pruned chunks overflow"))?;
-
-    // Initialize the anydb with a callback that populates the status bitmap.
-    let last_known_inactivity_floor = Location::new(status.len());
-    let any = any::init_fixed(
-        context.with_label("any"),
-        config.into(),
-        Some(last_known_inactivity_floor),
-        |append: bool, loc: Option<Location>| {
-            status.push(append);
-            if let Some(loc) = loc {
-                status.set_bit(*loc, false);
+/// Generate `init_fixed` or `init_variable` for a specific journal type.
+///
+/// Both variants follow the same sequence: validate const generics, load bitmap metadata,
+/// init the underlying `any` db with a bitmap callback, build the grafted MMR, compute root.
+/// They differ only in journal type, config type, codec bounds, and which `any::init_*` to call
+/// (same Rust #100013 limitation).
+macro_rules! impl_current_init {
+    ($fn_name:ident, $any_init:ident, $journal_ty:ty, $cfg_ty:ty, $key_bound:path, $codec_bound:path) => {
+        pub(super) async fn $fn_name<E, U, H, T, I, const N: usize, NewIndex>(
+            context: E,
+            config: $cfg_ty,
+            new_index: NewIndex,
+        ) -> Result<db::Db<E, $journal_ty, I, H, U, N>, Error>
+        where
+            E: Storage + Clock + Metrics,
+            U: Update + Send + Sync,
+            U::Key: $key_bound,
+            H: Hasher,
+            T: Translator,
+            I: UnorderedIndex<Value = Location>,
+            NewIndex: FnOnce(E, T) -> I,
+            Operation<U>: $codec_bound + Committable,
+        {
+            // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
+            const {
+                assert!(
+                    N.is_multiple_of(H::Digest::SIZE),
+                    "chunk size must be some multiple of the digest size",
+                );
+                assert!(N.is_power_of_two(), "chunk size must be a power of 2");
             }
-        },
-        new_index,
-    )
-    .await?;
 
-    // Build the grafted MMR from the bitmap and ops MMR.
-    let hasher = StandardHasher::<H>::new();
-    let grafted_mmr = db::build_grafted_mmr::<H, N>(
-        &hasher,
-        &status,
-        &pinned_nodes,
-        &any.log.mmr,
-        thread_pool.as_ref(),
-    )
-    .await?;
+            let thread_pool = config.mmr.thread_pool.clone();
+            let metadata_partition = config.grafted_mmr_metadata_partition.clone();
 
-    // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
-    let partial_chunk = db::partial_chunk(&status);
-    let ops_root = any.log.root();
-    let root = db::compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
+            // Load bitmap metadata (pruned_chunks + pinned nodes for grafted MMR).
+            let (metadata, pruned_chunks, pinned_nodes) =
+                db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
 
-    Ok(db::Db {
-        any,
-        status,
-        grafted_mmr,
-        metadata: AsyncMutex::new(metadata),
-        thread_pool,
-        root,
-    })
-}
+            // Initialize the activity status bitmap.
+            let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
+                .map_err(|_| Error::DataCorrupted("pruned chunks overflow"))?;
 
-/// Shared initialization logic for variable-sized value Current [db::Db].
-pub(super) async fn init_variable<E, U, H, T, I, const N: usize, NewIndex>(
-    context: E,
-    config: VariableConfig<T, <Operation<U> as Read>::Cfg>,
-    new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<U>>, I, H, U, N>, Error>
-where
-    E: Storage + Clock + Metrics,
-    U: Update + Send + Sync,
-    U::Key: Key,
-    H: Hasher,
-    T: Translator,
-    I: UnorderedIndex<Value = Location>,
-    NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: Codec + Committable,
-{
-    // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-    const {
-        // A compile-time assertion that the chunk size is some multiple of digest size. A multiple
-        // of 1 is optimal with respect to proof size, but a higher multiple allows for a smaller
-        // (RAM resident) merkle tree over the structure.
-        assert!(
-            N.is_multiple_of(H::Digest::SIZE),
-            "chunk size must be some multiple of the digest size",
-        );
-        // A compile-time assertion that chunk size is a power of 2, which is necessary to allow
-        // the status bitmap tree to be aligned with the underlying operations MMR.
-        assert!(N.is_power_of_two(), "chunk size must be a power of 2");
-    }
-
-    let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-    let pool = config.mmr.thread_pool.clone();
-
-    // Load bitmap metadata (pruned_chunks + pinned nodes for grafted MMR).
-    let (metadata, pruned_chunks, pinned_nodes) =
-        db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
-
-    // Initialize the activity status bitmap.
-    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| Error::DataCorrupted("pruned chunks overflow"))?;
-
-    // Initialize the anydb with a callback that populates the activity status bitmap.
-    let last_known_inactivity_floor = Location::new(status.len());
-    let any = any::init_variable(
-        context.with_label("any"),
-        config.into(),
-        Some(last_known_inactivity_floor),
-        |append: bool, loc: Option<Location>| {
-            status.push(append);
-            if let Some(loc) = loc {
-                status.set_bit(*loc, false);
-            }
-        },
-        new_index,
-    )
-    .await?;
-
-    // Build the grafted MMR from the bitmap and ops MMR.
-    let hasher = StandardHasher::<H>::new();
-    let grafted_mmr =
-        db::build_grafted_mmr::<H, N>(&hasher, &status, &pinned_nodes, &any.log.mmr, pool.as_ref())
+            // Initialize the anydb with a callback that populates the status bitmap.
+            let last_known_inactivity_floor = Location::new(status.len());
+            let any = any::$any_init(
+                context.with_label("any"),
+                config.into(),
+                Some(last_known_inactivity_floor),
+                |append: bool, loc: Option<Location>| {
+                    status.push(append);
+                    if let Some(loc) = loc {
+                        status.set_bit(*loc, false);
+                    }
+                },
+                new_index,
+            )
             .await?;
 
-    // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
-    let partial_chunk = db::partial_chunk(&status);
-    let ops_root = any.log.root();
-    let root = db::compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
+            // Build the grafted MMR from the bitmap and ops MMR.
+            let hasher = StandardHasher::<H>::new();
+            let grafted_mmr = db::build_grafted_mmr::<H, N>(
+                &hasher,
+                &status,
+                &pinned_nodes,
+                &any.log.mmr,
+                thread_pool.as_ref(),
+            )
+            .await?;
 
-    Ok(db::Db {
-        any,
-        status,
-        grafted_mmr,
-        metadata: AsyncMutex::new(metadata),
-        thread_pool: pool,
-        root,
-    })
+            // Compute and cache the root.
+            let storage =
+                grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
+            let partial_chunk = db::partial_chunk(&status);
+            let ops_root = any.log.root();
+            let root = db::compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
+
+            Ok(db::Db {
+                any,
+                status,
+                grafted_mmr,
+                metadata: AsyncMutex::new(metadata),
+                thread_pool,
+                root,
+            })
+        }
+    };
 }
+
+impl_current_init!(
+    init_fixed,
+    init_fixed,
+    FJournal<E, Operation<U>>,
+    FixedConfig<T>,
+    Array,
+    CodecFixedShared
+);
+impl_current_init!(
+    init_variable,
+    init_variable,
+    VJournal<E, Operation<U>>,
+    VariableConfig<T, <Operation<U> as Read>::Cfg>,
+    Key,
+    Codec
+);
 
 /// Extension trait for Current QMDB types that exposes bitmap information for testing.
 #[cfg(any(test, feature = "test-traits"))]

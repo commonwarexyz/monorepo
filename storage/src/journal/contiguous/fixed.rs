@@ -868,6 +868,14 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Persistable for Journal<
     }
 }
 
+impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Initializable<E> for Journal<E, A> {
+    type Config = Config;
+
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error> {
+        Self::init(context, config).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

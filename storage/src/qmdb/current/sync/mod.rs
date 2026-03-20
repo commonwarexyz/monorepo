@@ -71,18 +71,10 @@ use std::ops::Range;
 #[cfg(test)]
 pub(crate) mod tests;
 
-impl<T: Translator> Config for FixedConfig<T> {
-    type JournalConfig = fixed::Config;
+impl<T: Translator, LC: Clone> Config for super::Config<T, LC> {
+    type JournalConfig = LC;
 
-    fn journal_config(&self) -> Self::JournalConfig {
-        self.log.clone()
-    }
-}
-
-impl<T: Translator, C: Clone> Config for VariableConfig<T, C> {
-    type JournalConfig = variable::Config<C>;
-
-    fn journal_config(&self) -> Self::JournalConfig {
+    fn journal_config(&self) -> LC {
         self.log.clone()
     }
 }

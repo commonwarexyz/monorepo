@@ -5,6 +5,8 @@
 //! [variable]-size item journals are supported.
 
 use super::Error;
+use crate::Persistable;
+use commonware_runtime::{Clock, Metrics, Storage};
 use futures::Stream;
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
@@ -173,4 +175,20 @@ pub trait Mutable: Contiguous + Send + Sync {
             Ok(rewind_size)
         }
     }
+}
+
+/// A [Mutable] journal that can be constructed from a config and runtime context.
+///
+/// This trait captures the common initialization interface shared by both [fixed::Journal] and
+/// [variable::Journal], enabling generic code over the journal type.
+pub trait Initializable<E: Storage + Clock + Metrics>:
+    Mutable + Persistable<Error = Error>
+{
+    /// The configuration needed to initialize this journal.
+    type Config: Clone + Send;
+
+    /// Initialize a journal from the given context and configuration.
+    fn init(context: E, config: Self::Config) -> impl Future<Output = Result<Self, Error>> + Send
+    where
+        Self: Sized;
 }
