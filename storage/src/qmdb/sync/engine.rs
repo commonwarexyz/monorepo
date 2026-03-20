@@ -491,6 +491,7 @@ where
             qmdb::verify_proof(&self.hasher, &proof, start_loc, &operations, target_root)
         };
 
+        // Report success or failure to the resolver.
         let _ = success_tx.send(valid);
 
         if !valid {
@@ -639,6 +640,7 @@ mod tests {
         assert!(!requests.locations().contains(&Location::new(10)));
     }
 
+    /// Create a no-op fetch result future for testing request tracking.
     fn dummy_future(
         loc: u64,
     ) -> Pin<Box<dyn Future<Output = IndexedFetchResult<i32, sha256::Digest, ()>> + Send>> {

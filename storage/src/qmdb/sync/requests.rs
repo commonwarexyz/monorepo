@@ -12,7 +12,7 @@ pub(super) struct Requests<Op, D: Digest, E> {
     futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>>,
     /// Start locations of outstanding requests.
     /// A subset of the futures: entries are removed when a request completes
-    /// or is discarded, but the corresponding future remains in the stream
+    /// or is discarded, but the corresponding future remains in `futures`
     /// (removing from FuturesUnordered is expensive).
     locations: BTreeSet<Location>,
 }
