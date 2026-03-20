@@ -21,6 +21,9 @@
 //! - Requests smaller than [`BufferPoolConfig::pool_min_size`] bypass pooling
 //!   entirely and return untracked aligned allocations from both
 //!   [`BufferPool::try_alloc`] and [`BufferPool::alloc`].
+//! - Dropping [`BufferPool`] drains only the shared global freelists,
+//!   checked-out buffers and buffers cached in a live thread's local cache can
+//!   keep their size class alive until they are dropped or the thread exits.
 //!
 //! # Size Classes
 //!
