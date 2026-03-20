@@ -31,12 +31,7 @@ fn run_fresh(
             golden_dkg::play::<N3f1>(rng, &info, logs.clone(), k, &Sequential).unwrap();
         shares.push(share);
     }
-    let output = Output::new(
-        info.summary().clone(),
-        sharing,
-        dealers.clone(),
-        players.clone(),
-    );
+    let output = Output::new(*info.summary(), sharing, dealers.clone(), players.clone());
     (output, shares)
 }
 
