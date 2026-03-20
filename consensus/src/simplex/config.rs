@@ -125,11 +125,8 @@ where
     pub activity_timeout: ViewDelta,
 
     /// Move to nullify immediately if the selected leader has been inactive
-    /// for this many recent known views (we ignore views we don't have data for).
-    ///
-    /// This number should be less than or equal to `activity_timeout` (how
-    /// many views we are tracking below the finalized tip).
-    pub skip_timeout: ViewDelta,
+    /// for at least this long.
+    pub skip_timeout: Duration,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
@@ -188,12 +185,8 @@ impl<
             "activity timeout must be greater than zero"
         );
         assert!(
-            !self.skip_timeout.is_zero(),
+            self.skip_timeout > Duration::default(),
             "skip timeout must be greater than zero"
-        );
-        assert!(
-            self.skip_timeout <= self.activity_timeout,
-            "skip timeout must be less than or equal to activity timeout"
         );
         assert!(
             self.fetch_timeout > Duration::default(),
