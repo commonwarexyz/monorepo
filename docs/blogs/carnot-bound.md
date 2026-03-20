@@ -29,18 +29,18 @@ Protocols with *3-round finality*---one proposal round and two rounds of voting-
 
 We present two protocols realising this approach, both building on [Simplex](https://link.springer.com/chapter/10.1007/978-3-031-48624-1_17). **Carnot 1** assumes $n \geq 4f+1$ processors and achieves a particularly clean design: processors echo their fragment once upon voting, and no further fragment dissemination is ever required.
 
-![Algorithm 1: Carnot 1, the instructions for $p_i$.](/imgs/carnot-algo-1.png)
+![](/imgs/carnot-algo-1.png)
 
 **Carnot 2** operates under the optimal assumption $n \geq 3f+1$, at the cost of additional fragment dissemination when Byzantine processors interfere.
 
-![Algorithm 3: Carnot 2, the instructions for $p_i$, MAIN LOOP.](/imgs/carnot-algo-3.png)
+![](/imgs/carnot-algo-3.png)
 
-![Algorithm 4: Carnot 2, the instructions for $p_i$ to enumerate extra fragments](/imgs/carnot-algo-4.png)
+![](/imgs/carnot-algo-4.png)
 
 Under favourable conditions---correct leaders and few actual faults---both protocols allow data expansion rates approaching $1$. When conditions deteriorate, they revert to safe rates of roughly $1.33$ and $1.5$, respectively. Both rates are well below the $2.5$ wall for 2-round protocols.
 
 Both protocols can also incorporate stable leaders and optimistic proposals, eliminating the gap between consecutive block proposals and allowing throughput to approach the underlying network bandwidth.
 
-![Algorithm 2: Carnot 1 with optimistic proposals, the instructions for $p_i$.](/imgs/carnot-algo-2.png)
+![](/imgs/carnot-algo-2.png)
 
 The paper is available on [arXiv](https://arxiv.org/abs/2603.11797). The name is inspired by the Carnot heat engine, which achieves the theoretical maximum efficiency for converting heat into work. Similarly, our protocols aim to approach the theoretical maximum efficiency for converting network bandwidth into throughput.
