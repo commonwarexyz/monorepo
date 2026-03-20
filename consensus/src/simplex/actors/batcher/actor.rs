@@ -188,6 +188,8 @@ where
     }
 
     /// Records the current time as the last activity time for a participant.
+    ///
+    /// This mechanism is not resistant to malicious validators (nor is it meant to be).
     fn record_activity(&mut self, sender: &S::PublicKey) {
         let Some(participant) = self.participants.index(sender) else {
             return;
