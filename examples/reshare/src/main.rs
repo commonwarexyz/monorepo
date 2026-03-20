@@ -152,7 +152,7 @@ fn main() {
     let app = App::parse();
 
     let config = tokio::Config::new()
-        .with_worker_threads(app.worker_threads)
+        .with_worker_threads(app.worker_threads, true)
         .with_catch_panics(false);
     let runner = tokio::Runner::new(config);
     runner.start(|context| async move {

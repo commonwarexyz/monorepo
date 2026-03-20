@@ -1,18 +1,26 @@
 //! Buffer types for I/O operations.
 //!
+//! Each buffer type is backed by one of three storage variants:
+//! - [`Bytes`]/[`BytesMut`]: standard heap allocation (from `From` conversions)
+//! - Aligned: untracked aligned allocation (from [`IoBufMut::with_alignment`],
+//!   pool bypass for small requests, or fallback)
+//! - Pooled: tracked aligned allocation returned to a [`BufferPool`] on drop
+//!
+//! Public types:
 //! - [`IoBuf`]: Immutable byte buffer
 //! - [`IoBufMut`]: Mutable byte buffer
 //! - [`IoBufs`]: Container for one or more immutable buffers
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
 //! - [`BufferPool`]: Pool of reusable, aligned buffers
 
+mod aligned;
 mod pool;
 
+use aligned::{AlignedBuf, AlignedBufMut, AlignedBuffer, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
-pub use pool::{BufferPool, BufferPoolConfig, PoolError};
-use pool::{PooledBuf, PooledBufMut};
-use std::{collections::VecDeque, io::IoSlice, ops::RangeBounds};
+pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
+use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize, ops::RangeBounds};
 
 /// Immutable byte buffer.
 ///
@@ -34,9 +42,16 @@ pub struct IoBuf {
     inner: IoBufInner,
 }
 
+/// Internal storage variant for [`IoBuf`].
+///
+/// - `Bytes`: from `From<Bytes>`, `From<Vec<u8>>`, `From<&'static [u8]>`, etc.
+/// - `Aligned`: from untracked aligned allocation ([`IoBufMut::with_alignment`],
+///   pool bypass for small requests, or fallback)
+/// - `Pooled`: from [`BufferPool`] allocation (returned to pool on final drop)
 #[derive(Clone, Debug)]
 enum IoBufInner {
     Bytes(Bytes),
+    Aligned(AlignedBuf),
     Pooled(PooledBuf),
 }
 
@@ -52,9 +67,18 @@ impl IoBuf {
     }
 
     /// Create a buffer from a pooled allocation.
+    #[inline]
     const fn from_pooled(pooled: PooledBuf) -> Self {
         Self {
             inner: IoBufInner::Pooled(pooled),
+        }
+    }
+
+    /// Create a buffer from an untracked aligned allocation.
+    #[inline]
+    const fn from_aligned(aligned: AlignedBuf) -> Self {
+        Self {
+            inner: IoBufInner::Aligned(aligned),
         }
     }
 
@@ -63,13 +87,15 @@ impl IoBuf {
     /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to the pool when the final reference is dropped.
     ///
-    /// Buffers backed by [`Bytes`], and untracked fallback allocations from
-    /// [`BufferPool::alloc`], return `false`.
+    /// Buffers backed by [`Bytes`], and untracked aligned allocations (from
+    /// [`IoBufMut::with_alignment`], pool bypass for small requests, or
+    /// fallback), return `false`.
     #[inline]
-    pub fn is_pooled(&self) -> bool {
+    pub const fn is_pooled(&self) -> bool {
         match &self.inner {
             IoBufInner::Bytes(_) => false,
-            IoBufInner::Pooled(p) => p.is_tracked(),
+            IoBufInner::Aligned(_) => false,
+            IoBufInner::Pooled(_) => true,
         }
     }
 
@@ -90,6 +116,7 @@ impl IoBuf {
     pub fn as_ptr(&self) -> *const u8 {
         match &self.inner {
             IoBufInner::Bytes(b) => b.as_ptr(),
+            IoBufInner::Aligned(a) => a.as_ptr(),
             IoBufInner::Pooled(p) => p.as_ptr(),
         }
     }
@@ -104,6 +131,9 @@ impl IoBuf {
             IoBufInner::Bytes(b) => Self {
                 inner: IoBufInner::Bytes(b.slice(range)),
             },
+            IoBufInner::Aligned(a) => a
+                .slice(range)
+                .map_or_else(Self::default, Self::from_aligned),
             IoBufInner::Pooled(p) => p.slice(range).map_or_else(Self::default, Self::from_pooled),
         }
     }
@@ -131,6 +161,7 @@ impl IoBuf {
             IoBufInner::Bytes(b) => Self {
                 inner: IoBufInner::Bytes(b.split_to(at)),
             },
+            IoBufInner::Aligned(a) => Self::from_aligned(a.split_to(at)),
             IoBufInner::Pooled(p) => Self::from_pooled(p.split_to(at)),
         }
     }
@@ -156,6 +187,14 @@ impl IoBuf {
                 .map_err(|bytes| Self {
                     inner: IoBufInner::Bytes(bytes),
                 }),
+            IoBufInner::Aligned(aligned) => aligned
+                .try_into_mut()
+                .map(|mut_aligned| IoBufMut {
+                    inner: IoBufMutInner::Aligned(mut_aligned),
+                })
+                .map_err(|aligned| Self {
+                    inner: IoBufInner::Aligned(aligned),
+                }),
             IoBufInner::Pooled(pooled) => pooled
                 .try_into_mut()
                 .map(|mut_pooled| IoBufMut {
@@ -173,6 +212,7 @@ impl AsRef<[u8]> for IoBuf {
     fn as_ref(&self) -> &[u8] {
         match &self.inner {
             IoBufInner::Bytes(b) => b.as_ref(),
+            IoBufInner::Aligned(a) => a.as_ref(),
             IoBufInner::Pooled(p) => p.as_ref(),
         }
     }
@@ -227,6 +267,7 @@ impl Buf for IoBuf {
     fn remaining(&self) -> usize {
         match &self.inner {
             IoBufInner::Bytes(b) => b.remaining(),
+            IoBufInner::Aligned(a) => a.remaining(),
             IoBufInner::Pooled(p) => p.remaining(),
         }
     }
@@ -235,6 +276,7 @@ impl Buf for IoBuf {
     fn chunk(&self) -> &[u8] {
         match &self.inner {
             IoBufInner::Bytes(b) => b.chunk(),
+            IoBufInner::Aligned(a) => a.chunk(),
             IoBufInner::Pooled(p) => p.chunk(),
         }
     }
@@ -243,6 +285,7 @@ impl Buf for IoBuf {
     fn advance(&mut self, cnt: usize) {
         match &mut self.inner {
             IoBufInner::Bytes(b) => b.advance(cnt),
+            IoBufInner::Aligned(a) => a.advance(cnt),
             IoBufInner::Pooled(p) => p.advance(cnt),
         }
     }
@@ -251,6 +294,7 @@ impl Buf for IoBuf {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         match &mut self.inner {
             IoBufInner::Bytes(b) => b.copy_to_bytes(len),
+            IoBufInner::Aligned(a) => a.copy_to_bytes(len),
             IoBufInner::Pooled(p) => {
                 // Full non-empty drain: transfer ownership so the drained source no
                 // longer retains the pooled allocation. Keep len == 0 on the normal
@@ -259,7 +303,7 @@ impl Buf for IoBuf {
                     let inner = std::mem::replace(&mut self.inner, IoBufInner::Bytes(Bytes::new()));
                     match inner {
                         IoBufInner::Pooled(p) => p.into_bytes(),
-                        IoBufInner::Bytes(_) => unreachable!(),
+                        _ => unreachable!(),
                     }
                 } else {
                     p.copy_to_bytes(len)
@@ -310,6 +354,7 @@ impl From<IoBuf> for Vec<u8> {
     fn from(buf: IoBuf) -> Self {
         match buf.inner {
             IoBufInner::Bytes(bytes) => Self::from(bytes),
+            IoBufInner::Aligned(aligned) => aligned.as_ref().to_vec(),
             IoBufInner::Pooled(pooled) => pooled.as_ref().to_vec(),
         }
     }
@@ -322,6 +367,7 @@ impl From<IoBuf> for Bytes {
     fn from(buf: IoBuf) -> Self {
         match buf.inner {
             IoBufInner::Bytes(bytes) => bytes,
+            IoBufInner::Aligned(aligned) => Self::from_owner(aligned),
             IoBufInner::Pooled(pooled) => Self::from_owner(pooled),
         }
     }
@@ -376,9 +422,12 @@ pub struct IoBufMut {
     inner: IoBufMutInner,
 }
 
+/// Internal storage variant for [`IoBufMut`]. See [`IoBufInner`] for variant
+/// semantics.
 #[derive(Debug)]
 enum IoBufMutInner {
     Bytes(BytesMut),
+    Aligned(AlignedBufMut),
     Pooled(PooledBufMut),
 }
 
@@ -398,6 +447,40 @@ impl IoBufMut {
         }
     }
 
+    /// Create an untracked aligned buffer with the given capacity and alignment.
+    ///
+    /// This uses the aligned backing path directly rather than `BytesMut`.
+    /// The returned buffer is not tracked by a [`BufferPool`], so dropping it
+    /// deallocates the aligned allocation immediately.
+    ///
+    /// Use this when the caller needs a specific alignment but does not need
+    /// pooled reuse.
+    #[inline]
+    pub fn with_alignment(capacity: usize, alignment: NonZeroUsize) -> Self {
+        if capacity == 0 {
+            return Self::with_capacity(0);
+        }
+        let buffer = AlignedBuffer::new(capacity, alignment.get());
+        Self::from_aligned(AlignedBufMut::new(buffer))
+    }
+
+    /// Create a zero-initialized untracked aligned buffer with the given
+    /// length and alignment.
+    ///
+    /// Unlike [`Self::with_alignment`], this initializes the full readable
+    /// range to zero and sets `len == capacity == len`.
+    #[inline]
+    pub fn zeroed_with_alignment(len: usize, alignment: NonZeroUsize) -> Self {
+        if len == 0 {
+            return Self::zeroed(0);
+        }
+        let buffer = AlignedBuffer::new_zeroed(len, alignment.get());
+        let mut buffer = Self::from_aligned(AlignedBufMut::new(buffer));
+        // SAFETY: the aligned allocation was zero-initialized for `len` bytes.
+        unsafe { buffer.set_len(len) };
+        buffer
+    }
+
     /// Create a buffer of `len` bytes, all initialized to zero.
     ///
     /// Unlike `with_capacity`, this sets both capacity and length to `len`,
@@ -410,9 +493,18 @@ impl IoBufMut {
     }
 
     /// Create a buffer from a pooled allocation.
+    #[inline]
     const fn from_pooled(pooled: PooledBufMut) -> Self {
         Self {
             inner: IoBufMutInner::Pooled(pooled),
+        }
+    }
+
+    /// Create a buffer from an untracked aligned allocation.
+    #[inline]
+    const fn from_aligned(aligned: AlignedBufMut) -> Self {
+        Self {
+            inner: IoBufMutInner::Aligned(aligned),
         }
     }
 
@@ -421,13 +513,15 @@ impl IoBufMut {
     /// Tracked buffers originate from [`BufferPool`] allocations and are
     /// returned to the pool when dropped.
     ///
-    /// Buffers backed by [`BytesMut`], and untracked fallback allocations from
-    /// [`BufferPool::alloc`], return `false`.
+    /// Buffers backed by [`BytesMut`], and untracked aligned allocations (from
+    /// [`IoBufMut::with_alignment`], pool bypass for small requests, or
+    /// fallback), return `false`.
     #[inline]
-    pub fn is_pooled(&self) -> bool {
+    pub const fn is_pooled(&self) -> bool {
         match &self.inner {
             IoBufMutInner::Bytes(_) => false,
-            IoBufMutInner::Pooled(p) => p.is_tracked(),
+            IoBufMutInner::Aligned(_) => false,
+            IoBufMutInner::Pooled(_) => true,
         }
     }
 
@@ -454,6 +548,7 @@ impl IoBufMut {
         );
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.set_len(len),
+            IoBufMutInner::Aligned(b) => b.set_len(len),
             IoBufMutInner::Pooled(b) => b.set_len(len),
         }
     }
@@ -469,6 +564,7 @@ impl IoBufMut {
     pub fn is_empty(&self) -> bool {
         match &self.inner {
             IoBufMutInner::Bytes(b) => b.is_empty(),
+            IoBufMutInner::Aligned(b) => b.is_empty(),
             IoBufMutInner::Pooled(b) => b.is_empty(),
         }
     }
@@ -478,6 +574,7 @@ impl IoBufMut {
     pub fn freeze(self) -> IoBuf {
         match self.inner {
             IoBufMutInner::Bytes(b) => b.freeze().into(),
+            IoBufMutInner::Aligned(b) => b.freeze(),
             IoBufMutInner::Pooled(b) => b.freeze(),
         }
     }
@@ -487,6 +584,7 @@ impl IoBufMut {
     pub fn capacity(&self) -> usize {
         match &self.inner {
             IoBufMutInner::Bytes(b) => b.capacity(),
+            IoBufMutInner::Aligned(b) => b.capacity(),
             IoBufMutInner::Pooled(b) => b.capacity(),
         }
     }
@@ -496,6 +594,7 @@ impl IoBufMut {
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.as_mut_ptr(),
+            IoBufMutInner::Aligned(b) => b.as_mut_ptr(),
             IoBufMutInner::Pooled(b) => b.as_mut_ptr(),
         }
     }
@@ -507,6 +606,7 @@ impl IoBufMut {
     pub fn truncate(&mut self, len: usize) {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.truncate(len),
+            IoBufMutInner::Aligned(b) => b.truncate(len),
             IoBufMutInner::Pooled(b) => b.truncate(len),
         }
     }
@@ -516,6 +616,7 @@ impl IoBufMut {
     pub fn clear(&mut self) {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.clear(),
+            IoBufMutInner::Aligned(b) => b.clear(),
             IoBufMutInner::Pooled(b) => b.clear(),
         }
     }
@@ -526,6 +627,7 @@ impl AsRef<[u8]> for IoBufMut {
     fn as_ref(&self) -> &[u8] {
         match &self.inner {
             IoBufMutInner::Bytes(b) => b.as_ref(),
+            IoBufMutInner::Aligned(b) => b.as_ref(),
             IoBufMutInner::Pooled(b) => b.as_ref(),
         }
     }
@@ -536,6 +638,7 @@ impl AsMut<[u8]> for IoBufMut {
     fn as_mut(&mut self) -> &mut [u8] {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.as_mut(),
+            IoBufMutInner::Aligned(b) => b.as_mut(),
             IoBufMutInner::Pooled(b) => b.as_mut(),
         }
     }
@@ -574,6 +677,7 @@ impl Buf for IoBufMut {
     fn remaining(&self) -> usize {
         match &self.inner {
             IoBufMutInner::Bytes(b) => b.remaining(),
+            IoBufMutInner::Aligned(b) => b.remaining(),
             IoBufMutInner::Pooled(b) => b.remaining(),
         }
     }
@@ -582,6 +686,7 @@ impl Buf for IoBufMut {
     fn chunk(&self) -> &[u8] {
         match &self.inner {
             IoBufMutInner::Bytes(b) => b.chunk(),
+            IoBufMutInner::Aligned(b) => b.chunk(),
             IoBufMutInner::Pooled(b) => b.chunk(),
         }
     }
@@ -590,6 +695,7 @@ impl Buf for IoBufMut {
     fn advance(&mut self, cnt: usize) {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.advance(cnt),
+            IoBufMutInner::Aligned(b) => b.advance(cnt),
             IoBufMutInner::Pooled(b) => b.advance(cnt),
         }
     }
@@ -598,6 +704,7 @@ impl Buf for IoBufMut {
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.copy_to_bytes(len),
+            IoBufMutInner::Aligned(a) => a.copy_to_bytes(len),
             IoBufMutInner::Pooled(p) => {
                 // Full non-empty drain: transfer ownership so the drained source no
                 // longer retains the pooled allocation. Keep len == 0 on the normal
@@ -607,7 +714,7 @@ impl Buf for IoBufMut {
                         std::mem::replace(&mut self.inner, IoBufMutInner::Bytes(BytesMut::new()));
                     match inner {
                         IoBufMutInner::Pooled(p) => p.into_bytes(),
-                        IoBufMutInner::Bytes(_) => unreachable!(),
+                        _ => unreachable!(),
                     }
                 } else {
                     p.copy_to_bytes(len)
@@ -623,6 +730,7 @@ unsafe impl BufMut for IoBufMut {
     fn remaining_mut(&self) -> usize {
         match &self.inner {
             IoBufMutInner::Bytes(b) => b.remaining_mut(),
+            IoBufMutInner::Aligned(b) => b.remaining_mut(),
             IoBufMutInner::Pooled(b) => b.remaining_mut(),
         }
     }
@@ -631,6 +739,7 @@ unsafe impl BufMut for IoBufMut {
     unsafe fn advance_mut(&mut self, cnt: usize) {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.advance_mut(cnt),
+            IoBufMutInner::Aligned(b) => b.advance_mut(cnt),
             IoBufMutInner::Pooled(b) => b.advance_mut(cnt),
         }
     }
@@ -639,6 +748,7 @@ unsafe impl BufMut for IoBufMut {
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
         match &mut self.inner {
             IoBufMutInner::Bytes(b) => b.chunk_mut(),
+            IoBufMutInner::Aligned(b) => b.chunk_mut(),
             IoBufMutInner::Pooled(b) => b.chunk_mut(),
         }
     }
@@ -2085,11 +2195,12 @@ mod tests {
             if #[cfg(miri)] {
                 // Reduce max_per_class to avoid slow atomics under miri.
                 let pool_config = BufferPoolConfig {
+                    pool_min_size: 0,
                     max_per_class: commonware_utils::NZUsize!(32),
                     ..BufferPoolConfig::for_network()
                 };
             } else {
-                let pool_config = BufferPoolConfig::for_network();
+                let pool_config = BufferPoolConfig::for_network().with_pool_min_size(0);
             }
         }
         let mut registry = prometheus_client::registry::Registry::default();
@@ -2165,6 +2276,20 @@ mod tests {
         let encoded = large.encode();
         let decoded = IoBuf::decode_cfg(encoded, &large_cfg).unwrap();
         assert_eq!(large, decoded);
+
+        let mut truncated = BytesMut::new();
+        4usize.write(&mut truncated);
+        truncated.extend_from_slice(b"xy");
+        let mut truncated = truncated.freeze();
+        assert!(IoBuf::read_cfg(&mut truncated, &cfg).is_err());
+
+        // Directly exercise the successful `read_cfg` path, not just decode helpers.
+        let mut direct = BytesMut::new();
+        4usize.write(&mut direct);
+        direct.extend_from_slice(b"wxyz");
+        let mut direct = direct.freeze();
+        let decoded = IoBuf::read_cfg(&mut direct, &cfg).unwrap();
+        assert_eq!(decoded, b"wxyz");
     }
 
     #[test]
@@ -2176,6 +2301,7 @@ mod tests {
 
     #[test]
     fn test_iobuf_split_to_consistent_across_backings() {
+        // split_to on pooled and Bytes-backed IoBufs should produce identical results.
         let pool = test_pool();
         let mut pooled = pool.try_alloc(256).expect("pooled allocation");
         pooled.put_slice(b"hello world");
@@ -2289,6 +2415,12 @@ mod tests {
         let mut prepend_noop = IoBufs::from(b"x");
         prepend_noop.prepend(IoBuf::default());
         assert_eq!(prepend_noop.coalesce(), b"x");
+
+        // Prepending into an empty aggregate should stay on the single-buffer fast path.
+        let mut prepend_into_empty = IoBufs::default();
+        prepend_into_empty.prepend(IoBuf::from(b"z"));
+        assert!(prepend_into_empty.is_single());
+        assert_eq!(prepend_into_empty.coalesce(), b"z");
 
         let mut prepend_pair = IoBufs::from(vec![IoBuf::from(b"b"), IoBuf::from(b"c")]);
         prepend_pair.prepend(IoBuf::from(b"a"));
@@ -2893,6 +3025,7 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_default() {
+        // Default IoBufsMut should be a single empty chunk.
         let bufs = IoBufsMut::default();
         assert!(bufs.is_single());
         assert!(bufs.is_empty());
@@ -2901,6 +3034,7 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_from_array() {
+        // From<[u8; N]> should create a single-chunk container with the array data.
         let bufs = IoBufsMut::from([1u8, 2, 3, 4, 5]);
         assert!(bufs.is_single());
         assert_eq!(bufs.len(), 5);
@@ -2909,6 +3043,7 @@ mod tests {
 
     #[test]
     fn test_iobufmut_buf_trait() {
+        // Buf trait on IoBufMut: remaining/chunk/advance should work like BytesMut.
         let mut buf = IoBufMut::from(b"hello world");
         assert_eq!(buf.remaining(), 11);
         assert_eq!(buf.chunk(), b"hello world");
@@ -3067,6 +3202,8 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_advance_skips_leading_writable_empty_chunk() {
+        // A leading chunk with capacity but no readable bytes (len == 0) should
+        // be skipped during advance, reaching the next readable chunk.
         let empty_writable = IoBufMut::with_capacity(4);
         let payload = IoBufMut::from(b"xy");
         let mut bufs = IoBufsMut::from(vec![empty_writable, payload]);
@@ -3078,12 +3215,21 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_coalesce_after_advance() {
+        // Advance mid-chunk: advance 3 of 11 bytes
         let buf1 = IoBufMut::from(b"hello");
         let buf2 = IoBufMut::from(b" world");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
 
         bufs.advance(3);
         assert_eq!(bufs.coalesce(), b"lo world");
+
+        // Advance to exact chunk boundary: advance 5 of 11 bytes
+        let buf1 = IoBufMut::from(b"hello");
+        let buf2 = IoBufMut::from(b" world");
+        let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
+
+        bufs.advance(5);
+        assert_eq!(bufs.coalesce(), b" world");
     }
 
     #[test]
@@ -3141,7 +3287,11 @@ mod tests {
         assert!(matches!(bufs.inner, IoBufsMutInner::Chunked(_)));
         let first = bufs.copy_to_bytes(1);
         assert_eq!(&first[..], b"a");
-        assert_eq!(bufs.remaining(), 4);
+        // Stay chunked while consuming across multiple tiny chunks.
+        let next = bufs.copy_to_bytes(3);
+        assert_eq!(&next[..], b"bcd");
+        assert_eq!(bufs.chunk(), b"e");
+        assert_eq!(bufs.remaining(), 1);
     }
 
     #[test]
@@ -3424,27 +3574,23 @@ mod tests {
 
     #[test]
     fn test_iobufsmut_freeze_after_advance() {
+        // Partial advance: advance 3 of 11 bytes
         let buf1 = IoBufMut::from(b"hello");
         let buf2 = IoBufMut::from(b" world");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
 
-        // Advance partway through first buffer
         bufs.advance(3);
         assert_eq!(bufs.len(), 8);
 
-        // Freeze and verify only remaining data is preserved
         let frozen = bufs.freeze();
         assert_eq!(frozen.len(), 8);
         assert_eq!(frozen.coalesce(), b"lo world");
-    }
 
-    #[test]
-    fn test_iobufsmut_freeze_after_advance_to_boundary() {
+        // Exact boundary advance: advance 5 of 11 bytes (first buf is 5 bytes)
         let buf1 = IoBufMut::from(b"hello");
         let buf2 = IoBufMut::from(b" world");
         let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
 
-        // Advance exactly to first buffer boundary
         bufs.advance(5);
         assert_eq!(bufs.len(), 6);
 
@@ -3453,19 +3599,6 @@ mod tests {
         let frozen = bufs.freeze();
         assert!(frozen.is_single());
         assert_eq!(frozen.coalesce(), b" world");
-    }
-
-    #[test]
-    fn test_iobufsmut_coalesce_after_advance_to_boundary() {
-        let buf1 = IoBufMut::from(b"hello");
-        let buf2 = IoBufMut::from(b" world");
-        let mut bufs = IoBufsMut::from(vec![buf1, buf2]);
-
-        // Advance exactly past first buffer
-        bufs.advance(5);
-
-        // Coalesce should only include second buffer's data
-        assert_eq!(bufs.coalesce(), b" world");
     }
 
     #[test]
@@ -3484,6 +3617,17 @@ mod tests {
         let bufs = IoBufsMut::from(vec![IoBufMut::from(b"hello"), IoBufMut::from(b" world")]);
         let coalesced = bufs.coalesce_with_pool(&pool);
         assert_eq!(coalesced, b"hello world");
+        assert!(coalesced.is_pooled());
+
+        // Four chunks force the deque-backed coalesce path instead of pair/triple fast paths.
+        let bufs = IoBufsMut::from(vec![
+            IoBufMut::from(b"a"),
+            IoBufMut::from(b"b"),
+            IoBufMut::from(b"c"),
+            IoBufMut::from(b"d"),
+        ]);
+        let coalesced = bufs.coalesce_with_pool(&pool);
+        assert_eq!(coalesced, b"abcd");
         assert!(coalesced.is_pooled());
 
         // With extra capacity: zero-copy if sufficient spare capacity
@@ -3568,6 +3712,125 @@ mod tests {
         // `Bytes::from_static` cannot be converted to mutable without copy.
         let from_iobuf = IoBufMut::from(IoBuf::from(Bytes::from_static(b"io")));
         assert_eq!(from_iobuf.as_ref(), b"io");
+    }
+
+    #[test]
+    fn test_iobuf_aligned_public_paths() {
+        // Exercise the public IoBuf/IoBufMut API through the untracked aligned
+        // backing: write, advance, copy_to_bytes, freeze, slice, split_to,
+        // try_into_mut, and From/Into conversions.
+        static ARRAY: &[u8; 4] = b"wxyz";
+
+        let alignment = NonZeroUsize::new(64).expect("non-zero alignment");
+
+        // Start from a non-zero untracked aligned buffer to cover the public mutable API.
+        let mut aligned_mut = IoBufMut::with_alignment(8, alignment);
+        assert!(!aligned_mut.is_pooled());
+        assert!(aligned_mut.is_empty());
+        assert_eq!(aligned_mut.capacity(), 8);
+        assert!((aligned_mut.as_mut_ptr() as usize).is_multiple_of(64));
+
+        aligned_mut.put_slice(b"abcdefgh");
+        assert_eq!(aligned_mut.as_mut(), b"abcdefgh");
+        assert_eq!(aligned_mut.chunk(), b"abcdefgh");
+        aligned_mut.advance(2);
+        assert_eq!(aligned_mut.chunk(), b"cdefgh");
+
+        let partial = aligned_mut.copy_to_bytes(2);
+        assert_eq!(partial.as_ref(), b"cd");
+        assert_eq!(aligned_mut.as_ref(), b"efgh");
+        let empty = aligned_mut.copy_to_bytes(0);
+        assert!(empty.is_empty());
+        assert_eq!(aligned_mut.as_ref(), b"efgh");
+
+        aligned_mut.clear();
+        assert!(aligned_mut.is_empty());
+        aligned_mut.put_slice(ARRAY);
+        assert!(aligned_mut == ARRAY);
+
+        // Full aligned drains should use the owner-transfer path, including len == 0 first.
+        let mut fully_drained = IoBufMut::with_alignment(4, alignment);
+        fully_drained.put_slice(b"lmno");
+        let empty = fully_drained.copy_to_bytes(0);
+        assert!(empty.is_empty());
+        assert_eq!(fully_drained.as_ref(), b"lmno");
+        let drained = fully_drained.copy_to_bytes(4);
+        assert_eq!(drained.as_ref(), b"lmno");
+        assert!(fully_drained.is_empty());
+
+        // Freeze to an immutable aligned `IoBuf` and exercise its view/Buf dispatch.
+        let aligned = aligned_mut.freeze();
+        assert!(!aligned.is_pooled());
+        assert_eq!(aligned.as_ref(), &ARRAY[..]);
+        assert!(aligned == ARRAY);
+        assert!(!aligned.as_ptr().is_null());
+        assert_eq!(aligned.slice(..2), b"wx");
+        assert_eq!(aligned.slice(1..), b"xyz");
+        assert_eq!(aligned.slice(1..=2), b"xy");
+        assert_eq!(aligned.chunk(), b"wxyz");
+
+        let mut split = aligned.clone();
+        let prefix = split.split_to(2);
+        assert_eq!(prefix, b"wx");
+        assert_eq!(split, b"yz");
+
+        let mut advanced = aligned.clone();
+        advanced.advance(2);
+        assert_eq!(advanced.chunk(), b"yz");
+
+        // Partial and full immutable drains should preserve the aligned backing behavior.
+        let mut drained = aligned.clone();
+        let empty = drained.copy_to_bytes(0);
+        assert!(empty.is_empty());
+        assert_eq!(drained.as_ref(), &ARRAY[..]);
+        let first = drained.copy_to_bytes(1);
+        assert_eq!(first.as_ref(), b"w");
+        let rest = drained.copy_to_bytes(3);
+        assert_eq!(rest.as_ref(), b"xyz");
+        assert_eq!(drained.remaining(), 0);
+
+        // Unique aligned immutable buffers can become mutable again.
+        let mut unique_source = IoBufMut::zeroed_with_alignment(4, alignment);
+        unique_source.as_mut().copy_from_slice(b"pqrs");
+        let unique = unique_source.freeze();
+        let recovered = unique
+            .try_into_mut()
+            .expect("unique aligned iobuf should recover mutability");
+        assert_eq!(recovered.as_ref(), b"pqrs");
+
+        // Shared aligned immutable buffers must reject the mutable conversion.
+        let mut shared_source = IoBufMut::zeroed_with_alignment(4, alignment);
+        shared_source.as_mut().copy_from_slice(b"tuvw");
+        let shared = shared_source.freeze();
+        let _shared_clone = shared.clone();
+        assert!(shared.try_into_mut().is_err());
+
+        // Owned/container conversions should preserve bytes for aligned backings.
+        let vec_out: Vec<u8> = aligned.clone().into();
+        let bytes_out: Bytes = aligned.into();
+        assert_eq!(vec_out, ARRAY.to_vec());
+        assert_eq!(bytes_out.as_ref(), &ARRAY[..]);
+
+        let from_array = IoBuf::from(ARRAY);
+        assert_eq!(from_array, b"wxyz");
+
+        let iobufs = IoBufs::from(ARRAY);
+        assert_eq!(iobufs.chunk(), b"wxyz");
+    }
+
+    #[test]
+    fn test_iobufmut_aligned_zero_length_constructors() {
+        let alignment = NonZeroUsize::new(64).expect("non-zero alignment");
+
+        let with_alignment = IoBufMut::with_alignment(0, alignment);
+        assert!(with_alignment.is_empty());
+        assert_eq!(with_alignment.len(), 0);
+        assert_eq!(with_alignment.capacity(), 0);
+
+        let zeroed = IoBufMut::zeroed_with_alignment(0, alignment);
+        assert!(zeroed.is_empty());
+        assert_eq!(zeroed.len(), 0);
+        assert_eq!(zeroed.capacity(), 0);
     }
 
     #[test]
@@ -3899,6 +4162,36 @@ mod tests {
         assert_eq!(bytes.as_ref(), b"abc");
         assert!(needs_canonicalize);
 
+        let mut empty_with_leading_mut = VecDeque::from([IoBufMut::default()]);
+        let (bytes, needs_canonicalize) =
+            copy_to_bytes_chunked(&mut empty_with_leading_mut, 0, "x");
+        assert!(bytes.is_empty());
+        assert!(!needs_canonicalize);
+        assert!(empty_with_leading_mut.is_empty());
+
+        // Mirror the fast/slow chunked helper paths for mutable chunks too.
+        let mut fast_mut = VecDeque::from([
+            IoBufMut::from(b"ab"),
+            IoBufMut::from(b"cd"),
+            IoBufMut::from(b"ef"),
+            IoBufMut::from(b"gh"),
+        ]);
+        let (bytes, needs_canonicalize) = copy_to_bytes_chunked(&mut fast_mut, 2, "x");
+        assert_eq!(bytes.as_ref(), b"ab");
+        assert!(needs_canonicalize);
+        assert_eq!(fast_mut.front().expect("front exists").as_ref(), b"cd");
+
+        let mut slow_mut = VecDeque::from([
+            IoBufMut::from(b"a"),
+            IoBufMut::from(b"bc"),
+            IoBufMut::from(b"de"),
+            IoBufMut::from(b"f"),
+        ]);
+        let (bytes, needs_canonicalize) = copy_to_bytes_chunked(&mut slow_mut, 4, "x");
+        assert_eq!(bytes.as_ref(), b"abcd");
+        assert!(needs_canonicalize);
+        assert_eq!(slow_mut.front().expect("front exists").as_ref(), b"e");
+
         // `advance_chunked_front` should skip empties and drain in linear order.
         let mut advance_chunked = VecDeque::from([
             IoBuf::default(),
@@ -3912,6 +4205,20 @@ mod tests {
         );
         advance_chunked_front(&mut advance_chunked, 2);
         assert!(advance_chunked.is_empty());
+
+        // The front-advance helper also has a separate mutable monomorphization.
+        let mut advance_chunked_mut = VecDeque::from([
+            IoBufMut::default(),
+            IoBufMut::from(b"abc"),
+            IoBufMut::from(b"d"),
+        ]);
+        advance_chunked_front(&mut advance_chunked_mut, 2);
+        assert_eq!(
+            advance_chunked_mut.front().expect("front exists").as_ref(),
+            b"c"
+        );
+        advance_chunked_front(&mut advance_chunked_mut, 2);
+        assert!(advance_chunked_mut.is_empty());
 
         // `advance_small_chunks` signals canonicalization when front chunks are exhausted.
         let mut small = [IoBuf::default(), IoBuf::from(b"abc".to_vec())];
@@ -3929,6 +4236,17 @@ mod tests {
         assert_eq!(small_exact[0].remaining(), 0);
         assert_eq!(small_exact[1].remaining(), 0);
         assert_eq!(small_exact[2].remaining(), 0);
+
+        // Small-chunk copy canonicalization is also instantiated for mutable chunks.
+        let mut small_mut = [
+            IoBufMut::from(b"a"),
+            IoBufMut::from(b"bc"),
+            IoBufMut::from(b"d"),
+        ];
+        let (bytes, needs_canonicalize) = copy_to_bytes_small_chunks(&mut small_mut, 3, "x");
+        assert_eq!(bytes.as_ref(), b"abc");
+        assert!(needs_canonicalize);
+        assert_eq!(small_mut[2].as_ref(), b"d");
 
         // `advance_mut_in_chunks` returns whether the request fully fit in writable chunks.
         let mut writable = [IoBufMut::with_capacity(2), IoBufMut::with_capacity(1)];
@@ -3986,15 +4304,22 @@ mod tests {
         wrapped.push_back(IoBufMut::with_capacity(1));
         wrapped.push_back(IoBufMut::with_capacity(1));
         wrapped.push_back(IoBufMut::with_capacity(1));
+        wrapped.push_back(IoBufMut::with_capacity(1));
+        wrapped.push_back(IoBufMut::with_capacity(1));
         let _ = wrapped.pop_front();
         wrapped.push_back(IoBufMut::with_capacity(1));
-        wrapped.push_back(IoBufMut::with_capacity(1));
+        let (first, second) = wrapped.as_slices();
+        assert!(!first.is_empty());
+        assert!(!second.is_empty());
+
+        // Force `advance_mut` to consume across the wrapped second slice as well.
+        let to_advance = first.len() + 1;
         let mut chunked = IoBufsMut {
             inner: IoBufsMutInner::Chunked(wrapped),
         };
         // SAFETY: We only verify cursor movement (`remaining`) and do not read bytes.
-        unsafe { chunked.advance_mut(4) };
-        assert_eq!(chunked.remaining(), 4);
+        unsafe { chunked.advance_mut(to_advance) };
+        assert_eq!(chunked.remaining(), to_advance);
         assert!(chunked.remaining_mut() > 0);
     }
 

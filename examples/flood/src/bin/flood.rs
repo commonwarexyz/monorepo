@@ -66,7 +66,7 @@ fn main() {
     let public_key = key.public_key();
 
     // Initialize runtime
-    let cfg = tokio::Config::new().with_worker_threads(config.worker_threads);
+    let cfg = tokio::Config::new().with_worker_threads(config.worker_threads, true);
     let executor = tokio::Runner::new(cfg);
 
     // Enforce minimum message size of 8 bytes for timestamp

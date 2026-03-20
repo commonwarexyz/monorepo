@@ -18,13 +18,13 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard},
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
-    Spawner as _, StreamOf, METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, BufferPoolThreadCache, Clock, Error, Execution, Handle,
+    Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
-use commonware_utils::sync::Mutex;
+use commonware_utils::{sync::Mutex, NZUsize};
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -165,21 +165,39 @@ impl Config {
     pub fn new() -> Self {
         let rng = OsRng.next_u64();
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{rng}"));
+        let worker_threads = 2;
         Self {
-            worker_threads: 2,
+            worker_threads,
             max_blocking_threads: 512,
             catch_panics: false,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
-            network_buffer_pool_cfg: BufferPoolConfig::for_network(),
-            storage_buffer_pool_cfg: BufferPoolConfig::for_storage(),
+            network_buffer_pool_cfg: BufferPoolConfig::for_network()
+                .with_thread_cache_for_parallelism(NZUsize!(worker_threads)),
+            storage_buffer_pool_cfg: BufferPoolConfig::for_storage()
+                .with_thread_cache_for_parallelism(NZUsize!(worker_threads)),
         }
     }
 
     // Setters
-    /// See [Config]
-    pub const fn with_worker_threads(mut self, n: usize) -> Self {
+    /// Returns a copy of this config with a new tokio worker thread count.
+    ///
+    /// If `update_buffer_pools` is `true`, the network and storage buffer pools also have
+    /// their thread-cache policy reset to `ForParallelism(n)`. This is useful when
+    /// keeping the default "buffer-pool parallelism follows worker threads" behavior.
+    ///
+    /// If `update_buffer_pools` is `false`, buffer pool configs are left unchanged. Use
+    /// this when their thread-cache policy was configured explicitly and should not be
+    /// rewritten.
+    pub const fn with_worker_threads(mut self, n: usize, update_buffer_pools: bool) -> Self {
+        if update_buffer_pools {
+            self.network_buffer_pool_cfg.thread_cache_capacity =
+                BufferPoolThreadCache::ForParallelism(NZUsize!(n));
+            self.storage_buffer_pool_cfg.thread_cache_capacity =
+                BufferPoolThreadCache::ForParallelism(NZUsize!(n));
+        }
+
         self.worker_threads = n;
         self
     }
@@ -835,5 +853,47 @@ impl crate::BufferPooler for Context {
 
     fn storage_buffer_pool(&self) -> &BufferPool {
         &self.storage_buffer_pool
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_worker_threads_optional_buffer_pool_update() {
+        // Opting in should keep the thread-cache policy aligned with the
+        // configured Tokio worker parallelism.
+        let default_cfg = Config::new().with_worker_threads(8, true);
+
+        assert_eq!(default_cfg.worker_threads, 8);
+        assert_eq!(
+            default_cfg.network_buffer_pool_cfg.thread_cache_capacity,
+            BufferPoolThreadCache::ForParallelism(NZUsize!(8))
+        );
+        assert_eq!(
+            default_cfg.storage_buffer_pool_cfg.thread_cache_capacity,
+            BufferPoolThreadCache::ForParallelism(NZUsize!(8))
+        );
+
+        // Opting out should preserve explicit buffer-pool overrides even when
+        // the runtime's worker thread count changes.
+        let overridden_cfg = Config::new()
+            .with_network_buffer_pool_config(
+                BufferPoolConfig::for_network().with_thread_cache_for_parallelism(NZUsize!(2)),
+            )
+            .with_storage_buffer_pool_config(
+                BufferPoolConfig::for_storage().with_thread_cache_disabled(),
+            )
+            .with_worker_threads(8, false);
+
+        assert_eq!(
+            overridden_cfg.network_buffer_pool_cfg.thread_cache_capacity,
+            BufferPoolThreadCache::ForParallelism(NZUsize!(2))
+        );
+        assert_eq!(
+            overridden_cfg.storage_buffer_pool_cfg.thread_cache_capacity,
+            BufferPoolThreadCache::Disabled
+        );
     }
 }
