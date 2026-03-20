@@ -23,7 +23,7 @@ module tests {
         val cert = notarization(FIRST_VIEW, "val_b1", Set("n0", "n1", "n2"), "n0")
 
         initWithLeaderAndCertifyTimeout(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
+            Map(0 -> "n2", 1 -> "n3", 2 -> "n4", 3 -> "n0", 4 -> "n1", 5 -> "n2", 6 -> "n3"),
             CERTIFY_ALL_TRUE
         )
             .then(on_certificate("n3", cert))
@@ -39,7 +39,7 @@ module tests {
 
     run timeoutBroadcastsNullifyTest = {
         initWithLeaderAndCertifyTimeout(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
+            Map(0 -> "n2", 1 -> "n3", 2 -> "n4", 3 -> "n0", 4 -> "n1", 5 -> "n2", 6 -> "n3"),
             CERTIFY_ALL_TRUE
         )
             .then(on_timeout("n2"))

@@ -6,6 +6,10 @@
 # Usage:
 #   ./scripts/test_traces.sh [test_dir [traces_root]]
 #
+# Environment:
+#   OUT_ITF_DIR  - if set, emit ITF traces to this directory
+#                  (file: $OUT_ITF_DIR/trace_roundtrip_test_<corpus>.itf.json)
+#
 # Defaults:
 #   test_dir    = traces
 #   traces_root = ../fuzz/artifacts/traces
@@ -40,7 +44,14 @@ for qnt_file in "$TEST_DIR"/trace_*.qnt; do
     echo "Testing: $qnt_file"
     heap_mb=24576
     quint_bin="$(command -v quint)"
-    cmd=("$quint_bin" test --main=tests --backend=rust --verbosity=4 --match=traceTest "$qnt_file")
+    cmd=("$quint_bin" test --main=tests --backend=rust --verbosity=4 --match=traceTest)
+    if [ -n "${OUT_ITF_DIR:-}" ]; then
+        mkdir -p "$OUT_ITF_DIR"
+        basename_noext=$(basename "$qnt_file" .qnt)
+        corpus_itf="${basename_noext#trace_}"
+        cmd+=(--out-itf="$OUT_ITF_DIR/trace_roundtrip_test_${corpus_itf}.itf.json")
+    fi
+    cmd+=("$qnt_file")
     if NODE_OPTIONS="--max-old-space-size=$heap_mb" "${cmd[@]}"; then
         PASS=$((PASS + 1))
     else

@@ -29,7 +29,7 @@ module tests {
         }
 
         initWithLeaderAndCertifyTimeout(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n3", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
+            Map(0 -> "n1", 1 -> "n2", 2 -> "n3", 3 -> "n0", 4 -> "n1", 5 -> "n2", 6 -> "n3"),
             CERTIFY_ALL_TRUE
         )
             .then(inject_proposal(invalid_proposal))
@@ -55,7 +55,7 @@ module tests {
         val cert = finalization(FIRST_VIEW, "val_b0", Set("n0", "n1", "n2"), "n2")
 
         initWithLeaderAndCertifyTimeout(
-            Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n0"),
+            Map(0 -> "n2", 1 -> "n3", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
             .then(on_certificate("n2", cert))

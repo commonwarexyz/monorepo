@@ -1445,20 +1445,23 @@ module replica {
         store_vote.get(id).size() <= 0
     })
 
-    // Check this invariant to see an example of having a subquorum of votes.
-    val votes_subquorum_example = CORRECT.forall(id => {
-        store_vote.get(id).size() <= Q
-    })
-
     // Check this invariant to see an example of having a quorum of votes.
-    val votes_quorum_example = CORRECT.forall(id => {
-        store_vote.get(id).size() <= Q
+    val nullify_votes_quorum_example = CORRECT.forall(id => {
+        store_vote.get(id).size() < Q
     })
 
-    // Check this invariant to see an example of having a certificate.
-    val cert = CORRECT.forall(id => {
-        store_certificate.get(id).size() <= 1
+    // Check this invariant to see an example of having a notarization certificate.
+    val notarization_example = CORRECT.forall(id => {
+        val certs = store_certificate.get(id)
+        certs.filter(c => is_notarization_cert(c)).size()==0
     })
+
+    // Check this invariant to see an example of having a finalization certificate.
+    val finalization_example = CORRECT.forall(id => {
+        val certs = store_certificate.get(id)
+        certs.filter(c => is_finalization_cert(c)).size()==0
+    })
+
 
     // Check this invariant to see an example of a replica reaching view > 2.
     val view = CORRECT.forall(id => {

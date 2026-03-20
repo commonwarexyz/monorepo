@@ -154,6 +154,14 @@ pub fn replay_trace(trace: &TraceData) -> Vec<ReplayedReplicaState> {
 
         // Replay trace entries
         for entry in &trace.entries {
+            // Skip self-votes: the engine generates its own votes internally
+            // via constructed(), so injecting them again causes duplicates.
+            if let TraceEntry::Vote { sender, receiver, .. } = entry {
+                if sender == receiver {
+                    continue;
+                }
+            }
+
             let receiver_id = match entry {
                 TraceEntry::Vote { receiver, .. } => receiver,
                 TraceEntry::Certificate { receiver, .. } => receiver,

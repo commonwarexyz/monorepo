@@ -3,7 +3,7 @@ TEST_DIR ?= traces
 
 FUZZ_RUNS ?= 1000
 
-.PHONY: test typecheck repl check clean get_traces build_traces test_traces clean_traces tv generate_itf convert_itf replay_itf
+.PHONY: test typecheck repl check clean get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces tv generate_itf convert_itf replay_itf clean_mbt_traces conformance_roundtrip
 
 typecheck:
 	quint typecheck types.qnt
@@ -41,10 +41,10 @@ run:
     	--invariant=all_invariants twins_n4f1b1.qnt
 
 
-get_traces:
+get_fuzz_traces:
 	cargo +nightly fuzz run simplex_ed25519_quint_disrupter -- -runs=$(FUZZ_RUNS)
 
-build_traces:
+build_quint_tests_from_fuzz_traces:
 	@for dir in $(TRACES_ROOT)/*/; do \
 		[ -d "$$dir" ] || continue; \
 		echo "Converting traces from $$dir"; \
@@ -54,11 +54,11 @@ build_traces:
 test_traces:
 	./scripts/test_traces.sh
 
-clean_traces:
+clean_fuzz_traces:
 	rm -rf $(TRACES_ROOT)
 	rm -rf $(TEST_DIR)/trace_*.qnt
 
-tv: clean_traces get_traces build_traces test_traces
+tv: clean_fuzz_traces get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces
 
 ITF_DIR ?= itf_traces
 ITF_SAMPLES ?= 50
@@ -100,6 +100,35 @@ replay_itf:
 	done; \
 	echo "Results: $$((total - failed))/$$total passed"; \
 	[ $$failed -eq 0 ]
+
+generate_mbt_unit_test_traces:
+	@mkdir -p $(ITF_DIR)
+	quint test --out-itf=$(ITF_DIR)/trace_test_n4f1b0_happyPathFinalizeTest.itf.json --match=happyPathFinalizeTest  ./tests/tests_n4f1b0.qnt
+	quint test --out-itf=$(ITF_DIR)/trace_test_n4f1b0_allCorrectReplicasFinalizeTwoBlocksTest.itf.json --match=allCorrectReplicasFinalizeTwoBlocksTest  ./tests/tests_n4f1b0.qnt
+	quint test --out-itf=$(ITF_DIR)/trace_test_n4f1b0_timeoutViewsThenFinalizeTest.itf.json --match=timeoutViewsThenFinalizeTest  ./tests/tests_n4f1b0.qnt
+	quint test --out-itf=$(ITF_DIR)/trace_test_n4f1b0_wrongParentNullifyThenCorrectFinalizeTest.itf.json --match=wrongParentNullifyThenCorrectFinalizeTest  ./tests/tests_n4f1b0.qnt
+	quint test --out-itf=$(ITF_DIR)/trace_test_n4f1b0_slowReplicaAlwaysNullifiesTest.itf.json --match=slowReplicaAlwaysNullifiesTest  ./tests/tests_n4f1b0.qnt
+
+clean_mbt_traces:
+	rm -rf $(ITF_DIR)/
+
+mbt_unit_tests: clean_mbt_traces generate_mbt_unit_test_traces convert_itf replay_itf
+
+generate_itf_test:
+	@mkdir -p $(ITF_DIR)
+	@for dir in $(TRACES_ROOT)/*/; do \
+		quint test --main=itf_main --max-steps=$(ITF_STEPS) \
+			--out-itf=$(ITF_DIR)/trace_$$i.itf.json \
+			--invariant=all_invariants itf_n4f1b1.qnt || true; \
+	done
+	@echo "Generated ITF traces in $(ITF_DIR)/"
+
+conformance_roundtrip: clean_mbt_traces clean_fuzz_traces
+	$(MAKE) FUZZ_RUNS=100 get_fuzz_traces
+	$(MAKE) build_quint_tests_from_fuzz_traces
+	OUT_ITF_DIR=$(ITF_DIR) ./scripts/test_traces.sh
+	$(MAKE) convert_itf
+	$(MAKE) replay_itf
 
 clean:
 	./scripts/verify.sh clean
