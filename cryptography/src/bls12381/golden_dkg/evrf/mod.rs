@@ -1,3 +1,5 @@
+mod bandersnatch;
+
 use crate::{
     bls12381::primitives::group::{Scalar, G1},
     ed25519,
