@@ -704,7 +704,7 @@ impl BufMut<TrackedOwner> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iobuf::pool::{BufferPool, BufferPoolConfig};
+    use crate::iobuf::pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache};
     use bytes::{Buf, BufMut, Bytes, BytesMut};
     use commonware_utils::NZUsize;
     use prometheus_client::registry::Registry;
@@ -724,6 +724,7 @@ mod tests {
             min_size: NZUsize!(min_size),
             max_size: NZUsize!(max_size),
             max_per_class: NZUsize!(max_per_class),
+            thread_cache_capacity: BufferPoolThreadCache::ForParallelism(NZUsize!(1)),
             prefill: false,
             alignment: NZUsize!(page_size()),
         }

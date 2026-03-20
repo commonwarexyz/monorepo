@@ -67,7 +67,9 @@ stability_scope!(BETA {
     pub use governor::Quota;
 
     pub mod iobuf;
-    pub use iobuf::{BufferPool, BufferPoolConfig, IoBuf, IoBufMut, IoBufs, IoBufsMut};
+    pub use iobuf::{
+        BufferPool, BufferPoolConfig, BufferPoolThreadCache, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+    };
 
     pub mod utils;
     pub use utils::*;

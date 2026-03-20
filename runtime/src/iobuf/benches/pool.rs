@@ -288,10 +288,11 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
         .with_min_size(NZUsize!(size.max(1024)))
         .with_max_size(NZUsize!(size.max(1024)))
         .with_max_per_class(NZUsize!(threads * 4))
+        .with_thread_cache_for_parallelism(NZUsize!(threads))
         .with_prefill(true);
 
     let runner_cfg = tokio::Config::default()
-        .with_worker_threads(1)
+        .with_worker_threads(1, false)
         .with_network_buffer_pool_config(cfg);
 
     tokio::Runner::new(runner_cfg).start(|ctx| async move { ctx.network_buffer_pool().clone() })
