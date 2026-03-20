@@ -3,17 +3,15 @@ mod ingress;
 mod round;
 mod verifier;
 
-use crate::{
-    simplex::config::ForwardingPolicy,
-    types::{Epoch, ViewDelta},
-    Relay, Reporter,
-};
+use crate::{simplex::config::ForwardingPolicy, types::Epoch, Relay, Reporter};
 pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
+use core::num::NonZeroU64;
 pub use ingress::{Mailbox, Message};
 pub use round::Round;
+use std::time::Duration;
 pub use verifier::Verifier;
 
 pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
@@ -26,10 +24,10 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
     /// Strategy for parallel operations.
     pub strategy: T,
 
-    pub activity_timeout: ViewDelta,
-    pub skip_timeout: ViewDelta,
+    pub skip_timeout: Duration,
     pub epoch: Epoch,
     pub mailbox_size: usize,
+    pub term_length: NonZeroU64,
     pub forwarding: ForwardingPolicy,
 }
 
@@ -195,10 +193,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -208,10 +206,16 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Create a peer to inject certificates
             let injector_pk = PrivateKey::from_seed(1_000_000).public_key();
@@ -362,10 +366,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -375,10 +379,16 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Create a peer to inject certificates.
             let injector_pk = PrivateKey::from_seed(1_000_001).public_key();
@@ -523,10 +533,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: relay.clone(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -536,10 +546,16 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Register all participants on the network and set up links
             let link = Link {
@@ -680,10 +696,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: relay.clone(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Silent,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -870,10 +886,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: relay.clone(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::NextLeader,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -1110,10 +1126,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: relay.clone(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Silent,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -1338,10 +1354,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: relay.clone(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Silent,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -1517,10 +1533,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: relay.clone(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Silent,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -1754,10 +1770,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: relay.clone(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Silent,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -1968,10 +1984,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -1981,10 +1997,16 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Register all participants on the network and set up links
             let link = Link {
@@ -2163,10 +2185,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -2176,10 +2198,16 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Register all participants on the network and set up links
             let link = Link {
@@ -2377,10 +2405,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -2390,10 +2418,16 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Register leader (participant 1) on the network
             let link = Link {
@@ -2402,8 +2436,11 @@ mod tests {
                 success_rate: 1.0,
             };
             let leader_pk = participants[1].clone();
-            let (mut leader_sender, _leader_receiver) =
-                oracle.control(leader_pk.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (mut leader_sender, _leader_receiver) = oracle
+                .control(leader_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             oracle
                 .add_link(leader_pk.clone(), me.clone(), link.clone())
                 .await
@@ -2508,10 +2545,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -2521,10 +2558,16 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Register leader (participant 1) on the network
             let link = Link {
@@ -2533,8 +2576,11 @@ mod tests {
                 success_rate: 1.0,
             };
             let leader_pk = participants[1].clone();
-            let (mut leader_sender, _leader_receiver) =
-                oracle.control(leader_pk.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (mut leader_sender, _leader_receiver) = oracle
+                .control(leader_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             oracle
                 .add_link(leader_pk.clone(), me.clone(), link.clone())
                 .await
@@ -2642,10 +2688,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(skip_timeout),
+                skip_timeout: Duration::from_secs(skip_timeout),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -2655,10 +2701,16 @@ mod tests {
                 mpsc::channel::<voter::Message<S, Sha256Digest>>(1024);
             let voter_mailbox = voter::Mailbox::new(voter_sender);
 
-            let (_vote_sender, vote_receiver) =
-                oracle.control(me.clone()).register(0, TEST_QUOTA).await.unwrap();
-            let (_certificate_sender, certificate_receiver) =
-                oracle.control(me.clone()).register(1, TEST_QUOTA).await.unwrap();
+            let (_vote_sender, vote_receiver) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_certificate_sender, certificate_receiver) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
 
             // Register leader (participant 1) on the network
             let link = Link {
@@ -2667,8 +2719,11 @@ mod tests {
                 success_rate: 1.0,
             };
             let leader_pk = participants[1].clone();
-            let (mut leader_sender, _leader_receiver) =
-                oracle.control(leader_pk.clone()).register(0, TEST_QUOTA).await.unwrap();
+            let (mut leader_sender, _leader_receiver) = oracle
+                .control(leader_pk.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
             oracle
                 .add_link(leader_pk.clone(), me.clone(), link.clone())
                 .await
@@ -2682,17 +2737,24 @@ mod tests {
             let leader = Participant::new(1);
             for v in 1..skip_timeout {
                 let view = View::new(v);
-                let nullify = batcher_mailbox.update(view, leader, View::zero(), None).await;
-                assert!(nullify.is_none(), "view {v} should be active (before skip_timeout)");
+                let nullify = batcher_mailbox
+                    .update(view, leader, View::zero(), None)
+                    .await;
+                assert!(
+                    nullify.is_none(),
+                    "view {v} should be active (before skip_timeout)"
+                );
             }
 
-            // Test 2: At view skip_timeout, the leader has been silent for
-            // skip_timeout tracked views and should be marked inactive.
+            // Test 2: Even at the skip timeout, we fail open while fewer than a quorum of
+            // participants have been recently active.
             let view = View::new(skip_timeout);
-            let nullify = batcher_mailbox.update(view, leader, View::zero(), None).await;
+            let nullify = batcher_mailbox
+                .update(view, leader, View::zero(), None)
+                .await;
             assert!(
-                nullify.is_some(),
-                "view {skip_timeout} should be inactive (leader hasn't voted in {skip_timeout} views)"
+                nullify.is_none(),
+                "view {skip_timeout} should stay active while the network is quiet"
             );
 
             // Test 3: Send a vote from the leader for the current view (view 5)
@@ -2714,7 +2776,9 @@ mod tests {
             // Test 4: Advance to view skip_timeout + 1 (view 6)
             // Leader voted in view 5, which is in the recent window, so should be active
             let view = View::new(skip_timeout + 1);
-            let nullify = batcher_mailbox.update(view, leader, View::zero(), None).await;
+            let nullify = batcher_mailbox
+                .update(view, leader, View::zero(), None)
+                .await;
             assert!(
                 nullify.is_none(),
                 "view {} should be active (leader voted in view {})",
@@ -2722,13 +2786,15 @@ mod tests {
                 skip_timeout
             );
 
-            // Test 5: Jump far ahead. The last seen message is now outside the
-            // skip window, so the leader becomes inactive again.
+            // Test 5: Jump far ahead. We still fail open because we never observed a quorum of
+            // recently active participants.
             let view = View::new(100);
-            let nullify = batcher_mailbox.update(view, leader, View::zero(), None).await;
+            let nullify = batcher_mailbox
+                .update(view, leader, View::zero(), None)
+                .await;
             assert!(
-                nullify.is_some(),
-                "view 100 should be inactive (leader was last seen in view {skip_timeout})"
+                nullify.is_none(),
+                "view 100 should stay active while fewer than a quorum are recently active"
             );
 
             // Test 6: local leader inactivity should not trigger a fast-timeout hint.
@@ -2800,10 +2866,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(skip_timeout),
+                skip_timeout: Duration::from_secs(skip_timeout),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -2932,10 +2998,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(skip_timeout),
+                skip_timeout: Duration::from_secs(skip_timeout),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -2982,14 +3048,15 @@ mod tests {
                 assert!(nullify.is_none(), "view {v} should be active before skip_timeout");
             }
 
-            // Enter the threshold view with no activity and confirm that we fast-timeout.
+            // Enter the threshold view with no activity and confirm that we fail open while the
+            // network is quiet.
             let active_view = View::new(skip_timeout);
             let nullify = batcher_mailbox
                 .update(active_view, leader, View::zero(), None)
                 .await;
             assert!(
-                nullify.is_some(),
-                "leader should be inactive after {skip_timeout} silent views"
+                nullify.is_none(),
+                "leader should stay active until a quorum of recent activity is observed"
             );
 
             // Deliver a certificate from the leader on the certificate channel. Even
@@ -3080,10 +3147,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -3216,10 +3283,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -3354,10 +3421,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -3557,10 +3624,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(batcher_context.clone(), batcher_cfg);
@@ -3810,10 +3877,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);
@@ -4029,10 +4096,10 @@ mod tests {
                 reporter: reporter.clone(),
                 relay: MockRelay::new(),
                 strategy: Sequential,
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(5),
                 epoch,
                 mailbox_size: 128,
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let (batcher, mut batcher_mailbox) = Actor::new(context.clone(), batcher_cfg);

@@ -325,10 +325,11 @@ where
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(256),
-                skip_timeout: ViewDelta::new(10),
+                skip_timeout: Duration::from_secs(10),
                 fetch_concurrent: 32,
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
+                term_length: commonware_utils::NZU64!(1),
                 forwarding: simplex::ForwardingPolicy::Disabled,
             },
         );

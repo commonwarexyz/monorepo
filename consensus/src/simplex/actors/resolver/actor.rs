@@ -25,7 +25,7 @@ use commonware_utils::{
     sequence::U64,
 };
 use rand_core::CryptoRngCore;
-use std::time::Duration;
+use std::{num::NonZeroU64, time::Duration};
 use tracing::debug;
 
 /// Requests are made concurrently to multiple peers.
@@ -42,6 +42,7 @@ pub struct Actor<
     strategy: T,
 
     epoch: Epoch,
+    term_length: NonZeroU64,
     mailbox_size: usize,
     fetch_timeout: Duration,
 
@@ -68,10 +69,11 @@ impl<
                 strategy: cfg.strategy,
 
                 epoch: cfg.epoch,
+                term_length: cfg.term_length,
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
 
-                state: State::new(cfg.fetch_concurrent),
+                state: State::new(cfg.fetch_concurrent, cfg.term_length),
 
                 mailbox_receiver: receiver,
             },
@@ -207,8 +209,9 @@ impl<
                 Some(Certificate::Finalization(finalization))
             }
             Certificate::Nullification(nullification) => {
-                if nullification.view() != view {
-                    debug!(%view, received = %nullification.view(), "nullification view mismatch");
+                let nv = nullification.view();
+                if view < nv || !nv.same_term(view, self.term_length) {
+                    debug!(%view, received = %nv, "nullification view mismatch");
                     return None;
                 }
                 if nullification.epoch() != self.epoch {
