@@ -120,7 +120,10 @@ fn glue_sums<F: BinaryFieldElement>(sum_f: F, sum_g: F, beta: F) -> F {
 }
 
 /// Core proving logic after initial commitment and root absorption.
-fn prove_core<T, U>(
+///
+/// Public within the crate so `da::prove_from_block` can reuse an
+/// already-encoded witness (the "accidental computer" path).
+pub(crate) fn prove_core<T, U>(
     config: &crate::ProverConfig<T, U>,
     poly: &[T],
     wtns_0: Witness<T>,

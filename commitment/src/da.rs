@@ -85,6 +85,36 @@ impl<F: BinaryFieldElement> EncodedBlock<F> {
         self.row_tree.get_depth()
     }
 
+    /// Convert into a [`Witness`](crate::proof::Witness) for the prover.
+    ///
+    /// This is the "accidental" bridge: the DA encoding IS the polynomial
+    /// commitment. The prover reuses the already-encoded block instead of
+    /// re-encoding from scratch, achieving zero prover overhead for the
+    /// polynomial commitment step.
+    pub fn into_witness(self) -> crate::proof::Witness<F> {
+        crate::proof::Witness {
+            data: self.data,
+            rows: self.rows,
+            cols: self.cols,
+            tree: self.row_tree,
+        }
+    }
+
+    /// Borrow as a [`Witness`](crate::proof::Witness) reference without consuming.
+    pub fn as_witness(&self) -> crate::proof::Witness<F>
+    where
+        F: Clone,
+    {
+        crate::proof::Witness {
+            data: self.data.clone(),
+            rows: self.rows,
+            cols: self.cols,
+            tree: crate::merkle::CompleteMerkleTree {
+                layers: self.row_tree.layers.clone(),
+            },
+        }
+    }
+
     /// Gather encoded row `i` as a contiguous vector.
     pub fn row(&self, i: usize) -> Vec<F> {
         assert!(i < self.rows, "row index out of bounds");

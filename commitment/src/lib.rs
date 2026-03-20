@@ -40,7 +40,7 @@ pub mod da;
 mod encode;
 mod error;
 pub mod proof;
-mod prover;
+pub(crate) mod prover;
 #[allow(dead_code)]
 pub mod utils;
 mod verifier;

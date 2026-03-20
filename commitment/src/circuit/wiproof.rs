@@ -1,25 +1,23 @@
-//! Zero-knowledge proof system using the polynomial commitment scheme.
+//! Witness-indistinguishable proof system using polynomial commitment.
 //!
-//! This module bridges the constraint system and polynomial commitment.
-//! The key flow:
+//! Bridges the constraint system and polynomial commitment. The verifier
+//! is convinced the prover knows a witness satisfying the circuit, but
+//! the opened rows in the Ligerito proof leak partial witness information.
 //!
-//! 1. Prover encodes witness as multilinear polynomial.
-//! 2. Prover commits to polynomial using Reed-Solomon + Merkle.
-//! 3. Prover and verifier run sumcheck protocol on constraint polynomial.
-//! 4. Verifier checks commitment at random evaluation point.
+//! For full zero-knowledge, the witness polynomial would need random
+//! blinding and the sumcheck messages would need masking.
+//! See <https://www.youtube.com/watch?v=GNaOgmqGxkI&t=11m> on WI vs ZK.
 //!
-//! ## Security model
+//! ## Accidental computer path
 //!
-//! - **Soundness**: constraint polynomial is zero on hypercube iff constraints
-//!   are satisfied. Sumcheck verifies this with overwhelming probability.
-//! - **Zero-knowledge**: verifier only sees polynomial commitment + random
-//!   evaluations. Schwartz-Zippel ensures random eval reveals nothing
-//!   about witness.
-//! - **Succinctness**: proof size is O(log n) via the recursive structure.
+//! [`prove_from_block`] takes an already DA-encoded block and produces
+//! a proof without re-encoding. The DA encoding IS the polynomial
+//! commitment -- zero additional prover cost.
 
 use crate::field::{BinaryElem128, BinaryElem32, BinaryFieldElement};
 use crate::proof::Proof;
 use crate::transcript::Sha256Transcript;
+use crate::Transcript as _; // bring trait methods into scope
 
 use crate::circuit::constraint::{Circuit, Witness};
 use crate::circuit::witness::LigeritoInstance;
@@ -152,6 +150,72 @@ fn compute_batching_challenge(public_inputs: &[BinaryElem32]) -> [u8; 16] {
     let mut challenge = [0u8; 16];
     challenge.copy_from_slice(&hash[..16]);
     challenge
+}
+
+/// Prove circuit satisfaction reusing a DA-encoded block.
+///
+/// This is the "accidental computer" construction: the DA encoding
+/// IS the polynomial commitment. The prover skips the encoding step
+/// entirely, using the already-computed `EncodedBlock` as the witness.
+///
+/// # Arguments
+///
+/// * `block` - DA-encoded block (already RS-encoded and Merkle-committed)
+/// * `poly` - The original polynomial (before encoding)
+/// * `circuit` - The constraint circuit to prove
+/// * `witness_data` - The witness values
+///
+/// The `block` must have been created from the same `poly` data.
+pub fn prove_from_block(
+    block: crate::da::EncodedBlock<BinaryElem32>,
+    poly: &[BinaryElem32],
+    circuit: Circuit,
+    witness_data: Witness,
+) -> crate::Result<ZkProof> {
+    let instance = LigeritoInstance::new(circuit, witness_data);
+
+    if !instance.is_satisfied() {
+        return Err(crate::Error::InvalidConfig(
+            "circuit constraints not satisfied",
+        ));
+    }
+
+    let log_size = instance.log_size().max(crate::MIN_LOG_SIZE as usize);
+    let config =
+        crate::prover_config_for_log_size::<BinaryElem32, BinaryElem128>(log_size as u32);
+
+    let mut poly_padded = poly.to_vec();
+    poly_padded.resize(1 << log_size, BinaryElem32::zero());
+
+    // Reuse the DA block as the initial witness -- zero re-encoding cost.
+    let wtns_0 = block.into_witness();
+    let cm_0 = crate::proof::Commitment {
+        root: wtns_0.tree.get_root(),
+    };
+
+    let mut transcript = Sha256Transcript::new(1234);
+    let root_bytes = cm_0
+        .root
+        .root
+        .as_ref()
+        .map_or(&[] as &[u8], |h| h.as_slice());
+    transcript.absorb_root(root_bytes);
+
+    // Call prove_core directly with the pre-computed witness.
+    let proof = crate::prover::prove_core(&config, &poly_padded, wtns_0, cm_0, &mut transcript)?;
+
+    let batching_challenge = compute_batching_challenge(&instance.public_inputs);
+
+    Ok(ZkProof {
+        commitment_proof: proof,
+        public_inputs: instance
+            .public_inputs
+            .iter()
+            .map(|x| x.poly().value())
+            .collect(),
+        batching_challenge,
+        log_size: log_size as u8,
+    })
 }
 
 /// High-level API: prove and verify in one call (for testing).
