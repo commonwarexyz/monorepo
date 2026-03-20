@@ -29,6 +29,9 @@ pub enum EngineError<D: Digest> {
     /// Sync stalled - no pending fetches
     #[error("sync stalled - no pending fetches")]
     SyncStalled,
+    /// Sync finish signal channel closed before finish was requested.
+    #[error("sync finish signal channel closed before finish was requested")]
+    FinishChannelClosed,
     /// Error extracting pinned nodes
     #[error("error extracting pinned nodes: {0}")]
     PinnedNodes(String),

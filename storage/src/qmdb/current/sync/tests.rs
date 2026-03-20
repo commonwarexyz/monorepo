@@ -426,6 +426,11 @@ macro_rules! current_sync_tests_for_harness {
                 crate::qmdb::any::sync::tests::test_target_update_on_done_client::<$harness>();
             }
 
+            #[test_traced]
+            fn test_sync_waits_for_explicit_finish() {
+                crate::qmdb::any::sync::tests::test_sync_waits_for_explicit_finish::<$harness>();
+            }
+
             #[rstest]
             #[case(1, 1)]
             #[case(1, 2)]
