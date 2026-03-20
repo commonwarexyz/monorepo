@@ -1,7 +1,7 @@
 ---
 title: "The Carnot Bound"
 description: "Recently, we released a paper called The Carnot Bound, which investigates the fundamental limits and possibilities for bandwidth-efficient consensus. The paper establishes a tight lower bound on coding efficiency for protocols with fast finality, and shows that an additional round of voting breaks the barrier. Here's the idea."
-date: "March 2026"
+date: "March 20th, 2026"
 published-time: "2026-03-20T00:00:00Z"
 modified-time: "2026-03-20T00:00:00Z"
 author: "Andrew Lewis-Pye"
