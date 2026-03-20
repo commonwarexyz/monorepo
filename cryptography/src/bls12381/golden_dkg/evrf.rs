@@ -21,6 +21,7 @@ use std::num::NonZeroU32;
 use zeroize::Zeroizing;
 
 const PUBLIC_KEY_LENGTH: usize = 32;
+const VRF_SECRET_LENGTH: usize = 32;
 
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
@@ -58,16 +59,17 @@ impl PrivateKey {
         crate::Signer::public_key(self)
     }
 
-    fn diffie_hellman(&self, public: &PublicKey, transcript: &mut Transcript) {
-        // Convert our ed25519 seed to an x25519 static secret.
-        // Ed25519 derives the scalar via SHA-512(seed)[0..32]; x25519 StaticSecret
-        // applies its own clamping on top of these bytes.
-        let x25519_secret = self.inner.expose(|key| {
+    fn vrf_secret_bytes(&self) -> [u8; VRF_SECRET_LENGTH] {
+        self.inner.expose(|key| {
             let hash = Sha512::digest(key.as_bytes());
-            let mut scalar_bytes = [0u8; 32];
-            scalar_bytes.copy_from_slice(&hash[..32]);
-            x25519_dalek::StaticSecret::from(scalar_bytes)
-        });
+            let mut scalar_bytes = [0u8; VRF_SECRET_LENGTH];
+            scalar_bytes.copy_from_slice(&hash[..VRF_SECRET_LENGTH]);
+            scalar_bytes
+        })
+    }
+
+    fn diffie_hellman(&self, public: &PublicKey, transcript: &mut Transcript) {
+        let x25519_secret = x25519_dalek::StaticSecret::from(self.vrf_secret_bytes());
 
         // Convert the ed25519 public key (compressed Edwards Y) to an x25519
         // public key (Montgomery U-coordinate).
@@ -128,7 +130,10 @@ impl PrivateKey {
         (
             scalars,
             VrfCommitments {
-                proof: Proof { key: self.clone() },
+                proof: Proof {
+                    sender: self.public(),
+                    vrf_secret: self.vrf_secret_bytes(),
+                },
                 commitments,
             },
         )
@@ -231,24 +236,44 @@ impl Display for PublicKey {
     }
 }
 
-/// An insecure "proof" that simply contains the sender's private key.
+/// An insecure "proof" that simply contains the sender's VRF secret.
 ///
-/// This is NOT a real zero-knowledge proof. It reveals the private key,
+/// This is NOT a real zero-knowledge proof. It reveals private VRF material,
 /// completely breaking the VRF's secrecy property. We use this placeholder
 /// so that commitment checking works while the real ZK proof is being developed.
 #[derive(Clone)]
 struct Proof {
-    key: PrivateKey,
+    sender: PublicKey,
+    vrf_secret: [u8; VRF_SECRET_LENGTH],
 }
 
 impl Proof {
+    fn vrf(&self, msg: &Summary, receiver: &PublicKey) -> Scalar {
+        let mut transcript = Transcript::resume(*msg);
+        let x25519_secret = x25519_dalek::StaticSecret::from(self.vrf_secret);
+
+        // Convert the ed25519 public key (compressed Edwards Y) to an x25519
+        // public key (Montgomery U-coordinate).
+        let edwards =
+            CompressedEdwardsY::from_slice(receiver.as_ref()).expect("public key is 32 bytes");
+        let montgomery = edwards
+            .decompress()
+            .expect("valid ed25519 public key decompresses")
+            .to_montgomery();
+        let x25519_public = x25519_dalek::PublicKey::from(montgomery.to_bytes());
+
+        let shared = x25519_secret.diffie_hellman(&x25519_public);
+        transcript.commit(shared.as_bytes().as_slice());
+        Scalar::random(&mut transcript.noise(b"vrf"))
+    }
+
     /// Check that each commitment matches the VRF output for the corresponding receiver.
     fn check(&self, msg: &Summary, sender: &PublicKey, commitments: &Map<PublicKey, G1>) -> bool {
-        if self.key.public() != *sender {
+        if self.sender != *sender {
             return false;
         }
         commitments.iter_pairs().all(|(receiver, commitment)| {
-            let expected = G1::generator() * &self.key.vrf(msg, receiver);
+            let expected = G1::generator() * &self.vrf(msg, receiver);
             *commitment == expected
         })
     }
@@ -256,7 +281,8 @@ impl Proof {
 
 impl Write for Proof {
     fn write(&self, buf: &mut impl BufMut) {
-        self.key.inner.expose(|key| key.as_bytes().write(buf));
+        self.sender.write(buf);
+        self.vrf_secret.write(buf);
     }
 }
 
@@ -265,13 +291,14 @@ impl Read for Proof {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         Ok(Self {
-            key: PrivateKey::read(buf)?,
+            sender: ReadExt::read(buf)?,
+            vrf_secret: ReadExt::read(buf)?,
         })
     }
 }
 
 impl FixedSize for Proof {
-    const SIZE: usize = PrivateKey::SIZE;
+    const SIZE: usize = PublicKey::SIZE + VRF_SECRET_LENGTH;
 }
 
 impl Write for VrfCommitments {
