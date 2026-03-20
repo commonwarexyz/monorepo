@@ -234,20 +234,16 @@ impl BufferPoolConfig {
     }
 
     /// Returns a copy of this config with an explicit per-thread cache size.
-    ///
-    /// This bypasses the derived heuristic and uses the same exact thread cache size for
-    /// every size class.
     pub const fn with_thread_cache_capacity(mut self, thread_cache_capacity: NonZeroUsize) -> Self {
         self.thread_cache_capacity = BufferPoolThreadCache::Fixed(thread_cache_capacity);
         self
     }
 
-    /// Returns a copy of this config with thread-cache capacity derived from a
-    /// parallelism hint.
+    /// Returns a copy of this config with thread-cache capacity derived from a parallelism hint.
     ///
-    /// The final per-thread cache size is resolved when the pool is created, using the
-    /// final `max_per_class` value. The derived size reserves half the class budget for
-    /// the shared freelist and clamps the local cache to `[1, 8]`.
+    /// The final per-thread cache size is resolved when the pool is created, using the final
+    /// `max_per_class` value. The derived size reserves half the class budget for the shared
+    /// freelist and clamps the local cache to `[1, 8]`.
     pub const fn with_thread_cache_for_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
         self.thread_cache_capacity = BufferPoolThreadCache::ForParallelism(parallelism);
         self
