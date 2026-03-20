@@ -28,6 +28,7 @@ extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+pub mod circuit;
 pub mod field;
 pub mod merkle;
 pub mod reed_solomon;
@@ -35,6 +36,7 @@ pub mod sumcheck;
 pub mod transcript;
 
 mod config;
+pub mod da;
 mod encode;
 mod error;
 pub mod proof;

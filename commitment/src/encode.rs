@@ -18,7 +18,7 @@ use rayon::prelude::*;
 /// The polynomial `poly[j * m + i]` maps to column `j`, row `i`.
 /// Columns are contiguous in memory, so RS encoding has perfect
 /// spatial locality.
-fn build_and_encode<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static>(
+pub(crate) fn build_and_encode<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static>(
     poly: &[F],
     m: usize,
     n: usize,
@@ -65,7 +65,7 @@ fn build_and_encode<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'stati
 /// identically to [`crate::utils::hash_row`] for prover/verifier
 /// consistency.
 #[inline]
-fn hash_row_colmajor<F: BinaryFieldElement>(data: &[F], rows: usize, cols: usize, i: usize) -> Hash {
+pub(crate) fn hash_row_colmajor<F: BinaryFieldElement>(data: &[F], rows: usize, cols: usize, i: usize) -> Hash {
     let mut row_buf = vec![F::zero(); cols];
     for j in 0..cols {
         row_buf[j] = data[j * rows + i];
