@@ -9,6 +9,8 @@ pub mod batch;
 #[cfg(test)]
 pub(crate) mod conformance;
 pub mod hasher;
+#[cfg(feature = "std")]
+pub(crate) mod journaled;
 mod location;
 pub mod mem;
 pub mod mmb;
