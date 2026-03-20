@@ -40,7 +40,7 @@ mod error;
 pub mod proof;
 mod prover;
 #[allow(dead_code)]
-mod utils;
+pub mod utils;
 mod verifier;
 
 pub use config::{
