@@ -161,7 +161,7 @@ where
     transcript.absorb_root(root_bytes);
 
     // Query selection on initial witness
-    let rows = wtns_0.mat.len();
+    let rows = wtns_0.num_rows();
     let queries = transcript.distinct_queries(rows, config.num_queries);
     let alpha: U = transcript.challenge();
 
@@ -169,7 +169,7 @@ where
     let n = f_evals.len().trailing_zeros() as usize;
     let sks_vks: Vec<T> = eval_sk_at_vks(1 << n);
 
-    let opened_rows: Vec<Vec<T>> = queries.iter().map(|&q| wtns_0.mat[q].clone()).collect();
+    let opened_rows: Vec<Vec<T>> = queries.iter().map(|&q| wtns_0.gather_row(q)).collect();
     let mtree_proof = wtns_0.tree.prove(&queries);
 
     builder.initial_opening = Some(Opening {
@@ -217,11 +217,11 @@ where
         if i == config.recursive_steps - 1 {
             transcript.absorb_elems(&current_poly);
 
-            let rows = wtns_prev.mat.len();
+            let rows = wtns_prev.num_rows();
             let queries = transcript.distinct_queries(rows, config.num_queries);
 
             let opened_rows: Vec<Vec<U>> =
-                queries.iter().map(|&q| wtns_prev.mat[q].clone()).collect();
+                queries.iter().map(|&q| wtns_prev.gather_row(q)).collect();
             let mtree_proof = wtns_prev.tree.prove(&queries);
 
             builder.final_opening = Some(FinalOpening {
@@ -255,12 +255,12 @@ where
             .map_or(&[] as &[u8], |h| h.as_slice());
         transcript.absorb_root(root_bytes);
 
-        let rows = wtns_prev.mat.len();
+        let rows = wtns_prev.num_rows();
         let queries = transcript.distinct_queries(rows, config.num_queries);
         let alpha: U = transcript.challenge();
 
         let opened_rows: Vec<Vec<U>> =
-            queries.iter().map(|&q| wtns_prev.mat[q].clone()).collect();
+            queries.iter().map(|&q| wtns_prev.gather_row(q)).collect();
         let mtree_proof = wtns_prev.tree.prove(&queries);
 
         builder.recursive_openings.push(Opening {

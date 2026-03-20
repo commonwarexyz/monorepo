@@ -1,8 +1,5 @@
-//! Encoding stage: polynomial to matrix to Reed-Solomon to Merkle commitment.
-//!
-//! This module implements the Ligero commitment: arrange polynomial
-//! coefficients as a matrix, RS-encode each column, hash rows into
-//! a Merkle tree.
+//! Encoding stage: polynomial to column-major matrix, RS-encode in-place,
+//! hash rows into a Merkle tree.
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -15,116 +12,97 @@ use crate::reed_solomon::ReedSolomon;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-/// Arrange polynomial coefficients into a matrix and RS-encode columns.
-fn poly_to_encoded_matrix<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static>(
+/// Build a column-major flat matrix from polynomial coefficients and
+/// RS-encode each column in-place.
+///
+/// The polynomial `poly[j * m + i]` maps to column `j`, row `i`.
+/// Columns are contiguous in memory, so RS encoding has perfect
+/// spatial locality.
+fn build_and_encode<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static>(
     poly: &[F],
     m: usize,
     n: usize,
     inv_rate: usize,
     rs: &ReedSolomon<F>,
-) -> Vec<Vec<F>> {
+) -> (Vec<F>, usize, usize) {
     let m_target = m * inv_rate;
-    let mut mat = vec![vec![F::zero(); n]; m_target];
+    let mut data = vec![F::zero(); m_target * n];
 
-    // Transpose polynomial into matrix (column-major to row-major)
+    // Fill column-major: poly[j*m + i] -> data[j*m_target + i]
+    for j in 0..n {
+        let col_start = j * m_target;
+        for i in 0..m {
+            let poly_idx = j * m + i;
+            if poly_idx < poly.len() {
+                data[col_start + i] = poly[poly_idx];
+            }
+        }
+    }
+
+    // RS-encode each column in-place (contiguous slice per column)
     #[cfg(feature = "parallel")]
     {
-        mat.par_iter_mut().enumerate().for_each(|(i, row)| {
-            for j in 0..n {
-                let idx = j * m + i;
-                if idx < poly.len() {
-                    row[j] = poly[idx];
-                }
-            }
+        data.par_chunks_mut(m_target).for_each(|col| {
+            crate::reed_solomon::encode_in_place_with_parallel(rs, col, false);
         });
     }
 
     #[cfg(not(feature = "parallel"))]
     {
-        for (i, row) in mat.iter_mut().enumerate() {
-            for j in 0..n {
-                let idx = j * m + i;
-                if idx < poly.len() {
-                    row[j] = poly[idx];
-                }
-            }
+        for j in 0..n {
+            let start = j * m_target;
+            let col = &mut data[start..start + m_target];
+            crate::reed_solomon::encode_in_place(rs, col);
         }
     }
 
-    // RS-encode each column
-    let n_cols = mat[0].len();
-
-    #[cfg(feature = "parallel")]
-    {
-        let cols: Vec<Vec<F>> = (0..n_cols)
-            .into_par_iter()
-            .map(|j| {
-                let mut col: Vec<F> = mat.iter().map(|row| row[j]).collect();
-                crate::reed_solomon::encode_in_place_with_parallel(rs, &mut col, false);
-                col
-            })
-            .collect();
-
-        for (i, row) in mat.iter_mut().enumerate() {
-            for (j, col) in cols.iter().enumerate() {
-                row[j] = col[i];
-            }
-        }
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    {
-        for j in 0..n_cols {
-            let mut col: Vec<F> = mat.iter().map(|row| row[j]).collect();
-            crate::reed_solomon::encode_in_place(rs, &mut col);
-            for (i, val) in col.iter().enumerate() {
-                mat[i][j] = *val;
-            }
-        }
-    }
-
-    mat
+    (data, m_target, n)
 }
 
-/// Hash a row of field elements using BLAKE3.
+/// Hash row `i` from a column-major flat buffer.
 ///
-/// Produces the leaf digest for the Merkle tree. Uses BLAKE3 (same as
-/// the interior nodes) to avoid mixing hash functions.
-#[inline(always)]
-pub(crate) fn hash_row<F: BinaryFieldElement>(row: &[F]) -> Hash {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&(row.len() as u32).to_le_bytes());
-
-    // SAFETY: Field elements are plain data (repr(transparent) over
-    // primitive integers) with no padding. Viewing the contiguous slice
-    // as bytes for hashing is sound.
-    let row_bytes = unsafe {
-        core::slice::from_raw_parts(row.as_ptr() as *const u8, core::mem::size_of_val(row))
-    };
-    hasher.update(row_bytes);
-
-    *hasher.finalize().as_bytes()
+/// Gathers the row into a contiguous buffer first, then hashes
+/// identically to [`crate::utils::hash_row`] for prover/verifier
+/// consistency.
+#[inline]
+fn hash_row_colmajor<F: BinaryFieldElement>(data: &[F], rows: usize, cols: usize, i: usize) -> Hash {
+    let mut row_buf = vec![F::zero(); cols];
+    for j in 0..cols {
+        row_buf[j] = data[j * rows + i];
+    }
+    crate::utils::hash_row(&row_buf)
 }
 
-/// Commit to a polynomial: encode as matrix, hash rows, build Merkle tree.
+/// Commit to a polynomial: encode as column-major matrix, hash rows,
+/// build Merkle tree.
 pub(crate) fn ligero_commit<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static>(
     poly: &[F],
     m: usize,
     n: usize,
     rs: &ReedSolomon<F>,
 ) -> Witness<F> {
-    let mat = poly_to_encoded_matrix(poly, m, n, 4, rs);
+    let (data, rows, cols) = build_and_encode(poly, m, n, 4, rs);
 
-    // Hash rows for Merkle leaves
+    // Hash rows (strided gather from column-major layout)
     #[cfg(feature = "parallel")]
-    let hashed_rows: Vec<Hash> = mat.par_iter().map(|row| hash_row(row)).collect();
+    let hashed_rows: Vec<Hash> = (0..rows)
+        .into_par_iter()
+        .map(|i| hash_row_colmajor(&data, rows, cols, i))
+        .collect();
 
     #[cfg(not(feature = "parallel"))]
-    let hashed_rows: Vec<Hash> = mat.iter().map(|row| hash_row(row)).collect();
+    let hashed_rows: Vec<Hash> = (0..rows)
+        .map(|i| hash_row_colmajor(&data, rows, cols, i))
+        .collect();
 
     let tree = merkle::build_merkle_tree_from_hashes(&hashed_rows);
 
-    Witness { mat, tree }
+    Witness {
+        data,
+        rows,
+        cols,
+        tree,
+    }
 }
 
 /// Extract commitment from a witness.

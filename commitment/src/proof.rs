@@ -8,11 +8,36 @@ use crate::merkle::{BatchedMerkleProof, MerkleRoot};
 use crate::sumcheck::eval::EvalSumcheckRound;
 
 /// Recursive Ligero witness (prover-side only).
+///
+/// The matrix is stored column-major in a flat buffer for cache-friendly
+/// RS encoding. Column `j` occupies `data[j * rows .. (j+1) * rows]`.
 pub struct Witness<T: BinaryFieldElement> {
-    /// Row-major encoded matrix.
-    pub mat: Vec<Vec<T>>,
+    /// Column-major flat buffer.
+    pub data: Vec<T>,
+    /// Number of rows (= m * inv_rate).
+    pub rows: usize,
+    /// Number of columns.
+    pub cols: usize,
     /// Merkle tree over hashed rows.
     pub tree: crate::merkle::CompleteMerkleTree,
+}
+
+impl<T: BinaryFieldElement> Witness<T> {
+    /// Gather row `i` into a new Vec.
+    #[inline]
+    pub fn gather_row(&self, i: usize) -> Vec<T> {
+        let mut row = vec![T::zero(); self.cols];
+        for j in 0..self.cols {
+            row[j] = self.data[j * self.rows + i];
+        }
+        row
+    }
+
+    /// Number of rows in the matrix.
+    #[inline]
+    pub fn num_rows(&self) -> usize {
+        self.rows
+    }
 }
 
 /// Merkle root commitment.
