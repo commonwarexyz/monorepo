@@ -113,6 +113,7 @@ clean_mbt_traces:
 	rm -rf $(ITF_DIR)/
 
 mbt_unit_tests: clean_mbt_traces generate_mbt_unit_test_traces convert_itf replay_itf
+mbt_replay: convert_itf replay_itf
 
 generate_itf_test:
 	@mkdir -p $(ITF_DIR)

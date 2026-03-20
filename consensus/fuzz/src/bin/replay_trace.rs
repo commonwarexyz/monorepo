@@ -49,6 +49,15 @@ fn main() {
             state.nullifications.keys().collect::<Vec<_>>(),
             state.finalizations.keys().collect::<Vec<_>>(),
         );
+        for (&view, signers) in &state.notarize_signers {
+            println!("    notarize_votes[{view}]: {signers:?}");
+        }
+        for (&view, signers) in &state.nullify_signers {
+            println!("    nullify_votes[{view}]: {signers:?}");
+        }
+        for (&view, signers) in &state.finalize_signers {
+            println!("    finalize_votes[{view}]: {signers:?}");
+        }
     }
 
     // If expected state is provided, compare

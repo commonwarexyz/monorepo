@@ -365,6 +365,81 @@ fn diff_store_certificate(
     new_entries
 }
 
+/// Collects `sent_vote` (global set of all sent votes) from an ITF state.
+fn collect_sent_vote(state: &Value) -> Vec<Value> {
+    parse_set(get_var(state, "sent_vote"))
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+/// Extracts vote signers from `store_vote` and `sent_vote` for a given node.
+///
+/// `store_vote[node]` tracks votes delivered via the network (may or may not
+/// include self-delivery). `sent_vote` is the global set of all sent votes.
+/// We union in the node's own sent votes so the result always includes self,
+/// matching the Rust Reporter which always records self-constructed votes.
+fn extract_vote_signers(
+    store_vote_map: &HashMap<String, Vec<Value>>,
+    sent_votes: &[Value],
+    node: &str,
+) -> (
+    BTreeMap<u64, BTreeSet<String>>,
+    BTreeMap<u64, BTreeSet<String>>,
+    BTreeMap<u64, BTreeSet<String>>,
+) {
+    let mut notarize_signers: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+    let mut nullify_signers: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+    let mut finalize_signers: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+
+    // Votes received from the network
+    if let Some(votes) = store_vote_map.get(node) {
+        for vote_val in votes {
+            insert_vote_signer(vote_val, &mut notarize_signers, &mut nullify_signers, &mut finalize_signers);
+        }
+    }
+
+    // Node's own sent votes (self-delivery)
+    for vote_val in sent_votes {
+        let sig = vote_val
+            .get("value")
+            .and_then(|v| v["sig"].as_str());
+        if sig == Some(node) {
+            insert_vote_signer(vote_val, &mut notarize_signers, &mut nullify_signers, &mut finalize_signers);
+        }
+    }
+
+    (notarize_signers, nullify_signers, finalize_signers)
+}
+
+fn insert_vote_signer(
+    vote_val: &Value,
+    notarize_signers: &mut BTreeMap<u64, BTreeSet<String>>,
+    nullify_signers: &mut BTreeMap<u64, BTreeSet<String>>,
+    finalize_signers: &mut BTreeMap<u64, BTreeSet<String>>,
+) {
+    let Some(tag) = vote_val.get("tag").and_then(|t| t.as_str()) else {
+        return;
+    };
+    let Some(inner) = vote_val.get("value") else {
+        return;
+    };
+    let view = parse_int(&inner["view"]);
+    let sig = inner["sig"].as_str().unwrap_or("").to_string();
+    match tag {
+        "Notarize" => {
+            notarize_signers.entry(view).or_default().insert(sig);
+        }
+        "Nullify" => {
+            nullify_signers.entry(view).or_default().insert(sig);
+        }
+        "Finalize" => {
+            finalize_signers.entry(view).or_default().insert(sig);
+        }
+        _ => {}
+    }
+}
+
 /// Extracts expected observable state from the final ITF state.
 fn extract_expected_state(
     state: &Value,
@@ -372,6 +447,8 @@ fn extract_expected_state(
     block_map: &HashMap<String, String>,
 ) -> ExpectedState {
     let store_cert_map = collect_store_certificate(state);
+    let store_vote_map = collect_store_vote(state);
+    let sent_votes = collect_sent_vote(state);
     let replica_state_entries = parse_map(get_var(state, "replica_state"));
     let committed_entries = parse_map(get_var(state, "ghost_committed_blocks"));
 
@@ -442,6 +519,10 @@ fn extract_expected_state(
             })
             .unwrap_or_default();
 
+        // Extract vote signers from store_vote + sent_vote
+        let (notarize_signers, nullify_signers, finalize_signers) =
+            extract_vote_signers(&store_vote_map, &sent_votes, node);
+
         nodes.insert(
             node.clone(),
             ExpectedNodeState {
@@ -450,6 +531,9 @@ fn extract_expected_state(
                 finalizations,
                 last_finalized,
                 committed_sequence,
+                notarize_signers,
+                nullify_signers,
+                finalize_signers,
             },
         );
     }

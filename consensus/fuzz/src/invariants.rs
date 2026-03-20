@@ -12,7 +12,7 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
 };
 use rand_core::CryptoRngCore;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub fn check<P: Simplex>(n: u32, replicas: &[ReplicaState]) {
     let threshold = bounds::quorum(n) as usize;
@@ -235,6 +235,9 @@ where
                 notarizations: extract_notarizations::<S>(reporter, max_participants),
                 nullifications: extract_nullifications::<S>(reporter, max_participants),
                 finalizations: extract_finalizations::<S>(reporter, max_participants),
+                notarize_signers: extract_notarize_signers(reporter),
+                nullify_signers: extract_nullify_signers(reporter),
+                finalize_signers: extract_finalize_signers(reporter),
             }
         })
         .collect()
@@ -303,4 +306,64 @@ fn extract_finalizations<S: Scheme<Sha256Digest>>(
             )
         })
         .collect()
+}
+
+fn pk_to_node_id<S: Scheme<Sha256Digest>>(
+    participants: &commonware_utils::ordered::Set<S::PublicKey>,
+    pk: &S::PublicKey,
+) -> String {
+    let idx = participants
+        .iter()
+        .position(|p| p == pk)
+        .expect("public key not in participants");
+    format!("n{idx}")
+}
+
+fn extract_notarize_signers<S: Scheme<Sha256Digest>>(
+    reporter: &Reporter<impl CryptoRngCore, S, impl Elector<S>, Sha256Digest>,
+) -> HashMap<u64, BTreeSet<String>> {
+    let notarizes = reporter.notarizes.lock();
+    let mut result = HashMap::new();
+    for (view, payload_map) in notarizes.iter() {
+        let mut signers = BTreeSet::new();
+        for pks in payload_map.values() {
+            for pk in pks {
+                signers.insert(pk_to_node_id::<S>(&reporter.participants, pk));
+            }
+        }
+        result.insert(view.get(), signers);
+    }
+    result
+}
+
+fn extract_nullify_signers<S: Scheme<Sha256Digest>>(
+    reporter: &Reporter<impl CryptoRngCore, S, impl Elector<S>, Sha256Digest>,
+) -> HashMap<u64, BTreeSet<String>> {
+    let nullifies = reporter.nullifies.lock();
+    let mut result = HashMap::new();
+    for (view, pks) in nullifies.iter() {
+        let signers = pks
+            .iter()
+            .map(|pk| pk_to_node_id::<S>(&reporter.participants, pk))
+            .collect();
+        result.insert(view.get(), signers);
+    }
+    result
+}
+
+fn extract_finalize_signers<S: Scheme<Sha256Digest>>(
+    reporter: &Reporter<impl CryptoRngCore, S, impl Elector<S>, Sha256Digest>,
+) -> HashMap<u64, BTreeSet<String>> {
+    let finalizes = reporter.finalizes.lock();
+    let mut result = HashMap::new();
+    for (view, payload_map) in finalizes.iter() {
+        let mut signers = BTreeSet::new();
+        for pks in payload_map.values() {
+            for pk in pks {
+                signers.insert(pk_to_node_id::<S>(&reporter.participants, pk));
+            }
+        }
+        result.insert(view.get(), signers);
+    }
+    result
 }

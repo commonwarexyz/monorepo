@@ -1,6 +1,6 @@
 use crate::types::ReplayedReplicaState;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Observable state from the Quint model for a single correct node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,6 +15,15 @@ pub struct ExpectedNodeState {
     pub last_finalized: u64,
     /// Committed block sequence (views in finalization order).
     pub committed_sequence: Vec<u64>,
+    /// Per-view set of node IDs that sent notarize votes to this node.
+    #[serde(default)]
+    pub notarize_signers: BTreeMap<u64, BTreeSet<String>>,
+    /// Per-view set of node IDs that sent nullify votes to this node.
+    #[serde(default)]
+    pub nullify_signers: BTreeMap<u64, BTreeSet<String>>,
+    /// Per-view set of node IDs that sent finalize votes to this node.
+    #[serde(default)]
+    pub finalize_signers: BTreeMap<u64, BTreeSet<String>>,
 }
 
 /// Expected observable state from the Quint model.
@@ -34,6 +43,13 @@ pub enum Mismatch {
     MissingFinalization { node: String, view: u64 },
     ExtraFinalization { node: String, view: u64 },
     LastFinalizedMismatch { node: String, expected: u64, actual: u64 },
+    VoteSignerMismatch {
+        node: String,
+        view: u64,
+        vote_type: &'static str,
+        expected: BTreeSet<String>,
+        actual: BTreeSet<String>,
+    },
 }
 
 /// Compares expected Quint state with actual Rust reporter state.
@@ -117,9 +133,74 @@ pub fn compare(
                 actual: actual_last,
             });
         }
+
+        // Compare vote signers
+        compare_signers(
+            &mut mismatches,
+            &node_id,
+            "notarize",
+            &expected_node.notarize_signers,
+            &state.notarize_signers,
+        );
+        compare_signers(
+            &mut mismatches,
+            &node_id,
+            "nullify",
+            &expected_node.nullify_signers,
+            &state.nullify_signers,
+        );
+        compare_signers(
+            &mut mismatches,
+            &node_id,
+            "finalize",
+            &expected_node.finalize_signers,
+            &state.finalize_signers,
+        );
     }
 
     mismatches
+}
+
+fn compare_signers(
+    mismatches: &mut Vec<Mismatch>,
+    node: &str,
+    vote_type: &'static str,
+    expected: &BTreeMap<u64, BTreeSet<String>>,
+    actual: &HashMap<u64, BTreeSet<String>>,
+) {
+    let all_views: BTreeSet<u64> = expected
+        .keys()
+        .chain(actual.keys())
+        .copied()
+        .collect();
+
+    for view in all_views {
+        // Skip INIT_VIEW: initial votes are pre-populated in Quint but
+        // the Rust engine only constructs its own vote and receives the certificate.
+        if view <= 1 {
+            continue;
+        }
+        let empty = BTreeSet::new();
+        let exp_set = expected.get(&view).unwrap_or(&empty);
+        let act_set = actual.get(&view).unwrap_or(&empty);
+        // The node's own vote may or may not be present on either side due
+        // to timing (spec may not have sent it, impl may have received the
+        // certificate first). Union both sides with {node} to ignore this.
+        let node_str = node.to_string();
+        let mut exp_with_self = exp_set.clone();
+        exp_with_self.insert(node_str.clone());
+        let mut act_with_self = act_set.clone();
+        act_with_self.insert(node_str);
+        if exp_with_self != act_with_self {
+            mismatches.push(Mismatch::VoteSignerMismatch {
+                node: node.to_string(),
+                view,
+                vote_type,
+                expected: exp_set.clone(),
+                actual: act_set.clone(),
+            });
+        }
+    }
 }
 
 impl std::fmt::Display for Mismatch {
@@ -151,6 +232,18 @@ impl std::fmt::Display for Mismatch {
                 write!(
                     f,
                     "{node}: last_finalized mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Mismatch::VoteSignerMismatch {
+                node,
+                view,
+                vote_type,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "{node}: {vote_type} signers mismatch at view {view}: spec={expected:?}, impl={actual:?}"
                 )
             }
         }
