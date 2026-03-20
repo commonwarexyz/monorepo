@@ -333,7 +333,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         // At a term boundary, prefer the highest nullification from the previous
         // term because it proves the skipped views were abandoned.
-        if self.view.term_start(self.term_length) == self.view {
+        if self.view.is_term_start(self.term_length) {
             let term_start = prev.term_start(self.term_length);
             // Check for the highest nullification in the previous term
             if let Some(nullification) = self
@@ -801,7 +801,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// no certified view below `view`, the parent is the genesis view and the
     /// genesis payload.
     fn find_parent(&self, view: View) -> Result<(View, D), View> {
-        if view != view.term_start(self.term_length) {
+        if !view.is_term_start(self.term_length) {
             let parent = view
                 .previous()
                 .expect("non-genesis views must have a previous view");
@@ -863,7 +863,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
 
         // Check that intra-term proposals do not skip any views.
-        if view != view.term_start(self.term_length) && view != parent.next() {
+        if !view.is_term_start(self.term_length) && view != parent.next() {
             return Err(ParentPayloadError::IntraTermProposalSkipsViews {
                 proposal_view: view,
                 parent_view: parent,
