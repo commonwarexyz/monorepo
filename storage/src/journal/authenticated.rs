@@ -10,11 +10,10 @@ use crate::{
         contiguous::{fixed, variable, Contiguous, Mutable, Reader},
         Error as JournalError,
     },
+    merkle::batch::ChainInfo,
     mmr::{
-        batch,
-        journaled::Mmr,
-        read::{BatchChainInfo, Readable},
-        Error as MmrError, Location, Position, Proof, StandardHasher,
+        self, batch, journaled::Mmr, Error as MmrError, Location, Position, Proof, Readable,
+        StandardHasher,
     },
     Persistable,
 };
@@ -31,7 +30,7 @@ use tracing::{debug, warn};
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("mmr error: {0}")]
-    Mmr(#[from] crate::mmr::Error),
+    Mmr(#[from] mmr::Error),
 
     #[error("journal error: {0}")]
     Journal(#[from] super::Error),
@@ -51,7 +50,12 @@ impl<E: Storage + Clock + Metrics, D: Digest, Item> BatchChain<Item> for Mmr<E, 
 
 /// A speculative batch whose root digest has not yet been computed,
 /// in contrast to [MerkleizedBatch].
-pub struct UnmerkleizedBatch<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item> {
+pub struct UnmerkleizedBatch<
+    'a,
+    H: Hasher,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+    Item,
+> {
     // The inner batch of MMR leaf digests.
     inner: batch::UnmerkleizedBatch<'a, H::Digest, P>,
     // The hasher to use for hashing the items.
@@ -60,8 +64,12 @@ pub struct UnmerkleizedBatch<'a, H: Hasher, P: Readable<Digest = H::Digest>, Ite
     items: Vec<Item>,
 }
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Encode>
-    UnmerkleizedBatch<'a, H, P, Item>
+impl<
+        'a,
+        H: Hasher,
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+        Item: Encode,
+    > UnmerkleizedBatch<'a, H, P, Item>
 {
     /// Add an item to the batch.
     #[allow(clippy::should_implement_trait)]
@@ -83,24 +91,42 @@ impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Encode>
 
 /// A speculative batch whose root digest has been computed,
 /// in contrast to [UnmerkleizedBatch].
-pub struct MerkleizedBatch<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item> {
+pub struct MerkleizedBatch<
+    'a,
+    H: Hasher,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+    Item,
+> {
     // The inner batch of MMR leaf digests.
     inner: batch::MerkleizedBatch<'a, H::Digest, P>,
     // The items to append.
     items: Arc<Vec<Item>>,
 }
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item> MerkleizedBatch<'a, H, P, Item> {
+impl<
+        'a,
+        H: Hasher,
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+        Item,
+    > MerkleizedBatch<'a, H, P, Item>
+{
     /// Return the root digest of the authenticated journal after this batch is applied.
     pub fn root(&self) -> H::Digest {
         self.inner.root()
     }
 }
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Send + Sync> Readable
-    for MerkleizedBatch<'a, H, P, Item>
+impl<
+        'a,
+        H: Hasher,
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+        Item: Send + Sync,
+    > Readable for MerkleizedBatch<'a, H, P, Item>
 {
+    type Family = mmr::Family;
     type Digest = H::Digest;
+    type Error = mmr::Error;
+
     fn size(&self) -> Position {
         self.inner.size()
     }
@@ -113,14 +139,31 @@ impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Send + Sync> Readable
     fn pruned_to_pos(&self) -> Position {
         self.inner.pruned_to_pos()
     }
+
+    fn proof(
+        &self,
+        hasher: &impl crate::merkle::hasher::Hasher<mmr::Family, Digest = H::Digest>,
+        loc: Location,
+    ) -> Result<Proof<H::Digest>, mmr::Error> {
+        self.inner.proof(hasher, loc)
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &impl crate::merkle::hasher::Hasher<mmr::Family, Digest = H::Digest>,
+        range: core::ops::Range<Location>,
+    ) -> Result<Proof<H::Digest>, mmr::Error> {
+        self.inner.range_proof(hasher, range)
+    }
 }
 
 impl<
         'a,
         H: Hasher,
-        P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest>,
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+            + ChainInfo<mmr::Family, Digest = H::Digest>,
         Item: Send + Sync,
-    > BatchChainInfo for MerkleizedBatch<'a, H, P, Item>
+    > ChainInfo<mmr::Family> for MerkleizedBatch<'a, H, P, Item>
 {
     type Digest = H::Digest;
     fn base_size(&self) -> Position {
@@ -131,8 +174,12 @@ impl<
     }
 }
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest> + BatchChain<Item>, Item: Send + Sync>
-    BatchChain<Item> for MerkleizedBatch<'a, H, P, Item>
+impl<
+        'a,
+        H: Hasher,
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error> + BatchChain<Item>,
+        Item: Send + Sync,
+    > BatchChain<Item> for MerkleizedBatch<'a, H, P, Item>
 {
     fn collect(&self, into: &mut Vec<Arc<Vec<Item>>>) {
         self.inner.parent().collect(into); // recurse to parent first
@@ -140,8 +187,12 @@ impl<'a, H: Hasher, P: Readable<Digest = H::Digest> + BatchChain<Item>, Item: Se
     }
 }
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Send + Sync + Encode>
-    MerkleizedBatch<'a, H, P, Item>
+impl<
+        'a,
+        H: Hasher,
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+        Item: Send + Sync + Encode,
+    > MerkleizedBatch<'a, H, P, Item>
 {
     /// Create a new speculative batch of operations with this batch as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<'_, H, Self, Item> {
@@ -158,7 +209,9 @@ impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Send + Sync + Encode>
 
 impl<'a, H: Hasher, P, Item: Send + Sync> MerkleizedBatch<'a, H, P, Item>
 where
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Item>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Item>,
 {
     /// Consume this batch, collecting the changes from its ancestors and itself into a
     /// [Changeset] which can be applied to the journal.
@@ -409,7 +462,7 @@ where
     /// # Errors
     ///
     /// - Returns [Error::Mmr] with [MmrError::LocationOverflow] if `start_loc` >
-    ///   [crate::mmr::MAX_LOCATION].
+    ///   [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [Error::Mmr] with [MmrError::RangeOutOfBounds] if `start_loc` >= current
     ///   item count.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
@@ -781,7 +834,7 @@ mod tests {
 
     /// Verify that a proof correctly proves the given operations are included in the MMR.
     fn verify_proof(
-        proof: &crate::mmr::Proof<<Sha256 as commonware_cryptography::Hasher>::Digest>,
+        proof: &mmr::Proof<<Sha256 as commonware_cryptography::Hasher>::Digest>,
         operations: &[Operation<Digest, Digest>],
         start_loc: Location,
         root: &<Sha256 as commonware_cryptography::Hasher>::Digest,
@@ -1589,7 +1642,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Mmr(mmr::Error::RangeOutOfBounds(_)))
             ));
         });
     }
@@ -1607,7 +1660,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Mmr(mmr::Error::RangeOutOfBounds(_)))
             ));
         });
     }
@@ -1831,7 +1884,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset, got {result:?}"
             );
@@ -1870,7 +1923,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset for sibling, got {result:?}"
             );
@@ -1900,7 +1953,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset for child after parent applied, got {result:?}"
             );
@@ -1930,7 +1983,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset for parent after child applied, got {result:?}"
             );

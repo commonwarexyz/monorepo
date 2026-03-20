@@ -11,16 +11,14 @@
 //! over elements whose activity state is reflected by the bitmap.
 
 use crate::{
+    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher, storage::Storage},
     metadata::{Config as MConfig, Metadata},
     mmr::{
+        self,
         batch::UnmerkleizedBatch,
-        hasher::Hasher,
         iterator::nodes_to_pin,
-        mem::{Config, Mmr, MIN_TO_PARALLELIZE},
-        storage::Storage,
-        verification,
-        Error::{self, *},
-        Location, Position, Proof,
+        mem::{Config, Mmr},
+        verification, Error, Location, Position, Proof,
     },
 };
 use commonware_codec::DecodeExt;
@@ -37,7 +35,7 @@ use tracing::{debug, error, warn};
 
 /// Returns a root digest that incorporates bits not yet part of the MMR because they
 /// belong to the last (unfilled) chunk.
-pub(crate) fn partial_chunk_root<H: Hasher, const N: usize>(
+pub(crate) fn partial_chunk_root<H: Hasher<mmr::Family>, const N: usize>(
     hasher: &H,
     mmr_root: &H::Digest,
     next_bit: u64,
@@ -224,7 +222,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
     /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
     /// bitmap corresponding to `root`.
     pub fn verify_bit_inclusion(
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<mmr::Family, Digest = D>,
         proof: &Proof<D>,
         chunk: &[u8; N],
         bit: u64,
@@ -236,7 +234,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize, S: State<D>> BitM
             return false;
         }
 
-        // The chunk index should always be < MAX_LOCATION.
+        // The chunk index should always be < MAX_LEAVES.
         let chunked_leaves = Location::new(PrunableBitMap::<N>::to_chunk_index(bit_len) as u64);
         let mut mmr_proof = Proof {
             leaves: chunked_leaves,
@@ -301,7 +299,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         context: E,
         partition: &str,
         pool: Option<ThreadPool>,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<mmr::Family, Digest = D>,
     ) -> Result<Self, Error> {
         let metadata_cfg = MConfig {
             partition: partition.into(),
@@ -339,12 +337,12 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
                 error!(?mmr_size, ?pos, "missing pinned node");
-                return Err(MissingNode(pos));
+                return Err(Error::MissingNode(pos));
             };
             let digest = D::decode(bytes.as_ref());
             let Ok(digest) = digest else {
                 error!(?mmr_size, ?pos, "could not convert node bytes to digest");
-                return Err(MissingNode(pos));
+                return Err(Error::MissingNode(pos));
             };
             pinned_nodes.push(digest);
         }
@@ -388,7 +386,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             .put(key, self.bitmap.pruned_chunks().to_be_bytes().to_vec());
 
         // Write the pinned nodes.
-        // This will never panic because pruned_chunks is always less than MAX_LOCATION.
+        // This will never panic because pruned_chunks is always less than MAX_LEAVES.
         let mmr_size = Position::try_from(Location::new(self.bitmap.pruned_chunks() as u64))?;
         for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
@@ -396,12 +394,12 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
             self.metadata.put(key, digest.to_vec());
         }
 
-        self.metadata.sync().await.map_err(MetadataError)
+        self.metadata.sync().await.map_err(Error::Metadata)
     }
 
     /// Destroy the bitmap metadata from disk.
     pub async fn destroy(self) -> Result<(), Error> {
-        self.metadata.destroy().await.map_err(MetadataError)
+        self.metadata.destroy().await.map_err(Error::Metadata)
     }
 
     /// Prune all complete chunks before the chunk containing the given bit.
@@ -455,7 +453,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
     /// Returns [Error::BitOutOfBounds] if `bit` is out of bounds.
     pub async fn proof(
         &self,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<mmr::Family, Digest = D>,
         bit: u64,
     ) -> Result<(Proof<D>, [u8; N]), Error> {
         if bit >= self.len() {
@@ -556,7 +554,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
     /// Merkleize all updates not yet reflected in the bitmap's root.
     pub fn merkleize(
         mut self,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<mmr::Family, Digest = D>,
     ) -> Result<MerkleizedBitMap<E, D, N>, Error> {
         // Add newly pushed complete chunks to the batch.
         let mut batch = UnmerkleizedBatch::new(&self.mmr).with_pool(self.pool.clone());
@@ -628,7 +626,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> UnmerkleizedBitMa
     }
 }
 
-impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage
+impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage<mmr::Family>
     for MerkleizedBitMap<E, D, N>
 {
     type Digest = D;
@@ -645,11 +643,11 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> Storage
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::StandardHasher;
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics, Runner as _};
+    use mmr::StandardHasher;
 
     const SHA256_SIZE: usize = sha256::Digest::SIZE;
 

@@ -5,7 +5,8 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    mmr::{self, hasher::Standard, journaled::Config as MmrConfig, MAX_LOCATION},
+    merkle::Family as _,
+    mmr::{self, journaled::Config as MmrConfig, Family, StandardHasher as Standard},
     qmdb::{
         any::{unordered::variable::Db, VariableConfig as Config},
         verify_proof,
@@ -14,7 +15,7 @@ use commonware_storage::{
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use mmr::location::Location;
+use mmr::Location;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU64},
@@ -90,7 +91,7 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             5 => Ok(Operation::GetMetadata),
             6 => {
-                let start_loc = u.arbitrary::<u64>()? % (*MAX_LOCATION + 1);
+                let start_loc = u.arbitrary::<u64>()? % (*Family::MAX_LEAVES + 1);
                 let start_loc = Location::new(start_loc);
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
@@ -98,7 +99,7 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             7 => {
                 let size = u.arbitrary()?;
-                let start_loc = u.arbitrary::<u64>()? % (*MAX_LOCATION + 1);
+                let start_loc = u.arbitrary::<u64>()? % (*Family::MAX_LEAVES + 1);
                 let start_loc = Location::new(start_loc);
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);

@@ -111,10 +111,7 @@ pub mod partitioned {
 
 #[cfg(test)]
 mod test {
-    use crate::{
-        qmdb::current::tests::variable_config,
-        translator::OneCap,
-    };
+    use crate::{qmdb::current::tests::variable_config, translator::OneCap};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::deterministic;

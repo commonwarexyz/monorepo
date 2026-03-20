@@ -17,6 +17,7 @@ pub mod variable;
 pub mod tests {
     //! Shared test utilities for unordered Current QMDB variants.
 
+    use super::db;
     use crate::{
         index::unordered::Index,
         journal::{contiguous::Mutable, Error as JournalError},
@@ -28,11 +29,7 @@ pub mod tests {
                 unordered::Operation,
                 ValueEncoding,
             },
-            current::{
-                proof::RangeProof,
-                tests::apply_random_ops,
-                BitmapPrunedBits,
-            },
+            current::{proof::RangeProof, tests::apply_random_ops, BitmapPrunedBits},
             store::tests::{TestKey, TestValue},
             Error,
         },
@@ -48,8 +45,6 @@ pub mod tests {
     use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
     use core::future::Future;
     use rand::RngCore;
-
-    use super::db;
 
     /// Concrete db type used in the shared proof tests, generic over journal (`C`) and value
     /// encoding (`V`).
@@ -161,9 +156,8 @@ pub mod tests {
     ///
     /// Tests that the verifier rejects proofs for old values after updates, including attempts
     /// to forge proofs by swapping locations or flipping activity bits.
-    pub(super) fn test_verify_proof_over_bits_in_uncommitted_chunk<C, V, F, Fut>(
-        mut open_db: F,
-    ) where
+    pub(super) fn test_verify_proof_over_bits_in_uncommitted_chunk<C, V, F, Fut>(mut open_db: F)
+    where
         C: Mutable<Item = Operation<Digest, V>> + Persistable<Error = JournalError> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<Digest, V>: Codec,
@@ -364,10 +358,9 @@ pub mod tests {
                 &root,
             ));
 
-            let mut db =
-                apply_random_ops::<TestDb<C, V>>(200, true, context.next_u64(), db)
-                    .await
-                    .unwrap();
+            let mut db = apply_random_ops::<TestDb<C, V>>(200, true, context.next_u64(), db)
+                .await
+                .unwrap();
             let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
             db.apply_batch(finalized).await.unwrap();
             let root = db.root();
@@ -386,7 +379,12 @@ pub mod tests {
                     .unwrap();
                 assert!(
                     TestDb::<C, V>::verify_range_proof(
-                        &mut hasher, &proof, loc, &ops, &chunks, &root
+                        &mut hasher,
+                        &proof,
+                        loc,
+                        &ops,
+                        &chunks,
+                        &root
                     ),
                     "failed to verify range at start_loc {start_loc}",
                 );
@@ -425,10 +423,9 @@ pub mod tests {
             let partition = "range-proofs".to_string();
             let mut hasher = Sha256::new();
             let db = open_db(context.with_label("db"), partition.clone()).await;
-            let mut db =
-                apply_random_ops::<TestDb<C, V>>(500, true, context.next_u64(), db)
-                    .await
-                    .unwrap();
+            let mut db = apply_random_ops::<TestDb<C, V>>(500, true, context.next_u64(), db)
+                .await
+                .unwrap();
             let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
             db.apply_batch(finalized).await.unwrap();
             let root = db.root();
@@ -540,9 +537,7 @@ pub mod tests {
                 );
                 // Ensure the proof does NOT verify if we use the previous value.
                 assert!(
-                    !TestDb::<C, V>::verify_key_value_proof(
-                        &mut hasher, k, old_val, &proof, &root
-                    ),
+                    !TestDb::<C, V>::verify_key_value_proof(&mut hasher, k, old_val, &proof, &root),
                     "proof of update {i} verified when it should not have"
                 );
                 old_val = v;

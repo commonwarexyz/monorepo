@@ -187,7 +187,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     /// # Errors
     ///
     /// - Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
-    ///   [crate::mmr::MAX_LOCATION].
+    ///   [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count` or `op_count` >
     ///   number of operations.
     pub async fn historical_proof(
@@ -207,7 +207,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `loc` > last commit point.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION]
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::merkle::Family::MAX_LEAVES]
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         if loc > self.last_commit_loc {
             return Err(Error::PruneBeyondMinRequired(loc, self.last_commit_loc));

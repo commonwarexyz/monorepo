@@ -103,14 +103,12 @@ pub mod partitioned {
 pub mod test {
     use super::*;
     use crate::{
-        qmdb::current::tests::fixed_config,
+        qmdb::current::{tests::fixed_config, unordered::tests as shared},
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::deterministic;
-
-    use crate::qmdb::current::unordered::tests as shared;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
