@@ -198,7 +198,15 @@ impl<S: Scheme, D: Digest> State<S, D> {
         let mut requests = Vec::with_capacity(self.fetch_concurrent);
         let mut cursor = self.floor_view().next();
         while cursor < self.current_view && requests.len() < self.fetch_concurrent {
-            if !self.nullifications.contains_key(&cursor) {
+            // If the cursor does not have a nullification at the view (or earlier in the term),
+            // add it to the requests.
+            let term_start = cursor.term_start(self.term_length);
+            if self
+                .nullifications
+                .range(term_start..=cursor)
+                .next_back()
+                .is_none()
+            {
                 requests.push(cursor);
             }
             cursor = cursor.next_term_start(self.term_length);
