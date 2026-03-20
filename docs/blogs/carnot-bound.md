@@ -7,7 +7,7 @@ modified-time: "2026-03-20T00:00:00Z"
 author: "Andrew Lewis-Pye"
 author_twitter: "https://x.com/AndrewLewisPye"
 url: "https://commonware.xyz/blogs/carnot-bound"
-image: ""
+image: "https://commonware.xyz/imgs/carnot.png"
 katex: true
 ---
 
