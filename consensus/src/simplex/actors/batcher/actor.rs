@@ -145,6 +145,7 @@ where
         // TODO(#1833): Metrics should use the post-start context
         let clock = Arc::new(context.clone());
         let (sender, receiver) = mpsc::channel(cfg.mailbox_size);
+        let last_activity = PrioritySet::new();
         (
             Self {
                 context: ContextCell::new(context),
@@ -162,7 +163,7 @@ where
                 epoch: cfg.epoch,
                 term_length: cfg.term_length,
 
-                last_activity: PrioritySet::new(),
+                last_activity,
 
                 mailbox_receiver: receiver,
 
@@ -190,10 +191,7 @@ where
     /// Records the current time as the last activity time for a participant.
     ///
     /// This mechanism is not resistant to malicious validators (nor is it meant to be).
-    fn record_activity(&mut self, sender: &S::PublicKey) {
-        let Some(participant) = self.participants.index(sender) else {
-            return;
-        };
+    fn record_activity(&mut self, participant: Participant) {
         self.last_activity.put(participant, self.context.current());
     }
 
@@ -379,15 +377,18 @@ where
                 Message::Constructed(message) => {
                     let view = message.view();
 
+                    // Record activity for ourselves.
+                    if let Some(me) = self.scheme.me() {
+                        self.record_activity(me);
+                    }
+
                     // Ignore non-useful votes.
                     if view <= finalized {
                         continue;
                     }
 
-                    // Since these are our own votes, we can safely record activity even if the view
-                    // is arbitrarily far in the future.
-
-                    // Add the message to the verifier.
+                    // Add the message to the verifier. Since these are our own votes, we can safely
+                    // add the message even if the view is arbitrarily far in the future.
                     work.entry(view)
                         .or_insert_with(|| self.new_round())
                         .add_constructed(message)
@@ -420,7 +421,9 @@ where
 
                 // Record activity from the sender even if we don't process the certificate.
                 let view = message.view();
-                self.record_activity(&sender);
+                if let Some(participant) = self.participants.index(&sender) {
+                    self.record_activity(participant);
+                }
 
                 // Ignore certificates below the highest finalized view since they aren't useful.
                 // Allow certificates from arbitrarily-future views since they advance our view.
@@ -525,7 +528,9 @@ where
 
                 // Record activity from the sender even if we don't process the vote.
                 let view = message.view();
-                self.record_activity(&sender);
+                if let Some(participant) = self.participants.index(&sender) {
+                    self.record_activity(participant);
+                }
 
                 // Ignore non-useful votes.
                 if view <= finalized {
