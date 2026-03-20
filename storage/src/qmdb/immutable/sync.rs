@@ -4,10 +4,7 @@ use crate::{
         authenticated,
         contiguous::{variable, Reader as _},
     },
-    mmr::{
-        journaled::{Config as MmrConfig, Mmr},
-        Location, StandardHasher,
-    },
+    mmr::{journaled::Mmr, Location, StandardHasher},
     qmdb::{
         any::VariableValue,
         build_snapshot_from_log,
@@ -66,14 +63,7 @@ where
         let mmr = Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
-                config: MmrConfig {
-                    journal_partition: db_config.mmr_journal_partition.clone(),
-                    metadata_partition: db_config.mmr_metadata_partition.clone(),
-                    items_per_blob: db_config.mmr_items_per_blob,
-                    write_buffer: db_config.mmr_write_buffer,
-                    thread_pool: db_config.thread_pool.clone(),
-                    page_cache: db_config.page_cache.clone(),
-                },
+                config: db_config.mmr.clone(),
                 range,
                 pinned_nodes,
             },
@@ -174,19 +164,25 @@ mod tests {
         const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            mmr_journal_partition: format!("journal-{suffix}"),
-            mmr_metadata_partition: format!("metadata-{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log-{suffix}"),
-            log_items_per_section: ITEMS_PER_SECTION,
-            log_compression: None,
-            log_codec_config: (),
-            log_write_buffer: NZUsize!(1024),
+            mmr: crate::mmr::journaled::Config {
+                journal_partition: format!("journal-{suffix}"),
+                metadata_partition: format!("metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            log: crate::journal::contiguous::variable::Config {
+                partition: format!("log-{suffix}"),
+                items_per_section: ITEMS_PER_SECTION,
+                compression: None,
+                codec_config: (),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
             translator: TwoCap,
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

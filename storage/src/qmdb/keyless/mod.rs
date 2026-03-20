@@ -65,9 +65,8 @@ use crate::{
     qmdb::{any::VariableValue, operation::Committable, Error},
 };
 use commonware_cryptography::Hasher;
-use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use std::num::{NonZeroU64, NonZeroUsize};
+use commonware_runtime::{Clock, Metrics, Storage};
+use std::num::NonZeroU64;
 use tracing::{debug, warn};
 
 pub mod batch;
@@ -77,38 +76,11 @@ pub use operation::Operation;
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The name of the [Storage] partition used for the MMR's backing journal.
-    pub mmr_journal_partition: String,
+    /// Configuration for the MMR backing the authenticated journal.
+    pub mmr: MmrConfig,
 
-    /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: NonZeroUsize,
-
-    /// The name of the [Storage] partition used for the MMR's metadata.
-    pub mmr_metadata_partition: String,
-
-    /// The name of the [Storage] partition used to persist the operations log.
-    pub log_partition: String,
-
-    /// The size of the write buffer to use with the log journal.
-    pub log_write_buffer: NonZeroUsize,
-
-    /// Optional compression level (using `zstd`) to apply to log data before storing.
-    pub log_compression: Option<u8>,
-
-    /// The codec configuration to use for encoding and decoding the operations log.
-    pub log_codec_config: C,
-
-    /// The max number of operations to put in each section of the operations log.
-    pub log_items_per_section: NonZeroU64,
-
-    /// An optional thread pool to use for parallelizing batch MMR operations.
-    pub thread_pool: Option<ThreadPool>,
-
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
+    /// Configuration for the variable-size operations log journal.
+    pub log: JournalConfig<C>,
 }
 
 /// A keyless QMDB for variable length data.
@@ -170,25 +142,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     /// Returns a [Keyless] qmdb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        let mmr_cfg = MmrConfig {
-            journal_partition: cfg.mmr_journal_partition,
-            metadata_partition: cfg.mmr_metadata_partition,
-            items_per_blob: cfg.mmr_items_per_blob,
-            write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
-            page_cache: cfg.page_cache.clone(),
-        };
-
-        let journal_cfg = JournalConfig {
-            partition: cfg.log_partition,
-            items_per_section: cfg.log_items_per_section,
-            compression: cfg.log_compression,
-            codec_config: cfg.log_codec_config,
-            page_cache: cfg.page_cache,
-            write_buffer: cfg.log_write_buffer,
-        };
-
-        let mut journal = Journal::new(context, mmr_cfg, journal_cfg, Operation::is_commit).await?;
+        let mut journal = Journal::new(context, cfg.mmr, cfg.log, Operation::is_commit).await?;
         if journal.size().await == 0 {
             warn!("no operations found in log, creating initial commit");
             journal.append(&Operation::Commit(None)).await?;
@@ -339,10 +293,12 @@ mod test {
     use crate::{mmr::StandardHasher as Standard, qmdb::verify_proof};
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
-    use std::num::NonZeroU16;
+    use std::num::{NonZeroU16, NonZeroUsize};
 
     // Use some weird sizes here to test boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -352,18 +308,24 @@ mod test {
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            mmr_journal_partition: format!("journal-{suffix}"),
-            mmr_metadata_partition: format!("metadata-{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log-journal-{suffix}"),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: ((0..=10000).into(), ()),
-            log_items_per_section: NZU64!(7),
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            mmr: MmrConfig {
+                journal_partition: format!("journal-{suffix}"),
+                metadata_partition: format!("metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            log: JournalConfig {
+                partition: format!("log-journal-{suffix}"),
+                items_per_section: NZU64!(7),
+                compression: None,
+                codec_config: ((0..=10000).into(), ()),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
         }
     }
 

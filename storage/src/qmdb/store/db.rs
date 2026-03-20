@@ -4,6 +4,7 @@
 //!
 //! ```rust
 //! use commonware_storage::{
+//!     journal::contiguous::variable::Config as JournalConfig,
 //!     qmdb::store::db::{Config, Db},
 //!     translator::TwoCap,
 //! };
@@ -19,13 +20,15 @@
 //! let executor = Runner::default();
 //! executor.start(|mut ctx| async move {
 //!     let config = Config {
-//!         log_partition: "test-partition".into(),
-//!         log_write_buffer: NZUsize!(64 * 1024),
-//!         log_compression: None,
-//!         log_codec_config: ((), ()),
-//!         log_items_per_section: NZU64!(4),
+//!         log: JournalConfig {
+//!             partition: "test-partition".into(),
+//!             write_buffer: NZUsize!(64 * 1024),
+//!             compression: None,
+//!             codec_config: ((), ()),
+//!             items_per_section: NZU64!(4),
+//!             page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+//!         },
 //!         translator: TwoCap,
-//!         page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!     };
 //!     let mut db =
 //!         Db::<_, Digest, Digest, TwoCap>::init(ctx.with_label("store"), config)
@@ -91,38 +94,20 @@ use crate::{
     Persistable,
 };
 use commonware_codec::{CodecShared, Read};
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::ops::Range;
-use std::{
-    collections::BTreeMap,
-    num::{NonZeroU64, NonZeroUsize},
-};
+use std::collections::BTreeMap;
 use tracing::{debug, warn};
 
 /// Configuration for initializing a [Db].
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
-    /// The name of the [Storage] partition used to persist the log of operations.
-    pub log_partition: String,
-
-    /// The size of the write buffer to use for each blob in the [Journal].
-    pub log_write_buffer: NonZeroUsize,
-
-    /// Optional compression level (using `zstd`) to apply to log data before storing.
-    pub log_compression: Option<u8>,
-
-    /// The codec configuration to use for encoding and decoding log items.
-    pub log_codec_config: C,
-
-    /// The number of operations to store in each section of the [Journal].
-    pub log_items_per_section: NonZeroU64,
+    /// Configuration for the variable-size operations log journal.
+    pub log: JournalConfig<C>,
 
     /// The [Translator] used by the [Index].
     pub translator: T,
-
-    /// The [CacheRef] to use for caching data.
-    pub page_cache: CacheRef,
 }
 
 /// A finalized batch of writes and deletes ready to be applied to the store.
@@ -354,18 +339,8 @@ where
         context: E,
         cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mut log = Journal::<E, Operation<K, V>>::init(
-            context.with_label("log"),
-            JournalConfig {
-                partition: cfg.log_partition,
-                items_per_section: cfg.log_items_per_section,
-                compression: cfg.log_compression,
-                codec_config: cfg.log_codec_config,
-                page_cache: cfg.page_cache,
-                write_buffer: cfg.log_write_buffer,
-            },
-        )
-        .await?;
+        let mut log =
+            Journal::<E, Operation<K, V>>::init(context.with_label("log"), cfg.log).await?;
 
         // Rewind log to remove uncommitted operations.
         if log.rewind_to(|op| op.is_commit()).await? == 0 {
@@ -529,9 +504,9 @@ mod test {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
-    use std::num::NonZeroU16;
+    use std::num::{NonZeroU16, NonZeroUsize};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
@@ -541,13 +516,15 @@ mod test {
 
     async fn create_test_store(context: deterministic::Context) -> TestStore {
         let cfg = Config {
-            log_partition: "journal".into(),
-            log_write_buffer: NZUsize!(64 * 1024),
-            log_compression: None,
-            log_codec_config: ((), ((0..=10000).into(), ())),
-            log_items_per_section: NZU64!(7),
+            log: JournalConfig {
+                partition: "journal".into(),
+                write_buffer: NZUsize!(64 * 1024),
+                compression: None,
+                codec_config: ((), ((0..=10000).into(), ())),
+                items_per_section: NZU64!(7),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            },
             translator: TwoCap,
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         };
         TestStore::init(context, cfg).await.unwrap()
     }

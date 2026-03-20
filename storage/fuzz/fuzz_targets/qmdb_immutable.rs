@@ -5,7 +5,8 @@ use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
-    mmr::Location,
+    journal::contiguous::variable::Config as VConfig,
+    mmr::{journaled::Config as MmrConfig, Location},
     qmdb::{
         immutable::{Config, Immutable},
         verify_proof,
@@ -91,19 +92,25 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
 }
 
 fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, (RangeCfg<usize>, ())> {
+    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
-        mmr_journal_partition: format!("journal-{suffix}"),
-        mmr_metadata_partition: format!("metadata-{suffix}"),
-        mmr_items_per_blob: NZU64!(ITEMS_PER_BLOB),
-        mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("log-{suffix}"),
-        log_items_per_section: NZU64!(ITEMS_PER_SECTION),
-        log_compression: None,
-        log_codec_config: ((0..=10000).into(), ()),
-        log_write_buffer: NZUsize!(1024),
+        mmr: MmrConfig {
+            journal_partition: format!("journal-{suffix}"),
+            metadata_partition: format!("metadata-{suffix}"),
+            items_per_blob: NZU64!(ITEMS_PER_BLOB),
+            write_buffer: NZUsize!(1024),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        log: VConfig {
+            partition: format!("log-{suffix}"),
+            items_per_section: NZU64!(ITEMS_PER_SECTION),
+            compression: None,
+            codec_config: ((0..=10000).into(), ()),
+            write_buffer: NZUsize!(1024),
+            page_cache,
+        },
         translator: TwoCap,
-        thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 

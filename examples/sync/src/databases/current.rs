@@ -19,7 +19,8 @@ use commonware_codec::FixedSize;
 use commonware_cryptography::{sha256, Hasher as CryptoHasher};
 use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
-    mmr::{Location, Proof},
+    journal::contiguous::fixed::Config as FConfig,
+    mmr::{journaled::Config as MmrConfig, Location, Proof},
     qmdb::{
         self,
         any::unordered::{fixed::Operation as FixedOperation, Update},
@@ -42,18 +43,24 @@ pub type Operation = FixedOperation<Key, Value>;
 
 /// Create a database configuration.
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
+    let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
     Config {
-        mmr_journal_partition: "mmr-journal".into(),
-        mmr_metadata_partition: "mmr-metadata".into(),
-        mmr_items_per_blob: NZU64!(4096),
-        mmr_write_buffer: NZUsize!(4096),
-        log_journal_partition: "log-journal".into(),
-        log_items_per_blob: NZU64!(4096),
-        log_write_buffer: NZUsize!(4096),
+        mmr: MmrConfig {
+            journal_partition: "mmr-journal".into(),
+            metadata_partition: "mmr-metadata".into(),
+            items_per_blob: NZU64!(4096),
+            write_buffer: NZUsize!(4096),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        log: FConfig {
+            partition: "log-journal".into(),
+            items_per_blob: NZU64!(4096),
+            write_buffer: NZUsize!(4096),
+            page_cache,
+        },
         grafted_mmr_metadata_partition: "grafted-mmr-metadata".into(),
         translator: Translator::default(),
-        thread_pool: None,
-        page_cache: buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10)),
     }
 }
 

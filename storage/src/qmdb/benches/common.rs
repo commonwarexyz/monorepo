@@ -4,6 +4,8 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
+    journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    mmr::journaled::Config as MmrConfig,
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
@@ -133,130 +135,113 @@ const PARTITION_FIX: &str = "bench-fixed";
 const PARTITION_VAR: &str = "bench-variable";
 const PARTITION_KEYLESS: &str = "bench-keyless";
 
-pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap> {
-    AnyFixedConfig::<EightCap> {
-        mmr_journal_partition: format!("journal-{PARTITION_FIX}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_FIX}"),
-        mmr_items_per_blob: ITEMS_PER_BLOB,
-        mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_journal_partition: format!("log-journal-{PARTITION_FIX}"),
-        log_items_per_blob: ITEMS_PER_BLOB,
-        log_write_buffer: WRITE_BUFFER_SIZE,
-        translator: EightCap,
+fn mmr_cfg(
+    suffix: &str,
+    ctx: &(impl BufferPooler + ThreadPooler),
+    page_cache: CacheRef,
+) -> MmrConfig {
+    MmrConfig {
+        journal_partition: format!("journal-{suffix}"),
+        metadata_partition: format!("metadata-{suffix}"),
+        items_per_blob: ITEMS_PER_BLOB,
+        write_buffer: WRITE_BUFFER_SIZE,
         thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache,
+    }
+}
+
+fn fix_log_cfg(suffix: &str, page_cache: CacheRef) -> FConfig {
+    FConfig {
+        partition: format!("log-journal-{suffix}"),
+        items_per_blob: ITEMS_PER_BLOB,
+        page_cache,
+        write_buffer: WRITE_BUFFER_SIZE,
+    }
+}
+
+fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfig<C> {
+    VConfig {
+        partition: format!("log-journal-{suffix}"),
+        items_per_section: ITEMS_PER_BLOB,
+        compression: None,
+        codec_config,
+        page_cache,
+        write_buffer: WRITE_BUFFER_SIZE,
+    }
+}
+
+pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap> {
+    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    AnyFixedConfig {
+        mmr: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        log: fix_log_cfg(PARTITION_FIX, page_cache),
+        translator: EightCap,
     }
 }
 
 pub fn cur_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> CurrentFixedConfig<EightCap> {
-    CurrentFixedConfig::<EightCap> {
-        mmr_journal_partition: format!("journal-{PARTITION_FIX}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_FIX}"),
-        mmr_items_per_blob: ITEMS_PER_BLOB,
-        mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_journal_partition: format!("log-journal-{PARTITION_FIX}"),
-        log_items_per_blob: ITEMS_PER_BLOB,
-        log_write_buffer: WRITE_BUFFER_SIZE,
+    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    CurrentFixedConfig {
+        mmr: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        log: fix_log_cfg(PARTITION_FIX, page_cache),
         grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_FIX}"),
         translator: EightCap,
-        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 pub fn any_var_digest_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> AnyVariableConfig<EightCap, ((), ())> {
-    AnyVariableConfig::<EightCap, ((), ())> {
-        mmr_journal_partition: format!("journal-{PARTITION_VAR}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_VAR}"),
-        mmr_items_per_blob: ITEMS_PER_BLOB,
-        mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log-journal-{PARTITION_VAR}"),
-        log_codec_config: ((), ()),
-        log_items_per_blob: ITEMS_PER_BLOB,
-        log_write_buffer: WRITE_BUFFER_SIZE,
-        log_compression: None,
+    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    AnyVariableConfig {
+        mmr: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         translator: EightCap,
-        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 pub fn cur_var_digest_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> CurrentVariableConfig<EightCap, ((), ())> {
-    CurrentVariableConfig::<EightCap, ((), ())> {
-        mmr_journal_partition: format!("journal-{PARTITION_VAR}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_VAR}"),
-        mmr_items_per_blob: ITEMS_PER_BLOB,
-        mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log-journal-{PARTITION_VAR}"),
-        log_codec_config: ((), ()),
-        log_items_per_blob: ITEMS_PER_BLOB,
-        log_write_buffer: WRITE_BUFFER_SIZE,
-        log_compression: None,
+    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    CurrentVariableConfig {
+        mmr: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
         translator: EightCap,
-        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 pub fn any_var_vec_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> AnyVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
-    AnyVariableConfig::<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
-        mmr_journal_partition: format!("journal-{PARTITION_VAR}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_VAR}"),
-        mmr_items_per_blob: ITEMS_PER_BLOB,
-        mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log-journal-{PARTITION_VAR}"),
-        log_codec_config: ((), ((0..=10000).into(), ())),
-        log_items_per_blob: ITEMS_PER_BLOB,
-        log_write_buffer: WRITE_BUFFER_SIZE,
-        log_compression: None,
+    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    AnyVariableConfig {
+        mmr: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         translator: EightCap,
-        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 pub fn cur_var_vec_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> CurrentVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
-    CurrentVariableConfig::<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
-        mmr_journal_partition: format!("journal-{PARTITION_VAR}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_VAR}"),
-        mmr_items_per_blob: ITEMS_PER_BLOB,
-        mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log-journal-{PARTITION_VAR}"),
-        log_codec_config: ((), ((0..=10000).into(), ())),
-        log_items_per_blob: ITEMS_PER_BLOB,
-        log_write_buffer: WRITE_BUFFER_SIZE,
-        log_compression: None,
+    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    CurrentVariableConfig {
+        mmr: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
         translator: EightCap,
-        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 
 pub fn keyless_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ())> {
-    KeylessConfig::<(commonware_codec::RangeCfg<usize>, ())> {
-        mmr_journal_partition: format!("journal-{PARTITION_KEYLESS}"),
-        mmr_metadata_partition: format!("metadata-{PARTITION_KEYLESS}"),
-        mmr_items_per_blob: ITEMS_PER_BLOB,
-        mmr_write_buffer: WRITE_BUFFER_SIZE,
-        log_partition: format!("log-journal-{PARTITION_KEYLESS}"),
-        log_codec_config: ((0..=10000).into(), ()),
-        log_items_per_section: ITEMS_PER_BLOB,
-        log_write_buffer: WRITE_BUFFER_SIZE,
-        log_compression: None,
-        thread_pool: Some(ctx.create_thread_pool(THREADS).unwrap()),
-        page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    KeylessConfig {
+        mmr: mmr_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),
+        log: var_log_cfg(PARTITION_KEYLESS, page_cache, ((0..=10000).into(), ())),
     }
 }
 
