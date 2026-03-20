@@ -20,6 +20,7 @@ pub mod merkle128;
 pub mod unified_memory128;
 
 pub mod memory;
+pub mod poker;
 pub mod integration;
 pub mod host_calls;
 pub mod sumcheck;
