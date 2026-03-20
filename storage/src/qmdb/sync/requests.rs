@@ -99,7 +99,6 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
     }
 
     /// Check if a location has an outstanding request.
-    #[cfg(test)]
     pub fn contains(&self, loc: &Location) -> bool {
         self.by_location.contains_key(loc)
     }

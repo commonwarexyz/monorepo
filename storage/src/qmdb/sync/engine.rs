@@ -238,9 +238,13 @@ where
     async fn schedule_requests(&mut self) -> Result<(), Error<DB, R>> {
         let target_size = self.target.range.end();
 
-        // Special case: If we don't have pinned nodes, we need to get them from the resolver
-        // for the lower sync bound.
-        if self.pinned_nodes.is_none() {
+        // Schedule a pinned-nodes request at the lower sync bound if we don't
+        // have pinned nodes yet and one isn't already in flight.
+        if self.pinned_nodes.is_none()
+            && !self
+                .outstanding_requests
+                .contains(&self.target.range.start())
+        {
             let start_loc = self.target.range.start();
             let resolver = self.resolver.clone();
             let (cancel_tx, cancel_rx) = oneshot::channel();
@@ -327,8 +331,10 @@ where
         new_target: Target<DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
         self.journal.resize(new_target.range.start()).await?;
+        // Remove requests at or before the new start. The request at start
+        // must be re-issued as a pinned-nodes request with the new target size.
         self.outstanding_requests
-            .remove_before(new_target.range.start());
+            .remove_before(new_target.range.start().checked_add(1).unwrap());
         self.fetched_operations.clear();
         self.pinned_nodes = None;
 
