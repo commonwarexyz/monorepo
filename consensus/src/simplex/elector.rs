@@ -464,7 +464,7 @@ mod tests {
         let epoch = Epoch::new(0);
         for view in 1..=10 {
             let round = Round::new(epoch, View::new(view));
-            assert_eq!(elector1.elect(round, None), elector2.elect(round, None),);
+            assert_eq!(elector1.elect(round, None), elector2.elect(round, None));
         }
     }
 
