@@ -210,8 +210,7 @@ impl<
             }
             Certificate::Nullification(nullification) => {
                 let nv = nullification.view();
-                if view < nv || nv.term_start(self.term_length) != view.term_start(self.term_length)
-                {
+                if view < nv || !nv.same_term(view, self.term_length) {
                     debug!(%view, received = %nv, "nullification view mismatch");
                     return None;
                 }
