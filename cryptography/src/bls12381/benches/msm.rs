@@ -1,4 +1,7 @@
-use commonware_cryptography::bls12381::primitives::group::{Scalar, G1, G2};
+use commonware_cryptography::bls12381::primitives::{
+    group::{Scalar, G1, G2, GT},
+    variant::{MinPk, Variant},
+};
 use commonware_math::algebra::{CryptoGroup, Random, Space};
 use commonware_parallel::{Rayon, Sequential};
 use criterion::{criterion_group, BatchSize, Criterion};
@@ -84,6 +87,26 @@ fn bench_msm(c: &mut Criterion) {
                         (points, scalars)
                     },
                     |(points, scalars)| black_box(G2::msm(&points, &scalars, &par)),
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+
+        // GT Sequential (conc=1)
+        c.bench_function(
+            &format!("{}/group=gt n={} conc=1", module_path!(), n),
+            |b| {
+                b.iter_batched(
+                    || {
+                        let mut rng = StdRng::seed_from_u64(0);
+                        let gt_gen = MinPk::pairing(&G1::generator(), &G2::generator());
+                        let points: Vec<GT> =
+                            (0..n).map(|_| gt_gen * &Scalar::random(&mut rng)).collect();
+                        let scalars: Vec<Scalar> =
+                            (0..n).map(|_| Scalar::random(&mut rng)).collect();
+                        (points, scalars)
+                    },
+                    |(points, scalars)| black_box(GT::msm(&points, &scalars, &Sequential)),
                     BatchSize::SmallInput,
                 );
             },
