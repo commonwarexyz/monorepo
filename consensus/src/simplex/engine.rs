@@ -70,7 +70,6 @@ impl<
                 strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
-                activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
                 term_length: cfg.term_length,
                 forwarding: cfg.forwarding,

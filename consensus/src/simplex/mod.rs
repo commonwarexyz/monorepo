@@ -696,7 +696,7 @@ mod tests {
         let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -952,7 +952,7 @@ mod tests {
         let n_active = 5;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -1122,7 +1122,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
 
         // Random restarts every x seconds
@@ -1324,7 +1324,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(240));
         executor.start(|mut context| async move {
@@ -1591,7 +1591,7 @@ mod tests {
         let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -1841,7 +1841,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -2036,7 +2036,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(2);
+        let skip_timeout = Duration::from_secs(2);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(1800));
         executor.start(|mut context| async move {
@@ -2255,7 +2255,7 @@ mod tests {
         let n = 10;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
         executor.start(|mut context| async move {
@@ -2461,7 +2461,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2723,7 +2723,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2914,7 +2914,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3104,7 +3104,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3279,7 +3279,7 @@ mod tests {
         let n = 7;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3612,7 +3612,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3786,7 +3786,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3970,7 +3970,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -4137,7 +4137,7 @@ mod tests {
         let n = 10;
         let required_containers = View::new(1_000);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(cfg);
@@ -4401,7 +4401,7 @@ mod tests {
                 timeout_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
                 activity_timeout: ViewDelta::new(4),
-                skip_timeout: ViewDelta::new(2),
+                skip_timeout: Duration::from_secs(2),
                 fetch_concurrent: 4,
                 term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 16),
@@ -4541,7 +4541,7 @@ mod tests {
         let n = 3;
         let required_containers = View::new(10);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -4784,7 +4784,7 @@ mod tests {
         let quorum = quorum(n) as usize;
         assert_eq!(quorum, 7);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -5124,7 +5124,7 @@ mod tests {
         let n = 4;
         let namespace = b"consensus".to_vec();
         let activity_timeout = ViewDelta::new(100);
-        let skip_timeout = ViewDelta::new(50);
+        let skip_timeout = Duration::from_secs(50);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -5281,7 +5281,7 @@ mod tests {
         // Create context
         let n = 5;
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new().with_seed(seed);
         let executor = deterministic::Runner::new(cfg);
@@ -5822,7 +5822,7 @@ mod tests {
             );
 
             let activity_timeout = ViewDelta::new(10);
-            let skip_timeout = ViewDelta::new(5);
+            let skip_timeout = Duration::from_secs(5);
             let namespace = b"consensus".to_vec();
             let link = link.clone();
             let trailing_finalizations = campaign.trailing_finalizations;

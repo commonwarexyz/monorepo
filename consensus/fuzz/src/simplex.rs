@@ -128,7 +128,7 @@ mod tests {
 
     const TEST_CONTAINERS: u64 = 1000;
     const PROPERTY_TEST_CONTAINERS: u64 = 30;
-    const TERM_LENGTH_BOUNDARIES: [NonZeroU64; 2] = [NZU64!(1), NZU64!(2)];
+    const TERM_LENGTH_BOUNDARIES: [NonZeroU64; 2] = [NZU64!(1), NZU64!(5)];
     const SEED: u64 = 0;
 
     fn test_input(seed: u64, containers: u64, term_length: NonZeroU64) -> FuzzInput {
