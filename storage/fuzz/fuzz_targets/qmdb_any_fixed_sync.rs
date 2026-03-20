@@ -122,6 +122,8 @@ async fn test_sync<
     let sync_config: sync::engine::Config<FixedDb, R> = sync::engine::Config {
         context: context.with_label("sync").with_attribute("id", sync_id),
         update_rx: None,
+        finish_rx: None,
+        reached_target_tx: None,
         db_config,
         fetch_batch_size: NZU64!((fetch_batch_size % 100) + 1),
         target,
