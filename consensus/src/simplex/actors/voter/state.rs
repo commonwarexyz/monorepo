@@ -281,22 +281,16 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Constructs a nullify vote for the current view, if eligible.
     ///
     /// Returns `Some((is_retry, nullify))` where `is_retry` is true when this is not the first
-    /// nullify emission for `view`. Returns `None` if we have already broadcast a finalize vote for this view.
-    pub fn construct_nullify(&mut self, view: View, timeout: bool) -> Option<(bool, Nullify<S>)> {
-        if timeout {
-            if view != self.view {
-                return None;
-            }
-        } else if self.nullification(view).is_none() {
+    /// nullify emission for `view`. Returns `None` if `view` is not the current view or if we
+    /// have already broadcast a finalize vote for this view.
+    pub fn construct_nullify(&mut self, view: View) -> Option<(bool, Nullify<S>)> {
+        if view != self.view {
             return None;
         }
         let is_retry = self.create_round(view).construct_nullify()?;
-        if !timeout && is_retry {
-            return None;
-        }
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
         self.nullify_views.insert(view);
-        if timeout && !is_retry {
+        if !is_retry {
             let round = self.create_round(view);
             let reason = if round.proposal().is_some() {
                 TimeoutReason::CertificationTimeout
@@ -3123,7 +3117,7 @@ mod tests {
 
             // Emit a timeout nullify vote for view 1.
             let (was_retry, _) = state
-                .construct_nullify(view, true)
+                .construct_nullify(view)
                 .expect("timeout nullify should exist");
             assert!(!was_retry);
 
@@ -3178,7 +3172,7 @@ mod tests {
 
             // Emit a timeout nullify for view 1.
             let (was_retry, _) = state
-                .construct_nullify(view, true)
+                .construct_nullify(view)
                 .expect("timeout nullify should exist");
             assert!(!was_retry);
 
@@ -3331,7 +3325,7 @@ mod tests {
             // Vote to nullify in term [1,3], activating the term safety lock.
             let view1 = View::new(1);
             let (was_retry, _) = state
-                .construct_nullify(view1, true)
+                .construct_nullify(view1)
                 .expect("timeout nullify should exist");
             assert!(!was_retry);
 
