@@ -4,7 +4,7 @@
 //! used to preserve digests required for root and proof generation that would have otherwise been
 //! pruned.
 //!
-//! This module is a thin wrapper around [crate::merkle::journaled::Journaled], specialized for the
+//! This module is a thin wrapper around the generic `Journaled` type, specialized for the
 //! MMR [Family]. It re-exports [Config] and provides a [SyncConfig] type alias, and adds
 //! MMR-specific async proof methods that use the [verification] module.
 
@@ -13,24 +13,9 @@ use crate::merkle::{
     mmr::{verification, Error, Family, Location, Position, Proof},
     storage::Storage,
 };
-// Items needed by the test module (previously defined or imported in the old monolithic module).
-#[cfg(test)]
-use crate::{
-    journal::contiguous::fixed::{Config as JConfig, Journal},
-    merkle::{mmr::iterator::nodes_to_pin, Readable},
-    metadata::{Config as MConfig, Metadata},
-};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-#[cfg(test)]
-use commonware_utils::sequence::prefixed_u64::U64;
 use core::ops::Range;
-#[cfg(test)]
-use std::{collections::BTreeMap, num::NonZeroUsize};
-
-/// Prefix used for the key storing the pruning boundary (as a leaf index) in the metadata.
-#[cfg(test)]
-const PRUNED_TO_PREFIX: u8 = 1;
 
 /// A MMR backed by a fixed-item-length journal.
 pub type Mmr<E, D> = crate::merkle::journaled::Journaled<Family, E, D>;
@@ -149,7 +134,12 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<Family> for Mmr<E,
 mod tests {
     use super::*;
     use crate::{
-        merkle::{conformance::build_test_mmr, LocationRangeExt as _},
+        journal::contiguous::fixed::{Config as JConfig, Journal},
+        merkle::{
+            conformance::build_test_mmr, mmr::iterator::nodes_to_pin, LocationRangeExt as _,
+            Readable,
+        },
+        metadata::{Config as MConfig, Metadata},
         mmr::{mem, Location, StandardHasher as Standard},
     };
     use commonware_cryptography::{
@@ -160,8 +150,14 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Blob as _, BufferPooler, Runner,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
-    use std::num::NonZeroU16;
+    use commonware_utils::{sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
+    use std::{
+        collections::BTreeMap,
+        num::{NonZeroU16, NonZeroUsize},
+    };
+
+    /// Prefix used for the key storing the pruning boundary (as a leaf index) in the metadata.
+    const PRUNED_TO_PREFIX: u8 = 1;
 
     fn test_digest(v: usize) -> Digest {
         Sha256::hash(&v.to_be_bytes())

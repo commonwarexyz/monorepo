@@ -43,7 +43,8 @@ where
     pub(super) immutable: &'a Immutable<E, K, V, H, T>,
 
     /// Authenticated journal batch for computing the speculative MMR root.
-    pub(super) journal_batch: authenticated::UnmerkleizedBatch<'a, mmr::Family, H, P, Operation<K, V>>,
+    pub(super) journal_batch:
+        authenticated::UnmerkleizedBatch<'a, mmr::Family, H, P, Operation<K, V>>,
 
     /// Pending mutations.
     pub(super) mutations: BTreeMap<K, V>,

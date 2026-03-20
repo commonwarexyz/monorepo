@@ -495,13 +495,8 @@ where
         &self,
         start_loc: Location<merkle::mmr::Family>,
         max_ops: NonZeroU64,
-    ) -> Result<
-        (
-            Proof<merkle::mmr::Family, H::Digest>,
-            Vec<C::Item>,
-        ),
-        Error<merkle::mmr::Family>,
-    > {
+    ) -> Result<(Proof<merkle::mmr::Family, H::Digest>, Vec<C::Item>), Error<merkle::mmr::Family>>
+    {
         self.historical_proof(self.size().await, start_loc, max_ops)
             .await
     }
@@ -523,21 +518,14 @@ where
         historical_leaves: Location<merkle::mmr::Family>,
         start_loc: Location<merkle::mmr::Family>,
         max_ops: NonZeroU64,
-    ) -> Result<
-        (
-            Proof<merkle::mmr::Family, H::Digest>,
-            Vec<C::Item>,
-        ),
-        Error<merkle::mmr::Family>,
-    > {
+    ) -> Result<(Proof<merkle::mmr::Family, H::Digest>, Vec<C::Item>), Error<merkle::mmr::Family>>
+    {
         // Acquire a reader guard to prevent pruning from advancing while we read.
         let reader = self.journal.reader().await;
         let bounds = reader.bounds();
 
         if *historical_leaves > bounds.end {
-            return Err(
-                merkle::Error::RangeOutOfBounds(Location::new(bounds.end)).into(),
-            );
+            return Err(merkle::Error::RangeOutOfBounds(Location::new(bounds.end)).into());
         }
         if start_loc >= historical_leaves {
             return Err(merkle::Error::RangeOutOfBounds(start_loc).into());

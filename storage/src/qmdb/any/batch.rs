@@ -988,8 +988,15 @@ where
     #[allow(clippy::type_complexity)]
     pub fn new_batch(
         &self,
-    ) -> UnmerkleizedBatch<'_, E, C, I, H, U, authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<U>>>
-    {
+    ) -> UnmerkleizedBatch<
+        '_,
+        E,
+        C,
+        I,
+        H,
+        U,
+        authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<U>>,
+    > {
         UnmerkleizedBatch {
             db: self.db,
             journal_batch: self.journal_batch.new_batch(),

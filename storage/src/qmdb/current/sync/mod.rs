@@ -126,14 +126,13 @@ where
         &hasher,
     )
     .await?;
-    let log =
-        authenticated::Journal::<mmr::Family, _, _, _>::from_components(
-            mmr,
-            log,
-            hasher,
-            apply_batch_size as u64,
-        )
-        .await?;
+    let log = authenticated::Journal::<mmr::Family, _, _, _>::from_components(
+        mmr,
+        log,
+        hasher,
+        apply_batch_size as u64,
+    )
+    .await?;
 
     // Initialize bitmap with pruned chunks.
     //
