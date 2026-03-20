@@ -5,6 +5,7 @@ members = [
     "coding",
     "collector",
     "commitment",
+    "wim",
     "conformance",
     "conformance/macros",
     "consensus",

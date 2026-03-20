@@ -1,0 +1,41 @@
+[package]
+name = "commonware-wim"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Witness-indistinguishable proofs of machine execution traces."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/wim"
+documentation = "https://docs.rs/commonware-wim"
+
+[lints]
+workspace = true
+
+[dependencies]
+commonware-commitment = { version = "2026.3.0", path = "../commitment" }
+bytemuck = { version = "1.21.0", features = ["derive"] }
+sha2 = { workspace = true }
+sha3 = { version = "0.10", default-features = false }
+thiserror.workspace = true
+
+# PolkaVM (optional) - uncomment when needed
+# polkavm = { git = "https://github.com/nickvdp/polkavm", optional = true }
+# polkavm-common = { git = "https://github.com/nickvdp/polkavm", optional = true }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[lib]
+bench = false
+
+[features]
+default = ["std"]
+std = [
+	"commonware-commitment/std",
+	"sha2/std",
+	"sha3/std",
+	"thiserror/std",
+]
+# polkavm-integration = ["std", "dep:polkavm", "dep:polkavm-common"]
