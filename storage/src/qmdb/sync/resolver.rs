@@ -70,7 +70,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         start_loc: Location,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
-        cancel: oneshot::Receiver<()>,
+        cancel_rx: oneshot::Receiver<()>,
     ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
 }
 
@@ -95,7 +95,7 @@ macro_rules! impl_resolver {
                 start_loc: Location,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel: oneshot::Receiver<()>,
+                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
                 let (proof, operations) =
                     self.historical_proof(op_count, start_loc, max_ops).await?;
@@ -132,7 +132,7 @@ macro_rules! impl_resolver {
                 start_loc: Location,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel: oneshot::Receiver<()>,
+                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let db = self.read().await;
                 let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
@@ -169,7 +169,7 @@ macro_rules! impl_resolver {
                 start_loc: Location,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel: oneshot::Receiver<()>,
+                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;

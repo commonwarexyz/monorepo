@@ -1287,11 +1287,17 @@ impl<R: Resolver<Digest = Digest>> Resolver for CorruptFirstPinnedNodesResolver<
         start_loc: Location,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
-        cancel: oneshot::Receiver<()>,
+        cancel_rx: oneshot::Receiver<()>,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let mut result = self
             .inner
-            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes, cancel)
+            .get_operations(
+                op_count,
+                start_loc,
+                max_ops,
+                include_pinned_nodes,
+                cancel_rx,
+            )
             .await?;
         // Corrupt pinned nodes only on the first request that includes them.
         if result.pinned_nodes.is_some()

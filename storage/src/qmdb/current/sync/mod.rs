@@ -483,7 +483,7 @@ macro_rules! impl_current_resolver {
                 start_loc: Location,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel: commonware_utils::channel::oneshot::Receiver<()>,
+                _cancel_rx: commonware_utils::channel::oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, Self::Error> {
                 let (proof, operations) = self.any
                     .historical_proof(op_count, start_loc, max_ops)
@@ -527,7 +527,7 @@ macro_rules! impl_current_resolver {
                 start_loc: Location,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel: commonware_utils::channel::oneshot::Receiver<()>,
+                _cancel_rx: commonware_utils::channel::oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let db = self.read().await;
                 let (proof, operations) = db.any
@@ -572,7 +572,7 @@ macro_rules! impl_current_resolver {
                 start_loc: Location,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel: commonware_utils::channel::oneshot::Receiver<()>,
+                _cancel_rx: commonware_utils::channel::oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;

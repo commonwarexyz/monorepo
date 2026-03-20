@@ -32,10 +32,10 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
     pub fn add(
         &mut self,
         start_loc: Location,
-        cancel: oneshot::Sender<()>,
+        cancel_tx: oneshot::Sender<()>,
         future: Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>,
     ) {
-        self.locations.insert(start_loc, cancel);
+        self.locations.insert(start_loc, cancel_tx);
         self.futures.push(future);
     }
 
