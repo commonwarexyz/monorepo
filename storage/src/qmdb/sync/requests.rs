@@ -12,10 +12,11 @@ pub(super) struct Requests<Op, D: Digest, E> {
     #[allow(clippy::type_complexity)]
     futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>>,
     /// Start locations of outstanding requests, paired with cancellation
-    /// senders. Dropping a sender signals the resolver that the request is
-    /// no longer needed. Entries are removed when a request completes or is
-    /// discarded, but the corresponding future remains in `futures`
-    /// (removing from FuturesUnordered is expensive).
+    /// senders. When an entry is removed (via [`Self::remove`] or
+    /// [`Self::remove_before`]), the sender is dropped, causing the
+    /// resolver's `cancel_rx.await` to return `Err` as a cancellation
+    /// signal. The corresponding future remains in `futures` (removing
+    /// from FuturesUnordered is expensive).
     locations: BTreeMap<Location, oneshot::Sender<()>>,
 }
 

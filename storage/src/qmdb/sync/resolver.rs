@@ -61,8 +61,9 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     /// `op_count` operations. If `include_pinned_nodes` is true, the result will include the
     /// pinned MMR nodes at `start_loc`.
     ///
-    /// The `cancel_rx` receiver fires when the engine no longer needs this request (e.g. due
-    /// to a target update). Implementations may use it to abort in-flight work early.
+    /// The corresponding `cancel_tx` is dropped when the engine no longer needs this
+    /// request (e.g. due to a target update), causing `cancel_rx.await` to return
+    /// `Err`. Implementations may `select!` on it to abort in-flight work early.
     #[allow(clippy::type_complexity)]
     fn get_operations<'a>(
         &'a self,
