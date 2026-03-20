@@ -27,6 +27,7 @@ pub const STATE_WIDTH: usize = 3;
 pub const RATE: usize = 2;
 
 /// Capacity: security parameter
+#[allow(dead_code)]
 pub const CAPACITY: usize = 1;
 
 /// Number of rounds (2 * security_level / log2(field_size) + safety margin)
@@ -77,6 +78,7 @@ const ROUND_CONSTANTS: [[u128; STATE_WIDTH]; NUM_ROUNDS] = [
 ///
 /// The MDS property ensures that any k input differences affect at least
 /// n-k+1 outputs, providing optimal diffusion for the hash function.
+#[allow(dead_code)]
 const MDS_MATRIX: [[u128; STATE_WIDTH]; STATE_WIDTH] = [
     [2, 1, 1],
     [1, 2, 1],
@@ -86,6 +88,7 @@ const MDS_MATRIX: [[u128; STATE_WIDTH]; STATE_WIDTH] = [
 /// Rescue-Prime sponge hash state
 pub struct RescueHash {
     state: [BinaryElem128; STATE_WIDTH],
+    #[allow(dead_code)]
     absorbed: usize,
 }
 
@@ -313,11 +316,6 @@ mod tests {
     #[test]
     fn test_mds_is_actually_mds() {
         // A matrix is MDS iff ALL square submatrices are non-singular
-        // For 3x3 matrix M, we need:
-        // 1. All 1x1 minors (elements) non-zero
-        // 2. All 2x2 minors non-zero
-        // 3. det(M) non-zero
-
         let m: [[BinaryElem128; 3]; 3] = [
             [BinaryElem128::from(2u128), BinaryElem128::from(1u128), BinaryElem128::from(1u128)],
             [BinaryElem128::from(1u128), BinaryElem128::from(2u128), BinaryElem128::from(1u128)],
@@ -332,9 +330,7 @@ mod tests {
             }
         }
 
-        // 2. Check all 2x2 minors (there are 9 of them for rows and 9 for cols)
-        // For each pair of rows (i1,i2) and pair of cols (j1,j2):
-        // det = m[i1][j1]*m[i2][j2] + m[i1][j2]*m[i2][j1]
+        // 2. Check all 2x2 minors
         for i1 in 0..3 {
             for i2 in (i1+1)..3 {
                 for j1 in 0..3 {
@@ -350,21 +346,10 @@ mod tests {
         }
 
         // 3. Check 3x3 determinant
-        // det = a(ei - fh) - b(di - fg) + c(dh - eg) for matrix
-        // [a b c]
-        // [d e f]
-        // [g h i]
-        // In char 2, subtraction = addition
         let det_3x3 = m[0][0].mul(&m[1][1].mul(&m[2][2]).add(&m[1][2].mul(&m[2][1])))
             .add(&m[0][1].mul(&m[1][0].mul(&m[2][2]).add(&m[1][2].mul(&m[2][0]))))
             .add(&m[0][2].mul(&m[1][0].mul(&m[2][1]).add(&m[1][1].mul(&m[2][0]))));
 
         assert_ne!(det_3x3, BinaryElem128::zero(), "MDS requires 3x3 det non-zero");
-
-        // Also verify we get the expected value
-        // For circulant [2,1,1]: det = 2*(4+1) + 1*(2+1) + 1*(1+2) = 2*5 + 3 + 3 = 10 + 6 = 16 in regular
-        // In GF(2^128): det = 2*5 + 3 + 3 = x*(x^2+1) + (x+1) + (x+1) = x^3+x + 0 = x^3+x = 10 = 0xa
-        // Actually let's just verify it's non-zero and compute what we get
-        // Verified: 3x3 determinant is non-zero
     }
 }
