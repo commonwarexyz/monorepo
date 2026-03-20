@@ -5,13 +5,13 @@ date: "March 2026"
 published-time: "2026-03-20T00:00:00Z"
 modified-time: "2026-03-20T00:00:00Z"
 author: "Andrew Lewis-Pye"
-author_twitter: "https://x.com/lewis_pye"
+author_twitter: "https://x.com/AndrewLewisPye"
 url: "https://commonware.xyz/blogs/carnot-bound"
 image: ""
 katex: true
 ---
 
-Recently, we released a paper called [The Carnot Bound](https://arxiv.org/abs/XXXX.XXXXX), which investigates the fundamental limits and possibilities for bandwidth-efficient consensus. The paper establishes a tight lower bound on coding efficiency for protocols with fast finality, and shows that an additional round of voting breaks the barrier. Here's the idea.
+Recently, we released a paper called [The Carnot Bound](https://arxiv.org/abs/2603.11797), which investigates the fundamental limits and possibilities for bandwidth-efficient consensus. The paper establishes a tight lower bound on coding efficiency for protocols with fast finality, and shows that an additional round of voting breaks the barrier. Here's the idea.
 
 In leader-based consensus, the leader is the throughput bottleneck. Every block the leader proposes must be sent to every other processor, and the time this takes is governed by a key parameter: the *data expansion rate*. If a block payload has size $\beta$, and the leader must send a total of $d \cdot \beta$ bits across all processors, then $d$ is the data expansion rate. The closer $d$ is to $1$, the closer maximum throughput gets to the raw network bandwidth.
 
@@ -33,4 +33,4 @@ Under favourable conditions---correct leaders and few actual faults---both proto
 
 Both protocols can also incorporate stable leaders and optimistic proposals, eliminating the gap between consecutive block proposals and allowing throughput to approach the underlying network bandwidth.
 
-The paper is available on [arXiv](https://arxiv.org/abs/XXXX.XXXXX). The name is inspired by the Carnot heat engine, which achieves the theoretical maximum efficiency for converting heat into work. Similarly, our protocols aim to approach the theoretical maximum efficiency for converting network bandwidth into throughput.
+The paper is available on [arXiv](https://arxiv.org/abs/2603.11797). The name is inspired by the Carnot heat engine, which achieves the theoretical maximum efficiency for converting heat into work. Similarly, our protocols aim to approach the theoretical maximum efficiency for converting network bandwidth into throughput.
