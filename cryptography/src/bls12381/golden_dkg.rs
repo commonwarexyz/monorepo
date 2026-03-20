@@ -95,7 +95,7 @@ use crate::{
         golden_dkg::evrf::VrfCommitments,
         primitives::{
             group::{Private, Scalar, Share, SmallScalar, G1},
-            sharing::{Mode, Sharing},
+            sharing::{Mode, ModeVersion, Sharing},
             variant::MinPk,
         },
     },
@@ -103,8 +103,8 @@ use crate::{
     transcript::{Summary, Transcript},
     Signer as _, Verifier as _,
 };
-use bytes::Bytes;
-use commonware_codec::{Encode, EncodeSize, Write};
+use bytes::{Buf, BufMut, Bytes};
+use commonware_codec::{Encode, EncodeSize, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Random, Space},
     poly::{Interpolator, Poly},
@@ -181,6 +181,44 @@ impl<P: Ord + Clone> Output<P> {
     }
 }
 
+impl<P: Write> Write for Output<P> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.summary.write(buf);
+        self.public.write(buf);
+        self.dealers.write(buf);
+        self.players.write(buf);
+        self.revealed.write(buf);
+    }
+}
+
+impl<P: EncodeSize> EncodeSize for Output<P> {
+    fn encode_size(&self) -> usize {
+        self.summary.encode_size()
+            + self.public.encode_size()
+            + self.dealers.encode_size()
+            + self.players.encode_size()
+            + self.revealed.encode_size()
+    }
+}
+
+impl<P: Read<Cfg = ()> + Ord + Clone> Read for Output<P> {
+    type Cfg = (NonZeroU32, ModeVersion);
+
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (max_participants, max_supported_mode): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let max_usize = max_participants.get() as usize;
+        Ok(Self {
+            summary: ReadExt::read(buf)?,
+            public: Read::read_cfg(buf, &(*max_participants, *max_supported_mode))?,
+            dealers: Read::read_cfg(buf, &(RangeCfg::new(1..=max_usize), ()))?,
+            players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_usize), ()))?,
+            revealed: Read::read_cfg(buf, &(RangeCfg::new(0..=max_usize), ()))?,
+        })
+    }
+}
+
 /// Configuration for a round of the golden DKG.
 ///
 /// Binds the round number, dealer set, and player set into a transcript, and
@@ -227,7 +265,7 @@ impl Info {
     }
 
     /// Return the transcript summary for this round.
-    pub fn summary(&self) -> &Summary {
+    pub const fn summary(&self) -> &Summary {
         &self.summary
     }
 
@@ -493,6 +531,35 @@ pub struct SignedDealerLog {
     log: DealerLog,
 }
 
+impl Write for SignedDealerLog {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.dealer.write(buf);
+        self.signature.write(buf);
+        self.log.write(buf);
+    }
+}
+
+impl EncodeSize for SignedDealerLog {
+    fn encode_size(&self) -> usize {
+        self.dealer.encode_size() + self.signature.encode_size() + self.log.encode_size()
+    }
+}
+
+impl Read for SignedDealerLog {
+    type Cfg = (NonZeroU32, ModeVersion);
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let dealer: PublicKey = ReadExt::read(buf)?;
+        let signature: ed25519::Signature = ReadExt::read(buf)?;
+        let log = Read::read_cfg(buf, cfg)?;
+        Ok(Self {
+            dealer,
+            signature,
+            log,
+        })
+    }
+}
+
 impl SignedDealerLog {
     /// Verify the signature and extract the dealer's public key and log.
     ///
@@ -527,6 +594,19 @@ impl Write for DealerLog {
 impl EncodeSize for DealerLog {
     fn encode_size(&self) -> usize {
         self.dealing.encode_size() + self.commitments.encode_size()
+    }
+}
+
+impl Read for DealerLog {
+    type Cfg = (NonZeroU32, ModeVersion);
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let dealing = Read::read_cfg(buf, cfg)?;
+        let commitments = Read::read_cfg(buf, &cfg.0)?;
+        Ok(Self {
+            dealing,
+            commitments,
+        })
     }
 }
 
@@ -595,6 +675,27 @@ impl Write for Dealing {
 impl EncodeSize for Dealing {
     fn encode_size(&self) -> usize {
         self.nonce.encode_size() + self.poly.encode_size() + self.masked_shares.encode_size()
+    }
+}
+
+impl Read for Dealing {
+    type Cfg = (NonZeroU32, ModeVersion);
+
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (max_players, _mode_version): &Self::Cfg,
+    ) -> Result<Self, commonware_codec::Error> {
+        let nonce = ReadExt::read(buf)?;
+        let poly = Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=*max_players), ()))?;
+        let masked_shares = Read::read_cfg(
+            buf,
+            &(RangeCfg::new(0..=max_players.get() as usize), (), ()),
+        )?;
+        Ok(Self {
+            nonce,
+            poly,
+            masked_shares,
+        })
     }
 }
 
@@ -937,7 +1038,7 @@ mod test_plan {
                 .map(|k| k.public())
                 .try_collect()
                 .unwrap();
-            let output = Output::new(info.summary().clone(), sharing, dealers, players);
+            let output = Output::new(*info.summary(), sharing, dealers, players);
             Ok((output, shares))
         }
 
@@ -1438,6 +1539,62 @@ mod tests {
         // Call deal with share: None in reshare mode -> MissingDealerShare
         let result = deal::<N3f1>(&mut rng, &info, &dealer_keys[0], None);
         assert!(matches!(result, Err(Error::MissingDealerShare)));
+    }
+
+    #[test]
+    fn signed_dealer_log_roundtrip() {
+        use commonware_parallel::Sequential;
+
+        let mut rng = commonware_utils::test_rng();
+        let dealer_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let player_keys: Vec<PrivateKey> = (0..7).map(|_| PrivateKey::random(&mut rng)).collect();
+        let dealer_set: Set<PublicKey> = dealer_keys
+            .iter()
+            .map(|k| k.public())
+            .try_collect()
+            .unwrap();
+        let player_set: Set<PublicKey> = player_keys
+            .iter()
+            .map(|k| k.public())
+            .try_collect()
+            .unwrap();
+        let info = Info::new(0, None, dealer_set, player_set);
+
+        let signed = deal::<N3f1>(&mut rng, &info, &dealer_keys[0], None).unwrap();
+        let encoded = signed.encode();
+        let max_players = NonZeroU32::new(7).unwrap();
+        let cfg = (max_players, ModeVersion::v0());
+        let decoded = SignedDealerLog::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
+
+        // The decoded log should identify successfully and produce a valid DKG.
+        let (pk, log) = decoded
+            .identify()
+            .expect("signature should verify after roundtrip");
+        assert_eq!(pk, dealer_keys[0].public());
+
+        let mut logs = std::collections::BTreeMap::new();
+        logs.insert(pk, log);
+        for dk in &dealer_keys[1..] {
+            let signed = deal::<N3f1>(&mut rng, &info, dk, None).unwrap();
+            let (pk, log) = signed.identify().unwrap();
+            logs.insert(pk, log);
+        }
+        observe::<N3f1>(&mut rng, &info, logs, &Sequential).expect("observe should succeed");
+    }
+
+    #[test]
+    fn output_roundtrip() {
+        let mut rng = commonware_utils::test_rng();
+        let dealer_keys: Vec<PrivateKey> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
+        let player_keys: Vec<PrivateKey> = (0..7).map(|_| PrivateKey::random(&mut rng)).collect();
+
+        let (output, _shares) = Plan::run_fresh(&mut rng, &dealer_keys, &player_keys).unwrap();
+        let encoded = output.encode();
+        let max_players = NonZeroU32::new(7).unwrap();
+        let cfg = (max_players, ModeVersion::v0());
+        let decoded: Output<PublicKey> = Read::read_cfg(&mut encoded.as_ref(), &cfg).unwrap();
+
+        assert_eq!(output, decoded);
     }
 
     #[test]

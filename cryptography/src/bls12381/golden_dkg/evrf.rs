@@ -17,6 +17,8 @@ use curve25519_dalek::edwards::CompressedEdwardsY;
 use ed25519_consensus::VerificationKey;
 use rand_core::CryptoRngCore;
 use sha2::{Digest, Sha512};
+use std::num::NonZeroU32;
+use zeroize::Zeroizing;
 
 const PUBLIC_KEY_LENGTH: usize = 32;
 
@@ -135,6 +137,28 @@ impl PrivateKey {
     }
 }
 
+impl Write for PrivateKey {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.inner.expose(|key| key.as_bytes().write(buf));
+    }
+}
+
+impl Read for PrivateKey {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
+        let key = ed25519_consensus::SigningKey::from(*raw);
+        Ok(Self {
+            inner: Secret::new(key),
+        })
+    }
+}
+
+impl FixedSize for PrivateKey {
+    const SIZE: usize = PUBLIC_KEY_LENGTH;
+}
+
 /// A public key, which we can use to create and check VRF outputs with.
 ///
 /// This can be created using [`PrivateKey::public`].
@@ -238,10 +262,18 @@ impl Write for Proof {
     }
 }
 
-impl EncodeSize for Proof {
-    fn encode_size(&self) -> usize {
-        32
+impl Read for Proof {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        Ok(Self {
+            key: PrivateKey::read(buf)?,
+        })
     }
+}
+
+impl FixedSize for Proof {
+    const SIZE: usize = PrivateKey::SIZE;
 }
 
 impl Write for VrfCommitments {
@@ -254,6 +286,17 @@ impl Write for VrfCommitments {
 impl EncodeSize for VrfCommitments {
     fn encode_size(&self) -> usize {
         self.proof.encode_size() + self.commitments.encode_size()
+    }
+}
+
+impl Read for VrfCommitments {
+    type Cfg = NonZeroU32;
+
+    fn read_cfg(buf: &mut impl Buf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
+        let proof: Proof = ReadExt::read(buf)?;
+        let range = commonware_codec::RangeCfg::new(0..=max_players.get() as usize);
+        let commitments = Read::read_cfg(buf, &(range, (), ()))?;
+        Ok(Self { proof, commitments })
     }
 }
 
