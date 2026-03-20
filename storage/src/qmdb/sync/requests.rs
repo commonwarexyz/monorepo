@@ -2,19 +2,21 @@
 
 use crate::{mmr::Location, qmdb::sync::engine::IndexedFetchResult};
 use commonware_cryptography::Digest;
+use commonware_utils::channel::oneshot;
 use futures::stream::FuturesUnordered;
-use std::{collections::BTreeSet, future::Future, pin::Pin};
+use std::{collections::BTreeMap, future::Future, pin::Pin};
 
 /// Manages outstanding fetch requests
 pub(super) struct Requests<Op, D: Digest, E> {
     /// Futures that will resolve to batches of operations
     #[allow(clippy::type_complexity)]
     futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>>,
-    /// Start locations of outstanding requests.
-    /// A subset of the futures: entries are removed when a request completes
-    /// or is discarded, but the corresponding future remains in `futures`
+    /// Start locations of outstanding requests, paired with cancellation
+    /// senders. Dropping a sender signals the resolver that the request is
+    /// no longer needed. Entries are removed when a request completes or is
+    /// discarded, but the corresponding future remains in `futures`
     /// (removing from FuturesUnordered is expensive).
-    locations: BTreeSet<Location>,
+    locations: BTreeMap<Location, oneshot::Sender<()>>,
 }
 
 impl<Op, D: Digest, E> Requests<Op, D, E> {
@@ -22,28 +24,29 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
     pub fn new() -> Self {
         Self {
             futures: FuturesUnordered::new(),
-            locations: BTreeSet::new(),
+            locations: BTreeMap::new(),
         }
     }
 
-    /// Add a new outstanding request
+    /// Add a new outstanding request with its cancellation sender
     pub fn add(
         &mut self,
         start_loc: Location,
+        cancel: oneshot::Sender<()>,
         future: Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>,
     ) {
-        self.locations.insert(start_loc);
+        self.locations.insert(start_loc, cancel);
         self.futures.push(future);
     }
 
-    /// Remove a request from `self.locations` by its starting location.
+    /// Remove a request by its starting location, dropping the cancel sender.
     /// Returns `true` if the request was tracked, `false` otherwise.
-    /// Doesn't remove from `self.futures` as it would be expensive.
     pub fn remove(&mut self, start_loc: Location) -> bool {
-        self.locations.remove(&start_loc)
+        self.locations.remove(&start_loc).is_some()
     }
 
     /// Remove all tracked locations before `loc`, keeping those >= `loc`.
+    /// Dropped entries' cancel senders signal their resolvers to abort.
     /// Futures remain in the stream; when they complete, the caller can detect
     /// they are untracked via the `false` return from [`Self::remove`].
     pub fn remove_before(&mut self, loc: Location) {
@@ -51,8 +54,8 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
     }
 
     /// Get the set of outstanding request locations
-    pub const fn locations(&self) -> &BTreeSet<Location> {
-        &self.locations
+    pub fn locations(&self) -> impl Iterator<Item = &Location> {
+        self.locations.keys()
     }
 
     /// Get a mutable reference to the futures stream

@@ -58,8 +58,11 @@ pub trait Resolver: Send + Sync + Clone + 'static {
 
     /// Get the operations starting at `start_loc` in the database, up to `max_ops` operations.
     /// Returns the operations and a proof that they were present in the database when it had
-    /// `size` operations. If `include_pinned_nodes` is true, the result will include the pinned
-    /// MMR nodes at `start_loc`.
+    /// `op_count` operations. If `include_pinned_nodes` is true, the result will include the
+    /// pinned MMR nodes at `start_loc`.
+    ///
+    /// The `cancel` receiver fires when the engine no longer needs this request (e.g. due to
+    /// a target update). Implementations may use it to abort in-flight work early.
     #[allow(clippy::type_complexity)]
     fn get_operations<'a>(
         &'a self,
@@ -67,6 +70,7 @@ pub trait Resolver: Send + Sync + Clone + 'static {
         start_loc: Location,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
+        cancel: oneshot::Receiver<()>,
     ) -> impl Future<Output = Result<FetchResult<Self::Op, Self::Digest>, Self::Error>> + Send + 'a;
 }
 
@@ -91,6 +95,7 @@ macro_rules! impl_resolver {
                 start_loc: Location,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
+                _cancel: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
                 let (proof, operations) =
                     self.historical_proof(op_count, start_loc, max_ops).await?;
@@ -127,6 +132,7 @@ macro_rules! impl_resolver {
                 start_loc: Location,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
+                _cancel: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let db = self.read().await;
                 let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
@@ -163,6 +169,7 @@ macro_rules! impl_resolver {
                 start_loc: Location,
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
+                _cancel: oneshot::Receiver<()>,
             ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
@@ -224,6 +231,7 @@ pub(crate) mod tests {
             _start_loc: Location,
             _max_ops: NonZeroU64,
             _include_pinned_nodes: bool,
+            _cancel: oneshot::Receiver<()>,
         ) -> Result<FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
             Err(qmdb::Error::KeyNotFound) // Arbitrary dummy error
         }

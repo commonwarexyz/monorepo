@@ -23,7 +23,12 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
-use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, NZU64};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    non_empty_range,
+    sync::AsyncRwLock,
+    NZU64,
+};
 use rand::RngCore as _;
 use std::{num::NonZeroU64, sync::Arc};
 
@@ -1282,10 +1287,11 @@ impl<R: Resolver<Digest = Digest>> Resolver for CorruptFirstPinnedNodesResolver<
         start_loc: Location,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
+        cancel: oneshot::Receiver<()>,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let mut result = self
             .inner
-            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes)
+            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes, cancel)
             .await?;
         // Corrupt pinned nodes only on the first request that includes them.
         if result.pinned_nodes.is_some()

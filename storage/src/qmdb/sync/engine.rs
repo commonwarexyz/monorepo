@@ -17,7 +17,10 @@ use commonware_codec::Encode;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::Metrics as _;
-use commonware_utils::{channel::mpsc, NZU64};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    NZU64,
+};
 use futures::{future::Either, StreamExt};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -238,11 +241,13 @@ where
         if self.pinned_nodes.is_none() {
             let start_loc = self.target.range.start();
             let resolver = self.resolver.clone();
+            let (cancel_tx, cancel_rx) = oneshot::channel();
             self.outstanding_requests.add(
                 start_loc,
+                cancel_tx,
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, start_loc, NZU64!(1), true)
+                        .get_operations(target_size, start_loc, NZU64!(1), true, cancel_rx)
                         .await;
                     IndexedFetchResult { start_loc, result }
                 }),
@@ -281,11 +286,13 @@ where
 
             // Schedule the request
             let resolver = self.resolver.clone();
+            let (cancel_tx, cancel_rx) = oneshot::channel();
             self.outstanding_requests.add(
                 gap_range.start,
+                cancel_tx,
                 Box::pin(async move {
                     let result = resolver
-                        .get_operations(target_size, gap_range.start, batch_size, false)
+                        .get_operations(target_size, gap_range.start, batch_size, false, cancel_rx)
                         .await;
                     IndexedFetchResult {
                         start_loc: gap_range.start,
@@ -631,13 +638,13 @@ mod tests {
                 }),
             }
         });
-        requests.add(Location::new(10), fut);
+        requests.add(Location::new(10), oneshot::channel().0, fut);
         assert_eq!(requests.len(), 1);
-        assert!(requests.locations().contains(&Location::new(10)));
+        assert!(requests.locations().any(|l| l == &Location::new(10)));
 
         // Test removing requests
         requests.remove(Location::new(10));
-        assert!(!requests.locations().contains(&Location::new(10)));
+        assert!(!requests.locations().any(|l| l == &Location::new(10)));
     }
 
     /// Create a no-op fetch result future for testing request tracking.
@@ -664,27 +671,27 @@ mod tests {
     fn test_remove_before() {
         let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
 
-        requests.add(Location::new(5), dummy_future(5));
-        requests.add(Location::new(10), dummy_future(10));
-        requests.add(Location::new(15), dummy_future(15));
-        requests.add(Location::new(20), dummy_future(20));
+        requests.add(Location::new(5), oneshot::channel().0, dummy_future(5));
+        requests.add(Location::new(10), oneshot::channel().0, dummy_future(10));
+        requests.add(Location::new(15), oneshot::channel().0, dummy_future(15));
+        requests.add(Location::new(20), oneshot::channel().0, dummy_future(20));
         assert_eq!(requests.len(), 4);
 
         // Remove requests before location 10 -- should drop loc 5
         requests.remove_before(Location::new(10));
         assert_eq!(requests.len(), 3);
-        assert!(!requests.locations().contains(&Location::new(5)));
-        assert!(requests.locations().contains(&Location::new(10)));
-        assert!(requests.locations().contains(&Location::new(15)));
-        assert!(requests.locations().contains(&Location::new(20)));
+        assert!(!requests.locations().any(|l| l == &Location::new(5)));
+        assert!(requests.locations().any(|l| l == &Location::new(10)));
+        assert!(requests.locations().any(|l| l == &Location::new(15)));
+        assert!(requests.locations().any(|l| l == &Location::new(20)));
     }
 
     #[test]
     fn test_remove_before_all() {
         let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
 
-        requests.add(Location::new(5), dummy_future(5));
-        requests.add(Location::new(10), dummy_future(10));
+        requests.add(Location::new(5), oneshot::channel().0, dummy_future(5));
+        requests.add(Location::new(10), oneshot::channel().0, dummy_future(10));
         assert_eq!(requests.len(), 2);
 
         // Remove all requests
@@ -703,22 +710,22 @@ mod tests {
     fn test_remove_before_none() {
         let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
 
-        requests.add(Location::new(10), dummy_future(10));
-        requests.add(Location::new(20), dummy_future(20));
+        requests.add(Location::new(10), oneshot::channel().0, dummy_future(10));
+        requests.add(Location::new(20), oneshot::channel().0, dummy_future(20));
         assert_eq!(requests.len(), 2);
 
         // Cutoff before all requests -- nothing removed
         requests.remove_before(Location::new(5));
         assert_eq!(requests.len(), 2);
-        assert!(requests.locations().contains(&Location::new(10)));
-        assert!(requests.locations().contains(&Location::new(20)));
+        assert!(requests.locations().any(|l| l == &Location::new(10)));
+        assert!(requests.locations().any(|l| l == &Location::new(20)));
     }
 
     #[test]
     fn test_remove_returns_tracked_status() {
         let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
 
-        requests.add(Location::new(10), dummy_future(10));
+        requests.add(Location::new(10), oneshot::channel().0, dummy_future(10));
         assert!(requests.remove(Location::new(10)));
         assert!(!requests.remove(Location::new(10)));
         assert!(!requests.remove(Location::new(99)));
@@ -728,9 +735,9 @@ mod tests {
     fn test_remove_after_remove_before() {
         let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
 
-        requests.add(Location::new(5), dummy_future(5));
-        requests.add(Location::new(10), dummy_future(10));
-        requests.add(Location::new(15), dummy_future(15));
+        requests.add(Location::new(5), oneshot::channel().0, dummy_future(5));
+        requests.add(Location::new(10), oneshot::channel().0, dummy_future(10));
+        requests.add(Location::new(15), oneshot::channel().0, dummy_future(15));
 
         // Discard locations before 10
         requests.remove_before(Location::new(10));
