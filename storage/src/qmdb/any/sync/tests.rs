@@ -127,6 +127,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 0,
         };
 
         // Create the engine
@@ -168,6 +169,7 @@ where
             fetch_batch_size: NZU64!(2),
             db_config,
             update_rx: None,
+            max_retained_roots: 0,
         };
 
         let result: Result<H::Db, _> = sync::sync(engine_config).await;
@@ -216,6 +218,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 0,
         };
 
         // Perform sync
@@ -296,6 +299,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 0,
         };
 
         let synced_db: H::Db = sync::sync(config).await.unwrap();
@@ -369,6 +373,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 0,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -469,6 +474,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 0,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -530,6 +536,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
+            max_retained_roots: 1,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -596,6 +603,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
+            max_retained_roots: 1,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -676,6 +684,7 @@ where
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: Some(update_receiver),
+                max_retained_roots: 1,
             };
 
             // Send target update with increased bounds
@@ -745,6 +754,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
+            max_retained_roots: 1,
         };
 
         // Complete the sync
@@ -816,6 +826,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 max_outstanding_requests: 10,
                 apply_batch_size: 1024,
                 update_rx: Some(update_receiver),
+                max_retained_roots: 1,
             };
             let mut client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
             loop {
@@ -922,6 +933,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 0,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -987,6 +999,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 0,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -1332,6 +1345,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 0,
         };
 
         // Sync should succeed on the second attempt after the first corrupted pinned nodes

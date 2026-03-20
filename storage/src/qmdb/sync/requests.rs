@@ -10,8 +10,10 @@ pub(super) struct Requests<Op, D: Digest, E> {
     /// Futures that will resolve to batches of operations
     #[allow(clippy::type_complexity)]
     futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>>,
-    /// Start locations of outstanding requests
-    /// Each element corresponds to an element in `futures` and vice versa
+    /// Start locations of outstanding requests.
+    /// A subset of the futures: entries are removed when a request completes
+    /// or is discarded, but the corresponding future remains in the stream
+    /// (removing from FuturesUnordered is expensive).
     locations: BTreeSet<Location>,
 }
 
@@ -35,9 +37,17 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
     }
 
     /// Remove a request from `self.locations` by its starting location.
+    /// Returns `true` if the request was tracked, `false` otherwise.
     /// Doesn't remove from `self.futures` as it would be expensive.
-    pub fn remove(&mut self, start_loc: Location) {
-        self.locations.remove(&start_loc);
+    pub fn remove(&mut self, start_loc: Location) -> bool {
+        self.locations.remove(&start_loc)
+    }
+
+    /// Remove all tracked locations before `loc`, keeping those >= `loc`.
+    /// Futures remain in the stream; when they complete, the caller can detect
+    /// they are untracked via the `false` return from [`Self::remove`].
+    pub fn remove_before(&mut self, loc: Location) {
+        self.locations = self.locations.split_off(&loc);
     }
 
     /// Get the set of outstanding request locations

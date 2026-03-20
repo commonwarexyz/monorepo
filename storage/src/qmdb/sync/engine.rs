@@ -19,7 +19,11 @@ use commonware_macros::select;
 use commonware_runtime::Metrics as _;
 use commonware_utils::{channel::mpsc, NZU64};
 use futures::{future::Either, StreamExt};
-use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    fmt::Debug,
+    num::NonZeroU64,
+};
 
 /// Type alias for sync engine errors
 type Error<DB, R> = qmdb::sync::Error<<R as Resolver>::Error, <DB as Database>::Digest>;
@@ -98,6 +102,10 @@ where
     pub db_config: DB::Config,
     /// Channel for receiving sync target updates
     pub update_rx: Option<mpsc::Receiver<Target<DB::Digest>>>,
+    /// Maximum number of previous roots to retain for verifying in-flight
+    /// requests after target updates. Set to 0 to disable (all retained
+    /// requests will be re-fetched).
+    pub max_retained_roots: usize,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
 pub(crate) struct Engine<DB, R>
@@ -118,6 +126,20 @@ where
 
     /// Pinned MMR nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
+
+    /// Historical roots from previous sync targets, keyed by tree size
+    /// (target.range.end()). Each tree size maps to a unique root because
+    /// the MMR is append-only and validate_update rejects unchanged roots.
+    /// When a retained request completes, proof.leaves identifies which
+    /// historical root to verify against.
+    retained_roots: HashMap<Location, DB::Digest>,
+
+    /// Tree sizes of retained roots in insertion order (oldest first),
+    /// used for FIFO eviction when retained_roots exceeds capacity.
+    retained_roots_order: VecDeque<Location>,
+
+    /// Maximum number of historical roots to retain
+    max_retained_roots: usize,
 
     /// The current sync target (root digest and operation bounds)
     target: Target<DB::Digest>,
@@ -189,6 +211,9 @@ where
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
             pinned_nodes: None,
+            retained_roots: HashMap::new(),
+            retained_roots_order: VecDeque::new(),
+            max_retained_roots: config.max_retained_roots,
             target: config.target.clone(),
             max_outstanding_requests: config.max_outstanding_requests,
             fetch_batch_size: config.fetch_batch_size,
@@ -273,28 +298,42 @@ where
         Ok(())
     }
 
-    /// Clear all sync state for a target update
+    /// Reset sync state for a target update.
+    ///
+    /// Only cancels requests that cover ranges before the new target range
+    /// start. Requests at or after the new start are retained; their proofs
+    /// will be verified against the saved historical root (see
+    /// `retained_roots`) so the fetched operations can still be used.
     pub async fn reset_for_target_update(
         mut self,
         new_target: Target<DB::Digest>,
     ) -> Result<Self, Error<DB, R>> {
         self.journal.resize(new_target.range.start()).await?;
+        // Remove requests at or before the new start. The +1 ensures we also
+        // clear the new start location itself, which schedule_requests will
+        // reuse for a pinned-nodes request (two futures sharing one location
+        // entry would cause the second to be silently discarded).
+        self.outstanding_requests
+            .remove_before(new_target.range.start().checked_add(1).unwrap());
+        self.fetched_operations.clear();
+        self.pinned_nodes = None;
 
-        Ok(Self {
-            outstanding_requests: Requests::new(),
-            fetched_operations: BTreeMap::new(),
-            pinned_nodes: None,
-            target: new_target,
-            max_outstanding_requests: self.max_outstanding_requests,
-            fetch_batch_size: self.fetch_batch_size,
-            apply_batch_size: self.apply_batch_size,
-            journal: self.journal,
-            resolver: self.resolver,
-            hasher: self.hasher,
-            context: self.context,
-            config: self.config,
-            update_receiver: self.update_receiver,
-        })
+        // Save the current root keyed by its tree size for verifying
+        // retained requests that were issued against this target.
+        if self.max_retained_roots > 0 {
+            let old_target_size = self.target.range.end();
+            self.retained_roots
+                .insert(old_target_size, self.target.root);
+            self.retained_roots_order.push_back(old_target_size);
+            while self.retained_roots.len() > self.max_retained_roots {
+                if let Some(oldest) = self.retained_roots_order.pop_front() {
+                    self.retained_roots.remove(&oldest);
+                }
+            }
+        }
+
+        self.target = new_target;
+        Ok(self)
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
@@ -389,18 +428,18 @@ where
 
     /// Handle the result of a fetch operation.
     ///
-    /// This method processes incoming fetch results by:
-    /// 1. Removing the request from outstanding requests
-    /// 2. Validating batch size
-    /// 3. Verifying proofs using the configured verifier
-    /// 4. Extracting pinned nodes if needed
-    /// 5. Storing valid operations for later application
+    /// Discards results for requests no longer tracked (removed by
+    /// `remove_before` during a target update). For tracked requests,
+    /// verifies the proof against the current root first, then falls back
+    /// to a matching historical root from `retained_roots` if available.
     fn handle_fetch_result(
         &mut self,
         fetch_result: IndexedFetchResult<DB::Op, DB::Digest, R::Error>,
     ) -> Result<(), Error<DB, R>> {
-        // Mark request as complete
-        self.outstanding_requests.remove(fetch_result.start_loc);
+        // Discard results for requests removed by a target update.
+        if !self.outstanding_requests.remove(fetch_result.start_loc) {
+            return Ok(());
+        }
 
         let start_loc = fetch_result.start_loc;
         let FetchResult {
@@ -419,8 +458,25 @@ where
             return Ok(());
         }
 
-        // Verify the proof (and pinned nodes if this is the sync boundary batch).
-        let need_pinned = self.pinned_nodes.is_none() && start_loc == self.target.range.start();
+        // Look up the root to verify against using proof.leaves (the tree
+        // size the request was issued for). Fresh requests match the current
+        // target; retained requests match a historical root.
+        let is_current = proof.leaves == self.target.range.end();
+        let target_root = if is_current {
+            &self.target.root
+        } else {
+            let Some(root) = self.retained_roots.get(&proof.leaves) else {
+                let _ = success_tx.send(false);
+                return Ok(());
+            };
+            root
+        };
+
+        // Verify the proof. Pinned nodes are only extracted from proofs
+        // for the current root because the database needs them for the
+        // latest tree size.
+        let need_pinned =
+            is_current && self.pinned_nodes.is_none() && start_loc == self.target.range.start();
         let valid = if need_pinned {
             let nodes = pinned_nodes.as_deref().unwrap_or(&[]);
             qmdb::verify_proof_and_pinned_nodes(
@@ -429,19 +485,12 @@ where
                 start_loc,
                 &operations,
                 nodes,
-                &self.target.root,
+                target_root,
             )
         } else {
-            qmdb::verify_proof(
-                &self.hasher,
-                &proof,
-                start_loc,
-                &operations,
-                &self.target.root,
-            )
+            qmdb::verify_proof(&self.hasher, &proof, start_loc, &operations, target_root)
         };
 
-        // Report success or failure to the resolver.
         let _ = success_tx.send(valid);
 
         if !valid {
@@ -451,7 +500,7 @@ where
             return Ok(());
         }
 
-        // Cache pinned nodes only after successful verification.
+        // Cache pinned nodes only from current-root-verified proofs.
         if need_pinned {
             if let Some(nodes) = pinned_nodes {
                 self.pinned_nodes = Some(nodes);
@@ -559,6 +608,7 @@ mod tests {
     use crate::mmr::Proof;
     use commonware_cryptography::sha256;
     use commonware_utils::channel::oneshot;
+    use std::{future::Future, pin::Pin};
 
     #[test]
     fn test_outstanding_requests() {
@@ -587,5 +637,106 @@ mod tests {
         // Test removing requests
         requests.remove(Location::new(10));
         assert!(!requests.locations().contains(&Location::new(10)));
+    }
+
+    fn dummy_future(
+        loc: u64,
+    ) -> Pin<Box<dyn Future<Output = IndexedFetchResult<i32, sha256::Digest, ()>> + Send>> {
+        Box::pin(async move {
+            IndexedFetchResult {
+                start_loc: Location::new(loc),
+                result: Ok(FetchResult {
+                    proof: Proof {
+                        leaves: Location::new(0),
+                        digests: vec![],
+                    },
+                    operations: vec![],
+                    success_tx: oneshot::channel().0,
+                    pinned_nodes: None,
+                }),
+            }
+        })
+    }
+
+    #[test]
+    fn test_remove_before() {
+        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+
+        requests.add(Location::new(5), dummy_future(5));
+        requests.add(Location::new(10), dummy_future(10));
+        requests.add(Location::new(15), dummy_future(15));
+        requests.add(Location::new(20), dummy_future(20));
+        assert_eq!(requests.len(), 4);
+
+        // Remove requests before location 10 -- should drop loc 5
+        requests.remove_before(Location::new(10));
+        assert_eq!(requests.len(), 3);
+        assert!(!requests.locations().contains(&Location::new(5)));
+        assert!(requests.locations().contains(&Location::new(10)));
+        assert!(requests.locations().contains(&Location::new(15)));
+        assert!(requests.locations().contains(&Location::new(20)));
+    }
+
+    #[test]
+    fn test_remove_before_all() {
+        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+
+        requests.add(Location::new(5), dummy_future(5));
+        requests.add(Location::new(10), dummy_future(10));
+        assert_eq!(requests.len(), 2);
+
+        // Remove all requests
+        requests.remove_before(Location::new(100));
+        assert_eq!(requests.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_before_empty() {
+        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+        requests.remove_before(Location::new(10));
+        assert_eq!(requests.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_before_none() {
+        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+
+        requests.add(Location::new(10), dummy_future(10));
+        requests.add(Location::new(20), dummy_future(20));
+        assert_eq!(requests.len(), 2);
+
+        // Cutoff before all requests -- nothing removed
+        requests.remove_before(Location::new(5));
+        assert_eq!(requests.len(), 2);
+        assert!(requests.locations().contains(&Location::new(10)));
+        assert!(requests.locations().contains(&Location::new(20)));
+    }
+
+    #[test]
+    fn test_remove_returns_tracked_status() {
+        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+
+        requests.add(Location::new(10), dummy_future(10));
+        assert!(requests.remove(Location::new(10)));
+        assert!(!requests.remove(Location::new(10)));
+        assert!(!requests.remove(Location::new(99)));
+    }
+
+    #[test]
+    fn test_remove_after_remove_before() {
+        let mut requests: Requests<i32, sha256::Digest, ()> = Requests::new();
+
+        requests.add(Location::new(5), dummy_future(5));
+        requests.add(Location::new(10), dummy_future(10));
+        requests.add(Location::new(15), dummy_future(15));
+
+        // Discard locations before 10
+        requests.remove_before(Location::new(10));
+
+        // Discarded location: remove returns false
+        assert!(!requests.remove(Location::new(5)));
+        // Retained location: remove returns true
+        assert!(requests.remove(Location::new(10)));
+        assert!(requests.remove(Location::new(15)));
     }
 }
