@@ -543,9 +543,52 @@ pub fn fft_butterfly_gf32_avx512(
     }
 }
 
-/// AVX-512 implementation using 512-bit VPCLMULQDQ
-/// Processes 8 elements at once using full 512-bit vectors
-/// Requires Rust 1.89+ for _mm512_extracti64x4_epi64
+/// Vectorized GF(2^32) reduction on 8 x 64-bit products in a __m512i.
+///
+/// Each 64-bit lane holds a 63-bit carry-less product. The high 32 bits
+/// are reduced modulo x^32 + x^15 + x^9 + x^7 + x^4 + x^3 + 1 using
+/// shifts and XORs, all in-register.
+#[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+#[target_feature(enable = "avx512f")]
+#[inline]
+unsafe fn reduce_gf32_avx512(p: core::arch::x86_64::__m512i) -> core::arch::x86_64::__m512i {
+    use core::arch::x86_64::*;
+
+    // hi = p >> 32 (high 32 bits of each 64-bit lane)
+    let hi = _mm512_srli_epi64(p, 32);
+    // lo = p & 0xFFFFFFFF
+    let mask32 = _mm512_set1_epi64(0xFFFFFFFFi64);
+    let lo = _mm512_and_si512(p, mask32);
+
+    // tmp = hi ^ (hi >> 17) ^ (hi >> 23) ^ (hi >> 25) ^ (hi >> 28) ^ (hi >> 29)
+    let tmp = _mm512_xor_si512(
+        _mm512_xor_si512(
+            _mm512_xor_si512(hi, _mm512_srli_epi64(hi, 17)),
+            _mm512_xor_si512(_mm512_srli_epi64(hi, 23), _mm512_srli_epi64(hi, 25)),
+        ),
+        _mm512_xor_si512(_mm512_srli_epi64(hi, 28), _mm512_srli_epi64(hi, 29)),
+    );
+
+    // res = lo ^ tmp ^ (tmp << 3) ^ (tmp << 4) ^ (tmp << 7) ^ (tmp << 9) ^ (tmp << 15)
+    let res = _mm512_xor_si512(
+        _mm512_xor_si512(
+            _mm512_xor_si512(lo, tmp),
+            _mm512_xor_si512(_mm512_slli_epi64(tmp, 3), _mm512_slli_epi64(tmp, 4)),
+        ),
+        _mm512_xor_si512(
+            _mm512_xor_si512(_mm512_slli_epi64(tmp, 7), _mm512_slli_epi64(tmp, 9)),
+            _mm512_slli_epi64(tmp, 15),
+        ),
+    );
+
+    // Mask to 32 bits
+    _mm512_and_si512(res, mask32)
+}
+
+/// AVX-512 FFT butterfly: fully vectorized multiply, reduce, and XOR.
+///
+/// Processes 16 elements per iteration (two rounds of 8-wide VPCLMULQDQ).
+/// Multiply, reduce, and butterfly XOR all stay in 512-bit registers.
 #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
 #[target_feature(enable = "avx512f,vpclmulqdq")]
 unsafe fn fft_butterfly_gf32_avx512_impl(
@@ -559,77 +602,91 @@ unsafe fn fft_butterfly_gf32_avx512_impl(
     let len = u.len();
 
     let lambda_val = lambda.poly().value() as u64;
-    // Broadcast lambda to all 8 lanes of 512-bit vector
     let lambda_512 = _mm512_set1_epi64(lambda_val as i64);
+
+    // SAFETY: BinaryElem32 is repr(transparent) over a u32 wrapper.
+    // Interpreting &[BinaryElem32] as &[u32] is sound for aligned SIMD loads.
+    let u_ptr = u.as_mut_ptr() as *mut u32;
+    let w_ptr = w.as_mut_ptr() as *mut u32;
 
     let mut i = 0;
 
-    // Process 8 elements at once using 512-bit vectors
-    // VPCLMULQDQ on 512-bit does 4 clmuls per instruction (one per 128-bit lane)
-    // We pack elements: [w0, w1] [w2, w3] [w4, w5] [w6, w7] in 4 x 128-bit lanes
-    while i + 8 <= len {
-        // Load 8 w elements into 512-bit vector
-        // Each 128-bit lane holds 2 elements for clmul
-        let w_512 = _mm512_set_epi64(
-            w[i + 7].poly().value() as i64,
-            w[i + 6].poly().value() as i64,
-            w[i + 5].poly().value() as i64,
-            w[i + 4].poly().value() as i64,
-            w[i + 3].poly().value() as i64,
-            w[i + 2].poly().value() as i64,
-            w[i + 1].poly().value() as i64,
-            w[i].poly().value() as i64,
-        );
+    // Process 16 elements per iteration: two batches of 8
+    while i + 16 <= len {
+        for batch in 0..2 {
+            let off = i + batch * 8;
 
-        // VPCLMULQDQ selector 0x00: multiply low 64-bits of each 128-bit lane
-        // This gives us: lambda*w[0], lambda*w[2], lambda*w[4], lambda*w[6]
+            // Load 8 x u32 from w, zero-extend to 8 x u64 in __m512i
+            // SAFETY: we checked i + 16 <= len, so off + 7 < len
+            let w_256 = _mm256_loadu_si256(w_ptr.add(off) as *const __m256i);
+            let w_512 = _mm512_cvtepu32_epi64(w_256);
+
+            // VPCLMULQDQ: 4 clmuls per instruction, 2 instructions = 8 products
+            // Selector 0x00: low*low of each 128-bit lane (even indices)
+            // Selector 0x01: low*high of each 128-bit lane (odd indices)
+            let prod_even = _mm512_clmulepi64_epi128(lambda_512, w_512, 0x00);
+            let prod_odd = _mm512_clmulepi64_epi128(lambda_512, w_512, 0x01);
+
+            // Interleave even/odd products back to original order:
+            // prod_even has results in lanes [0,_,2,_,4,_,6,_]
+            // prod_odd has results in lanes  [_,1,_,3,_,5,_,7]
+            // Merge: take even from prod_even, odd from prod_odd
+            let merge_idx = _mm512_set_epi64(15, 6, 13, 4, 11, 2, 9, 0);
+            let products = _mm512_permutex2var_epi64(prod_even, merge_idx, prod_odd);
+
+            // Reduce all 8 products in-register
+            let reduced = reduce_gf32_avx512(products);
+
+            // Load 8 x u32 from u, zero-extend to 8 x u64
+            let u_256 = _mm256_loadu_si256(u_ptr.add(off) as *const __m256i);
+            let u_512 = _mm512_cvtepu32_epi64(u_256);
+
+            // u' = u ^ lambda_w
+            let u_new = _mm512_xor_si512(u_512, reduced);
+
+            // w' = w ^ u' (original w XOR new u)
+            let w_new = _mm512_xor_si512(w_512, u_new);
+
+            // Truncate 64->32 and store back
+            let u_out = _mm512_cvtepi64_epi32(u_new);
+            let w_out = _mm512_cvtepi64_epi32(w_new);
+
+            _mm256_storeu_si256(u_ptr.add(off) as *mut __m256i, u_out);
+            _mm256_storeu_si256(w_ptr.add(off) as *mut __m256i, w_out);
+        }
+
+        i += 16;
+    }
+
+    // Handle remaining 8 elements
+    if i + 8 <= len {
+        let w_256 = _mm256_loadu_si256(w_ptr.add(i) as *const __m256i);
+        let w_512 = _mm512_cvtepu32_epi64(w_256);
+
         let prod_even = _mm512_clmulepi64_epi128(lambda_512, w_512, 0x00);
-
-        // VPCLMULQDQ selector 0x01: multiply low of first operand with high of second
-        // This gives us: lambda*w[1], lambda*w[3], lambda*w[5], lambda*w[7]
         let prod_odd = _mm512_clmulepi64_epi128(lambda_512, w_512, 0x01);
 
-        // Extract 256-bit halves using _mm512_extracti64x4_epi64 (Rust 1.89+)
-        let prod_even_lo: __m256i = _mm512_extracti64x4_epi64::<0>(prod_even);
-        let prod_even_hi: __m256i = _mm512_extracti64x4_epi64::<1>(prod_even);
-        let prod_odd_lo: __m256i = _mm512_extracti64x4_epi64::<0>(prod_odd);
-        let prod_odd_hi: __m256i = _mm512_extracti64x4_epi64::<1>(prod_odd);
+        let merge_idx = _mm512_set_epi64(15, 6, 13, 4, 11, 2, 9, 0);
+        let products = _mm512_permutex2var_epi64(prod_even, merge_idx, prod_odd);
 
-        // Extract individual 64-bit products
-        let p0 = _mm256_extract_epi64::<0>(prod_even_lo) as u64; // lambda * w[0]
-        let p2 = _mm256_extract_epi64::<2>(prod_even_lo) as u64; // lambda * w[2]
-        let p4 = _mm256_extract_epi64::<0>(prod_even_hi) as u64; // lambda * w[4]
-        let p6 = _mm256_extract_epi64::<2>(prod_even_hi) as u64; // lambda * w[6]
+        let reduced = reduce_gf32_avx512(products);
 
-        let p1 = _mm256_extract_epi64::<0>(prod_odd_lo) as u64; // lambda * w[1]
-        let p3 = _mm256_extract_epi64::<2>(prod_odd_lo) as u64; // lambda * w[3]
-        let p5 = _mm256_extract_epi64::<0>(prod_odd_hi) as u64; // lambda * w[5]
-        let p7 = _mm256_extract_epi64::<2>(prod_odd_hi) as u64; // lambda * w[7]
+        let u_256 = _mm256_loadu_si256(u_ptr.add(i) as *const __m256i);
+        let u_512 = _mm512_cvtepu32_epi64(u_256);
 
-        // Reduce all 8 products
-        let lw = [
-            reduce_gf32_inline(p0) as u32,
-            reduce_gf32_inline(p1) as u32,
-            reduce_gf32_inline(p2) as u32,
-            reduce_gf32_inline(p3) as u32,
-            reduce_gf32_inline(p4) as u32,
-            reduce_gf32_inline(p5) as u32,
-            reduce_gf32_inline(p6) as u32,
-            reduce_gf32_inline(p7) as u32,
-        ];
+        let u_new = _mm512_xor_si512(u_512, reduced);
+        let w_new = _mm512_xor_si512(w_512, u_new);
 
-        // u[i] = u[i] XOR lambda_w[i], then w[i] = w[i] XOR u[i]
-        for j in 0..8 {
-            let u_val = u[i + j].poly().value() ^ lw[j];
-            let w_val = w[i + j].poly().value() ^ u_val;
-            u[i + j] = BinaryElem32::from(u_val);
-            w[i + j] = BinaryElem32::from(w_val);
-        }
+        let u_out = _mm512_cvtepi64_epi32(u_new);
+        let w_out = _mm512_cvtepi64_epi32(w_new);
+
+        _mm256_storeu_si256(u_ptr.add(i) as *mut __m256i, u_out);
+        _mm256_storeu_si256(w_ptr.add(i) as *mut __m256i, w_out);
 
         i += 8;
     }
 
-    // Handle remaining elements with scalar
+    // Scalar tail
     while i < len {
         let lambda_w = lambda.mul(&w[i]);
         u[i] = u[i].add(&lambda_w);
@@ -650,9 +707,42 @@ fn reduce_gf32_inline(p: u64) -> u64 {
     lo ^ tmp ^ (tmp << 3) ^ (tmp << 4) ^ (tmp << 7) ^ (tmp << 9) ^ (tmp << 15)
 }
 
-/// AVX2 vectorized FFT butterfly operation for GF(2^32)
-/// Processes 4 elements at once using 256-bit VPCLMULQDQ
-/// For CPUs with AVX2 but not AVX-512
+/// Vectorized GF(2^32) reduction on 4 x 64-bit products in a __m256i.
+#[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn reduce_gf32_avx2(p: core::arch::x86_64::__m256i) -> core::arch::x86_64::__m256i {
+    use core::arch::x86_64::*;
+
+    let hi = _mm256_srli_epi64(p, 32);
+    let mask32 = _mm256_set1_epi64x(0xFFFFFFFFi64);
+    let lo = _mm256_and_si256(p, mask32);
+
+    let tmp = _mm256_xor_si256(
+        _mm256_xor_si256(
+            _mm256_xor_si256(hi, _mm256_srli_epi64(hi, 17)),
+            _mm256_xor_si256(_mm256_srli_epi64(hi, 23), _mm256_srli_epi64(hi, 25)),
+        ),
+        _mm256_xor_si256(_mm256_srli_epi64(hi, 28), _mm256_srli_epi64(hi, 29)),
+    );
+
+    let res = _mm256_xor_si256(
+        _mm256_xor_si256(
+            _mm256_xor_si256(lo, tmp),
+            _mm256_xor_si256(_mm256_slli_epi64(tmp, 3), _mm256_slli_epi64(tmp, 4)),
+        ),
+        _mm256_xor_si256(
+            _mm256_xor_si256(_mm256_slli_epi64(tmp, 7), _mm256_slli_epi64(tmp, 9)),
+            _mm256_slli_epi64(tmp, 15),
+        ),
+    );
+
+    _mm256_and_si256(res, mask32)
+}
+
+/// AVX2 FFT butterfly: fully vectorized multiply, reduce, and XOR.
+///
+/// Processes 4 elements per iteration using 256-bit VPCLMULQDQ.
 #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
 #[target_feature(enable = "avx2,vpclmulqdq")]
 unsafe fn fft_butterfly_gf32_avx2_impl(
@@ -666,56 +756,69 @@ unsafe fn fft_butterfly_gf32_avx2_impl(
     let len = u.len();
 
     let lambda_val = lambda.poly().value() as u64;
-    // Broadcast lambda to both 128-bit lanes
     let lambda_256 = _mm256_set1_epi64x(lambda_val as i64);
+
+    // SAFETY: BinaryElem32 is repr(transparent) over a u32 wrapper.
+    let u_ptr = u.as_mut_ptr() as *mut u32;
+    let w_ptr = w.as_mut_ptr() as *mut u32;
 
     let mut i = 0;
 
-    // Process 4 elements at once using 256-bit vectors
-    // VPCLMULQDQ on 256-bit does 2 clmuls per instruction (one per 128-bit lane)
     while i + 4 <= len {
-        // Load 4 w elements: [w0, w1] in low lane, [w2, w3] in high lane
-        let w_256 = _mm256_set_epi64x(
-            w[i + 3].poly().value() as i64,
-            w[i + 2].poly().value() as i64,
-            w[i + 1].poly().value() as i64,
-            w[i].poly().value() as i64,
-        );
+        // Load 4 x u32 from w, zero-extend to 4 x u64
+        let w_128 = _mm_loadu_si128(w_ptr.add(i) as *const __m128i);
+        let w_256 = _mm256_cvtepu32_epi64(w_128);
 
-        // Selector 0x00: multiply low 64-bits of each 128-bit lane
-        // Gives: lambda*w[0], lambda*w[2]
+        // 2 VPCLMULQDQ: even lanes (0x00) and odd lanes (0x01)
         let prod_even = _mm256_clmulepi64_epi128(lambda_256, w_256, 0x00);
-
-        // Selector 0x01: multiply low of first with high of second
-        // Gives: lambda*w[1], lambda*w[3]
         let prod_odd = _mm256_clmulepi64_epi128(lambda_256, w_256, 0x01);
 
-        // Extract products
-        let p0 = _mm256_extract_epi64::<0>(prod_even) as u64;
-        let p2 = _mm256_extract_epi64::<2>(prod_even) as u64;
-        let p1 = _mm256_extract_epi64::<0>(prod_odd) as u64;
-        let p3 = _mm256_extract_epi64::<2>(prod_odd) as u64;
+        // Interleave: prod_even has [p0, _, p2, _], prod_odd has [_, p1, _, p3]
+        // Blend: take even lanes from prod_even, odd lanes from prod_odd
+        let products = _mm256_blend_epi32(prod_even, prod_odd, 0b11001100);
 
-        // Reduce all 4 products
-        let lw = [
-            reduce_gf32_inline(p0) as u32,
-            reduce_gf32_inline(p1) as u32,
-            reduce_gf32_inline(p2) as u32,
-            reduce_gf32_inline(p3) as u32,
-        ];
+        // Reduce in-register
+        let reduced = reduce_gf32_avx2(products);
 
-        // u[i] = u[i] XOR lambda_w[i], then w[i] = w[i] XOR u[i]
-        for j in 0..4 {
-            let u_val = u[i + j].poly().value() ^ lw[j];
-            let w_val = w[i + j].poly().value() ^ u_val;
-            u[i + j] = BinaryElem32::from(u_val);
-            w[i + j] = BinaryElem32::from(w_val);
-        }
+        // Load 4 x u32 from u, zero-extend
+        let u_128 = _mm_loadu_si128(u_ptr.add(i) as *const __m128i);
+        let u_256 = _mm256_cvtepu32_epi64(u_128);
+
+        // u' = u ^ reduced, w' = w ^ u'
+        let u_new = _mm256_xor_si256(u_256, reduced);
+        let w_new = _mm256_xor_si256(w_256, u_new);
+
+        // Truncate 64->32 and store (pack with shuffle)
+        // Extract lower 32 bits of each 64-bit lane
+        let u_packed = _mm256_shuffle_epi8(
+            u_new,
+            _mm256_set_epi8(
+                -1, -1, -1, -1, -1, -1, -1, -1, 28, 24, 20, 16, -1, -1, -1, -1,
+                -1, -1, -1, -1, 12, 8, 4, 0, -1, -1, -1, -1, -1, -1, -1, -1,
+            ),
+        );
+        let u_lo = _mm256_extracti128_si256::<0>(u_packed);
+        let u_hi = _mm256_extracti128_si256::<1>(u_packed);
+        let u_out = _mm_or_si128(u_lo, u_hi);
+
+        let w_packed = _mm256_shuffle_epi8(
+            w_new,
+            _mm256_set_epi8(
+                -1, -1, -1, -1, -1, -1, -1, -1, 28, 24, 20, 16, -1, -1, -1, -1,
+                -1, -1, -1, -1, 12, 8, 4, 0, -1, -1, -1, -1, -1, -1, -1, -1,
+            ),
+        );
+        let w_lo = _mm256_extracti128_si256::<0>(w_packed);
+        let w_hi = _mm256_extracti128_si256::<1>(w_packed);
+        let w_out = _mm_or_si128(w_lo, w_hi);
+
+        _mm_storeu_si128(u_ptr.add(i) as *mut __m128i, u_out);
+        _mm_storeu_si128(w_ptr.add(i) as *mut __m128i, w_out);
 
         i += 4;
     }
 
-    // Handle remaining elements with scalar
+    // Scalar tail
     while i < len {
         let lambda_w = lambda.mul(&w[i]);
         u[i] = u[i].add(&lambda_w);
