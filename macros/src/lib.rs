@@ -240,7 +240,9 @@ pub use commonware_macros_impl::stability_mod;
 /// Marks all items within a scope with a stability level and optional cfg predicate.
 ///
 /// When building with `RUSTFLAGS="--cfg commonware_stability_N"`, items with stability
-/// less than N are excluded.
+/// less than N are excluded. You can also provide an optional `else { ... }`
+/// fallback scope that is enabled when the stability scope is excluded, or
+/// chain `else LEVEL { ... }` arms for match-like fallback by stability level.
 ///
 /// # Example
 /// ```rust,ignore
@@ -255,6 +257,22 @@ pub use commonware_macros_impl::stability_mod;
 /// // With cfg predicate
 /// stability_scope!(BETA, cfg(feature = "std") {
 ///     pub mod std_only_module;
+/// });
+///
+/// // With fallback scope
+/// stability_scope!(ALPHA {
+///     pub fn alpha_only() {}
+/// } else {
+///     pub fn non_alpha_fallback() {}
+/// });
+///
+/// // Multi-level fallback
+/// stability_scope!(ALPHA {
+///     pub fn alpha_path() {}
+/// } else BETA {
+///     pub fn beta_path() {}
+/// } else {
+///     pub fn gamma_or_higher_path() {}
 /// });
 /// ```
 ///
