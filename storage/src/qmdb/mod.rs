@@ -35,7 +35,7 @@
 //!
 //! # Traits
 //!
-//! Keyed mutable variants ([any] and [current]) implement [any::traits::DbAny] and
+//! Keyed mutable variants ([any] and [current]) implement `any::traits::DbAny` and
 //! [crate::Persistable].
 //!
 //! # Acknowledgments
@@ -111,12 +111,6 @@ pub enum Error {
     /// The changeset was created from a different database state than the current one.
     #[error("stale changeset: batch expected db size {expected}, but db has {actual}")]
     StaleChangeset { expected: u64, actual: u64 },
-}
-
-impl From<crate::merkle::Error> for Error {
-    fn from(e: crate::merkle::Error) -> Self {
-        Self::Mmr(e.into())
-    }
 }
 
 impl From<crate::journal::authenticated::Error> for Error {

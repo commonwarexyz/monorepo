@@ -9,13 +9,11 @@ use crate::{
         contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
+    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher as _, storage::Storage as MerkleStorage},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         self,
-        hasher::Hasher as _,
         iterator::{nodes_to_pin, PeakIterator},
-        mem::MIN_TO_PARALLELIZE,
-        storage::Storage as _,
         Location, Position, StandardHasher,
     },
     qmdb::{
@@ -150,7 +148,7 @@ where
     /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR. For positions at or
     /// above the grafting height, returns grafted MMR node. For positions below the grafting
     /// height, the ops MMR is used.
-    fn grafted_storage(&self) -> impl mmr::storage::Storage<Digest = H::Digest> + '_ {
+    fn grafted_storage(&self) -> impl MerkleStorage<mmr::Family, Digest = H::Digest> + '_ {
         grafting::Storage::new(
             &self.grafted_mmr,
             grafting::height::<N>(),
@@ -221,7 +219,7 @@ where
     /// # Errors
     ///
     /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk.
-    /// Returns [mmr::Error::LocationOverflow] if `start_loc` > [mmr::MAX_LOCATION].
+    /// Returns [mmr::Error::LocationOverflow] if `start_loc` > [crate::merkle::Family::MAX_LEAVES].
     /// Returns [mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     pub async fn range_proof(
         &self,
@@ -295,7 +293,7 @@ where
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [mmr::Error::LocationOverflow] if `prune_loc` > [mmr::MAX_LOCATION].
+    /// - Returns [mmr::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         self.flatten();
 
@@ -382,7 +380,7 @@ where
             metadata.put(key, digest.to_vec());
         }
 
-        metadata.sync().await.map_err(mmr::Error::MetadataError)?;
+        metadata.sync().await.map_err(mmr::Error::Metadata)?;
 
         Ok(())
     }
@@ -528,8 +526,8 @@ pub(super) fn combine_roots<H: Hasher>(
 /// See the [Root structure](super) section in the module documentation.
 pub(super) async fn compute_db_root<
     H: Hasher,
-    G: mmr::read::Readable<Digest = H::Digest>,
-    S: mmr::storage::Storage<Digest = H::Digest>,
+    G: mmr::Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+    S: MerkleStorage<mmr::Family, Digest = H::Digest>,
     const N: usize,
 >(
     hasher: &StandardHasher<H>,
@@ -555,14 +553,14 @@ pub(super) async fn compute_db_root<
 /// `storage` is the grafted storage over the grafted MMR and the ops MMR.
 pub(super) async fn compute_grafted_mmr_root<
     H: Hasher,
-    G: mmr::read::Readable<Digest = H::Digest>,
-    S: mmr::storage::Storage<Digest = H::Digest>,
+    G: mmr::Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+    S: MerkleStorage<mmr::Family, Digest = H::Digest>,
 >(
     hasher: &StandardHasher<H>,
     storage: &grafting::Storage<'_, H::Digest, G, S>,
 ) -> Result<H::Digest, Error> {
     let size = storage.size().await;
-    let leaves = Location::try_from(size).map_err(mmr::Error::from)?;
+    let leaves = Location::try_from(size)?;
 
     // Collect peak digests from the grafted storage, which transparently dispatches
     // to the grafted MMR or the ops MMR based on height.
@@ -586,7 +584,7 @@ pub(super) async fn compute_grafted_mmr_root<
 /// When a thread pool is provided and there are enough chunks, hashing is parallelized.
 pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
     hasher: &StandardHasher<H>,
-    ops_mmr: &impl mmr::storage::Storage<Digest = H::Digest>,
+    ops_mmr: &impl MerkleStorage<mmr::Family, Digest = H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     pool: Option<&ThreadPool>,
 ) -> Result<Vec<(Position, H::Digest)>, Error> {
@@ -651,7 +649,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     hasher: &StandardHasher<H>,
     bitmap: &BitMap<N>,
     pinned_nodes: &[H::Digest],
-    ops_mmr: &impl mmr::storage::Storage<Digest = H::Digest>,
+    ops_mmr: &impl MerkleStorage<mmr::Family, Digest = H::Digest>,
     pool: Option<&ThreadPool>,
 ) -> Result<mmr::mem::Mmr<H::Digest>, Error> {
     let grafting_height = grafting::height::<N>();

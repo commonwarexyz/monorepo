@@ -1,7 +1,8 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::mmr::{
-    location::LocationRangeExt as _, mem::Mmr, Location, StandardHasher,
+use commonware_storage::{
+    merkle::LocationRangeExt as _,
+    mmr::{mem::Mmr, Location, StandardHasher},
 };
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;

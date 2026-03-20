@@ -11,7 +11,7 @@ use crate::{
         Error as JournalError,
     },
     mmr::{
-        batch, journaled::Mmr, read::Readable, Error as MmrError, Location, Position, Proof,
+        self, batch, journaled::Mmr, Error as MmrError, Location, Position, Proof, Readable,
         StandardHasher,
     },
     Persistable,
@@ -29,7 +29,7 @@ use tracing::{debug, warn};
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("mmr error: {0}")]
-    Mmr(#[from] crate::mmr::Error),
+    Mmr(#[from] mmr::Error),
 
     #[error("journal error: {0}")]
     Journal(#[from] super::Error),
@@ -146,7 +146,9 @@ impl<D: Digest, Item: Send + Sync> MerkleizedBatch<D, Item> {
 }
 
 impl<D: Digest, Item: Send + Sync> Readable for MerkleizedBatch<D, Item> {
+    type Family = mmr::Family;
     type Digest = D;
+    type Error = mmr::Error;
 
     fn size(&self) -> Position {
         self.inner.size()
@@ -162,6 +164,22 @@ impl<D: Digest, Item: Send + Sync> Readable for MerkleizedBatch<D, Item> {
 
     fn pruned_to_pos(&self) -> Position {
         self.inner.pruned_to_pos()
+    }
+
+    fn proof(
+        &self,
+        hasher: &impl crate::merkle::hasher::Hasher<mmr::Family, Digest = D>,
+        loc: Location,
+    ) -> Result<Proof<D>, mmr::Error> {
+        self.inner.proof(hasher, loc)
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &impl crate::merkle::hasher::Hasher<mmr::Family, Digest = D>,
+        range: core::ops::Range<Location>,
+    ) -> Result<Proof<D>, mmr::Error> {
+        self.inner.range_proof(hasher, range)
     }
 }
 
@@ -412,7 +430,7 @@ where
     /// # Errors
     ///
     /// - Returns [Error::Mmr] with [MmrError::LocationOverflow] if `start_loc` >
-    ///   [crate::mmr::MAX_LOCATION].
+    ///   [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [Error::Mmr] with [MmrError::RangeOutOfBounds] if `start_loc` >= current
     ///   item count.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
@@ -518,7 +536,7 @@ where
     /// initialization.
     pub async fn new(
         context: E,
-        mmr_cfg: crate::mmr::journaled::Config,
+        mmr_cfg: mmr::journaled::Config,
         journal_cfg: fixed::Config,
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
@@ -557,7 +575,7 @@ where
     /// initialization.
     pub async fn new(
         context: E,
-        mmr_cfg: crate::mmr::journaled::Config,
+        mmr_cfg: mmr::journaled::Config,
         journal_cfg: variable::Config<O::Cfg>,
         rewind_predicate: fn(&O) -> bool,
     ) -> Result<Self, Error> {
@@ -814,7 +832,7 @@ mod tests {
 
     /// Verify that a proof correctly proves the given operations are included in the MMR.
     fn verify_proof(
-        proof: &crate::mmr::Proof<<Sha256 as commonware_cryptography::Hasher>::Digest>,
+        proof: &mmr::Proof<<Sha256 as commonware_cryptography::Hasher>::Digest>,
         operations: &[Operation<Digest, Digest>],
         start_loc: Location,
         root: &<Sha256 as commonware_cryptography::Hasher>::Digest,
@@ -1622,7 +1640,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Mmr(mmr::Error::RangeOutOfBounds(_)))
             ));
         });
     }
@@ -1640,7 +1658,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Mmr(mmr::Error::RangeOutOfBounds(_)))
             ));
         });
     }
@@ -1861,7 +1879,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset, got {result:?}"
             );
@@ -1900,7 +1918,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset for sibling, got {result:?}"
             );
@@ -1930,7 +1948,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset for child after parent applied, got {result:?}"
             );
@@ -1960,7 +1978,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset for parent after child applied, got {result:?}"
             );

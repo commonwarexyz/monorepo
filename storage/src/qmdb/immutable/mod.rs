@@ -228,7 +228,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     /// # Errors
     ///
     /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
-    /// [crate::mmr::MAX_LOCATION].
+    /// [crate::merkle::Family::MAX_LEAVES].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
     /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
@@ -250,7 +250,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > last commit location.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         if loc > self.last_commit_loc {
             return Err(Error::PruneBeyondMinRequired(loc, self.last_commit_loc));

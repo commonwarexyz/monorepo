@@ -6,9 +6,8 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
-    mmr::{
-        self, read::Readable, storage::Storage as MmrStorage, Location, Position, StandardHasher,
-    },
+    merkle::storage::Storage as MmrStorage,
+    mmr::{self, Location, Position, Readable, StandardHasher},
     qmdb::{
         any::{
             self,
@@ -254,14 +253,23 @@ impl<B: BitmapRead<N>, const N: usize> BitmapRead<N> for BitmapDiff<'_, B, N> {
 /// Tries the batch chain's sync [`Readable`] first (which covers nodes appended or overwritten
 /// by the batch, plus anything still in the in-memory MMR). Falls through to the base's async
 /// [`MmrStorage`].
-struct BatchStorageAdapter<'a, D: Digest, R: Readable<Digest = D>, S: MmrStorage<Digest = D>> {
+struct BatchStorageAdapter<
+    'a,
+    D: Digest,
+    R: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
+    S: MmrStorage<mmr::Family, Digest = D>,
+> {
     batch: &'a R,
     base: &'a S,
     _phantom: core::marker::PhantomData<D>,
 }
 
-impl<'a, D: Digest, R: Readable<Digest = D>, S: MmrStorage<Digest = D>>
-    BatchStorageAdapter<'a, D, R, S>
+impl<
+        'a,
+        D: Digest,
+        R: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
+        S: MmrStorage<mmr::Family, Digest = D>,
+    > BatchStorageAdapter<'a, D, R, S>
 {
     const fn new(batch: &'a R, base: &'a S) -> Self {
         Self {
@@ -272,8 +280,11 @@ impl<'a, D: Digest, R: Readable<Digest = D>, S: MmrStorage<Digest = D>>
     }
 }
 
-impl<D: Digest, R: Readable<Digest = D>, S: MmrStorage<Digest = D>> MmrStorage
-    for BatchStorageAdapter<'_, D, R, S>
+impl<
+        D: Digest,
+        R: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
+        S: MmrStorage<mmr::Family, Digest = D>,
+    > MmrStorage<mmr::Family> for BatchStorageAdapter<'_, D, R, S>
 {
     type Digest = D;
 
