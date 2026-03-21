@@ -49,9 +49,10 @@ use commonware_runtime::{Buf, BufMut};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
-/// There should never be more than 255 levels in a proof (would mean the Binary Merkle Tree
-/// has more than 2^255 leaves).
-pub const MAX_LEVELS: usize = u8::MAX as usize;
+/// There should never be more than 32 sibling levels in a proof. Since `leaf_count` is a `u32`,
+/// a tree can have at most `u32::MAX` leaves, which requires at most `u32::BITS = 32` sibling
+/// hashes per item in a multi-proof (one per level from the leaf up to, but not including, the root).
+pub const MAX_LEVELS: usize = u32::BITS as usize;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
