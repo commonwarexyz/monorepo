@@ -11,7 +11,6 @@ use crate::{
     qmdb::{
         any::{init_variable, unordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
-        Error,
     },
     translator::Translator,
 };
@@ -19,13 +18,21 @@ use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 
+type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
+
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
 pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
+pub type Db<E, K, V, H, T> = super::Db<
+    crate::merkle::mmr::Family,
+    E,
+    Journal<E, Operation<K, V>>,
+    Index<T, Location>,
+    H,
+    Update<K, V>,
+>;
 
 impl<E: Storage + Clock + Metrics, K: Key, V: VariableValue, H: Hasher, T: Translator>
     Db<E, K, V, H, T>
@@ -74,13 +81,14 @@ pub mod partitioned {
         qmdb::{
             any::{init_variable, VariableConfig, VariableValue},
             operation::Key,
-            Error,
         },
         translator::Translator,
     };
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage};
+
+    type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -92,6 +100,7 @@ pub mod partitioned {
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
     pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
+        crate::merkle::mmr::Family,
         E,
         Journal<E, Operation<K, V>>,
         Index<T, Location, P>,
@@ -664,6 +673,7 @@ pub(crate) mod test {
     #[allow(dead_code, clippy::manual_async_fn)]
     fn issue_2787_regression(
         db: &crate::qmdb::immutable::Immutable<
+            crate::merkle::mmr::Family,
             deterministic::Context,
             Digest,
             Vec<u8>,

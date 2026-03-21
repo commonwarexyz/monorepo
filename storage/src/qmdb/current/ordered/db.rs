@@ -14,13 +14,14 @@ use crate::{
         },
         current::proof::OperationProof,
         operation::Key,
-        Error,
     },
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use futures::stream::Stream;
+
+type Error = crate::qmdb::Error<crate::mmr::Family>;
 
 /// Proof information for verifying a key has a particular value in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -104,7 +105,7 @@ where
                     // The provided `key` is in the DB if it matches the start of the span.
                     return false;
                 }
-                if !crate::qmdb::any::db::Db::<E, C, I, H, Update<K, V>>::span_contains(
+                if !crate::qmdb::any::db::Db::<crate::merkle::mmr::Family, E, C, I, H, Update<K, V>>::span_contains(
                     &data.key,
                     &data.next_key,
                     key,

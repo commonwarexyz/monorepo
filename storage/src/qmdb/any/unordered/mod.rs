@@ -3,7 +3,7 @@ use crate::qmdb::any::traits::PersistableMutableLog;
 use crate::{
     index::Unordered as Index,
     journal::contiguous::{Contiguous, Mutable, Reader},
-    mmr::Location,
+    merkle::{Family, Location},
     qmdb::{
         any::{
             db::{AuthenticatedLog, Db},
@@ -11,7 +11,6 @@ use crate::{
         },
         build_snapshot_from_log,
         operation::{Committable, Key, Operation as OperationTrait},
-        Error,
     },
 };
 use commonware_codec::Codec;
@@ -24,13 +23,14 @@ pub mod variable;
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
 
 impl<
+        F: Family,
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location<F>>,
         H: Hasher,
-    > Db<E, C, I, H, Update<K, V>>
+    > Db<F, E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
@@ -38,9 +38,9 @@ where
     pub(crate) async fn get_with_loc(
         &self,
         key: &K,
-    ) -> Result<Option<(V::Value, Location)>, Error> {
+    ) -> Result<Option<(V::Value, Location<F>)>, crate::qmdb::Error<F>> {
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
 
         let reader = self.log.reader().await;
         for loc in locs {
@@ -60,22 +60,23 @@ where
 }
 
 impl<
+        F: Family,
         E: Storage + Clock + Metrics,
         C: Mutable<Item = O>,
         O: OperationTrait + Codec + Committable + Send + Sync,
-        I: Index<Value = Location>,
+        I: Index<Value = Location<F>>,
         H: Hasher,
         U: Send + Sync,
-    > Db<E, C, I, H, U>
+    > Db<F, E, C, I, H, U>
 {
     /// Returns an [Db] initialized directly from the given components. The log is
     /// replayed from `inactivity_floor_loc` to build the snapshot, and that value is used as the
     /// inactivity floor. The last operation is assumed to be a commit.
     pub(crate) async fn from_components(
-        inactivity_floor_loc: Location,
-        log: AuthenticatedLog<E, C, H>,
+        inactivity_floor_loc: Location<F>,
+        log: AuthenticatedLog<F, E, C, H>,
         mut snapshot: I,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, crate::qmdb::Error<F>> {
         let (active_keys, last_commit_loc) = {
             let reader = log.reader().await;
             let active_keys =
@@ -105,13 +106,13 @@ impl<
 
 #[cfg(any(test, feature = "test-traits"))]
 crate::qmdb::any::traits::impl_db_any! {
-    [E, K, V, C, I, H] Db<E, C, I, H, Update<K, V>>
+    [E, K, V, C, I, H] Db<crate::merkle::mmr::Family, E, C, I, H, Update<K, V>>
     where {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
         C: PersistableMutableLog<Operation<K, V>>,
-        I: Index<Value = Location> + Send + Sync + 'static,
+        I: Index<Value = crate::mmr::Location> + Send + Sync + 'static,
         H: Hasher,
         Operation<K, V>: Codec,
         V::Value: Send + Sync,
@@ -121,13 +122,13 @@ crate::qmdb::any::traits::impl_db_any! {
 
 #[cfg(any(test, feature = "test-traits"))]
 crate::qmdb::any::traits::impl_provable! {
-    [E, K, V, C, I, H] Db<E, C, I, H, Update<K, V>>
+    [E, K, V, C, I, H] Db<crate::merkle::mmr::Family, E, C, I, H, Update<K, V>>
     where {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
         C: PersistableMutableLog<Operation<K, V>>,
-        I: Index<Value = Location> + Send + Sync + 'static,
+        I: Index<Value = crate::mmr::Location> + Send + Sync + 'static,
         H: Hasher,
         Operation<K, V>: Codec,
         V::Value: Send + Sync,

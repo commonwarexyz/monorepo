@@ -56,7 +56,7 @@ async fn build_db<E, O, I, H, U, C>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: Range<Location>,
     apply_batch_size: usize,
-) -> Result<Db<E, C, I, H, U>, qmdb::Error>
+) -> Result<Db<crate::merkle::mmr::Family, E, C, I, H, U>, qmdb::Error<crate::merkle::mmr::Family>>
 where
     E: Storage + Clock + Metrics,
     O: Operation + Committable + CodecShared + Send + Sync + 'static,
@@ -112,7 +112,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error> {
+    ) -> Result<Self, qmdb::Error<crate::merkle::mmr::Family>> {
         let mmr_config = config.mmr.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, Self::Op, _, H, UnorderedFixedUpdate<K, V>, _>(
@@ -155,7 +155,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error> {
+    ) -> Result<Self, qmdb::Error<crate::merkle::mmr::Family>> {
         let mmr_config = config.mmr.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, Self::Op, _, H, UnorderedVariableUpdate<K, V>, _>(
@@ -197,7 +197,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error> {
+    ) -> Result<Self, qmdb::Error<crate::merkle::mmr::Family>> {
         let mmr_config = config.mmr.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, Self::Op, _, H, OrderedFixedUpdate<K, V>, _>(
@@ -240,7 +240,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error> {
+    ) -> Result<Self, qmdb::Error<crate::merkle::mmr::Family>> {
         let mmr_config = config.mmr.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, Self::Op, _, H, OrderedVariableUpdate<K, V>, _>(

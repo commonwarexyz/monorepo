@@ -48,7 +48,7 @@ pub trait Database: Sized + Send {
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> impl Future<Output = Result<Self, crate::qmdb::Error>> + Send;
+    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<crate::merkle::mmr::Family>>> + Send;
 
     /// Get the root digest of the database for verification
     fn root(&self) -> Self::Digest;

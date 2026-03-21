@@ -41,14 +41,16 @@ pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 
 /// Trait for cleanup operations in tests.
 pub(crate) trait Destructible {
-    fn destroy(self) -> impl std::future::Future<Output = Result<(), qmdb::Error>> + Send;
+    fn destroy(
+        self,
+    ) -> impl std::future::Future<Output = Result<(), qmdb::Error<crate::merkle::mmr::Family>>> + Send;
 }
 
 // Implement Destructible for the concrete MMR type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
 impl Destructible for crate::mmr::journaled::Mmr<deterministic::Context, Digest> {
-    async fn destroy(self) -> Result<(), qmdb::Error> {
-        self.destroy().await.map_err(qmdb::Error::Mmr)
+    async fn destroy(self) -> Result<(), qmdb::Error<crate::merkle::mmr::Family>> {
+        self.destroy().await.map_err(qmdb::Error::Merkle)
     }
 }
 

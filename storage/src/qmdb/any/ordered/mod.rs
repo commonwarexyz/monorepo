@@ -3,11 +3,10 @@ use crate::qmdb::any::traits::PersistableMutableLog;
 use crate::{
     index::Ordered as Index,
     journal::contiguous::{Contiguous, Reader},
-    mmr::Location,
+    merkle::{Family, Location},
     qmdb::{
         any::{db::Db, ValueEncoding},
         operation::{Key, Operation as OperationTrait},
-        Error,
     },
 };
 use commonware_codec::Codec;
@@ -22,28 +21,31 @@ use std::{
     ops::Bound,
 };
 
+type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
+
 pub mod fixed;
 pub mod variable;
 
 pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Operation};
 
 /// Type alias for a location and its associated key data.
-type LocatedKey<K, V> = Option<(Location, Update<K, V>)>;
+type LocatedKey<F, K, V> = Option<(Location<F>, Update<K, V>)>;
 
 impl<
+        F: Family,
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
-        I: Index<Value = Location>,
+        I: Index<Value = Location<F>>,
         H: Hasher,
-    > Db<E, C, I, H, Update<K, V>>
+    > Db<F, E, C, I, H, Update<K, V>>
 where
     Operation<K, V>: Codec,
 {
     async fn get_update_op(
         reader: &impl Reader<Item = Operation<K, V>>,
-        loc: Location,
+        loc: Location<F>,
     ) -> Result<Update<K, V>, Error> {
         match reader.read(*loc).await? {
             Operation::Update(key_data) => Ok(key_data),
@@ -71,9 +73,9 @@ where
     /// Find the span produced by the provided locations that contains `key`, if any.
     async fn find_span(
         &self,
-        locs: impl IntoIterator<Item = Location>,
+        locs: impl IntoIterator<Item = Location<F>>,
         key: &K,
-    ) -> Result<LocatedKey<K, V>, Error> {
+    ) -> Result<LocatedKey<F, K, V>, Error> {
         let reader = self.log.reader().await;
         for loc in locs {
             // Iterate over conflicts in the snapshot entry to find the span.
@@ -88,14 +90,14 @@ where
 
     /// Get the operation that defines the span whose range contains `key`, or None if the DB is
     /// empty.
-    pub async fn get_span(&self, key: &K) -> Result<LocatedKey<K, V>, Error> {
+    pub async fn get_span(&self, key: &K) -> Result<LocatedKey<F, K, V>, Error> {
         if self.is_empty() {
             return Ok(None);
         }
 
         // If the translated key is in the snapshot, get a cursor to look for the key.
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
         let span = self.find_span(locs, key).await?;
         if let Some(span) = span {
             return Ok(Some(span));
@@ -107,7 +109,7 @@ where
         };
 
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location> = iter.copied().collect();
+        let locs: Vec<Location<F>> = iter.copied().collect();
         let span = self
             .find_span(locs, key)
             .await?
@@ -127,9 +129,9 @@ where
     pub(crate) async fn get_with_loc(
         &self,
         key: &K,
-    ) -> Result<Option<(Update<K, V>, Location)>, Error> {
+    ) -> Result<Option<(Update<K, V>, Location<F>)>, Error> {
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location> = self.snapshot.get(key).copied().collect();
+        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
         let reader = self.log.reader().await;
         for loc in locs {
             let op = reader.read(*loc).await?;
@@ -194,7 +196,7 @@ where
     /// reverse order of the keys.
     async fn fetch_all_updates(
         &self,
-        locs: impl IntoIterator<Item = &Location>,
+        locs: impl IntoIterator<Item = &Location<F>>,
     ) -> Result<Vec<Update<K, V>>, Error> {
         let reader = self.log.reader().await;
         let futures = locs
@@ -250,13 +252,13 @@ pub(crate) fn find_prev_key<'a, K: Ord, V>(
 
 #[cfg(any(test, feature = "test-traits"))]
 crate::qmdb::any::traits::impl_db_any! {
-    [E, K, V, C, I, H] Db<E, C, I, H, Update<K, V>>
+    [E, K, V, C, I, H] Db<crate::merkle::mmr::Family, E, C, I, H, Update<K, V>>
     where {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
         C: PersistableMutableLog<Operation<K, V>>,
-        I: Index<Value = Location> + 'static,
+        I: Index<Value = crate::mmr::Location> + 'static,
         H: Hasher,
         Operation<K, V>: Codec,
         V::Value: Send + Sync,
@@ -266,13 +268,13 @@ crate::qmdb::any::traits::impl_db_any! {
 
 #[cfg(any(test, feature = "test-traits"))]
 crate::qmdb::any::traits::impl_provable! {
-    [E, K, V, C, I, H] Db<E, C, I, H, Update<K, V>>
+    [E, K, V, C, I, H] Db<crate::merkle::mmr::Family, E, C, I, H, Update<K, V>>
     where {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
         C: PersistableMutableLog<Operation<K, V>>,
-        I: Index<Value = Location> + 'static,
+        I: Index<Value = crate::mmr::Location> + 'static,
         H: Hasher,
         Operation<K, V>: Codec,
         V::Value: Send + Sync,

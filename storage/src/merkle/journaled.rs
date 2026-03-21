@@ -869,6 +869,113 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Readable for Journaled
     }
 }
 
+impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest> crate::merkle::storage::Storage<F>
+    for Journaled<F, E, D>
+{
+    type Digest = D;
+
+    async fn size(&self) -> Position<F> {
+        self.size()
+    }
+
+    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
+        Self::get_node(self, position).await
+    }
+}
+
+impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
+    /// Return an inclusion proof for the element at the location `loc` against a historical
+    /// state with `leaves` leaves.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if `loc`
+    ///   is not provable at that historical size.
+    /// - Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
+    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
+    ///   pruned.
+    pub async fn historical_proof(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        leaves: Location<F>,
+        loc: Location<F>,
+    ) -> Result<Proof<F, D>, Error<F>> {
+        if !loc.is_valid_index() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        // loc is valid so it won't overflow from + 1
+        self.historical_range_proof(hasher, leaves, loc..loc + 1)
+            .await
+    }
+
+    /// Return an inclusion proof for the elements in `range` against a historical state with
+    /// `leaves` leaves.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if
+    ///   `range` is not provable at that historical size.
+    /// - Returns [Error::LocationOverflow] if any location in `range` exceeds [Family::MAX_LEAVES].
+    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
+    ///   pruned.
+    /// - Returns [Error::Empty] if the range is empty.
+    pub async fn historical_range_proof(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        leaves: Location<F>,
+        range: core::ops::Range<Location<F>>,
+    ) -> Result<Proof<F, D>, Error<F>> {
+        if leaves > self.leaves() {
+            return Err(Error::RangeOutOfBounds(leaves));
+        }
+        crate::merkle::verification::historical_range_proof(hasher, self, leaves, range).await
+    }
+
+    /// Return an inclusion proof for the element at the location `loc` that can be verified against
+    /// the current root.
+    ///
+    /// This async inherent method shadows [`Readable::proof`] and can read from the backing
+    /// journal for nodes that have been synced out of memory.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
+    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
+    ///   pruned.
+    /// - Returns [Error::Empty] if the range is empty.
+    pub async fn proof(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        loc: Location<F>,
+    ) -> Result<Proof<F, D>, Error<F>> {
+        if !loc.is_valid_index() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        // loc is valid so it won't overflow from + 1
+        self.range_proof(hasher, loc..loc + 1).await
+    }
+
+    /// Return an inclusion proof for the elements within the specified location range.
+    ///
+    /// This async inherent method shadows [`Readable::range_proof`] and can read from the backing
+    /// journal for nodes that have been synced out of memory.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [Error::LocationOverflow] if any location in `range` exceeds [Family::MAX_LEAVES].
+    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
+    ///   pruned.
+    /// - Returns [Error::Empty] if the range is empty.
+    pub async fn range_proof(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        range: core::ops::Range<Location<F>>,
+    ) -> Result<Proof<F, D>, Error<F>> {
+        self.historical_range_proof(hasher, self.leaves(), range)
+            .await
+    }
+}
+
 impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> ChainInfo<F> for Journaled<F, E, D> {
     type Digest = D;
 

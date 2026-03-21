@@ -43,7 +43,7 @@ where
 {
     /// Database error
     #[error("database error: {0}")]
-    Database(crate::qmdb::Error),
+    Database(crate::qmdb::Error<crate::merkle::mmr::Family>),
 
     /// Resolver error
     #[error("resolver error: {0:?}")]
@@ -58,7 +58,7 @@ impl<T, U, D> From<T> for Error<U, D>
 where
     U: std::error::Error + Send + 'static,
     D: Digest,
-    T: Into<crate::qmdb::Error>,
+    T: Into<crate::qmdb::Error<crate::merkle::mmr::Family>>,
 {
     fn from(err: T) -> Self {
         Self::Database(err.into())

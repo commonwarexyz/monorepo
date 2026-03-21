@@ -59,15 +59,18 @@ use crate::{
         },
     },
     mmr::{
+        self,
         journaled::{Config as MmrConfig, Mmr},
         Location, Proof,
     },
-    qmdb::{any::VariableValue, operation::Committable, Error},
+    qmdb::{any::VariableValue, operation::Committable},
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use std::num::NonZeroU64;
 use tracing::{debug, warn};
+
+type Error = crate::qmdb::Error<mmr::Family>;
 
 pub mod batch;
 mod operation;
@@ -718,7 +721,7 @@ mod test {
             assert!(matches!(
                 db.historical_proof(db.bounds().await.end + 1, Location::new(5), NZU64!(10))
                     .await,
-                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Merkle(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
 
             let root = db.root();

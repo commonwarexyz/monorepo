@@ -2,7 +2,7 @@
 
 use crate::{
     journal::contiguous::Mutable,
-    mmr::{Location, Proof},
+    merkle::Proof,
     qmdb::{operation::Key, Error},
     Persistable,
 };
@@ -36,7 +36,7 @@ pub trait UnmerkleizedBatch: Sized {
     fn merkleize(
         self,
         metadata: Option<Self::Metadata>,
-    ) -> impl Future<Output = Result<Self::Merkleized, Error>>;
+    ) -> impl Future<Output = Result<Self::Merkleized, Error<crate::merkle::mmr::Family>>>;
 }
 
 /// Merkleized batch of operations.
@@ -72,7 +72,7 @@ pub trait BatchableDb {
     fn apply_batch(
         &mut self,
         batch: Self::Changeset,
-    ) -> impl Future<Output = Result<Range<Location>, Error>>;
+    ) -> impl Future<Output = Result<Range<crate::mmr::Location>, Error<crate::merkle::mmr::Family>>>;
 }
 
 /// Unified trait for an authenticated database.
@@ -81,7 +81,7 @@ pub trait BatchableDb {
 /// reads, and batch mutations.
 pub trait DbAny:
     BatchableDb<K = <Self as DbAny>::Key, V = <Self as DbAny>::Value>
-    + Persistable<Error = Error>
+    + Persistable<Error = Error<crate::merkle::mmr::Family>>
     + Send
     + Sync
 {
@@ -98,30 +98,37 @@ pub trait DbAny:
     fn get<'a>(
         &'a self,
         key: &'a Self::Key,
-    ) -> impl Future<Output = Result<Option<Self::Value>, Error>> + Send + use<'a, Self>;
+    ) -> impl Future<Output = Result<Option<Self::Value>, Error<crate::merkle::mmr::Family>>>
+           + Send
+           + use<'a, Self>;
 
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    fn bounds(&self) -> impl Future<Output = Range<Location>> + Send;
+    fn bounds(&self) -> impl Future<Output = Range<crate::mmr::Location>> + Send;
 
     /// Return the Location of the next operation appended to this db.
-    fn size(&self) -> impl Future<Output = Location> + Send {
+    fn size(&self) -> impl Future<Output = crate::mmr::Location> + Send {
         async { self.bounds().await.end }
     }
 
     /// Get the metadata associated with the last commit.
     fn get_metadata(
         &self,
-    ) -> impl Future<Output = Result<Option<<Self as DbAny>::Value>, Error>> + Send;
+    ) -> impl Future<
+        Output = Result<Option<<Self as DbAny>::Value>, Error<crate::merkle::mmr::Family>>,
+    > + Send;
 
     /// Prune historical operations prior to `loc`.
-    fn prune(&mut self, loc: Location) -> impl Future<Output = Result<(), Error>> + Send;
+    fn prune(
+        &mut self,
+        loc: crate::mmr::Location,
+    ) -> impl Future<Output = Result<(), Error<crate::merkle::mmr::Family>>> + Send;
 
     /// The location before which all operations can be pruned.
-    fn inactivity_floor_loc(&self) -> impl Future<Output = Location> + Send;
+    fn inactivity_floor_loc(&self) -> impl Future<Output = crate::mmr::Location> + Send;
 }
 
 /// Proof generation for Any database variants.
@@ -137,10 +144,17 @@ pub trait Provable: DbAny {
     #[allow(clippy::type_complexity)]
     fn proof(
         &self,
-        start_loc: Location,
+        start_loc: crate::mmr::Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send
-    {
+    ) -> impl Future<
+        Output = Result<
+            (
+                Proof<crate::merkle::mmr::Family, Self::Digest>,
+                Vec<Self::Operation>,
+            ),
+            Error<crate::merkle::mmr::Family>,
+        >,
+    > + Send {
         async move {
             self.historical_proof(self.bounds().await.end, start_loc, max_ops)
                 .await
@@ -151,10 +165,18 @@ pub trait Provable: DbAny {
     #[allow(clippy::type_complexity)]
     fn historical_proof(
         &self,
-        historical_size: Location,
-        start_loc: Location,
+        historical_size: crate::mmr::Location,
+        start_loc: crate::mmr::Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error>> + Send;
+    ) -> impl Future<
+        Output = Result<
+            (
+                Proof<crate::merkle::mmr::Family, Self::Digest>,
+                Vec<Self::Operation>,
+            ),
+            Error<crate::merkle::mmr::Family>,
+        >,
+    > + Send;
 }
 
 /// Implements [`DbAny`] by delegating each method to an identically-named inherent method.
@@ -181,7 +203,7 @@ macro_rules! impl_db_any {
             type Value = $val;
             type Digest = $dig;
 
-            async fn get(&self, key: &$key) -> ::core::result::Result<Option<$val>, $crate::qmdb::Error> {
+            async fn get(&self, key: &$key) -> ::core::result::Result<Option<$val>, $crate::qmdb::Error<$crate::merkle::mmr::Family>> {
                 self.get(key).await
             }
 
@@ -195,14 +217,14 @@ macro_rules! impl_db_any {
 
             async fn get_metadata(
                 &self,
-            ) -> ::core::result::Result<Option<$val>, $crate::qmdb::Error> {
+            ) -> ::core::result::Result<Option<$val>, $crate::qmdb::Error<$crate::merkle::mmr::Family>> {
                 self.get_metadata().await
             }
 
             async fn prune(
                 &mut self,
                 loc: $crate::mmr::Location,
-            ) -> ::core::result::Result<(), $crate::qmdb::Error> {
+            ) -> ::core::result::Result<(), $crate::qmdb::Error<$crate::merkle::mmr::Family>> {
                 self.prune(loc).await
             }
 
@@ -233,8 +255,8 @@ macro_rules! impl_provable {
                 start_loc: $crate::mmr::Location,
                 max_ops: ::core::num::NonZeroU64,
             ) -> ::core::result::Result<
-                ($crate::mmr::Proof<<Self as $crate::qmdb::any::traits::DbAny>::Digest>, Vec<$op>),
-                $crate::qmdb::Error,
+                ($crate::merkle::Proof<$crate::merkle::mmr::Family, <Self as $crate::qmdb::any::traits::DbAny>::Digest>, Vec<$op>),
+                $crate::qmdb::Error<$crate::merkle::mmr::Family>,
             > {
                 self.historical_proof(historical_size, start_loc, max_ops)
                     .await

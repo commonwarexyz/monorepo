@@ -469,11 +469,10 @@ where
     }
 }
 
-/// MMR-specific proof methods. These use the MMR `verification` module, which provides
-/// historical and async proof generation. Other Merkle families may add their own proof
-/// methods in separate impl blocks.
-impl<E, C, H> Journal<merkle::mmr::Family, E, C, H>
+/// Proof methods that work for any Merkle family.
+impl<F, E, C, H> Journal<F, E, C, H>
 where
+    F: Family,
     E: Storage + Clock + Metrics,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
@@ -486,22 +485,21 @@ where
     /// # Errors
     ///
     /// - Returns [Error::Merkle] with [merkle::Error::LocationOverflow] if `start_loc` >
-    ///   [merkle::mmr::Family::MAX_LEAVES].
+    ///   [Family::MAX_LEAVES].
     /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >= current
     ///   item count.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
     ///   pruned.
     pub async fn proof(
         &self,
-        start_loc: Location<merkle::mmr::Family>,
+        start_loc: Location<F>,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<merkle::mmr::Family, H::Digest>, Vec<C::Item>), Error<merkle::mmr::Family>>
-    {
+    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
         self.historical_proof(self.size().await, start_loc, max_ops)
             .await
     }
 
-    /// Generate a historical proof with respect to the state of the MMR when it had
+    /// Generate a historical proof with respect to the state of the Merkle structure when it had
     /// `historical_leaves` leaves.
     ///
     /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
@@ -515,11 +513,10 @@ where
     ///   pruned.
     pub async fn historical_proof(
         &self,
-        historical_leaves: Location<merkle::mmr::Family>,
-        start_loc: Location<merkle::mmr::Family>,
+        historical_leaves: Location<F>,
+        start_loc: Location<F>,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<merkle::mmr::Family, H::Digest>, Vec<C::Item>), Error<merkle::mmr::Family>>
-    {
+    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
         // Acquire a reader guard to prevent pruning from advancing while we read.
         let reader = self.journal.reader().await;
         let bounds = reader.bounds();

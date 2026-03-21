@@ -5,17 +5,11 @@
 //! pruned.
 //!
 //! This module is a thin wrapper around the generic `Journaled` type, specialized for the
-//! MMR [Family]. It re-exports [Config] and provides a [SyncConfig] type alias, and adds
-//! MMR-specific async proof methods that use the [verification] module.
+//! MMR [Family]. It re-exports [Config] and provides a [SyncConfig] type alias. Async proof
+//! methods (`proof`, `range_proof`, `historical_proof`, `historical_range_proof`) and the
+//! `Storage<F>` impl are provided by the generic `Journaled` in `merkle::journaled`.
 
-use crate::merkle::{
-    hasher::Hasher,
-    mmr::{verification, Error, Family, Location, Position, Proof},
-    storage::Storage,
-};
-use commonware_cryptography::Digest;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-use core::ops::Range;
+use crate::merkle::mmr::Family;
 
 /// A MMR backed by a fixed-item-length journal.
 pub type Mmr<E, D> = crate::merkle::journaled::Journaled<Family, E, D>;
@@ -25,110 +19,6 @@ pub use crate::merkle::journaled::Config;
 
 /// Configuration for initializing a journaled MMR for synchronization.
 pub type SyncConfig<D> = crate::merkle::journaled::SyncConfig<Family, D>;
-
-/// MMR-specific extension methods on the journaled MMR.
-impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
-    /// Return an inclusion proof for the element at the location `loc` against a historical MMR
-    /// state with `leaves` leaves.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if `loc`
-    ///   is not provable at that historical size.
-    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::merkle::Family::MAX_LEAVES].
-    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
-    ///   pruned.
-    pub async fn historical_proof(
-        &self,
-        hasher: &impl Hasher<Family, Digest = D>,
-        leaves: Location,
-        loc: Location,
-    ) -> Result<Proof<D>, Error> {
-        if !loc.is_valid_index() {
-            return Err(Error::LocationOverflow(loc));
-        }
-        // loc is valid so it won't overflow from + 1
-        self.historical_range_proof(hasher, leaves, loc..loc + 1)
-            .await
-    }
-
-    /// Return an inclusion proof for the elements in `range` against a historical MMR state with
-    /// `leaves` leaves.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if `range`
-    ///   is not provable at that historical size.
-    /// - Returns [Error::LocationOverflow] if any location in `range` exceeds
-    ///   [crate::merkle::Family::MAX_LEAVES].
-    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
-    ///   pruned.
-    /// - Returns [Error::Empty] if the range is empty.
-    pub async fn historical_range_proof(
-        &self,
-        hasher: &impl Hasher<Family, Digest = D>,
-        leaves: Location,
-        range: Range<Location>,
-    ) -> Result<Proof<D>, Error> {
-        if leaves > self.leaves() {
-            return Err(Error::RangeOutOfBounds(leaves));
-        }
-        verification::historical_range_proof(hasher, self, leaves, range).await
-    }
-
-    /// Return an inclusion proof for the element at the location `loc` that can be verified against
-    /// the current root.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::merkle::Family::MAX_LEAVES].
-    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
-    ///   pruned.
-    /// - Returns [Error::Empty] if the range is empty.
-    pub async fn proof(
-        &self,
-        hasher: &impl Hasher<Family, Digest = D>,
-        loc: Location,
-    ) -> Result<Proof<D>, Error> {
-        if !loc.is_valid_index() {
-            return Err(Error::LocationOverflow(loc));
-        }
-        // loc is valid so it won't overflow from + 1
-        self.range_proof(hasher, loc..loc + 1).await
-    }
-
-    /// Return an inclusion proof for the elements within the specified location range.
-    ///
-    /// Locations are validated by [verification::range_proof].
-    ///
-    /// # Errors
-    ///
-    /// - Returns [Error::LocationOverflow] if any location in `range` exceeds
-    ///   [crate::merkle::Family::MAX_LEAVES].
-    /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
-    ///   pruned.
-    /// - Returns [Error::Empty] if the range is empty.
-    pub async fn range_proof(
-        &self,
-        hasher: &impl Hasher<Family, Digest = D>,
-        range: Range<Location>,
-    ) -> Result<Proof<D>, Error> {
-        self.historical_range_proof(hasher, self.leaves(), range)
-            .await
-    }
-}
-
-impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<Family> for Mmr<E, D> {
-    type Digest = D;
-
-    async fn size(&self) -> Position {
-        self.size()
-    }
-
-    async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
-        Self::get_node(self, position).await
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -140,7 +30,7 @@ mod tests {
             Readable,
         },
         metadata::{Config as MConfig, Metadata},
-        mmr::{mem, Location, StandardHasher as Standard},
+        mmr::{mem, Error, Location, Position, Proof, StandardHasher as Standard},
     };
     use commonware_cryptography::{
         sha256::{self, Digest},
@@ -148,7 +38,8 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob as _, BufferPooler, Runner,
+        buffer::paged::CacheRef, deterministic, Blob as _, BufferPooler, Metrics as _, Runner,
+        Storage as _,
     };
     use commonware_utils::{sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
     use std::{

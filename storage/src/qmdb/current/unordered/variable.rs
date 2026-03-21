@@ -14,7 +14,6 @@ use crate::{
     qmdb::{
         any::{unordered::variable::Operation, value::VariableEncoding, VariableValue},
         current::VariableConfig as Config,
-        Error,
     },
     translator::Translator,
 };
@@ -22,6 +21,8 @@ use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
+
+type Error = crate::qmdb::Error<crate::mmr::Family>;
 
 pub type Db<E, K, V, H, T, const N: usize> =
     super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, Index<T, Location>, H, N>;
@@ -60,7 +61,6 @@ pub mod partitioned {
                 unordered::variable::partitioned::Operation, value::VariableEncoding, VariableValue,
             },
             current::VariableConfig as Config,
-            Error,
         },
         translator::Translator,
     };
@@ -68,6 +68,8 @@ pub mod partitioned {
     use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage as RStorage};
     use commonware_utils::Array;
+
+    type Error = crate::qmdb::Error<crate::mmr::Family>;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -120,7 +122,6 @@ mod test {
                 tests::{apply_random_ops, variable_config},
                 unordered::{db::KeyValueProof, variable::Db},
             },
-            Error,
         },
         translator::TwoCap,
     };
@@ -129,6 +130,8 @@ mod test {
     use commonware_runtime::{deterministic, Metrics as _, Runner as _};
     use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
     use rand::RngCore;
+
+    type Error = crate::qmdb::Error<crate::mmr::Family>;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;

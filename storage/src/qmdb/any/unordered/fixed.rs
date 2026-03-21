@@ -4,23 +4,28 @@ use crate::{
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
     mmr::Location,
-    qmdb::{
-        any::{init_fixed, unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
-        Error,
-    },
+    qmdb::any::{init_fixed, unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
     translator::Translator,
 };
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
+type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
+
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
 pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
+pub type Db<E, K, V, H, T> = super::Db<
+    crate::merkle::mmr::Family,
+    E,
+    Journal<E, Operation<K, V>>,
+    Index<T, Location>,
+    H,
+    Update<K, V>,
+>;
 
 impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
     Db<E, K, V, H, T>
@@ -61,15 +66,14 @@ pub mod partitioned {
         index::partitioned::unordered::Index,
         journal::contiguous::fixed::Journal,
         mmr::Location,
-        qmdb::{
-            any::{init_fixed, FixedConfig as Config, FixedValue},
-            Error,
-        },
+        qmdb::any::{init_fixed, FixedConfig as Config, FixedValue},
         translator::Translator,
     };
     use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage};
     use commonware_utils::Array;
+
+    type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
 
     /// A key-value QMDB with a partitioned snapshot index.
     ///
@@ -81,6 +85,7 @@ pub mod partitioned {
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
     pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
+        crate::merkle::mmr::Family,
         E,
         Journal<E, Operation<K, V>>,
         Index<T, Location, P>,
@@ -318,7 +323,7 @@ pub(crate) mod test {
             assert!(matches!(
                 db.historical_proof(db.bounds().await.end + 1, Location::new(6), NZU64!(10))
                     .await,
-                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Merkle(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
 
             db.destroy().await.unwrap();

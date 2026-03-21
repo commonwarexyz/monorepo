@@ -24,7 +24,6 @@ use crate::{
             grafting,
             proof::{OperationProof, RangeProof},
         },
-        Error,
     },
     Persistable,
 };
@@ -37,6 +36,9 @@ use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use rayon::prelude::*;
 use tracing::{error, warn};
+
+/// Convenience alias: all `current` databases use the MMR family.
+type Error = crate::qmdb::Error<mmr::Family>;
 
 /// Prefix used for the metadata key for grafted MMR pinned nodes.
 const NODE_PREFIX: u8 = 0;
@@ -55,7 +57,7 @@ pub struct Db<
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub(super) any: any::db::Db<E, C, I, H, U>,
+    pub(super) any: any::db::Db<mmr::Family, E, C, I, H, U>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.

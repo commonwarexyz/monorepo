@@ -138,9 +138,16 @@ fn fuzz(input: FuzzInput) {
         let mut rng = StdRng::seed_from_u64(input.seed);
 
         let cfg = db_config("fuzz-partition", &context);
-        let mut db = Immutable::<_, Digest, Vec<u8>, Sha256, TwoCap>::init(context, cfg)
-            .await
-            .unwrap();
+        let mut db = Immutable::<
+            commonware_storage::merkle::mmr::Family,
+            _,
+            Digest,
+            Vec<u8>,
+            Sha256,
+            TwoCap,
+        >::init(context, cfg)
+        .await
+        .unwrap();
 
         let hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
         let mut keys_set = Vec::new();

@@ -15,13 +15,14 @@ use crate::{
         any::{ordered::variable::Operation, value::VariableEncoding, VariableValue},
         current::VariableConfig as Config,
         operation::Key,
-        Error,
     },
     translator::Translator,
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+
+type Error = crate::qmdb::Error<crate::mmr::Family>;
 
 pub type Db<E, K, V, H, T, const N: usize> =
     super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, Index<T, Location>, H, N>;
@@ -61,13 +62,14 @@ pub mod partitioned {
             },
             current::VariableConfig as Config,
             operation::Key,
-            Error,
         },
         translator::Translator,
     };
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage as RStorage};
+
+    type Error = crate::qmdb::Error<crate::mmr::Family>;
 
     /// A partitioned variant of [super::Db].
     ///

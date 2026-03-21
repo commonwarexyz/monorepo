@@ -5,11 +5,13 @@ use crate::{
     journal::authenticated::{self, BatchChain},
     merkle::batch::ChainInfo,
     mmr::{self, Location, Readable},
-    qmdb::{any::VariableValue, keyless::operation::Operation, Error},
+    qmdb::{any::VariableValue, keyless::operation::Operation},
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
 use std::sync::Arc;
+
+type Error = crate::qmdb::Error<mmr::Family>;
 
 /// A speculative batch of operations whose root digest has not yet been
 /// computed, in contrast to [MerkleizedBatch].

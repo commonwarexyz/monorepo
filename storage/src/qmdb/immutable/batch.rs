@@ -3,9 +3,8 @@
 use super::Immutable;
 use crate::{
     journal::authenticated::{self, BatchChain},
-    merkle::batch::ChainInfo,
-    mmr::{self, Location, Readable},
-    qmdb::{any::VariableValue, immutable::operation::Operation, Error},
+    merkle::{batch::ChainInfo, Family, Location, Readable},
+    qmdb::{any::VariableValue, immutable::operation::Operation},
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
@@ -15,42 +14,42 @@ use std::{collections::BTreeMap, sync::Arc};
 
 /// What happened to a key in this batch.
 #[derive(Clone)]
-pub(crate) struct DiffEntry<V> {
+pub(crate) struct DiffEntry<F: Family, V> {
     pub(crate) value: V,
-    pub(crate) loc: Location,
+    pub(crate) loc: Location<F>,
 }
 
 /// A single snapshot index mutation to apply to the base DB's snapshot.
-pub(crate) enum SnapshotDiff<K> {
+pub(crate) enum SnapshotDiff<F: Family, K> {
     /// Insert a new key at new_loc.
-    Insert { key: K, new_loc: Location },
+    Insert { key: K, new_loc: Location<F> },
 }
 
 /// A speculative batch of operations whose root digest has not yet been
 /// computed, in contrast to [MerkleizedBatch].
-pub struct UnmerkleizedBatch<'a, E, K, V, H, T, P>
+pub struct UnmerkleizedBatch<'a, F, E, K, V, H, T, P>
 where
+    F: Family,
     E: RStorage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
+    P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
+        + ChainInfo<F, Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
     /// The committed DB this batch is built on top of.
-    pub(super) immutable: &'a Immutable<E, K, V, H, T>,
+    pub(super) immutable: &'a Immutable<F, E, K, V, H, T>,
 
-    /// Authenticated journal batch for computing the speculative MMR root.
-    pub(super) journal_batch:
-        authenticated::UnmerkleizedBatch<'a, mmr::Family, H, P, Operation<K, V>>,
+    /// Authenticated journal batch for computing the speculative Merkle root.
+    pub(super) journal_batch: authenticated::UnmerkleizedBatch<'a, F, H, P, Operation<K, V>>,
 
     /// Pending mutations.
     pub(super) mutations: BTreeMap<K, V>,
 
     /// Uncommitted key-level changes accumulated by prior batches in the chain.
-    pub(super) base_diff: Arc<BTreeMap<K, DiffEntry<V>>>,
+    pub(super) base_diff: Arc<BTreeMap<K, DiffEntry<F, V>>>,
 
     /// One Arc segment of operations per prior batch in the chain.
     pub(super) base_operations: Vec<Arc<Vec<Operation<K, V>>>>,
@@ -65,25 +64,26 @@ where
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [UnmerkleizedBatch].
-pub struct MerkleizedBatch<'a, E, K, V, H, T, P>
+pub struct MerkleizedBatch<'a, F, E, K, V, H, T, P>
 where
+    F: Family,
     E: RStorage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
+    P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
+        + ChainInfo<F, Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
     /// The committed DB this batch is built on top of.
-    immutable: &'a Immutable<E, K, V, H, T>,
+    immutable: &'a Immutable<F, E, K, V, H, T>,
 
-    /// Merkleized authenticated journal batch (provides the speculative MMR root).
-    journal_batch: authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<K, V>>,
+    /// Merkleized authenticated journal batch (provides the speculative Merkle root).
+    journal_batch: authenticated::MerkleizedBatch<'a, F, H, P, Operation<K, V>>,
 
     /// All uncommitted key-level changes in this batch chain.
-    diff: Arc<BTreeMap<K, DiffEntry<V>>>,
+    diff: Arc<BTreeMap<K, DiffEntry<F, V>>>,
 
     /// One Arc segment of operations per batch in the chain (chronological order).
     base_operations: Vec<Arc<Vec<Operation<K, V>>>>,
@@ -96,12 +96,12 @@ where
 }
 
 /// An owned changeset that can be applied to the database.
-pub struct Changeset<K: Array, D: Digest, V: VariableValue> {
-    /// The finalized authenticated journal batch (MMR changeset + item chain).
-    pub(super) journal_finalized: authenticated::Changeset<mmr::Family, D, Operation<K, V>>,
+pub struct Changeset<F: Family, K: Array, D: Digest, V: VariableValue> {
+    /// The finalized authenticated journal batch (Merkle changeset + item chain).
+    pub(super) journal_finalized: authenticated::Changeset<F, D, Operation<K, V>>,
 
     /// Snapshot mutations to apply, in order.
-    pub(super) snapshot_diffs: Vec<SnapshotDiff<K>>,
+    pub(super) snapshot_diffs: Vec<SnapshotDiff<F, K>>,
 
     /// Total operation count after this batch.
     pub(super) total_size: u64,
@@ -110,15 +110,16 @@ pub struct Changeset<K: Array, D: Digest, V: VariableValue> {
     pub(super) db_size: u64,
 }
 
-impl<'a, E, K, V, H, T, P> UnmerkleizedBatch<'a, E, K, V, H, T, P>
+impl<'a, F, E, K, V, H, T, P> UnmerkleizedBatch<'a, F, E, K, V, H, T, P>
 where
+    F: Family,
     E: RStorage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
+    P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
+        + ChainInfo<F, Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
     /// Set a key to a value.
@@ -131,7 +132,7 @@ where
     }
 
     /// Read through: mutations -> base diff -> committed DB.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+    pub async fn get(&self, key: &K) -> Result<Option<V>, crate::qmdb::Error<F>> {
         // Check this batch's pending mutations.
         if let Some(value) = self.mutations.get(key) {
             return Ok(Some(value.clone()));
@@ -145,12 +146,12 @@ where
     }
 
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
-    pub fn merkleize(self, metadata: Option<V>) -> MerkleizedBatch<'a, E, K, V, H, T, P> {
+    pub fn merkleize(self, metadata: Option<V>) -> MerkleizedBatch<'a, F, E, K, V, H, T, P> {
         let base = self.base_size;
 
         // Build operations: one Set per key (BTreeMap iterates in sorted order), then Commit.
         let mut ops: Vec<Operation<K, V>> = Vec::with_capacity(self.mutations.len() + 1);
-        let mut diff: BTreeMap<K, DiffEntry<V>> = BTreeMap::new();
+        let mut diff: BTreeMap<K, DiffEntry<F, V>> = BTreeMap::new();
 
         for (key, value) in self.mutations {
             let loc = Location::new(base + ops.len() as u64);
@@ -190,28 +191,21 @@ where
     }
 }
 
-impl<'a, E, K, V, H, T, P> MerkleizedBatch<'a, E, K, V, H, T, P>
+impl<'a, F, E, K, V, H, T, P> MerkleizedBatch<'a, F, E, K, V, H, T, P>
 where
+    F: Family,
     E: RStorage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
+    P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
+        + ChainInfo<F, Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
     /// Return the speculative root.
     pub fn root(&self) -> H::Digest {
         self.journal_batch.root()
-    }
-
-    /// Read through: diff -> committed DB.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
-        if let Some(entry) = self.diff.get(key) {
-            return Ok(Some(entry.value.clone()));
-        }
-        self.immutable.get(key).await
     }
 
     /// Create a new speculative batch of operations with this batch as its parent.
@@ -220,12 +214,13 @@ where
         &self,
     ) -> UnmerkleizedBatch<
         '_,
+        F,
         E,
         K,
         V,
         H,
         T,
-        authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<K, V>>,
+        authenticated::MerkleizedBatch<'a, F, H, P, Operation<K, V>>,
     > {
         UnmerkleizedBatch {
             immutable: self.immutable,
@@ -238,8 +233,16 @@ where
         }
     }
 
+    /// Read through: diff -> committed DB.
+    pub async fn get(&self, key: &K) -> Result<Option<V>, crate::qmdb::Error<F>> {
+        if let Some(entry) = self.diff.get(key) {
+            return Ok(Some(entry.value.clone()));
+        }
+        self.immutable.get(key).await
+    }
+
     /// Consume this batch, producing an owned `Changeset`.
-    pub fn finalize(self) -> Changeset<K, H::Digest, V> {
+    pub fn finalize(self) -> Changeset<F, K, H::Digest, V> {
         // Build snapshot diffs from diff. All entries are inserts since
         // immutable databases don't support updates or deletes.
         let diff = Arc::try_unwrap(self.diff).unwrap_or_else(|arc| (*arc).clone());

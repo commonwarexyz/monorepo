@@ -235,7 +235,7 @@ use crate::{
         fixed::{Config as FConfig, Journal as FJournal},
         variable::{Config as VConfig, Journal as VJournal},
     },
-    mmr::{journaled::Config as MmrConfig, Location, StandardHasher},
+    mmr::{self, journaled::Config as MmrConfig, Location, StandardHasher},
     qmdb::{
         any::{
             self,
@@ -243,7 +243,6 @@ use crate::{
             FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
         },
         operation::{Committable, Key},
-        Error,
     },
     translator::Translator,
 };
@@ -255,6 +254,8 @@ use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
 pub mod batch;
 pub mod db;
 mod grafting;
+type Error = crate::qmdb::Error<mmr::Family>;
+
 pub mod ordered;
 pub mod proof;
 pub(crate) mod sync;
@@ -498,7 +499,6 @@ pub mod tests {
         qmdb::{
             any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             store::tests::{TestKey, TestValue},
-            Error,
         },
         translator::Translator,
     };
@@ -512,6 +512,8 @@ pub mod tests {
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use std::num::{NonZeroU16, NonZeroUsize};
     use tracing::warn;
+
+    type Error = crate::qmdb::Error<crate::mmr::Family>;
 
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(88);

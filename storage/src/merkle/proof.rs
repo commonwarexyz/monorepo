@@ -4,7 +4,7 @@
 //! family (MMR, MMB, etc.) reuses the shared verification and reconstruction logic in this module,
 //! while retaining any family-specific proof helpers in its submodule.
 
-use crate::merkle::{hasher::Hasher, Family, Location, Position};
+use crate::merkle::{hasher::Hasher, Error, Family, Location, Position};
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec,
@@ -235,6 +235,39 @@ impl<F: Family, D: Digest> Proof<F, D> {
         E: AsRef<[u8]>,
     {
         self.reconstruct_root_collecting(hasher, elements, start_loc, None)
+    }
+
+    /// Reconstructs the root digest from the digests in the proof and the provided range
+    /// of elements, returning the (position,digest) of every node whose digest was required by the
+    /// process (including those from the proof itself). Returns [Error::InvalidProof] if the
+    /// input data is invalid and [Error::RootMismatch] if the root does not match the computed
+    /// root.
+    pub fn verify_range_inclusion_and_extract_digests<H, E>(
+        &self,
+        hasher: &H,
+        elements: &[E],
+        start_loc: Location<F>,
+        root: &D,
+    ) -> Result<Vec<(Position<F>, D)>, Error<F>>
+    where
+        H: Hasher<F, Digest = D>,
+        E: AsRef<[u8]>,
+    {
+        let mut collected_digests = Vec::new();
+        let Ok(reconstructed_root) = self.reconstruct_root_collecting(
+            hasher,
+            elements,
+            start_loc,
+            Some(&mut collected_digests),
+        ) else {
+            return Err(Error::InvalidProof);
+        };
+
+        if reconstructed_root != *root {
+            return Err(Error::RootMismatch);
+        }
+
+        Ok(collected_digests)
     }
 
     /// Like [`reconstruct_root`](Self::reconstruct_root), but if `collected` is `Some`,

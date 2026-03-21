@@ -78,17 +78,19 @@ use crate::{
             variable::{Config as VConfig, Journal as VJournal},
         },
     },
-    mmr::{self, journaled::Config as MmrConfig, Location},
+    mmr::{self, journaled::Config as MmrConfig},
     qmdb::{
         any::operation::{Operation, Update},
         operation::Committable,
-        Error,
     },
     translator::Translator,
 };
 use commonware_codec::{Codec, CodecFixedShared, Read};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
+
+type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
+type Location = crate::mmr::Location;
 use tracing::warn;
 
 pub mod batch;
@@ -129,20 +131,20 @@ pub struct VariableConfig<T: Translator, C> {
 }
 
 /// Shared initialization logic for fixed-sized value [db::Db].
-pub(super) async fn init_fixed<E, U, H, T, I, F, NewIndex>(
+pub(super) async fn init_fixed<E, U, H, T, I, Cb, NewIndex>(
     context: E,
     cfg: FixedConfig<T>,
     known_inactivity_floor: Option<Location>,
-    callback: F,
+    callback: Cb,
     new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<U>>, I, H, U>, Error>
+) -> Result<db::Db<crate::merkle::mmr::Family, E, FJournal<E, Operation<U>>, I, H, U>, Error>
 where
     E: Storage + Clock + Metrics,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
-    F: FnMut(bool, Option<Location>),
+    Cb: FnMut(bool, Option<Location>),
     NewIndex: FnOnce(E, T) -> I,
     Operation<U>: CodecFixedShared + Committable,
 {
@@ -166,20 +168,20 @@ where
 }
 
 /// Shared initialization logic for variable-sized value [db::Db].
-pub(super) async fn init_variable<E, U, H, T, I, F, NewIndex>(
+pub(super) async fn init_variable<E, U, H, T, I, Cb, NewIndex>(
     context: E,
     cfg: VariableConfig<T, <Operation<U> as Read>::Cfg>,
     known_inactivity_floor: Option<Location>,
-    callback: F,
+    callback: Cb,
     new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<U>>, I, H, U>, Error>
+) -> Result<db::Db<crate::merkle::mmr::Family, E, VJournal<E, Operation<U>>, I, H, U>, Error>
 where
     E: Storage + Clock + Metrics,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
-    F: FnMut(bool, Option<Location>),
+    Cb: FnMut(bool, Option<Location>),
     NewIndex: FnOnce(E, T) -> I,
     Operation<U>: Codec + Committable,
 {

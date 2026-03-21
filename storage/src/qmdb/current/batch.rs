@@ -23,7 +23,6 @@ use crate::{
             grafting,
         },
         operation::{Key, Operation as OperationTrait},
-        Error,
     },
 };
 use commonware_codec::Codec;
@@ -34,6 +33,9 @@ use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
 };
+
+/// Convenience alias: all `current` databases use the MMR family.
+type Error = crate::qmdb::Error<mmr::Family>;
 
 /// A bitmap that can be read.
 pub trait BitmapRead<const N: usize> {
@@ -89,7 +91,7 @@ impl<'a, B: BitmapRead<N>, const N: usize> BitmapScan<'a, B, N> {
     }
 }
 
-impl<B: BitmapRead<N>, const N: usize> FloorScan for BitmapScan<'_, B, N> {
+impl<B: BitmapRead<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan<'_, B, N> {
     fn next_candidate(&mut self, floor: Location, tip: u64) -> Option<Location> {
         let mut loc = *floor;
         let bitmap_len = self.bitmap.len();
@@ -306,7 +308,7 @@ where
     B: BitmapRead<N>,
 {
     /// The inner any-layer batch that handles mutations, journal, and floor raise.
-    inner: any::batch::UnmerkleizedBatch<'a, E, C, I, H, U, P>,
+    inner: any::batch::UnmerkleizedBatch<'a, mmr::Family, E, C, I, H, U, P>,
 
     /// The committed current-layer DB (for bitmap and grafted MMR access).
     current_db: &'a super::db::Db<E, C, I, H, U, N>,
@@ -343,7 +345,7 @@ where
     B: BitmapRead<N>,
 {
     /// The inner any-layer merkleized batch.
-    inner: any::batch::MerkleizedBatch<'a, E, C, I, H, U, P>,
+    inner: any::batch::MerkleizedBatch<'a, mmr::Family, E, C, I, H, U, P>,
 
     /// The committed current-layer DB (for bitmap and grafted MMR access).
     current_db: &'a super::db::Db<E, C, I, H, U, N>,
@@ -367,7 +369,7 @@ where
 /// An owned changeset that can be applied to the database.
 pub struct Changeset<K, D: Digest, Item: Send, const N: usize> {
     /// The inner any-layer changeset.
-    pub(super) inner: any::batch::Changeset<K, D, Item>,
+    pub(super) inner: any::batch::Changeset<mmr::Family, K, D, Item>,
 
     /// One bool per operation in the batch chain (pushes applied before clears).
     pub(super) bitmap_pushes: Vec<bool>,
@@ -398,7 +400,7 @@ where
     B: BitmapRead<N>,
 {
     pub(super) const fn new(
-        inner: any::batch::UnmerkleizedBatch<'a, E, C, I, H, U, P>,
+        inner: any::batch::UnmerkleizedBatch<'a, mmr::Family, E, C, I, H, U, P>,
         current_db: &'a super::db::Db<E, C, I, H, U, N>,
         base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
         base_bitmap_clears: Vec<Arc<Vec<Location>>>,
@@ -531,7 +533,7 @@ fn push_operation_bits<U, B, const N: usize>(
     bitmap: &mut BitmapDiff<'_, B, N>,
     segment: &[Operation<U>],
     segment_base: u64,
-    diff: &BTreeMap<U::Key, DiffEntry<U::Value>>,
+    diff: &BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>,
 ) where
     U: update::Update,
     B: BitmapRead<N>,
@@ -560,7 +562,7 @@ fn push_operation_bits<U, B, const N: usize>(
 /// Clear bits for base-DB operations superseded by this chain's diff.
 fn clear_base_old_locs<K, V, B, const N: usize>(
     bitmap: &mut BitmapDiff<'_, B, N>,
-    diff: &BTreeMap<K, DiffEntry<V>>,
+    diff: &BTreeMap<K, DiffEntry<mmr::Family, V>>,
 ) where
     K: Ord,
     B: BitmapRead<N>,
@@ -578,7 +580,7 @@ fn clear_base_old_locs<K, V, B, const N: usize>(
 fn clear_ancestor_superseded<U, B, const N: usize>(
     bitmap: &mut BitmapDiff<'_, B, N>,
     chain: &[std::sync::Arc<Vec<Operation<U>>>],
-    diff: &BTreeMap<U::Key, DiffEntry<U::Value>>,
+    diff: &BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>,
     db_base: u64,
 ) where
     U: update::Update,
@@ -610,7 +612,7 @@ fn clear_ancestor_superseded<U, B, const N: usize>(
 /// chain's accumulated bitmap pushes/clears are stored alongside the diff
 /// so that `finalize()` can concatenate them without recomputation.
 async fn compute_current_layer<'a, E, U, C, I, H, P, G, B, const N: usize>(
-    inner: any::batch::MerkleizedBatch<'a, E, C, I, H, U, P>,
+    inner: any::batch::MerkleizedBatch<'a, mmr::Family, E, C, I, H, U, P>,
     current_db: &'a super::db::Db<E, C, I, H, U, N>,
     base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
     base_bitmap_clears: Vec<Arc<Vec<Location>>>,
@@ -921,7 +923,8 @@ mod trait_impls {
         fn merkleize(
             self,
             metadata: Option<V::Value>,
-        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error>> {
+        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<crate::mmr::Family>>>
+        {
             self.merkleize(metadata)
         }
     }
@@ -955,7 +958,8 @@ mod trait_impls {
         fn merkleize(
             self,
             metadata: Option<V::Value>,
-        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error>> {
+        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<crate::mmr::Family>>>
+        {
             self.merkleize(metadata)
         }
     }
@@ -1026,7 +1030,9 @@ mod trait_impls {
         fn apply_batch(
             &mut self,
             batch: Self::Changeset,
-        ) -> impl Future<Output = Result<core::ops::Range<Location>, crate::qmdb::Error>> {
+        ) -> impl Future<
+            Output = Result<core::ops::Range<Location>, crate::qmdb::Error<crate::mmr::Family>>,
+        > {
             self.apply_batch(batch)
         }
     }
@@ -1069,7 +1075,9 @@ mod trait_impls {
         fn apply_batch(
             &mut self,
             batch: Self::Changeset,
-        ) -> impl Future<Output = Result<core::ops::Range<Location>, crate::qmdb::Error>> {
+        ) -> impl Future<
+            Output = Result<core::ops::Range<Location>, crate::qmdb::Error<crate::mmr::Family>>,
+        > {
             self.apply_batch(batch)
         }
     }
@@ -1280,7 +1288,7 @@ mod tests {
         let base = make_bitmap(&[true; 64]);
         let mut bitmap = BitmapDiff::<Bm, N>::new(&base, 2);
 
-        let mut diff: BTreeMap<K, DiffEntry<u64>> = BTreeMap::new();
+        let mut diff: BTreeMap<K, DiffEntry<mmr::Family, u64>> = BTreeMap::new();
 
         // key1: Active with base_old_loc = Some(5) -> should clear bit 5.
         diff.insert(

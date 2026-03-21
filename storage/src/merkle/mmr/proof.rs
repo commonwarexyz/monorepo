@@ -2,46 +2,13 @@
 
 use crate::merkle::{
     hasher::Hasher,
-    mmr::{iterator::nodes_to_pin, Error, Family, Location, Position},
+    mmr::{iterator::nodes_to_pin, Family, Location, Position},
     proof::{Blueprint, Proof},
 };
 use alloc::{collections::btree_map::BTreeMap, vec::Vec};
 use commonware_cryptography::Digest;
 
 impl<D: Digest> Proof<Family, D> {
-    /// Reconstructs the root digest of the MMR from the digests in the proof and the provided range
-    /// of elements, returning the (position,digest) of every node whose digest was required by the
-    /// process (including those from the proof itself). Returns a [Error::InvalidProof] if the
-    /// input data is invalid and [Error::RootMismatch] if the root does not match the computed
-    /// root.
-    pub fn verify_range_inclusion_and_extract_digests<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        start_loc: Location,
-        root: &D,
-    ) -> Result<Vec<(Position, D)>, Error>
-    where
-        H: Hasher<Family, Digest = D>,
-        E: AsRef<[u8]>,
-    {
-        let mut collected_digests = Vec::new();
-        let Ok(reconstructed_root) = self.reconstruct_root_collecting(
-            hasher,
-            elements,
-            start_loc,
-            Some(&mut collected_digests),
-        ) else {
-            return Err(Error::InvalidProof);
-        };
-
-        if reconstructed_root != *root {
-            return Err(Error::RootMismatch);
-        }
-
-        Ok(collected_digests)
-    }
-
     /// Verify that both the proof and the pinned nodes are valid with respect to `root`.
     ///
     /// The `pinned_nodes` are the peak digests of the sub-MMR at `start_loc`, in the order returned
@@ -135,7 +102,7 @@ mod tests {
     use super::*;
     use crate::merkle::{
         self as merkle,
-        mmr::{iterator::PeakIterator, mem::Mmr, StandardHasher as Standard},
+        mmr::{iterator::PeakIterator, mem::Mmr, Error, StandardHasher as Standard},
         proof::nodes_required_for_multi_proof,
         Family as _, LocationRangeExt as _,
     };

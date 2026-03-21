@@ -21,6 +21,8 @@ mod proof;
 mod read;
 #[cfg(feature = "std")]
 pub mod storage;
+#[cfg(feature = "std")]
+pub mod verification;
 
 use alloc::vec::Vec;
 use core::fmt::Debug;

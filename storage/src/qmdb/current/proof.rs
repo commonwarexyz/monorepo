@@ -8,7 +8,7 @@ use crate::{
     journal::contiguous::{Contiguous, Reader as _},
     merkle::{hasher::Hasher as _, storage::Storage},
     mmr::{self, verification, Location, Proof},
-    qmdb::{current::grafting, Error},
+    qmdb::current::grafting,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
@@ -17,6 +17,8 @@ use core::ops::Range;
 use futures::future::try_join_all;
 use std::num::NonZeroU64;
 use tracing::debug;
+
+type Error = crate::qmdb::Error<mmr::Family>;
 
 /// A proof that a range of operations exist in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]

@@ -3,7 +3,7 @@
 use crate::Key;
 use commonware_codec::Encode;
 use commonware_storage::{
-    mmr::{Location, Proof},
+    mmr::{self, Location, Proof},
     qmdb::{self, operation::Operation},
 };
 use std::{future::Future, num::NonZeroU64};
@@ -46,6 +46,7 @@ impl DatabaseType {
 }
 
 /// Helper trait for databases that can be synced.
+#[allow(clippy::type_complexity)]
 pub trait Syncable: Sized {
     /// The type of operations in the database.
     type Operation: Operation + Encode + Sync + 'static;
@@ -59,7 +60,7 @@ pub trait Syncable: Sized {
     fn add_operations(
         &mut self,
         operations: Vec<Self::Operation>,
-    ) -> impl Future<Output = Result<(), qmdb::Error>>;
+    ) -> impl Future<Output = Result<(), qmdb::Error<mmr::Family>>>;
 
     /// Get the database's root digest.
     fn root(&self) -> Key;
@@ -76,13 +77,13 @@ pub trait Syncable: Sized {
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send;
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>> + Send;
 
     /// Get the pinned MMR nodes for a lower operation boundary of `loc`.
     fn pinned_nodes_at(
         &self,
         loc: Location,
-    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error>> + Send;
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send;
 
     /// Get the database type name for logging.
     fn name() -> &'static str;
