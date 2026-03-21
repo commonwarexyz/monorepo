@@ -365,7 +365,11 @@ where
         scheme: scheme.clone(),
         elector: elector.clone(),
     };
-    let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+    let reporter = reporter::Reporter::new_with_options(
+        context.with_label("reporter"),
+        reporter_cfg,
+        reporter::Options::minimal(),
+    );
 
     let app_cfg = application::Config {
         hasher: Sha256::default(),
@@ -598,8 +602,11 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 scheme: scheme.clone(),
                 elector: primary_elector.clone(),
             };
-            let reporter =
-                reporter::Reporter::new(primary_context.with_label("reporter"), reporter_cfg);
+            let reporter = reporter::Reporter::new_with_options(
+                primary_context.with_label("reporter"),
+                reporter_cfg,
+                reporter::Options::minimal(),
+            );
 
             let app_cfg = application::Config {
                 hasher: Sha256::default(),
