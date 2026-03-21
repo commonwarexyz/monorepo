@@ -69,8 +69,14 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     /// [`Hasher::root`](crate::merkle::hasher::Hasher::root)).
     fn peaks(size: Position<Self>) -> impl Iterator<Item = (Position<Self>, u32)>;
 
-    /// Compute positions of nodes that must be pinned when pruning to `prune_pos`
+    /// Compute a sufficient set of node positions to pin when pruning to `prune_pos`
     /// in a structure of the given `size`.
+    ///
+    /// Implementations may return a conservative superset of the minimally required nodes.
+    /// Callers must therefore treat the result as "safe to retain" rather than assuming it is
+    /// minimal or canonical. Families may also differ in how this set depends on `size`; for
+    /// example, some families may ignore `size`, while others may grow the returned set as the
+    /// structure is appended to.
     fn nodes_to_pin(size: Position<Self>, prune_pos: Position<Self>) -> Vec<Position<Self>>;
 
     /// Return the positions of the left and right children of the node at `pos` with the
