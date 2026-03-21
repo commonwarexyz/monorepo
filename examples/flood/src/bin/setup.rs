@@ -4,7 +4,7 @@ use commonware_cryptography::{ed25519, Signer as _};
 use commonware_deployer::aws;
 use commonware_flood::Config;
 use commonware_math::algebra::Random;
-use commonware_utils::hex;
+use commonware_utils::{hex, NZUsize};
 use rand::{rngs::OsRng, seq::IteratorRandom};
 use tracing::info;
 use uuid::Uuid;
@@ -157,7 +157,7 @@ fn main() {
             worker_threads,
             message_size,
             message_backlog,
-            mailbox_size,
+            mailbox_size: NZUsize!(mailbox_size),
             instrument,
         };
         peer_configs.push((peer_config_file.clone(), peer_config));

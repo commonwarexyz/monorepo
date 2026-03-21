@@ -23,6 +23,9 @@ pub enum Message<C: PublicKey> {
     /// Register a peer set at a given index.
     Register { index: u64, peers: Map<C, Address> },
 
+    /// Follow the complete set of fallback follower source IPs for peers that may dial us when not currently tracked.
+    Follow { peers: Map<C, IpAddr> },
+
     /// Update addresses for multiple peers without creating a new peer set.
     Overwrite { peers: Map<C, Address> },
 
@@ -233,6 +236,10 @@ impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
 
     async fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) {
         self.sender.0.send_lossy(Message::Overwrite { peers });
+    }
+
+    async fn follow(&mut self, peers: Map<Self::PublicKey, IpAddr>) {
+        self.sender.0.send_lossy(Message::Follow { peers });
     }
 }
 

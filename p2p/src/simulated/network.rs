@@ -33,6 +33,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -99,7 +100,7 @@ pub struct Config {
     /// tracked peer set will have their links removed and messages to them will be dropped.
     ///
     /// If [None], peer sets are not considered.
-    pub tracked_peer_sets: Option<usize>,
+    pub tracked_peer_sets: Option<NonZeroUsize>,
 }
 
 /// Implementation of a simulated network.
@@ -142,8 +143,11 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Reference count for each peer (number of peer sets they belong to)
     peer_refs: BTreeMap<P, usize>,
 
+    // Peers that may send to and receive from us without belonging to tracked peer sets.
+    follower_peers: BTreeSet<P>,
+
     // Maximum number of peer sets to track
-    tracked_peer_sets: Option<usize>,
+    tracked_peer_sets: Option<NonZeroUsize>,
 
     // A map of peers blocking each other
     blocks: BTreeSet<(P, P)>,
@@ -198,6 +202,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 peers: BTreeMap::new(),
                 peer_sets: BTreeMap::new(),
                 peer_refs: BTreeMap::new(),
+                follower_peers: BTreeSet::new(),
                 blocks: BTreeSet::new(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
@@ -277,6 +282,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     }
                 }
 
+                let peers = Set::from_iter_dedup(peers);
+
                 // Create and store new peer set
                 for public_key in peers.iter() {
                     // Create peer if it doesn't exist
@@ -288,7 +295,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.peer_sets.insert(id, peers.clone());
 
                 // Remove oldest peer set if we exceed the limit
-                while self.peer_sets.len() > tracked_peer_sets {
+                while self.peer_sets.len() > tracked_peer_sets.get() {
                     let (id, set) = self.peer_sets.pop_first().unwrap();
                     debug!(id, "removed oldest peer set");
 
@@ -315,6 +322,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // Broadcast updated peer list to LimitedSender subscribers
                 self.broadcast_peer_list().await;
             }
+            ingress::Message::Follow { public_keys } => {
+                self.follower_peers = public_keys.into_iter().collect();
+                self.broadcast_peer_list().await;
+            }
             ingress::Message::Register {
                 channel,
                 public_key,
@@ -324,8 +335,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // If peer does not exist, then create it.
                 let (_, is_new) = self.ensure_peer_exists(&public_key).await;
 
-                // When not using peer sets, broadcast updated peer list to subscribers
-                if is_new && self.peer_sets.is_empty() {
+                // Broadcast when the connected peer set changes.
+                if is_new
+                    && (self.peer_sets.is_empty() || self.follower_peers.contains(&public_key))
+                {
                     self.broadcast_peer_list().await;
                 }
 
@@ -358,10 +371,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
             ingress::Message::PeerSet { id, response } => {
                 if self.peer_sets.is_empty() {
-                    // Return all peers if no peer sets are registered.
+                    // Return all non-follower peers if no peer sets are registered.
                     let _ = response.send(Some(
                         self.peers
                             .keys()
+                            .filter(|peer| !self.follower_peers.contains(*peer))
                             .cloned()
                             .try_collect()
                             .expect("BTreeMap keys are unique"),
@@ -391,7 +405,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let (mut sender, receiver) = ring::channel(NZUsize!(1));
 
                 // Send current peer list immediately
-                let peer_list: Vec<P> = self.all_tracked_peers().into_iter().collect();
+                let peer_list: Vec<P> = self.all_recipients().into_iter().collect();
                 let _ = sender.send(peer_list).await;
 
                 // Store sender for future broadcasts
@@ -409,8 +423,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // If peer does not exist, then create it.
                 let (_, is_new) = self.ensure_peer_exists(&public_key).await;
 
-                // When not using peer sets, broadcast updated peer list to subscribers
-                if is_new && self.peer_sets.is_empty() {
+                // Broadcast when the connected peer set changes.
+                if is_new
+                    && (self.peer_sets.is_empty() || self.follower_peers.contains(&public_key))
+                {
                     self.broadcast_peer_list().await;
                 }
 
@@ -511,7 +527,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
     async fn broadcast_peer_list(&mut self) {
-        let peer_list = self.all_tracked_peers().into_iter().collect::<Vec<_>>();
+        let peer_list = self.all_recipients().into_iter().collect::<Vec<_>>();
         let mut live_subscribers = Vec::with_capacity(self.peer_subscribers.len());
         for mut subscriber in self.peer_subscribers.drain(..) {
             if subscriber.send(peer_list.clone()).await.is_ok() {
@@ -530,6 +546,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         if self.peer_sets.is_empty() && self.tracked_peer_sets.is_none() {
             self.peers
                 .keys()
+                .filter(|peer| !self.follower_peers.contains(*peer))
                 .cloned()
                 .try_collect()
                 .expect("BTreeMap keys are unique")
@@ -540,6 +557,20 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .try_collect()
                 .expect("BTreeMap keys are unique")
         }
+    }
+
+    /// Get all peers that should receive `Recipients::All`.
+    fn all_recipients(&self) -> Set<P> {
+        Set::from_iter_dedup(
+            self.all_tracked_peers().into_iter().chain(
+                self.follower_peers
+                    .iter()
+                    .filter(|peer| {
+                        self.peers.contains_key(*peer) && !self.peer_refs.contains_key(*peer)
+                    })
+                    .cloned(),
+            ),
+        )
     }
 }
 
@@ -581,7 +612,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     fn handle_task(&mut self, task: Task<P>) {
         // If peer sets are enabled and we are not in one, ignore the message (we are disconnected from all)
         let (channel, origin, recipients, message, reply) = task;
-        if self.tracked_peer_sets.is_some() && !self.peer_refs.contains_key(&origin) {
+        if self.tracked_peer_sets.is_some()
+            && !self.peer_refs.contains_key(&origin)
+            && !self.follower_peers.contains(&origin)
+        {
             warn!(
                 ?origin,
                 reason = "not in tracked peer set",
@@ -595,16 +629,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
         // Collect recipients
         let recipients = match recipients {
-            Recipients::All => {
-                // If peer sets have been registered, send only to tracked peers
-                // Otherwise, send to all registered peers (compatibility
-                // with tests that do not register peer sets.)
-                if self.peer_sets.is_empty() {
-                    self.peers.keys().cloned().collect()
-                } else {
-                    self.peer_refs.keys().cloned().collect()
-                }
-            }
+            Recipients::All => self.all_recipients().into_iter().collect(),
             Recipients::Some(keys) => keys,
             Recipients::One(key) => vec![key],
         };
@@ -620,7 +645,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
 
             // If tracking peer sets, ensure recipient and sender are in a tracked peer set
-            if self.tracked_peer_sets.is_some() && !self.peer_refs.contains_key(&recipient) {
+            if self.tracked_peer_sets.is_some()
+                && !self.peer_refs.contains_key(&recipient)
+                && !self.follower_peers.contains(&recipient)
+            {
                 trace!(
                     ?origin,
                     ?recipient,
@@ -1295,10 +1323,11 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Manager, Provider, Receiver as _, Recipients, Sender as _};
+    use crate::{AddressableManager, Manager, Provider, Receiver as _, Recipients, Sender as _};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic, Quota, Runner as _};
-    use futures::FutureExt;
+    use commonware_utils::NZUsize;
+    use futures::{FutureExt, StreamExt};
     use std::num::NonZeroU32;
 
     const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
@@ -1313,7 +1342,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1364,7 +1393,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1496,7 +1525,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1570,7 +1599,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1657,7 +1686,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: Some(NZUsize!(3)),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1691,6 +1720,318 @@ mod tests {
             assert_eq!(id, 11);
             assert_eq!(new, [pk4.clone()].try_into().unwrap());
             assert_eq!(all, [pk1, pk2, pk4].try_into().unwrap());
+        });
+    }
+
+    #[test]
+    fn test_followers_receive_all_and_are_excluded_from_peer_sets() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(NZUsize!(3)),
+            };
+            let network_context = context.with_label("network");
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            let tracked_a = ed25519::PrivateKey::from_seed(40).public_key();
+            let tracked_b = ed25519::PrivateKey::from_seed(41).public_key();
+            let follower = ed25519::PrivateKey::from_seed(42).public_key();
+            let tracked_a_socket = SocketAddr::from(([1, 1, 1, 1], 1001));
+            let tracked_b_socket = SocketAddr::from(([2, 2, 2, 2], 1002));
+            let mut manager = oracle.socket_manager();
+            let mut subscription = manager.subscribe().await;
+
+            // Follow one peer and track two others. Only the tracked
+            // peers should appear in peer-set queries and subscriptions.
+            manager
+                .follow(
+                    [(follower.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            manager
+                .track(
+                    0,
+                    [
+                        (tracked_a.clone(), tracked_a_socket.into()),
+                        (tracked_b.clone(), tracked_b_socket.into()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .await;
+
+            let peer_set = manager.peer_set(0).await.unwrap();
+            assert_eq!(
+                peer_set,
+                [tracked_a.clone(), tracked_b.clone()].try_into().unwrap()
+            );
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 0);
+            assert_eq!(
+                new,
+                [tracked_a.clone(), tracked_b.clone()].try_into().unwrap()
+            );
+            assert_eq!(
+                all,
+                [tracked_a.clone(), tracked_b.clone()].try_into().unwrap()
+            );
+
+            // Connect all three peers and wire up links so we can exercise
+            // direct sends and Recipients::All delivery.
+            let (mut tracked_a_sender, _tracked_a_recv) = oracle
+                .control(tracked_a.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_tracked_b_sender, mut tracked_b_recv) = oracle
+                .control(tracked_b.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (mut follower_sender, mut follower_recv) = oracle
+                .control(follower.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let link = ingress::Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(tracked_a.clone(), tracked_b.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(tracked_a.clone(), follower.clone(), link.clone())
+                .await
+                .unwrap();
+            oracle
+                .add_link(follower.clone(), tracked_b.clone(), link)
+                .await
+                .unwrap();
+
+            // Recipients::All expands to tracked peers plus connected followers.
+            let sent = tracked_a_sender
+                .send(Recipients::All, b"to_all", false)
+                .await
+                .unwrap();
+            assert_eq!(sent.len(), 2);
+            assert!(sent.contains(&tracked_b));
+            assert!(sent.contains(&follower));
+
+            let (sender, payload) = tracked_b_recv.recv().await.unwrap();
+            assert_eq!(sender, tracked_a);
+            assert_eq!(payload, b"to_all");
+
+            let (sender, payload) = follower_recv.recv().await.unwrap();
+            assert_eq!(sender, tracked_a);
+            assert_eq!(payload, b"to_all");
+
+            // Followers can also send directly to tracked peers.
+            let sent = follower_sender
+                .send(Recipients::One(tracked_b.clone()), b"from_follower", false)
+                .await
+                .unwrap();
+            assert_eq!(sent, vec![tracked_b.clone()]);
+
+            let (sender, payload) = tracked_b_recv.recv().await.unwrap();
+            assert_eq!(sender, follower);
+            assert_eq!(payload, b"from_follower");
+        });
+    }
+
+    #[test]
+    fn test_followers_are_full_peers_while_tracked_and_fall_back_after_eviction() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(NZUsize!(2)),
+            };
+            let network_context = context.with_label("network");
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            let tracked = ed25519::PrivateKey::from_seed(50).public_key();
+            let follower = ed25519::PrivateKey::from_seed(51).public_key();
+            let tracked_socket = SocketAddr::from(([4, 4, 4, 4], 1004));
+            let follower_socket = SocketAddr::from(([5, 5, 5, 5], 1005));
+
+            let mut manager = oracle.socket_manager();
+            let mut subscription = manager.subscribe().await;
+
+            // Start by following a peer, then add the same peer to a
+            // tracked set so it behaves like a normal tracked peer.
+            manager
+                .follow(
+                    [(follower.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            manager
+                .track(
+                    0,
+                    [
+                        (tracked.clone(), tracked_socket.into()),
+                        (follower.clone(), follower_socket.into()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .await;
+
+            let peer_set = manager.peer_set(0).await.unwrap();
+            assert_eq!(
+                peer_set,
+                [tracked.clone(), follower.clone()].try_into().unwrap()
+            );
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 0);
+            assert_eq!(new, [tracked.clone(), follower.clone()].try_into().unwrap());
+            assert_eq!(all, [tracked.clone(), follower.clone()].try_into().unwrap());
+
+            // While tracked, Recipients::All should reach the peer through the
+            // tracked-peer expansion.
+            let (mut tracked_sender, _tracked_recv) = oracle
+                .control(tracked.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_follower_sender, mut follower_recv) = oracle
+                .control(follower.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let link = ingress::Link {
+                latency: Duration::from_millis(0),
+                jitter: Duration::from_millis(0),
+                success_rate: 1.0,
+            };
+            oracle
+                .add_link(tracked.clone(), follower.clone(), link)
+                .await
+                .unwrap();
+
+            let sent = tracked_sender
+                .send(Recipients::All, b"tracked", false)
+                .await
+                .unwrap();
+            assert_eq!(sent, vec![follower.clone()]);
+            let (sender, payload) = follower_recv.recv().await.unwrap();
+            assert_eq!(sender, tracked);
+            assert_eq!(payload, b"tracked");
+
+            // Evict the set that tracked the follower peer. It should disappear
+            // from tracked views but still receive Recipients::All as a follower
+            // fallback peer.
+            manager
+                .track(
+                    1,
+                    [(tracked.clone(), tracked_socket.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let _ = subscription.recv().await.unwrap();
+            manager
+                .track(
+                    2,
+                    [(tracked.clone(), tracked_socket.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 2);
+            assert_eq!(new, [tracked.clone()].try_into().unwrap());
+            assert_eq!(all, [tracked.clone()].try_into().unwrap());
+
+            let sent = tracked_sender
+                .send(Recipients::All, b"fallback", false)
+                .await
+                .unwrap();
+            assert_eq!(sent, vec![follower.clone()]);
+            let (sender, payload) = follower_recv.recv().await.unwrap();
+            assert_eq!(sender, tracked);
+            assert_eq!(payload, b"fallback");
+        });
+    }
+
+    #[test]
+    fn test_connected_peer_subscription_excludes_untracked_non_followers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(NZUsize!(2)),
+            };
+            let network_context = context.with_label("network");
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            let mut connected = ConnectedPeerProvider::new(network.oracle_mailbox.clone());
+            network_context.spawn(|_| network.run());
+
+            let ordinary = ed25519::PrivateKey::from_seed(60).public_key();
+            let follower = ed25519::PrivateKey::from_seed(61).public_key();
+
+            let mut receiver = connected.subscribe().await;
+            assert_eq!(
+                receiver.next().await.unwrap(),
+                Vec::<ed25519::PublicKey>::new()
+            );
+
+            // Ordinary connected peers are ignored until they are either tracked
+            // or explicitly followed.
+            let _ = oracle
+                .control(ordinary.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            assert_eq!(
+                receiver.next().await.unwrap(),
+                Vec::<ed25519::PublicKey>::new()
+            );
+
+            let _ = oracle
+                .control(follower.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            assert_eq!(
+                receiver.next().await.unwrap(),
+                Vec::<ed25519::PublicKey>::new()
+            );
+
+            // Once one peer is followed, the connected-peer subscription
+            // exposes only that peer, not all untracked connections.
+            let mut manager = oracle.socket_manager();
+            manager
+                .follow(
+                    [(follower.clone(), IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)))]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            assert_eq!(receiver.next().await.unwrap(), vec![follower.clone()]);
+
+            // Replacing the follower set with nothing removes the peer from the
+            // connected follower view immediately, which is what Recipients::All
+            // will use for future fanout decisions.
+            manager.follow(Default::default()).await;
+            assert_eq!(
+                receiver.next().await.unwrap(),
+                Vec::<ed25519::PublicKey>::new()
+            );
         });
     }
 
@@ -1734,7 +2075,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
-            tracked_peer_sets: Some(3),
+            tracked_peer_sets: Some(NZUsize!(3)),
         };
         let runner = deterministic::Runner::default();
 
@@ -1814,7 +2155,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
-            tracked_peer_sets: Some(3),
+            tracked_peer_sets: Some(NZUsize!(3)),
         };
         let runner = deterministic::Runner::default();
 

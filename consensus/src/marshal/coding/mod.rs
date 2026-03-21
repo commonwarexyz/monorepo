@@ -94,7 +94,7 @@ mod tests {
     use commonware_p2p::Manager;
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::NZU16;
+    use commonware_utils::{NZUsize, NZU16};
     use std::time::Duration;
 
     #[test_group("slow")]
@@ -1415,7 +1415,7 @@ mod tests {
         // the block unless V::commitment(block) matches the finalization payload.
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), Some(1));
+            let mut oracle = setup_network(context.clone(), Some(NZUsize!(1)));
             let Fixture {
                 participants,
                 schemes,

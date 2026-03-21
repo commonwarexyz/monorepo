@@ -20,7 +20,7 @@ stability_scope!(BETA {
         channel::mpsc,
         ordered::{Map, Set},
     };
-    use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
+    use std::{error::Error as StdError, fmt::Debug, future::Future, net::IpAddr, time::SystemTime};
 
     pub mod authenticated;
     pub mod types;
@@ -281,6 +281,26 @@ stability_scope!(BETA {
         fn overwrite(
             &mut self,
             peers: Map<Self::PublicKey, Address>,
+        ) -> impl Future<Output = ()> + Send;
+
+        /// Follow the complete set of inbound-only follower peers by `(PublicKey, IpAddr)`.
+        ///
+        /// This is a fallback admission rule, not tracked peer-set membership:
+        /// - a followed peer may connect from its configured source IP when it is absent from all tracked sets
+        /// - a followed peer is never dialed while it is untracked
+        /// - a followed peer is excluded from peer-set queries and subscriptions while it is untracked
+        /// - a followed peer still receives direct messages and messages sent to [`Recipients::All`](crate::Recipients::All)
+        ///
+        /// This call replaces the entire followed set. Peers omitted from `peers` stop being
+        /// followed. If an omitted peer is currently connected only through follower policy, that
+        /// live session is disconnected so it must reconnect under the updated policy.
+        ///
+        /// If a later tracked peer set includes the same public key, normal tracked-peer semantics
+        /// apply while it remains tracked. Entering or leaving tracked mode disconnects any live
+        /// session so the peer reconnects under the current policy.
+        fn follow(
+            &mut self,
+            peers: Map<Self::PublicKey, IpAddr>,
         ) -> impl Future<Output = ()> + Send;
     }
 

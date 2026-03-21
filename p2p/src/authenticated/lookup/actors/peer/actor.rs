@@ -40,9 +40,9 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config) -> (Self, Mailbox<Message>, Relay<EncodedData>) {
-        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
-        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
-        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size.get());
+        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size.get());
+        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size.get());
         (
             Self {
                 context,
@@ -293,6 +293,7 @@ mod tests {
     };
     use commonware_runtime::{deterministic, mocks, BufferPooler, Runner, Spawner};
     use commonware_stream::encrypted::Config as StreamConfig;
+    use commonware_utils::NZUsize;
     use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::time::Duration;
 
@@ -301,7 +302,7 @@ mod tests {
 
     fn default_peer_config() -> Config {
         Config {
-            mailbox_size: 10,
+            mailbox_size: NZUsize!(10),
             ping_frequency: Duration::from_secs(30),
             sent_messages: Family::<metrics::Message, Counter>::default(),
             received_messages: Family::<metrics::Message, Counter>::default(),

@@ -68,7 +68,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     ) {
         // General initialization
         let directory_cfg = directory::Config {
-            max_sets: cfg.tracked_peer_sets,
+            max_sets: cfg.tracked_peer_sets.get(),
             peer_connection_cooldown: cfg.peer_connection_cooldown,
             allow_private_ips: cfg.allow_private_ips,
             allow_dns: cfg.allow_dns,
@@ -116,10 +116,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             },
             _ = self.directory.wait_for_unblock() => {
                 if self.directory.unblock_expired() {
-                    self.listener
-                        .0
-                        .send_lossy(self.directory.listenable())
-                        .await;
+                    self.listener.0.send_lossy(self.directory.listenable()).await;
                 }
             },
             Some(msg) = self.receiver.recv() else {
@@ -137,12 +134,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             Message::Register { index, peers } => {
                 // Identify peers that were added or had their addresses changed.
                 let peer_keys: Set<C::PublicKey> = peers.keys().clone();
-                let Some((deleted, changed)) = self.directory.add_set(index, peers) else {
+                let Some((removed, changed)) = self.directory.add_set(index, peers) else {
                     return;
                 };
 
-                // Kill connections for peers no longer in any tracked peer set.
-                for peer in deleted {
+                // Kill connections for peers that left the tracked set view.
+                for peer in removed {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
                     }
@@ -168,6 +165,22 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     subscriber.send_lossy((index, peer_keys.clone(), self.directory.tracked()))
                 });
             }
+            Message::Follow { peers } => {
+                // `follow` replaces the complete follower set. Any untracked peer
+                // that drops out of that set must reconnect under the new policy.
+                for peer in self.directory.follow(peers) {
+                    if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
+                        mailbox.kill().await;
+                    }
+                }
+
+                // Refresh the listener's admitted IP set so new inbound
+                // connections are checked against the latest follower policy.
+                self.listener
+                    .0
+                    .send_lossy(self.directory.listenable())
+                    .await;
+            }
             Message::Overwrite { peers } => {
                 let mut any_changed = false;
                 for (public_key, address) in peers {
@@ -177,7 +190,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     }
                     any_changed = true;
 
-                    // Kill the existing connection since it was established to the old address.
+                    // Kill the existing connection since it was established to
+                    // the old tracked address.
                     if let Some(mut peer) = self.mailboxes.remove(&public_key) {
                         peer.kill().await;
                     }
@@ -274,7 +288,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{authenticated::lookup::actors::peer, AddressableManager, Ingress};
+    use crate::{authenticated::lookup::actors::peer, AddressableManager, Ingress, Provider};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
@@ -283,6 +297,7 @@ mod tests {
         deterministic::{self},
         Clock, Runner,
     };
+    use commonware_utils::NZUsize;
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
@@ -297,7 +312,7 @@ mod tests {
         (
             Config {
                 crypto,
-                tracked_peer_sets: 2,
+                tracked_peer_sets: NZUsize!(2),
                 peer_connection_cooldown: Duration::from_millis(200),
                 allow_private_ips: true,
                 allow_dns: true,
@@ -690,7 +705,7 @@ mod tests {
             let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
             let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
-            cfg.tracked_peer_sets = 1;
+            cfg.tracked_peer_sets = NZUsize!(1);
 
             let TestHarness {
                 mut mailbox,
@@ -780,6 +795,333 @@ mod tests {
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(!registered_ips.contains(&addr_1.ip()));
             assert!(registered_ips.contains(&addr_2.ip()));
+        });
+    }
+
+    #[test]
+    fn test_followed_peer_is_full_peer_while_tracked_and_follower_when_untracked() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (cfg, mut listener_receiver) = test_config(PrivateKey::from_seed(0), false);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let follower_pk = new_signer_and_pk(1).1;
+            let tracked_pk = new_signer_and_pk(2).1;
+            let tracked_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
+            let follower_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+
+            // Follow a peer as inbound-only fallback. While it is untracked, only
+            // the follower IP is acceptable and the peer must never be dialed.
+            oracle
+                .follow([(follower_pk.clone(), follower_ip)].try_into().unwrap())
+                .await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&follower_ip));
+            assert!(mailbox.acceptable(follower_pk.clone(), follower_ip).await);
+            assert!(
+                !mailbox
+                    .acceptable(follower_pk.clone(), tracked_addr.ip())
+                    .await
+            );
+            let dialable = mailbox.dialable().await;
+            assert!(
+                !dialable.peers.contains(&follower_pk),
+                "followers must not be dialed while untracked"
+            );
+
+            // Add the same public key to a tracked set. At this point it becomes a
+            // full lookup peer and participates in peer-set subscriptions.
+            let mut subscription = oracle.subscribe().await;
+            oracle
+                .track(
+                    0,
+                    [
+                        (follower_pk.clone(), tracked_addr.into()),
+                        (tracked_pk.clone(), tracked_addr.into()),
+                    ]
+                    .try_into()
+                    .unwrap(),
+                )
+                .await;
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 0);
+            assert_eq!(
+                new,
+                [follower_pk.clone(), tracked_pk.clone()]
+                    .try_into()
+                    .unwrap()
+            );
+            assert_eq!(
+                all,
+                [follower_pk.clone(), tracked_pk.clone()]
+                    .try_into()
+                    .unwrap()
+            );
+
+            let dialable = mailbox.dialable().await;
+            assert!(dialable.peers.contains(&follower_pk));
+            assert!(!mailbox.acceptable(follower_pk.clone(), follower_ip).await);
+            assert!(
+                mailbox
+                    .acceptable(follower_pk.clone(), tracked_addr.ip())
+                    .await
+            );
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(
+                registered_ips.contains(&tracked_addr.ip())
+                    && !registered_ips.contains(&follower_ip)
+            );
+
+            // Evict the peer from every tracked set. The peer should disappear from
+            // tracked views and fall back to follower admission again.
+            oracle
+                .track(
+                    1,
+                    [(tracked_pk.clone(), tracked_addr.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let _ = subscription.recv().await.unwrap();
+            let _ = listener_receiver.recv().await.unwrap();
+
+            oracle
+                .track(
+                    2,
+                    [(tracked_pk.clone(), tracked_addr.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 2);
+            assert_eq!(new, [tracked_pk.clone()].try_into().unwrap());
+            assert_eq!(all, [tracked_pk.clone()].try_into().unwrap());
+
+            let dialable = mailbox.dialable().await;
+            assert!(
+                !dialable.peers.contains(&follower_pk),
+                "followers must stop being dialed once they fall back out of tracked sets"
+            );
+            assert!(mailbox.acceptable(follower_pk.clone(), follower_ip).await);
+            assert!(!mailbox.acceptable(follower_pk, tracked_addr.ip()).await);
+
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&tracked_addr.ip()));
+            assert!(registered_ips.contains(&follower_ip));
+        });
+    }
+
+    #[test]
+    fn test_follow_replaces_the_follower_set_and_disconnects_omitted_untracked_peers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (cfg, mut listener_receiver) = test_config(PrivateKey::from_seed(0), false);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let follower_pk = new_signer_and_pk(1).1;
+            let follower_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+
+            // Start by following one untracked peer and verify the listener is
+            // configured to admit that source IP.
+            oracle
+                .follow([(follower_pk.clone(), follower_ip)].try_into().unwrap())
+                .await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert_eq!(registered_ips, [follower_ip].into_iter().collect());
+
+            // Establish a live inbound session under follower policy. This is
+            // the connection that must be torn down when the peer is omitted
+            // from the next follow update.
+            let reservation = mailbox.listen(follower_pk.clone()).await;
+            assert!(reservation.is_some());
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            mailbox.connect(follower_pk.clone(), peer_mailbox);
+
+            // Replace the entire follower set with nothing. Omitting the peer
+            // revokes its untracked admission policy and disconnects the live
+            // session so any future reconnect must be re-authorized explicitly.
+            oracle.follow(Default::default()).await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.is_empty());
+            assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)));
+
+            // After the old session is released, the peer is no longer
+            // acceptable because it is neither tracked nor followed.
+            drop(reservation);
+            context.sleep(Duration::from_millis(1_010)).await;
+            assert!(!mailbox.acceptable(follower_pk, follower_ip).await);
+        });
+    }
+
+    #[test]
+    fn test_live_follower_connection_reconnects_when_peer_becomes_tracked_and_overwritten() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (cfg, mut listener_receiver) = test_config(PrivateKey::from_seed(0), false);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let follower_pk = new_signer_and_pk(1).1;
+            let follower_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+            let tracked_addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
+            let tracked_addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(7, 7, 7, 7)), 9002);
+
+            // Admit the peer through follower fallback and establish a live
+            // inbound session before the peer is tracked anywhere.
+            oracle
+                .follow([(follower_pk.clone(), follower_ip)].try_into().unwrap())
+                .await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&follower_ip));
+
+            let reservation = mailbox.listen(follower_pk.clone()).await;
+            assert!(reservation.is_some());
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            mailbox.connect(follower_pk.clone(), peer_mailbox);
+
+            // Start tracking the same peer. Because the peer now has a tracked
+            // address, the existing follower session must be replaced.
+            oracle
+                .track(
+                    0,
+                    [(follower_pk.clone(), tracked_addr_a.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&tracked_addr_a.ip()));
+            assert!(!registered_ips.contains(&follower_ip));
+            assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)));
+            drop(reservation);
+            context.sleep(Duration::from_millis(1_010)).await;
+            assert!(!mailbox.acceptable(follower_pk.clone(), follower_ip).await);
+            assert!(
+                mailbox
+                    .acceptable(follower_pk.clone(), tracked_addr_a.ip())
+                    .await
+            );
+
+            // Re-establish the peer as a tracked connection, then overwrite the
+            // tracked address. This also forces a reconnect, matching main.
+            let reservation = mailbox.listen(follower_pk.clone()).await;
+            assert!(reservation.is_some());
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            mailbox.connect(follower_pk.clone(), peer_mailbox);
+            oracle
+                .overwrite(
+                    [(follower_pk.clone(), tracked_addr_b.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&tracked_addr_b.ip()));
+            assert!(!registered_ips.contains(&tracked_addr_a.ip()));
+            assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)));
+
+            // Once that session is released, the latest tracked policy governs
+            // the next admission attempt.
+            drop(reservation);
+            context.sleep(Duration::from_millis(1_010)).await;
+            assert!(!mailbox.acceptable(follower_pk.clone(), follower_ip).await);
+            assert!(
+                !mailbox
+                    .acceptable(follower_pk.clone(), tracked_addr_a.ip())
+                    .await
+            );
+            assert!(
+                mailbox
+                    .acceptable(follower_pk.clone(), tracked_addr_b.ip())
+                    .await
+            );
+        });
+    }
+
+    #[test]
+    fn test_live_tracked_connection_reconnects_under_follower_fallback_after_eviction() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (mut cfg, mut listener_receiver) = test_config(PrivateKey::from_seed(0), false);
+            cfg.tracked_peer_sets = NZUsize!(1);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let follower_pk = new_signer_and_pk(1).1;
+            let tracked_pk = new_signer_and_pk(2).1;
+            let tracked_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
+            let tracked_addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(7, 7, 7, 7)), 9002);
+            let follower_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
+
+            // Give the peer a follower fallback, then add it to the only tracked
+            // set so it behaves like a normal lookup peer.
+            oracle
+                .follow([(follower_pk.clone(), follower_ip)].try_into().unwrap())
+                .await;
+            let _ = listener_receiver.recv().await.unwrap();
+            oracle
+                .track(
+                    0,
+                    [(follower_pk.clone(), tracked_addr.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&tracked_addr.ip()));
+            assert!(!registered_ips.contains(&follower_ip));
+
+            let reservation = mailbox.listen(follower_pk.clone()).await;
+            assert!(reservation.is_some());
+            let (peer_mailbox, mut peer_rx) = Mailbox::new(1);
+            mailbox.connect(follower_pk.clone(), peer_mailbox);
+
+            // Evict the tracked set. The live session is torn down immediately so
+            // the peer must reconnect under the follower fallback policy.
+            oracle
+                .track(
+                    1,
+                    [(tracked_pk.clone(), tracked_addr_2.into())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+            let registered_ips = listener_receiver.recv().await.unwrap();
+            assert!(registered_ips.contains(&tracked_addr_2.ip()));
+            assert!(registered_ips.contains(&follower_ip));
+            assert!(!registered_ips.contains(&tracked_addr.ip()));
+            assert!(matches!(peer_rx.recv().await, Some(peer::Message::Kill)));
+
+            // After the tracked session is released, the peer is follower-only
+            // again and must reconnect from the follower IP.
+            drop(reservation);
+            context.sleep(Duration::from_millis(1_010)).await;
+            let dialable = mailbox.dialable().await;
+            assert!(
+                !dialable.peers.contains(&follower_pk),
+                "followers must not remain dialable after the fallback"
+            );
+            assert!(mailbox.acceptable(follower_pk.clone(), follower_ip).await);
+            assert!(
+                !mailbox
+                    .acceptable(follower_pk.clone(), tracked_addr.ip())
+                    .await
+            );
         });
     }
 

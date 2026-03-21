@@ -19,7 +19,10 @@ use commonware_runtime::{
 use commonware_utils::channel::mpsc;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand_core::CryptoRngCore;
-use std::time::Duration;
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
 use tracing::debug;
 
 pub struct Actor<
@@ -30,10 +33,10 @@ pub struct Actor<
 > {
     context: ContextCell<E>,
 
-    mailbox_size: usize,
+    mailbox_size: NonZeroUsize,
     gossip_bit_vec_frequency: Duration,
-    max_peer_set_size: u64,
-    peer_gossip_max_count: usize,
+    max_peer_set_size: NonZeroU64,
+    peer_gossip_max_count: NonZeroUsize,
     info_verifier: InfoVerifier<C>,
 
     receiver: mpsc::Receiver<Message<O, I, C>>,
@@ -73,7 +76,7 @@ impl<
             "messages rate limited",
             rate_limited.clone(),
         );
-        let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
+        let (sender, receiver) = Mailbox::new(cfg.mailbox_size.get());
 
         (
             Self {

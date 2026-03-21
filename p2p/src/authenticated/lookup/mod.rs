@@ -31,6 +31,33 @@
 //! Any inbound connection attempts from an IP address that is not in the union of all registered
 //! peer sets will be rejected.
 //!
+//! ## Followers
+//!
+//! [`AddressableManager::follow`](crate::AddressableManager::follow)
+//! allows a node to replace the full set of fallback inbound-only followers by
+//! `(PublicKey, IpAddr)`. When a followed public key is not currently in any tracked peer set, the
+//! registered source IP is used to authorize inbound connections. These peers:
+//!
+//! - may dial the node from the registered source IP
+//! - are never dialed by the node while untracked
+//! - are not returned by peer set queries or subscriptions while untracked
+//! - receive direct messages and messages sent to [`Recipients::All`](crate::Recipients::All)
+//!
+//! If a later tracked peer set includes the same public key, normal tracked-peer semantics apply
+//! while it remains tracked. Once it leaves all tracked peer sets again, it falls back to the
+//! registered follower behavior.
+//!
+//! `follow` replaces the previous follower set. Untracked peers omitted from the new set are
+//! disconnected and must reconnect only after they are followed again. Tracked peers that are no
+//! longer followed remain ordinary tracked peers until they leave the tracked view.
+//!
+//! When a follower-backed peer leaves its last tracked set, any live connection is disconnected
+//! and the peer must reconnect under the follower fallback policy. Tracked address updates also
+//! disconnect live sessions immediately, matching normal tracked-peer behavior.
+//!
+//! This is intended for simple, scoped clients that know which lookup node to dial out of band,
+//! but should not participate in the full peer-set management lifecycle.
+//!
 //! ## Messages
 //!
 //! Application-level data is exchanged using the `Data` message type. This structure contains:
@@ -2169,6 +2196,112 @@ mod tests {
             assert!(received0);
             let (sender, _) = receiver2.recv().await.unwrap();
             assert_eq!(sender, peer1.public_key());
+        });
+    }
+
+    #[test_traced]
+    fn test_follower_peer_end_to_end_lookup_network() {
+        let base_port = 7_000;
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let server_sk = ed25519::PrivateKey::from_seed(0);
+            let server_pk = server_sk.public_key();
+            let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
+
+            let follower_sk = ed25519::PrivateKey::from_seed(1);
+            let follower_pk = follower_sk.public_key();
+            let follower_addr =
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port.saturating_add(1));
+
+            // Start the lookup node that will admit the follower peer only by
+            // its public key and source IP.
+            let server_cfg = Config::test(server_sk, server_addr, MAX_MESSAGE_SIZE);
+            let (mut server_network, mut server_oracle) =
+                Network::new(context.with_label("server"), server_cfg);
+            let (mut server_sender, mut server_receiver) =
+                server_network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            server_network.start();
+            server_oracle
+                .follow(
+                    [(follower_pk.clone(), follower_addr.ip())]
+                        .try_into()
+                        .unwrap(),
+                )
+                .await;
+
+            // Start the follower node with a normal tracked view of the server so
+            // it can dial the server through the full lookup/dialer stack.
+            let follower_cfg = Config::test(follower_sk, follower_addr, MAX_MESSAGE_SIZE);
+            let (mut follower_network, mut follower_oracle) =
+                Network::new(context.with_label("follower"), follower_cfg);
+            let (mut follower_sender, mut follower_receiver) = follower_network.register(
+                0,
+                Quota::per_second(NZU32!(100)),
+                DEFAULT_MESSAGE_BACKLOG,
+            );
+            follower_network.start();
+            let follower_peer_set: Map<_, _> = [
+                (server_pk.clone(), server_addr.into()),
+                (follower_pk.clone(), follower_addr.into()),
+            ]
+            .try_into()
+            .unwrap();
+            follower_oracle.track(0, follower_peer_set).await;
+
+            // Wait for the follower node to complete the real listener/handshake
+            // path into the server, then verify server-side delivery.
+            loop {
+                let sent = follower_sender
+                    .send(
+                        Recipients::One(server_pk.clone()),
+                        b"follower_to_server".to_vec(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                if sent == vec![server_pk.clone()] {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+            let (sender, payload) = server_receiver.recv().await.unwrap();
+            assert_eq!(sender, follower_pk);
+            assert_eq!(payload, b"follower_to_server");
+
+            // Once connected, the server can target the follower peer directly
+            // even though the peer is not in any tracked set on the server.
+            loop {
+                let sent = server_sender
+                    .send(
+                        Recipients::One(follower_pk.clone()),
+                        b"server_to_follower".to_vec(),
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                if sent == vec![follower_pk.clone()] {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+            let (sender, payload) = follower_receiver.recv().await.unwrap();
+            assert_eq!(sender, server_pk);
+            assert_eq!(payload, b"server_to_follower");
+
+            // Recipients::All should also reach the connected follower peer.
+            loop {
+                let sent = server_sender
+                    .send(Recipients::All, b"server_to_all".to_vec(), true)
+                    .await
+                    .unwrap();
+                if sent == vec![follower_pk.clone()] {
+                    break;
+                }
+                context.sleep(Duration::from_millis(100)).await;
+            }
+            let (sender, payload) = follower_receiver.recv().await.unwrap();
+            assert_eq!(sender, server_pk);
+            assert_eq!(payload, b"server_to_all");
         });
     }
 }

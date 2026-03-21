@@ -2,7 +2,10 @@
 
 use crate::{authenticated::discovery::config::Bootstrapper, Ingress};
 use commonware_cryptography::Signer;
-use std::time::Duration;
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
 
 mod actor;
 mod directory;
@@ -27,10 +30,10 @@ pub struct Config<C: Signer> {
     pub allow_private_ips: bool,
     pub allow_dns: bool,
     pub synchrony_bound: Duration,
-    pub tracked_peer_sets: usize,
-    pub max_peer_set_size: u64,
+    pub tracked_peer_sets: NonZeroUsize,
+    pub max_peer_set_size: NonZeroU64,
     pub peer_connection_cooldown: Duration,
-    pub peer_gossip_max_count: usize,
+    pub peer_gossip_max_count: NonZeroUsize,
     pub dial_fail_limit: usize,
     pub block_duration: Duration,
 }

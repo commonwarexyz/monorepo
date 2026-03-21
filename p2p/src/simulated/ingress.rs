@@ -21,6 +21,9 @@ pub enum Message<P: PublicKey, E: Clock> {
         id: u64,
         peers: Set<P>,
     },
+    Follow {
+        public_keys: Set<P>,
+    },
     PeerSet {
         id: u64,
         response: oneshot::Sender<Option<Set<P>>>,
@@ -68,6 +71,10 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
                 .debug_struct("Track")
                 .field("id", id)
                 .finish_non_exhaustive(),
+            Self::Follow { public_keys } => f
+                .debug_struct("Follow")
+                .field("public_keys", public_keys)
+                .finish(),
             Self::PeerSet { id, .. } => f
                 .debug_struct("PeerSet")
                 .field("id", id)
@@ -247,6 +254,11 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         self.sender.0.send_lossy(Message::Track { id, peers });
     }
 
+    /// Replace the full followed peer set.
+    fn follow(&self, public_keys: Set<P>) {
+        self.sender.0.send_lossy(Message::Follow { public_keys });
+    }
+
     /// Get the peers for a given id.
     async fn peer_set(&self, id: u64) -> Option<Set<P>> {
         self.sender
@@ -357,6 +369,10 @@ impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
 
     async fn overwrite(&mut self, _peers: Map<Self::PublicKey, Address>) {
         // We consider all addresses to be valid, so this is a no-op
+    }
+
+    async fn follow(&mut self, peers: Map<Self::PublicKey, std::net::IpAddr>) {
+        self.oracle.follow(peers.into_keys());
     }
 }
 

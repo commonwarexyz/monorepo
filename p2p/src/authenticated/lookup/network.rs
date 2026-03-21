@@ -57,7 +57,7 @@ impl<
     /// * A tuple containing the network instance and the oracle that
     ///   can be used by a developer to configure which peers are authorized.
     pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
-        let (listener_mailbox, listener) = Mailbox::<HashSet<IpAddr>>::new(cfg.mailbox_size);
+        let (listener_mailbox, listener) = Mailbox::<HashSet<IpAddr>>::new(cfg.mailbox_size.get());
         let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.with_label("tracker"),
             tracker::Config {
@@ -106,7 +106,7 @@ impl<
     /// # Returns
     ///
     /// * A tuple containing the sender and receiver for the channel (how to communicate
-    ///   with external peers on the network). It is safe to close either the sender or receiver
+    ///   with other peers on the network). It is safe to close either the sender or receiver
     ///   without impacting the ability to process messages on other channels.
     #[allow(clippy::type_complexity)]
     pub fn register(

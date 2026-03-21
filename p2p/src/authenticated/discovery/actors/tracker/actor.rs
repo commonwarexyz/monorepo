@@ -79,7 +79,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         let directory_cfg = directory::Config {
             allow_private_ips: cfg.allow_private_ips,
             allow_dns: cfg.allow_dns,
-            max_sets: cfg.tracked_peer_sets,
+            max_sets: cfg.tracked_peer_sets.get(),
             dial_fail_limit: cfg.dial_fail_limit,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
             block_duration: cfg.block_duration,
@@ -102,7 +102,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         // Create peer validator
         let info_verifier = Info::verifier(
             cfg.crypto.public_key(),
-            cfg.peer_gossip_max_count,
+            cfg.peer_gossip_max_count.get(),
             cfg.synchrony_bound,
             ip_namespace,
         );
@@ -111,8 +111,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             Self {
                 context: ContextCell::new(context),
                 crypto: cfg.crypto,
-                max_peer_set_size: cfg.max_peer_set_size,
-                peer_gossip_max_count: cfg.peer_gossip_max_count,
+                max_peer_set_size: cfg.max_peer_set_size.get(),
+                peer_gossip_max_count: cfg.peer_gossip_max_count.get(),
                 receiver,
                 directory,
                 subscribers: Vec::new(),
@@ -294,7 +294,7 @@ mod tests {
         Signer,
     };
     use commonware_runtime::{deterministic, Clock, Runner};
-    use commonware_utils::{bitmap::BitMap, ordered::Set, TryCollect};
+    use commonware_utils::{bitmap::BitMap, ordered::Set, NZUsize, TryCollect, NZU64};
     use futures::future::Either;
     use std::{
         collections::HashSet,
@@ -316,10 +316,10 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             synchrony_bound: Duration::from_secs(10),
-            tracked_peer_sets: 2,
+            tracked_peer_sets: NZUsize!(2),
             peer_connection_cooldown: Duration::from_millis(200),
-            peer_gossip_max_count: 5,
-            max_peer_set_size: 128,
+            peer_gossip_max_count: NZUsize!(5),
+            max_peer_set_size: NZU64!(128),
             dial_fail_limit: 1,
             block_duration: Duration::from_secs(100),
         }
@@ -422,7 +422,7 @@ mod tests {
                 mut mailbox,
                 ..
             } = setup_actor(context.clone(), cfg_initial);
-            let too_many_peers: Set<PublicKey> = (1..=cfg.max_peer_set_size + 1)
+            let too_many_peers: Set<PublicKey> = (1..=cfg.max_peer_set_size.get() + 1)
                 .map(|i| new_signer_and_pk(i).1)
                 .try_collect()
                 .unwrap();

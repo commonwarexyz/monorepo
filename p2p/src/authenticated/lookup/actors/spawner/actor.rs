@@ -15,6 +15,7 @@ use commonware_runtime::{
 use commonware_utils::channel::mpsc;
 use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand_core::CryptoRngCore;
+use std::num::NonZeroUsize;
 use tracing::debug;
 
 pub struct Actor<
@@ -25,7 +26,7 @@ pub struct Actor<
 > {
     context: ContextCell<E>,
 
-    mailbox_size: usize,
+    mailbox_size: NonZeroUsize,
     ping_frequency: std::time::Duration,
 
     receiver: mpsc::Receiver<Message<Si, St, C>>,
@@ -64,7 +65,7 @@ impl<
             "messages rate limited",
             rate_limited.clone(),
         );
-        let (sender, receiver) = Mailbox::new(cfg.mailbox_size);
+        let (sender, receiver) = Mailbox::new(cfg.mailbox_size.get());
 
         (
             Self {

@@ -50,17 +50,17 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<EncodedData>) {
-        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size);
-        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size);
-        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size);
+        let (control_sender, control_receiver) = Mailbox::new(cfg.mailbox_size.get());
+        let (high_sender, high_receiver) = mpsc::channel(cfg.mailbox_size.get());
+        let (low_sender, low_receiver) = mpsc::channel(cfg.mailbox_size.get());
         (
             Self {
                 context,
                 mailbox: control_sender,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 info_verifier: cfg.info_verifier,
-                max_bit_vec: cfg.max_peer_set_size,
-                max_peers: cfg.peer_gossip_max_count,
+                max_bit_vec: cfg.max_peer_set_size.get(),
+                max_peers: cfg.peer_gossip_max_count.get(),
                 control: control_receiver,
                 high: high_receiver,
                 low: low_receiver,
@@ -402,7 +402,7 @@ mod tests {
     };
     use commonware_runtime::{deterministic, mocks, BufferPooler, IoBuf, Runner, Spawner};
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::{bitmap::BitMap, SystemTimeExt};
+    use commonware_utils::{bitmap::BitMap, NZUsize, SystemTimeExt, NZU64};
     use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -415,10 +415,10 @@ mod tests {
 
     fn default_peer_config(me: PublicKey) -> Config<PublicKey> {
         Config {
-            mailbox_size: 10,
+            mailbox_size: NZUsize!(10),
             gossip_bit_vec_frequency: Duration::from_secs(30),
-            max_peer_set_size: 128,
-            peer_gossip_max_count: 10,
+            max_peer_set_size: NZU64!(128),
+            peer_gossip_max_count: NZUsize!(10),
             info_verifier: types::Info::verifier(
                 me,
                 10,
@@ -812,10 +812,10 @@ mod tests {
 
             // Create peer config with our metric
             let config = Config {
-                mailbox_size: 10,
+                mailbox_size: NZUsize!(10),
                 gossip_bit_vec_frequency: Duration::from_secs(30),
-                max_peer_set_size: 128,
-                peer_gossip_max_count: 10,
+                max_peer_set_size: NZU64!(128),
+                peer_gossip_max_count: NZUsize!(10),
                 info_verifier: types::Info::verifier(
                     remote_pk.clone(),
                     10,

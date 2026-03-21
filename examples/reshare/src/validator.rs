@@ -80,7 +80,7 @@ pub async fn run<S, L>(
             .collect::<Vec<_>>(),
         MAX_MESSAGE_SIZE,
     );
-    p2p_cfg.mailbox_size = MAILBOX_SIZE;
+    p2p_cfg.mailbox_size = NZUsize!(MAILBOX_SIZE);
 
     let (mut network, oracle) = discovery::Network::new(context.with_label("network"), p2p_cfg);
 
@@ -606,7 +606,7 @@ mod test {
                 ctx.with_label("network"),
                 simulated::Config {
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: Some(NZUsize!(3)),
                     max_size: 1024 * 1024,
                 },
             );
@@ -1478,7 +1478,7 @@ mod test {
                 ctx.with_label("network"),
                 simulated::Config {
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: Some(NZUsize!(3)),
                     max_size: 1024 * 1024,
                 },
             );

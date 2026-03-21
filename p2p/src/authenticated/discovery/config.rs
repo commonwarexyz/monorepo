@@ -1,8 +1,12 @@
 use crate::Ingress;
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use commonware_utils::NZU32;
-use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
+use commonware_utils::{NZUsize, NZU32, NZU64};
+use std::{
+    net::SocketAddr,
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    time::Duration,
+};
 
 /// Known peer and its accompanying ingress address that will be dialed on startup.
 pub type Bootstrapper<P> = (P, Ingress);
@@ -50,7 +54,7 @@ pub struct Config<C: Signer> {
     ///
     /// When there are more messages in the mailbox than this value, any actor
     /// sending a message will be blocked until the mailbox is processed.
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 
     /// Time into the future that a timestamp can be and still be considered valid.
     pub synchrony_bound: Duration,
@@ -94,13 +98,13 @@ pub struct Config<C: Signer> {
     /// been evicted and/or to communicate with peers in a future
     /// set (if we, for example, are trying to do a reshare of a threshold
     /// key).
-    pub tracked_peer_sets: usize,
+    pub tracked_peer_sets: NonZeroUsize,
 
     /// Maximum number of peers to track in a single peer set.
     ///
     /// This is used to limit the size of the bit vec messages, which will take one bit per peer in
     /// the set. This number can be set to a reasonably high value that we never expect to reach.
-    pub max_peer_set_size: u64,
+    pub max_peer_set_size: NonZeroU64,
 
     /// Frequency we gossip about known peers.
     ///
@@ -115,7 +119,7 @@ pub struct Config<C: Signer> {
     ///
     /// This is used to prevent malicious peers from sending us a large number of peers at one time (each
     /// of which requires a signature verification).
-    pub peer_gossip_max_count: usize,
+    pub peer_gossip_max_count: NonZeroUsize,
 
     /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
@@ -141,7 +145,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: false,
             max_message_size,
-            mailbox_size: 1_000,
+            mailbox_size: NZUsize!(1_000),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
@@ -151,10 +155,10 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(64)),
             dial_frequency: Duration::from_secs(1),
             dial_fail_limit: 2,
-            tracked_peer_sets: 4,
-            max_peer_set_size: 1 << 16, // 2^16
+            tracked_peer_sets: NZUsize!(4),
+            max_peer_set_size: NZU64!(1 << 16), // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
-            peer_gossip_max_count: 32,
+            peer_gossip_max_count: NZUsize!(32),
             block_duration: Duration::from_hours(4),
         }
     }
@@ -183,7 +187,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: true,
             max_message_size,
-            mailbox_size: 1_000,
+            mailbox_size: NZUsize!(1_000),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
@@ -193,10 +197,10 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(128)),
             dial_frequency: Duration::from_millis(500),
             dial_fail_limit: 1,
-            tracked_peer_sets: 4,
-            max_peer_set_size: 1 << 16, // 2^16
+            tracked_peer_sets: NZUsize!(4),
+            max_peer_set_size: NZU64!(1 << 16), // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
-            peer_gossip_max_count: 32,
+            peer_gossip_max_count: NZUsize!(32),
             block_duration: Duration::from_hours(1),
         }
     }
@@ -218,7 +222,7 @@ impl<C: Signer> Config<C> {
 
             allow_private_ips: true,
             max_message_size,
-            mailbox_size: 1_000,
+            mailbox_size: NZUsize!(1_000),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
@@ -228,10 +232,10 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(256)),
             dial_frequency: Duration::from_millis(200),
             dial_fail_limit: 1,
-            tracked_peer_sets: 4,
-            max_peer_set_size: 1 << 8, // 2^8
+            tracked_peer_sets: NZUsize!(4),
+            max_peer_set_size: NZU64!(1 << 8), // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),
-            peer_gossip_max_count: 32,
+            peer_gossip_max_count: NZUsize!(32),
             block_duration: Duration::from_mins(1),
         }
     }

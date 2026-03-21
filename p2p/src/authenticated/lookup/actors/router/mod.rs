@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 mod actor;
 mod ingress;
 
@@ -6,5 +8,5 @@ pub use ingress::{Message, Messenger};
 
 /// Config for an [Actor].
 pub struct Config {
-    pub mailbox_size: usize,
+    pub mailbox_size: NonZeroUsize,
 }
