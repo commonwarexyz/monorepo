@@ -161,7 +161,7 @@ where
 }
 
 /// Hash functions for IBE.
-mod hash {
+pub(crate) mod hash {
     use super::*;
     use crate::{Hasher, Sha256};
 
@@ -209,7 +209,7 @@ mod hash {
 /// to enable better compiler optimizations. Since we know blocks are
 /// exactly 32 bytes, we can unroll the operation completely.
 #[inline]
-fn xor(a: &Block, b: &Block) -> Block {
+pub(crate) fn xor(a: &Block, b: &Block) -> Block {
     let a_bytes = a.as_ref();
     let b_bytes = b.as_ref();
 
