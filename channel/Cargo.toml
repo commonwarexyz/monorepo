@@ -1,0 +1,21 @@
+[package]
+name = "commonware-channel"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "State channel protocol with dispute resolution via block-height timeouts."
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2 = { workspace = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+rand = { workspace = true, features = ["std", "std_rng"] }
+
+[features]
+default = ["std"]
+std = ["sha2/std", "thiserror/std"]
