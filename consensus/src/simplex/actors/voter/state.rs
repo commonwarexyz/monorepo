@@ -1133,6 +1133,76 @@ mod tests {
     }
 
     #[test]
+    fn entering_next_view_resets_expired_timeout_state() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let leader_timeout = Duration::from_secs(1);
+            let retry = Duration::from_secs(3);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(13),
+                activity_timeout: ViewDelta::new(3),
+                leader_timeout,
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: retry,
+            };
+            let mut state = State::new(context.clone(), cfg);
+            state.set_genesis(test_genesis());
+
+            let view_1 = state.current_view();
+            assert_eq!(view_1, View::new(1));
+
+            // Force the current view into timeout mode and schedule a retry.
+            state.trigger_timeout(view_1, TimeoutReason::LeaderTimeout);
+            assert!(
+                state.next_timeout_deadline() <= context.current(),
+                "current view should be expired after timeout is triggered"
+            );
+            let (was_retry, _) = state
+                .construct_nullify(view_1)
+                .expect("first timeout nullify should exist");
+            assert!(!was_retry);
+            let retry_deadline = state.next_timeout_deadline();
+            assert_eq!(
+                retry_deadline,
+                context.current() + retry,
+                "timed-out view should schedule a retry"
+            );
+
+            // Advancing into the next view must install fresh deadlines instead of reusing
+            // the expired/retrying state from the previous view.
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(state.epoch(), view_1))
+                        .expect("nullify")
+                })
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&verifier, &votes, &Sequential).expect("nullify");
+            assert!(state.add_nullification(nullification));
+
+            let view_2 = state.current_view();
+            assert_eq!(view_2, View::new(2));
+            let next_deadline = state.next_timeout_deadline();
+            assert_eq!(
+                next_deadline,
+                context.current() + leader_timeout,
+                "next view should start with a fresh leader timeout"
+            );
+            assert_ne!(
+                next_deadline, retry_deadline,
+                "next view must not inherit the previous view retry deadline"
+            );
+        });
+    }
+
+    #[test]
     fn nullify_only_records_metric_once() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
