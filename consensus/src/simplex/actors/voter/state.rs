@@ -311,6 +311,28 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let result = self.create_round(view).add_notarization(notarization);
         if result.0 && view > self.last_finalized {
             self.certification_candidates.insert(view);
+            // Proactively queue uncertified ancestors that have notarizations. The f+1 signers of
+            // `view` must have certified each ancestor before voting, so we know they are
+            // certifiable. Triggering this locally avoids waiting for ancestor certification
+            // messages to arrive separately.
+            let mut cursor = self
+                .views
+                .get(&view)
+                .and_then(|r| r.proposal())
+                .map(|p| p.parent);
+            while let Some(ancestor) = cursor {
+                if ancestor <= self.last_finalized || ancestor == GENESIS_VIEW {
+                    break;
+                }
+                let Some(round) = self.views.get(&ancestor) else {
+                    break;
+                };
+                if round.is_certified() || round.notarization().is_none() {
+                    break;
+                }
+                self.certification_candidates.insert(ancestor);
+                cursor = round.proposal().map(|p| p.parent);
+            }
         }
         result
     }
@@ -2270,6 +2292,109 @@ mod tests {
 
             // Attempt to notarize after timeout
             assert!(state.construct_notarize(view).is_none());
+        });
+    }
+
+    #[test]
+    fn notarization_proactively_certifies_ancestors() {
+        // When a notarization for view N arrives and an ancestor view A has a stored notarization
+        // (but hasn't been certified yet and is no longer in certification_candidates because a
+        // prior certify_candidates() call already drained it), the ancestor walk in
+        // add_notarization should re-add A to certification_candidates. This ensures the
+        // automaton is asked to certify A without waiting for a separate trigger.
+        //
+        // This scenario occurs when:
+        //   1. notarization(A) arrives -> A added to certification_candidates
+        //   2. certify_candidates() drains the set (certify request sent to automaton)
+        //   3. notarization(N) arrives, where N's ancestry includes A -> A should be re-queued
+        //
+        // Without the ancestor walk, step 3 would only add N; A would be missing from the next
+        // certify_candidates() call, potentially stalling finalization.
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: verifier.clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            let view_1 = View::new(1);
+            let view_2 = View::new(2);
+            let epoch = Epoch::new(1);
+
+            // Build notarization for view 1 (parent: GENESIS_VIEW).
+            let proposal_1 = Proposal::new(
+                Rnd::new(epoch, view_1),
+                GENESIS_VIEW,
+                Sha256Digest::from([1u8; 32]),
+            );
+            let votes_1: Vec<_> = schemes
+                .iter()
+                .map(|s| Notarize::sign(s, proposal_1.clone()).unwrap())
+                .collect();
+            let notarization_1 =
+                Notarization::from_notarizes(&verifier, votes_1.iter(), &Sequential).unwrap();
+
+            // Build notarization for view 2 (parent: view 1).
+            let proposal_2 = Proposal::new(
+                Rnd::new(epoch, view_2),
+                view_1,
+                Sha256Digest::from([2u8; 32]),
+            );
+            let votes_2: Vec<_> = schemes
+                .iter()
+                .map(|s| Notarize::sign(s, proposal_2.clone()).unwrap())
+                .collect();
+            let notarization_2 =
+                Notarization::from_notarizes(&verifier, votes_2.iter(), &Sequential).unwrap();
+
+            // Step 1: notarization(view 1) arrives -> view 1 queued.
+            state.add_notarization(notarization_1);
+            assert!(
+                state.certification_candidates.contains(&view_1),
+                "view 1 should be a candidate after its notarization"
+            );
+
+            // Step 2: certify_candidates() drains the set (simulates certify request in-flight).
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1, "one candidate before drain");
+            assert!(
+                state.certification_candidates.is_empty(),
+                "candidates drained"
+            );
+
+            // Step 3: notarization(view 2) arrives. The ancestor walk should re-queue view 1.
+            state.add_notarization(notarization_2);
+            assert!(
+                state.certification_candidates.contains(&view_2),
+                "view 2 should be a candidate"
+            );
+            assert!(
+                state.certification_candidates.contains(&view_1),
+                "view 1 should be re-queued by ancestor walk"
+            );
+
+            // Both views returned by the next certify_candidates() call.
+            let candidates = state.certify_candidates();
+            let candidate_views: Vec<_> = candidates.iter().map(|p| p.round.view()).collect();
+            assert!(
+                candidate_views.contains(&view_1),
+                "view 1 must be in candidates"
+            );
+            assert!(
+                candidate_views.contains(&view_2),
+                "view 2 must be in candidates"
+            );
         });
     }
 }
