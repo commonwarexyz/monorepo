@@ -918,6 +918,7 @@ mod tests {
         all_online::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         all_online::<_, _, RoundRobin>(ed25519::fixture);
         all_online::<_, _, RoundRobin>(secp256r1::fixture);
+        all_online::<_, _, RoundRobin>(scheme_mocks::fixture_with::<true, true, false, _>);
     }
 
     fn observer<S, F, L>(mut fixture: F)
@@ -1087,6 +1088,7 @@ mod tests {
         observer::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         observer::<_, _, RoundRobin>(ed25519::fixture);
         observer::<_, _, RoundRobin>(secp256r1::fixture);
+        observer::<_, _, RoundRobin>(scheme_mocks::fixture_with::<true, true, false, _>);
     }
 
     fn unclean_shutdown<S, F, L>(mut fixture: F)
@@ -1552,6 +1554,7 @@ mod tests {
         backfill::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         backfill::<_, _, RoundRobin>(ed25519::fixture);
         backfill::<_, _, RoundRobin>(secp256r1::fixture);
+        backfill::<_, _, RoundRobin>(scheme_mocks::fixture_with::<true, true, false, _>);
     }
 
     fn one_offline<S, F, L>(mut fixture: F)
@@ -1802,6 +1805,7 @@ mod tests {
         one_offline::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         one_offline::<_, _, RoundRobin>(ed25519::fixture);
         one_offline::<_, _, RoundRobin>(secp256r1::fixture);
+        one_offline::<_, _, RoundRobin>(scheme_mocks::fixture_with::<true, true, false, _>);
     }
 
     fn slow_validator<S, F, L>(mut fixture: F)
@@ -1996,6 +2000,7 @@ mod tests {
         slow_validator::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         slow_validator::<_, _, RoundRobin>(ed25519::fixture);
         slow_validator::<_, _, RoundRobin>(secp256r1::fixture);
+        slow_validator::<_, _, RoundRobin>(scheme_mocks::fixture_with::<true, true, false, _>);
     }
 
     fn all_recovery<S, F, L>(mut fixture: F)
@@ -2214,6 +2219,7 @@ mod tests {
         all_recovery::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         all_recovery::<_, _, RoundRobin>(ed25519::fixture);
         all_recovery::<_, _, RoundRobin>(secp256r1::fixture);
+        all_recovery::<_, _, RoundRobin>(scheme_mocks::fixture_with::<true, true, false, _>);
     }
 
     fn partition<S, F, L>(mut fixture: F)
@@ -2419,17 +2425,21 @@ mod tests {
         partition::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         partition::<_, _, RoundRobin>(ed25519::fixture);
         partition::<_, _, RoundRobin>(secp256r1::fixture);
+        partition::<_, _, RoundRobin>(scheme_mocks::fixture_with::<true, true, false, _>);
     }
 
-    fn slow_and_lossy_links<S, F, L>(seed: u64, mut fixture: F) -> String
+    fn slow_and_lossy_links_with<S, F, L>(
+        seed: u64,
+        n: u32,
+        required_containers: View,
+        mut fixture: F,
+    ) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
     {
         // Create context
-        let n = 5;
-        let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
@@ -2573,6 +2583,15 @@ mod tests {
         })
     }
 
+    fn slow_and_lossy_links<S, F, L>(seed: u64, fixture: F) -> String
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: Elector<S>,
+    {
+        slow_and_lossy_links_with::<S, F, L>(seed, 5, View::new(50), fixture)
+    }
+
     #[test_group("slow")]
     #[test_traced]
     fn test_slow_and_lossy_links() {
@@ -2584,6 +2603,21 @@ mod tests {
         slow_and_lossy_links::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinSig, _>);
         slow_and_lossy_links::<_, _, RoundRobin>(0, ed25519::fixture);
         slow_and_lossy_links::<_, _, RoundRobin>(0, secp256r1::fixture);
+        slow_and_lossy_links::<_, _, RoundRobin>(
+            0,
+            scheme_mocks::fixture_with::<true, true, false, _>,
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_slow_and_lossy_links_mock_strict_stress() {
+        slow_and_lossy_links_with::<_, _, RoundRobin>(
+            0,
+            10,
+            View::new(100),
+            scheme_mocks::fixture_with::<true, true, false, _>,
+        );
     }
 
     #[test_group("slow")]
@@ -2660,6 +2694,16 @@ mod tests {
             let secp_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(seed, secp256r1::fixture);
             assert_eq!(secp_state_1, secp_state_2);
 
+            let mock_state_1 = slow_and_lossy_links::<_, _, RoundRobin>(
+                seed,
+                scheme_mocks::fixture_with::<true, true, false, _>,
+            );
+            let mock_state_2 = slow_and_lossy_links::<_, _, RoundRobin>(
+                seed,
+                scheme_mocks::fixture_with::<true, true, false, _>,
+            );
+            assert_eq!(mock_state_1, mock_state_2);
+
             let states = [
                 ("threshold-vrf-minpk", ts_vrf_pk_state_1),
                 ("threshold-vrf-minsig", ts_vrf_sig_state_1),
@@ -2669,6 +2713,7 @@ mod tests {
                 ("multisig-minsig", ms_sig_state_1),
                 ("ed25519", ed_state_1),
                 ("secp256r1", secp_state_1),
+                ("mock-strict", mock_state_1),
             ];
 
             // Sanity check that different types can't be identical
@@ -4278,6 +4323,12 @@ mod tests {
         run_1k::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_1k_mock_strict() {
+        run_1k::<_, _, RoundRobin>(scheme_mocks::fixture_with::<true, true, false, _>);
+    }
+
     fn engine_shutdown<S, F, L>(seed: u64, mut fixture: F, graceful: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -4701,6 +4752,9 @@ mod tests {
         );
         attributable_reporter_filtering::<_, _, RoundRobin>(ed25519::fixture);
         attributable_reporter_filtering::<_, _, RoundRobin>(secp256r1::fixture);
+        attributable_reporter_filtering::<_, _, RoundRobin>(
+            scheme_mocks::fixture_with::<true, true, false, _>,
+        );
     }
 
     fn split_views_no_lockup<S, F, L>(mut fixture: F)
@@ -5673,6 +5727,25 @@ mod tests {
         );
     }
 
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_mock_strict() {
+        assert_eq!(
+            hailstorm::<_, _, RoundRobin>(
+                0,
+                10,
+                ViewDelta::new(15),
+                scheme_mocks::fixture_with::<true, true, false, _>
+            ),
+            hailstorm::<_, _, RoundRobin>(
+                0,
+                10,
+                ViewDelta::new(15),
+                scheme_mocks::fixture_with::<true, true, false, _>
+            )
+        );
+    }
+
     /// Configuration for a Twins testing campaign.
     ///
     /// A campaign generates adversarial primary/secondary recipient-set
@@ -6159,7 +6232,7 @@ mod tests {
                 &mut test_rng(),
                 TWINS_CAMPAIGN,
                 link,
-                scheme_mocks::fixture,
+                scheme_mocks::fixture_with::<true, true, false, _>,
             );
         }
     }
@@ -6183,7 +6256,7 @@ mod tests {
                 &mut test_rng(),
                 campaign,
                 link,
-                scheme_mocks::fixture,
+                scheme_mocks::fixture_with::<true, true, false, _>,
             );
         }
     }
@@ -6200,7 +6273,7 @@ mod tests {
             &mut test_rng(),
             campaign,
             TWINS_LINK,
-            scheme_mocks::fixture,
+            scheme_mocks::fixture_with::<true, true, false, _>,
         );
     }
 
@@ -6217,7 +6290,7 @@ mod tests {
             &mut test_rng(),
             campaign,
             TWINS_LINK,
-            scheme_mocks::fixture,
+            scheme_mocks::fixture_with::<true, true, false, _>,
         );
     }
 
