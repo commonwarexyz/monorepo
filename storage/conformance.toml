@@ -98,13 +98,14 @@ hash = "f07e12cc9db44b417c1e936e0f36f06d93ec8390b59c4394811d422d11b32a7d"
 n_cases = 65536
 hash = "1be8a11f1e27adb03ad60b57af16993cc571a4b8c2bdd1c086b1762f6a92f70e"
 
-["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<U64,FixedEncoding<U64>>>"]
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<MmrFamily,U64,FixedEncoding<U64>>\n>"]
 n_cases = 65536
 hash = "b96e969e3c2fa571101b20a527709627a46c7cbcabc21b6c34491d942c44e11a"
 
-["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<U64,VariableEncoding<Vec<u8>>>>"]
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<MmrFamily,U64,VariableEncoding<Vec<\nu8>>>>"]
 n_cases = 65536
 hash = "734013661e2e967b0ecad32fac076377319237c040b5deb2363268d23dc9c926"
+
 
 ["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<Unordered<Fixed<U64,U64>>>"]
 n_cases = 65536
@@ -114,13 +115,14 @@ hash = "92d97caa778f4825bb78af31114456bd2fadee745387914ca4754407638b518a"
 n_cases = 65536
 hash = "36910b6b06e883c255d8e6f4ae688630c2bae894dd440e7a93985663119be574"
 
-["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<UnorderedOperation<U64,FixedEncoding<U64>>>"]
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<UnorderedOperation<MmrFamily,U64,FixedEncoding<U64>\n>>"]
 n_cases = 65536
 hash = "0a7354fdc9af8a461126f61f85def0eb2e5929df0b0bb045431d16fe8376ff0b"
 
-["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<UnorderedOperation<U64,VariableEncoding<Vec<u8>>>\n>"]
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<UnorderedOperation<MmrFamily,U64,VariableEncoding<Vec\n<u8>>>>"]
 n_cases = 65536
 hash = "32b30ab90b530340cd3d86ba14a31a4d265095a4e78719529d3a55fae2ad0bf2"
+
 
 ["commonware_storage::qmdb::any::operation::update::tests::conformance::CodecConformance<OrderedUpdate<Fixed<U64,U64>>>"]
 n_cases = 65536

@@ -445,11 +445,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         // Write the required pinned nodes to metadata.
         if let Some(pinned_nodes) = cfg.pinned_nodes {
             // Use caller-provided pinned nodes.
-            let expected_pinned_nodes = F::nodes_to_pin(journal_size, prune_pos).len();
-            if pinned_nodes.len() != expected_pinned_nodes {
+            let nodes_to_pin_persisted = F::nodes_to_pin(journal_size, prune_pos);
+            if pinned_nodes.len() != nodes_to_pin_persisted.len() {
                 return Err(Error::<F>::InvalidPinnedNodes);
             }
-            let nodes_to_pin_persisted = F::nodes_to_pin(journal_size, prune_pos);
             for (pos, digest) in nodes_to_pin_persisted.into_iter().zip(pinned_nodes.iter()) {
                 metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             }

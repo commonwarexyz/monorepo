@@ -50,7 +50,6 @@ use crate::{
     index::{Cursor, Unordered as Index},
     journal::contiguous::{Mutable, Reader},
     merkle::{Family, Location},
-    mmr,
     qmdb::operation::Operation,
 };
 use commonware_utils::NZUsize;
@@ -302,15 +301,21 @@ fn delete_known_loc<F: Family, I: Index<Value = Location<F>>>(
 }
 
 /// A wrapper of DB state required for implementing inactivity floor management.
-pub(crate) struct FloorHelper<'a, I: Index<Value = mmr::Location>, C: Mutable<Item: Operation>> {
+pub(crate) struct FloorHelper<
+    'a,
+    F: Family,
+    I: Index<Value = Location<F>>,
+    C: Mutable<Item: Operation<Family = F>>,
+> {
     pub snapshot: &'a mut I,
     pub log: &'a mut C,
 }
 
-impl<I, C> FloorHelper<'_, I, C>
+impl<F, I, C> FloorHelper<'_, F, I, C>
 where
-    I: Index<Value = mmr::Location>,
-    C: Mutable<Item: Operation>,
+    F: Family,
+    I: Index<Value = Location<F>>,
+    C: Mutable<Item: Operation<Family = F>>,
 {
     /// Moves the given operation to the tip of the log if it is active, rendering its old location
     /// inactive. If the operation was not active, then this is a no-op. Returns whether the
@@ -318,8 +323,8 @@ where
     async fn move_op_if_active(
         &mut self,
         op: C::Item,
-        old_loc: mmr::Location,
-    ) -> Result<bool, Error<mmr::Family>> {
+        old_loc: Location<F>,
+    ) -> Result<bool, Error<F>> {
         let Some(key) = op.key() else {
             return Ok(false); // operations without keys cannot be active
         };
@@ -334,7 +339,7 @@ where
             }
 
             // Update the operation's snapshot location to point to tip.
-            cursor.update(mmr::Location::new(self.log.size().await));
+            cursor.update(Location::<F>::new(self.log.size().await));
         }
 
         // Apply the operation at tip.
@@ -354,12 +359,9 @@ where
     /// otherwise.
     async fn raise_floor(
         &mut self,
-        mut inactivity_floor_loc: mmr::Location,
-    ) -> Result<mmr::Location, Error<mmr::Family>>
-    where
-        I: Index<Value = mmr::Location>,
-    {
-        let tip_loc = mmr::Location::new(self.log.size().await);
+        mut inactivity_floor_loc: Location<F>,
+    ) -> Result<Location<F>, Error<F>> {
+        let tip_loc: Location<F> = Location::new(self.log.size().await);
         loop {
             assert!(
                 *inactivity_floor_loc < tip_loc,

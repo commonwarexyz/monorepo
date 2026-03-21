@@ -318,7 +318,7 @@ pub(super) async fn init_fixed<E, U, H, T, I, const N: usize, NewIndex>(
     context: E,
     config: FixedConfig<T>,
     new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<U>>, I, H, U, N>, Error>
+) -> Result<db::Db<E, FJournal<E, Operation<mmr::Family, U>>, I, H, U, N>, Error>
 where
     E: Storage + Clock + Metrics,
     U: Update + Send + Sync,
@@ -327,7 +327,7 @@ where
     T: Translator,
     I: UnorderedIndex<Value = Location>,
     NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: CodecFixedShared + Committable,
+    Operation<mmr::Family, U>: CodecFixedShared + Committable,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
@@ -400,9 +400,9 @@ where
 /// Shared initialization logic for variable-sized value Current [db::Db].
 pub(super) async fn init_variable<E, U, H, T, I, const N: usize, NewIndex>(
     context: E,
-    config: VariableConfig<T, <Operation<U> as Read>::Cfg>,
+    config: VariableConfig<T, <Operation<mmr::Family, U> as Read>::Cfg>,
     new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<U>>, I, H, U, N>, Error>
+) -> Result<db::Db<E, VJournal<E, Operation<mmr::Family, U>>, I, H, U, N>, Error>
 where
     E: Storage + Clock + Metrics,
     U: Update + Send + Sync,
@@ -411,7 +411,7 @@ where
     T: Translator,
     I: UnorderedIndex<Value = Location>,
     NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: Codec + Committable,
+    Operation<mmr::Family, U>: Codec + Committable,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {

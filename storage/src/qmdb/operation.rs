@@ -1,4 +1,4 @@
-use crate::mmr::Location;
+use crate::merkle::{Family, Location};
 use core::{fmt::Debug, hash::Hash, ops::Deref};
 
 /// Trait bound for key types used in QMDB operations. Satisfied by both fixed-size keys
@@ -15,6 +15,9 @@ impl<T> Key for T where
 
 /// An operation that can be applied to a database.
 pub trait Operation {
+    /// The Merkle family for locations stored in this operation.
+    type Family: Family;
+
     /// The key type for this operation.
     type Key: Key;
 
@@ -29,7 +32,7 @@ pub trait Operation {
 
     /// The inactivity floor location if this operation is a commit operation with a floor value,
     /// None otherwise.
-    fn has_floor(&self) -> Option<Location>;
+    fn has_floor(&self) -> Option<Location<Self::Family>>;
 }
 
 /// A trait for operations used by database variants that support commit operations.

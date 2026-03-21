@@ -111,8 +111,8 @@ where
     U: Update + Send + Sync + 'static,
     I: crate::index::Unordered<Value = Location>,
     H: Hasher,
-    J: Mutable<Item = Operation<U>> + Persistable<Error = crate::journal::Error>,
-    Operation<U>: Codec + Committable + CodecShared,
+    J: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = crate::journal::Error>,
+    Operation<mmr::Family, U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
     let hasher = StandardHasher::<H>::new();

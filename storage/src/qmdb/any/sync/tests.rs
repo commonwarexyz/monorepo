@@ -1550,8 +1550,13 @@ mod harnesses {
 
         fn create_ops(
             n: usize,
-        ) -> Vec<crate::qmdb::any::unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>
-        {
+        ) -> Vec<
+            crate::qmdb::any::unordered::Operation<
+                crate::merkle::mmr::Family,
+                Digest,
+                VariableEncoding<Vec<u8>>,
+            >,
+        > {
             crate::qmdb::any::unordered::variable::test::create_test_ops(n)
         }
 
@@ -1572,7 +1577,13 @@ mod harnesses {
 
         async fn apply_ops(
             mut db: Self::Db,
-            ops: Vec<crate::qmdb::any::unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>,
+            ops: Vec<
+                crate::qmdb::any::unordered::Operation<
+                    crate::merkle::mmr::Family,
+                    Digest,
+                    VariableEncoding<Vec<u8>>,
+                >,
+            >,
         ) -> Self::Db {
             crate::qmdb::any::unordered::variable::test::apply_ops(&mut db, ops).await;
             let finalized = db

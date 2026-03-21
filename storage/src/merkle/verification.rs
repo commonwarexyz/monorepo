@@ -58,12 +58,10 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         let map: HashMap<Position<F>, D> = digests.into_iter().collect();
 
         let size = Position::try_from(proof.leaves)?;
-        let start_pos = Position::try_from(start_loc)?;
 
-        // Count peaks before the start position to determine the fold prefix.
-        let num_fold_peaks = F::peaks(size)
-            .take_while(|&(peak_pos, _)| peak_pos < start_pos)
-            .count();
+        // Count peaks in the fold prefix using the same leaf-coverage logic that proof
+        // construction uses. Some families (for example MMB) do not order peaks by position.
+        let num_fold_peaks = Blueprint::<F>::fold_prefix(proof.leaves, start_loc)?.len();
 
         let fold_acc = if num_fold_peaks > 0 {
             Some(*proof.digests.first().ok_or(Error::InvalidProof)?)
@@ -272,6 +270,7 @@ mod tests {
     use super::*;
     use crate::{
         merkle::LocationRangeExt as _,
+        mmb::{mem::Mmb, Location as MmbLocation},
         mmr::{mem::Mmr, StandardHasher as Standard},
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
@@ -387,6 +386,55 @@ mod tests {
                             root,
                         ),
                         "sub-proof should verify for range {start}..{end}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_verification_proof_store_with_fold_prefix_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: Standard<Sha256> = Standard::new();
+            let mut mmb = Mmb::new(&hasher);
+            let elements: Vec<_> = (0..8).map(test_digest).collect();
+            let changeset = {
+                let mut batch = mmb.new_batch();
+                for element in &elements {
+                    batch = batch.add(&hasher, element);
+                }
+                batch.merkleize(&hasher).finalize()
+            };
+            mmb.apply(changeset).unwrap();
+            let root = mmb.root();
+
+            // With 8 leaves, the oldest MMB peak covers locations 0..4 but sits at position 7,
+            // while the first leaf in the proven range (location 4) sits at position 6.
+            // A position-based peak comparison therefore misclassifies the fold prefix.
+            let range = MmbLocation::new(4)..MmbLocation::new(8);
+            let range_proof = mmb.range_proof(&hasher, range.clone()).unwrap();
+            let proof_store = ProofStore::new(
+                &hasher,
+                &range_proof,
+                &elements[range.to_usize_range()],
+                range.start,
+                root,
+            )
+            .unwrap();
+
+            for start in 4u64..8 {
+                for end in (start + 1)..=8 {
+                    let sub_range = MmbLocation::new(start)..MmbLocation::new(end);
+                    let sub_proof = proof_store.range_proof(&hasher, sub_range.clone()).unwrap();
+                    assert!(
+                        sub_proof.verify_range_inclusion(
+                            &hasher,
+                            &elements[sub_range.to_usize_range()],
+                            sub_range.start,
+                            root,
+                        ),
+                        "sub-proof should verify for MMB range {start}..{end}"
                     );
                 }
             }

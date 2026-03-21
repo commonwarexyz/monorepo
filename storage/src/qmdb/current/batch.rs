@@ -296,13 +296,13 @@ pub struct UnmerkleizedBatch<'a, E, C, I, H, U, P, G, B, const N: usize>
 where
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<mmr::Family, U>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
@@ -333,13 +333,13 @@ pub struct MerkleizedBatch<'a, E, C, I, H, U, P, G, B, const N: usize>
 where
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<mmr::Family, U>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
@@ -388,13 +388,13 @@ impl<'a, E, C, I, H, U, P, G, B, const N: usize> UnmerkleizedBatch<'a, E, C, I, 
 where
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<mmr::Family, U>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
@@ -434,13 +434,13 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+    C: Mutable<Item = Operation<mmr::Family, update::Unordered<K, V>>>,
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
-    Operation<update::Unordered<K, V>>: Codec,
+    Operation<mmr::Family, update::Unordered<K, V>>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<update::Unordered<K, V>>>,
+        + BatchChain<Operation<mmr::Family, update::Unordered<K, V>>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
@@ -484,13 +484,13 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<update::Ordered<K, V>>>,
+    C: Mutable<Item = Operation<mmr::Family, update::Ordered<K, V>>>,
     I: crate::index::Ordered<Value = Location> + 'static,
     H: Hasher,
-    Operation<update::Ordered<K, V>>: Codec,
+    Operation<mmr::Family, update::Ordered<K, V>>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<update::Ordered<K, V>>>,
+        + BatchChain<Operation<mmr::Family, update::Ordered<K, V>>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
@@ -531,13 +531,13 @@ where
 /// the merged diff shows it as the final location for its key.
 fn push_operation_bits<U, B, const N: usize>(
     bitmap: &mut BitmapDiff<'_, B, N>,
-    segment: &[Operation<U>],
+    segment: &[Operation<mmr::Family, U>],
     segment_base: u64,
     diff: &BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>,
 ) where
     U: update::Update,
     B: BitmapRead<N>,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     for (i, op) in segment.iter().enumerate() {
         let op_loc = Location::new(segment_base + i as u64);
@@ -579,13 +579,13 @@ fn clear_base_old_locs<K, V, B, const N: usize>(
 #[allow(clippy::type_complexity)]
 fn clear_ancestor_superseded<U, B, const N: usize>(
     bitmap: &mut BitmapDiff<'_, B, N>,
-    chain: &[std::sync::Arc<Vec<Operation<U>>>],
+    chain: &[std::sync::Arc<Vec<Operation<mmr::Family, U>>>],
     diff: &BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>,
     db_base: u64,
 ) where
     U: update::Update,
     B: BitmapRead<N>,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     let mut seg_base = db_base;
     for ancestor_seg in &chain[..chain.len() - 1] {
@@ -622,13 +622,13 @@ async fn compute_current_layer<'a, E, U, C, I, H, P, G, B, const N: usize>(
 where
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<mmr::Family, U>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
@@ -721,13 +721,13 @@ impl<'a, E, C, I, H, U, P, G, B, const N: usize> MerkleizedBatch<'a, E, C, I, H,
 where
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<mmr::Family, U>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
@@ -753,7 +753,7 @@ where
         I,
         H,
         U,
-        authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<U>>,
+        authenticated::MerkleizedBatch<'a, mmr::Family, H, P, Operation<mmr::Family, U>>,
         mmr::MerkleizedBatch<'a, H::Digest, G>,
         BitmapDiff<'a, B, N>,
         N,
@@ -782,13 +782,13 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Contiguous<Item = Operation<update::Unordered<K, V>>>,
+    C: Contiguous<Item = Operation<mmr::Family, update::Unordered<K, V>>>,
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
-    Operation<update::Unordered<K, V>>: Codec,
+    Operation<mmr::Family, update::Unordered<K, V>>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<update::Unordered<K, V>>>,
+        + BatchChain<Operation<mmr::Family, update::Unordered<K, V>>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
@@ -806,13 +806,13 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Contiguous<Item = Operation<update::Ordered<K, V>>>,
+    C: Contiguous<Item = Operation<mmr::Family, update::Ordered<K, V>>>,
     I: crate::index::Ordered<Value = Location> + 'static,
     H: Hasher,
-    Operation<update::Ordered<K, V>>: Codec,
+    Operation<mmr::Family, update::Ordered<K, V>>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<update::Ordered<K, V>>>,
+        + BatchChain<Operation<mmr::Family, update::Ordered<K, V>>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
@@ -828,19 +828,19 @@ impl<'a, E, C, I, H, U, P, G, B, const N: usize> MerkleizedBatch<'a, E, C, I, H,
 where
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync + 'static,
-    C: Mutable<Item = Operation<U>>,
+    C: Mutable<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<mmr::Family, U>>,
     G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
         + ChainInfo<mmr::Family, Digest = H::Digest>,
     B: BitmapRead<N>,
 {
     /// Consume this batch, producing an owned [`Changeset`].
-    pub fn finalize(self) -> Changeset<U::Key, H::Digest, Operation<U>, N> {
+    pub fn finalize(self) -> Changeset<U::Key, H::Digest, Operation<mmr::Family, U>, N> {
         // Flatten the chain of Arc segments + this level's diff into flat Vecs.
         let total_pushes: usize = self
             .base_bitmap_pushes
@@ -899,13 +899,13 @@ mod trait_impls {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+        C: Mutable<Item = Operation<mmr::Family, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location> + 'static,
         H: Hasher,
-        Operation<update::Unordered<K, V>>: Codec,
+        Operation<mmr::Family, update::Unordered<K, V>>: Codec,
         P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
             + ChainInfo<mmr::Family, Digest = H::Digest>
-            + BatchChain<Operation<update::Unordered<K, V>>>,
+            + BatchChain<Operation<mmr::Family, update::Unordered<K, V>>>,
         G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
             + ChainInfo<mmr::Family, Digest = H::Digest>,
         B: BitmapRead<N>,
@@ -935,13 +935,13 @@ mod trait_impls {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
+        C: Mutable<Item = Operation<mmr::Family, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location> + 'static,
         H: Hasher,
-        Operation<update::Ordered<K, V>>: Codec,
+        Operation<mmr::Family, update::Ordered<K, V>>: Codec,
         P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
             + ChainInfo<mmr::Family, Digest = H::Digest>
-            + BatchChain<Operation<update::Ordered<K, V>>>,
+            + BatchChain<Operation<mmr::Family, update::Ordered<K, V>>>,
         G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
             + ChainInfo<mmr::Family, Digest = H::Digest>,
         B: BitmapRead<N>,
@@ -969,19 +969,19 @@ mod trait_impls {
     where
         E: Storage + Clock + Metrics,
         U: update::Update + Send + Sync + 'static,
-        C: Mutable<Item = Operation<U>>,
+        C: Mutable<Item = Operation<mmr::Family, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        Operation<U>: Codec,
+        Operation<mmr::Family, U>: Codec,
         P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
             + ChainInfo<mmr::Family, Digest = H::Digest>
-            + BatchChain<Operation<U>>,
+            + BatchChain<Operation<mmr::Family, U>>,
         G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
             + ChainInfo<mmr::Family, Digest = H::Digest>,
         B: BitmapRead<N>,
     {
         type Digest = H::Digest;
-        type Changeset = Changeset<U::Key, H::Digest, Operation<U>, N>;
+        type Changeset = Changeset<U::Key, H::Digest, Operation<mmr::Family, U>, N>;
 
         fn root(&self) -> H::Digest {
             self.root()
@@ -998,15 +998,16 @@ mod trait_impls {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<update::Unordered<K, V>>>
+        C: Mutable<Item = Operation<mmr::Family, update::Unordered<K, V>>>
             + Persistable<Error = crate::journal::Error>,
         I: UnorderedIndex<Value = Location> + 'static,
         H: Hasher,
-        Operation<update::Unordered<K, V>>: Codec,
+        Operation<mmr::Family, update::Unordered<K, V>>: Codec,
     {
         type K = K;
         type V = V::Value;
-        type Changeset = Changeset<K, H::Digest, Operation<update::Unordered<K, V>>, N>;
+        type Changeset =
+            Changeset<K, H::Digest, Operation<mmr::Family, update::Unordered<K, V>>, N>;
         type Batch<'a>
             = UnmerkleizedBatch<
             'a,
@@ -1043,15 +1044,15 @@ mod trait_impls {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<update::Ordered<K, V>>>
+        C: Mutable<Item = Operation<mmr::Family, update::Ordered<K, V>>>
             + Persistable<Error = crate::journal::Error>,
         I: crate::index::Ordered<Value = Location> + 'static,
         H: Hasher,
-        Operation<update::Ordered<K, V>>: Codec,
+        Operation<mmr::Family, update::Ordered<K, V>>: Codec,
     {
         type K = K;
         type V = V::Value;
-        type Changeset = Changeset<K, H::Digest, Operation<update::Ordered<K, V>>, N>;
+        type Changeset = Changeset<K, H::Digest, Operation<mmr::Family, update::Ordered<K, V>>, N>;
         type Batch<'a>
             = UnmerkleizedBatch<
             'a,
@@ -1237,7 +1238,7 @@ mod tests {
         type K = FixedBytes<4>;
         type V = FixedEncoding<u64>;
         type U = update::Unordered<K, V>;
-        type Op = Operation<U>;
+        type Op = Operation<mmr::Family, U>;
 
         let key1 = FixedBytes::from([1, 0, 0, 0]);
         let key2 = FixedBytes::from([2, 0, 0, 0]);

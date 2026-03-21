@@ -88,10 +88,10 @@ impl<E, C, I, H, U, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
@@ -121,7 +121,7 @@ where
         hasher: &mut H,
         proof: &RangeProof<H::Digest>,
         start_loc: Location,
-        ops: &[Operation<U>],
+        ops: &[Operation<mmr::Family, U>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
@@ -134,10 +134,10 @@ impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR. For positions at or
     /// above the grafting height, returns grafted MMR node. For positions below the grafting
@@ -219,7 +219,14 @@ where
         hasher: &mut H,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<U>>, Vec<[u8; N]>), Error> {
+    ) -> Result<
+        (
+            RangeProof<H::Digest>,
+            Vec<Operation<mmr::Family, U>>,
+            Vec<[u8; N]>,
+        ),
+        Error,
+    > {
         let storage = self.grafted_storage();
         let ops_root = self.any.log.root();
         RangeProof::new_with_ops(
@@ -240,10 +247,10 @@ impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Mutable<Item = Operation<U>>,
+    C: Mutable<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     /// Returns an ops-level historical proof for the specified range.
     ///
@@ -254,7 +261,7 @@ where
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(mmr::Proof<H::Digest>, Vec<Operation<U>>), Error> {
+    ) -> Result<(mmr::Proof<H::Digest>, Vec<Operation<mmr::Family, U>>), Error> {
         self.any
             .historical_proof(historical_size, start_loc, max_ops)
             .await
@@ -323,10 +330,10 @@ impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
@@ -357,10 +364,10 @@ impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     U: Update + 'static,
-    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     /// Apply a changeset to the database, returning the range of written operations.
     ///
@@ -374,7 +381,7 @@ where
     /// durability.
     pub async fn apply_batch(
         &mut self,
-        batch: super::batch::Changeset<U::Key, H::Digest, Operation<U>, N>,
+        batch: super::batch::Changeset<U::Key, H::Digest, Operation<mmr::Family, U>, N>,
     ) -> Result<Range<Location>, Error> {
         // 1. Apply inner any batch (writes ops, updates snapshot).
         let range = self.any.apply_batch(batch.inner).await?;
@@ -418,10 +425,10 @@ impl<E, U, C, I, H, const N: usize> Persistable for Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     type Error = Error;
 

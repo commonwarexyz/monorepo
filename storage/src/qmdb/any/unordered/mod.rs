@@ -27,12 +27,12 @@ impl<
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding,
-        C: Contiguous<Item = Operation<K, V>>,
+        C: Contiguous<Item = Operation<F, K, V>>,
         I: Index<Value = Location<F>>,
         H: Hasher,
     > Db<F, E, C, I, H, Update<K, V>>
 where
-    Operation<K, V>: Codec,
+    Operation<F, K, V>: Codec,
 {
     /// Returns the value for `key` and its location, or None if the key is not active.
     pub(crate) async fn get_with_loc(
@@ -111,10 +111,10 @@ crate::qmdb::any::traits::impl_db_any! {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<K, V>>,
+        C: PersistableMutableLog<Operation<crate::merkle::mmr::Family, K, V>>,
         I: Index<Value = crate::mmr::Location> + Send + Sync + 'static,
         H: Hasher,
-        Operation<K, V>: Codec,
+        Operation<crate::merkle::mmr::Family, K, V>: Codec,
         V::Value: Send + Sync,
     }
     Key = K, Value = V::Value, Digest = H::Digest
@@ -127,11 +127,11 @@ crate::qmdb::any::traits::impl_provable! {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<K, V>>,
+        C: PersistableMutableLog<Operation<crate::merkle::mmr::Family, K, V>>,
         I: Index<Value = crate::mmr::Location> + Send + Sync + 'static,
         H: Hasher,
-        Operation<K, V>: Codec,
+        Operation<crate::merkle::mmr::Family, K, V>: Codec,
         V::Value: Send + Sync,
     }
-    Operation = Operation<K, V>
+    Operation = Operation<crate::merkle::mmr::Family, K, V>
 }

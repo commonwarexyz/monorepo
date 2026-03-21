@@ -18,7 +18,7 @@ use commonware_utils::Array;
 type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
 
 pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
-pub type Operation<K, V> = ordered::Operation<K, FixedEncoding<V>>;
+pub type Operation<K, V> = ordered::Operation<crate::merkle::mmr::Family, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.

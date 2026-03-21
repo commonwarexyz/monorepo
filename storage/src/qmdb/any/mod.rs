@@ -137,7 +137,10 @@ pub(super) async fn init_fixed<E, U, H, T, I, Cb, NewIndex>(
     known_inactivity_floor: Option<Location>,
     callback: Cb,
     new_index: NewIndex,
-) -> Result<db::Db<crate::merkle::mmr::Family, E, FJournal<E, Operation<U>>, I, H, U>, Error>
+) -> Result<
+    db::Db<crate::merkle::mmr::Family, E, FJournal<E, Operation<mmr::Family, U>>, I, H, U>,
+    Error,
+>
 where
     E: Storage + Clock + Metrics,
     U: Update + Send + Sync,
@@ -146,13 +149,13 @@ where
     I: UnorderedIndex<Value = Location>,
     Cb: FnMut(bool, Option<Location>),
     NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: CodecFixedShared + Committable,
+    Operation<mmr::Family, U>: CodecFixedShared + Committable,
 {
     let mut log = authenticated::Journal::<mmr::Family, _, FJournal<_, _>, _>::new(
         context.with_label("log"),
         cfg.mmr,
         cfg.log,
-        Operation::is_commit,
+        Operation::<mmr::Family, U>::is_commit,
     )
     .await?;
 
@@ -170,11 +173,14 @@ where
 /// Shared initialization logic for variable-sized value [db::Db].
 pub(super) async fn init_variable<E, U, H, T, I, Cb, NewIndex>(
     context: E,
-    cfg: VariableConfig<T, <Operation<U> as Read>::Cfg>,
+    cfg: VariableConfig<T, <Operation<mmr::Family, U> as Read>::Cfg>,
     known_inactivity_floor: Option<Location>,
     callback: Cb,
     new_index: NewIndex,
-) -> Result<db::Db<crate::merkle::mmr::Family, E, VJournal<E, Operation<U>>, I, H, U>, Error>
+) -> Result<
+    db::Db<crate::merkle::mmr::Family, E, VJournal<E, Operation<mmr::Family, U>>, I, H, U>,
+    Error,
+>
 where
     E: Storage + Clock + Metrics,
     U: Update + Send + Sync,
@@ -183,13 +189,13 @@ where
     I: UnorderedIndex<Value = Location>,
     Cb: FnMut(bool, Option<Location>),
     NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: Codec + Committable,
+    Operation<mmr::Family, U>: Codec + Committable,
 {
     let mut log = authenticated::Journal::<mmr::Family, _, VJournal<_, _>, _>::new(
         context.with_label("log"),
         cfg.mmr,
         cfg.log,
-        Operation::is_commit,
+        Operation::<mmr::Family, U>::is_commit,
     )
     .await?;
 

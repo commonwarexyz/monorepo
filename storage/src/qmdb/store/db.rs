@@ -396,9 +396,10 @@ where
         self.log.destroy().await.map_err(Into::into)
     }
 
+    #[allow(clippy::type_complexity)]
     const fn as_floor_helper(
         &mut self,
-    ) -> FloorHelper<'_, Index<T, Location>, Journal<E, Operation<K, V>>> {
+    ) -> FloorHelper<'_, crate::mmr::Family, Index<T, Location>, Journal<E, Operation<K, V>>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,

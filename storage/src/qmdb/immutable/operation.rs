@@ -54,6 +54,7 @@ impl<K: Array, V: VariableValue> EncodeSize for Operation<K, V> {
 }
 
 impl<K: Array, V: VariableValue> OperationTrait for Operation<K, V> {
+    type Family = crate::merkle::mmr::Family;
     type Key = K;
 
     fn key(&self) -> Option<&Self::Key> {

@@ -22,7 +22,7 @@ use commonware_runtime::{Clock, Metrics, Storage};
 type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
 
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
-pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
+pub type Operation<K, V> = ordered::Operation<crate::merkle::mmr::Family, K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.

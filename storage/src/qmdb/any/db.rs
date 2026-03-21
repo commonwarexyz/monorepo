@@ -10,7 +10,7 @@ use crate::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    merkle::{Family, Location, Proof},
+    merkle::{Family, Location, Position, Proof},
     qmdb::{build_snapshot_from_log, operation::Operation as OperationTrait},
     Persistable,
 };
@@ -73,10 +73,10 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
@@ -124,31 +124,22 @@ where
         let bounds = self.log.reader().await.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
     }
-}
 
-// MMR-specific functionality (pinned nodes).
-impl<E, U, C, I, H> Db<crate::merkle::mmr::Family, E, C, I, H, U>
-where
-    E: Storage + Clock + Metrics,
-    U: Update,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = crate::mmr::Location>,
-    H: Hasher,
-    Operation<U>: Codec,
-{
-    /// Return the pinned MMR nodes for a lower operation boundary of `loc`.
+    /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
     pub async fn pinned_nodes_at(
         &self,
-        loc: crate::mmr::Location,
-    ) -> Result<Vec<H::Digest>, crate::qmdb::Error<crate::merkle::mmr::Family>> {
-        let pos = crate::mmr::Position::try_from(loc)?;
-        let futs: Vec<_> = crate::mmr::iterator::nodes_to_pin(pos)
+        loc: Location<F>,
+    ) -> Result<Vec<H::Digest>, crate::qmdb::Error<F>> {
+        let size = self.log.mmr.size();
+        let pos = Position::<F>::try_from(loc)?;
+        let futs: Vec<_> = F::nodes_to_pin(size, pos)
+            .into_iter()
             .map(|p| async move {
                 self.log
                     .mmr
                     .get_node(p)
                     .await?
-                    .ok_or(crate::mmr::Error::ElementPruned(p).into())
+                    .ok_or(crate::merkle::Error::ElementPruned(p).into())
             })
             .collect();
         futures::future::try_join_all(futs).await
@@ -161,10 +152,10 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Mutable<Item = Operation<U>>,
+    C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
@@ -191,7 +182,7 @@ where
         historical_size: Location<F>,
         start_loc: Location<F>,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<U>>), crate::qmdb::Error<F>> {
+    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
         self.log
             .historical_proof(historical_size, start_loc, max_ops)
             .await
@@ -202,7 +193,7 @@ where
         &self,
         loc: Location<F>,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<U>>), crate::qmdb::Error<F>> {
+    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
         self.historical_proof(self.log.size().await, loc, max_ops)
             .await
     }
@@ -213,10 +204,10 @@ impl<E, U, C, I, H> Db<crate::merkle::mmr::Family, E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<crate::merkle::mmr::Family, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = crate::mmr::Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<crate::merkle::mmr::Family, U>: Codec,
 {
     /// Returns a [Db] initialized from `log`, using `callback` to report snapshot
     /// building events.
@@ -276,10 +267,10 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Sync all database state to disk.
     pub async fn sync(&self) -> Result<(), crate::qmdb::Error<F>> {
@@ -303,10 +294,10 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
 {
     type Error = crate::qmdb::Error<F>;
 

@@ -122,19 +122,19 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
     P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
         + ChainInfo<F, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<F, U>>,
 {
     /// The committed DB this batch is built on top of.
     db: &'a Db<F, E, C, I, H, U>,
 
     /// Authenticated journal batch for computing the speculative MMR root.
-    journal_batch: authenticated::UnmerkleizedBatch<'a, F, H, P, Operation<U>>,
+    journal_batch: authenticated::UnmerkleizedBatch<'a, F, H, P, Operation<F, U>>,
 
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
@@ -143,7 +143,7 @@ where
     base_diff: Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>,
 
     /// One Arc segment of operations per prior batch in the chain.
-    base_operations: Vec<Arc<Vec<Operation<U>>>>,
+    base_operations: Vec<Arc<Vec<Operation<F, U>>>>,
 
     /// Total operation count before this batch (committed DB + prior batches).
     /// This batch's i-th operation lands at location `base_size + i`.
@@ -167,25 +167,25 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
     P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
         + ChainInfo<F, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<F, U>>,
 {
     /// The committed DB this batch is built on top of.
     db: &'a Db<F, E, C, I, H, U>,
 
     /// Merkleized authenticated journal batch (provides the speculative MMR root).
-    pub(crate) journal_batch: authenticated::MerkleizedBatch<'a, F, H, P, Operation<U>>,
+    pub(crate) journal_batch: authenticated::MerkleizedBatch<'a, F, H, P, Operation<F, U>>,
 
     /// All uncommitted key-level changes in this batch chain.
     pub(crate) diff: Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>,
 
     /// One Arc segment of operations per batch in the chain (chronological order).
-    pub(crate) base_operations: Vec<Arc<Vec<Operation<U>>>>,
+    pub(crate) base_operations: Vec<Arc<Vec<Operation<F, U>>>>,
 
     /// Inactivity floor location after this batch's floor raise.
     new_inactivity_floor_loc: Location<F>,
@@ -236,18 +236,18 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
     P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
         + ChainInfo<F, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<F, U>>,
 {
     db: &'a Db<F, E, C, I, H, U>,
-    journal_batch: authenticated::UnmerkleizedBatch<'a, F, H, P, Operation<U>>,
+    journal_batch: authenticated::UnmerkleizedBatch<'a, F, H, P, Operation<F, U>>,
     base_diff: Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>,
-    base_operations: Vec<Arc<Vec<Operation<U>>>>,
+    base_operations: Vec<Arc<Vec<Operation<F, U>>>>,
     base_size: u64,
     db_size: u64,
     base_inactivity_floor_loc: Location<F>,
@@ -259,13 +259,13 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
     P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
         + ChainInfo<F, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<F, U>>,
 {
     /// Read an operation at a given location from the correct source.
     ///
@@ -280,8 +280,8 @@ where
     async fn read_op(
         &self,
         loc: Location<F>,
-        current_ops: &[Operation<U>],
-    ) -> Result<Operation<U>, crate::qmdb::Error<F>> {
+        current_ops: &[Operation<F, U>],
+    ) -> Result<Operation<F, U>, crate::qmdb::Error<F>> {
         let loc_val = *loc;
 
         if loc_val >= self.base_size {
@@ -380,7 +380,7 @@ where
         &self,
         floor: &mut Location<F>,
         fixed_tip: u64,
-        ops: &mut Vec<Operation<U>>,
+        ops: &mut Vec<Operation<F, U>>,
         diff: &mut BTreeMap<U::Key, DiffEntry<F, U::Value>>,
         scan: &mut S,
     ) -> Result<bool, crate::qmdb::Error<F>> {
@@ -420,7 +420,7 @@ where
     /// merkleize, diff merge, and `MerkleizedBatch` construction.
     async fn finish<S: FloorScan<F>>(
         mut self,
-        mut ops: Vec<Operation<U>>,
+        mut ops: Vec<Operation<F, U>>,
         mut diff: BTreeMap<U::Key, DiffEntry<F, U::Value>>,
         active_keys_delta: isize,
         user_steps: u64,
@@ -453,12 +453,8 @@ where
         }
 
         // CommitFloor operation.
-        // Operation::CommitFloor stores mmr::Location, so convert from generic Location<F>.
         let commit_loc = Location::new(self.base_size + ops.len() as u64);
-        ops.push(Operation::CommitFloor(
-            metadata,
-            crate::mmr::Location::new(*floor),
-        ));
+        ops.push(Operation::CommitFloor(metadata, floor));
 
         // Merkleize the journal batch.
         // The journal batch was created eagerly at batch construction time and its
@@ -501,13 +497,13 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
     P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
         + ChainInfo<F, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<F, U>>,
 {
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     ///
@@ -548,13 +544,13 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
     P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
         + ChainInfo<F, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<F, U>>,
 {
     /// Read through: mutations -> base diff -> committed DB.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
@@ -575,13 +571,13 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+    C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<update::Unordered<K, V>>: Codec,
+    Operation<F, update::Unordered<K, V>>: Codec,
     P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
         + ChainInfo<F, Digest = H::Digest>
-        + BatchChain<Operation<update::Unordered<K, V>>>,
+        + BatchChain<Operation<F, update::Unordered<K, V>>>,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
     pub async fn merkleize(
@@ -609,7 +605,7 @@ where
         let results = try_join_all(futures).await?;
 
         // Generate user mutation operations.
-        let mut ops: Vec<Operation<update::Unordered<K, V>>> = Vec::new();
+        let mut ops: Vec<Operation<F, update::Unordered<K, V>>> = Vec::new();
         let mut diff: BTreeMap<K, DiffEntry<F, V::Value>> = BTreeMap::new();
         let mut active_keys_delta: isize = 0;
         let mut user_steps: u64 = 0;
@@ -700,13 +696,13 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<update::Ordered<K, V>>>,
+    C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
     I: OrderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<update::Ordered<K, V>>: Codec,
+    Operation<F, update::Ordered<K, V>>: Codec,
     P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
         + ChainInfo<F, Digest = H::Digest>
-        + BatchChain<Operation<update::Ordered<K, V>>>,
+        + BatchChain<Operation<F, update::Ordered<K, V>>>,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
     pub async fn merkleize(
@@ -827,7 +823,7 @@ where
                 continue;
             }
             if let DiffEntry::Active { value, loc, .. } = entry {
-                let op: Operation<update::Ordered<K, V>> = m.read_op(*loc, &[]).await?;
+                let op: Operation<F, update::Ordered<K, V>> = m.read_op(*loc, &[]).await?;
                 let data = match op {
                     Operation::Update(data) => data,
                     _ => unreachable!("base diff Active should reference Update op"),
@@ -855,7 +851,7 @@ where
         }
 
         // Generate operations.
-        let mut ops: Vec<Operation<update::Ordered<K, V>>> = Vec::new();
+        let mut ops: Vec<Operation<F, update::Ordered<K, V>>> = Vec::new();
         let mut diff: BTreeMap<K, DiffEntry<F, V::Value>> = BTreeMap::new();
         let mut active_keys_delta: isize = 0;
         let mut user_steps: u64 = 0;
@@ -967,13 +963,13 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
     P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
         + ChainInfo<F, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<F, U>>,
 {
     /// Read through: diff -> committed DB.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
@@ -989,13 +985,13 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
     P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
         + ChainInfo<F, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<F, U>>,
 {
     /// Return the speculative root.
     pub fn root(&self) -> H::Digest {
@@ -1014,7 +1010,7 @@ where
         I,
         H,
         U,
-        authenticated::MerkleizedBatch<'a, F, H, P, Operation<U>>,
+        authenticated::MerkleizedBatch<'a, F, H, P, Operation<F, U>>,
     > {
         UnmerkleizedBatch {
             db: self.db,
@@ -1035,16 +1031,16 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync + 'static,
-    C: Mutable<Item = Operation<U>>,
+    C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
     P: Readable<Family = F, Digest = H::Digest, Error = crate::merkle::Error<F>>
         + ChainInfo<F, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+        + BatchChain<Operation<F, U>>,
 {
     /// Consume this batch, producing an owned [`Changeset`].
-    pub fn finalize(self) -> Changeset<F, U::Key, H::Digest, Operation<U>> {
+    pub fn finalize(self) -> Changeset<F, U::Key, H::Digest, Operation<F, U>> {
         let diff = Arc::try_unwrap(self.diff).unwrap_or_else(|arc| (*arc).clone());
         let snapshot_diffs: Vec<_> = diff
             .into_iter()
@@ -1103,10 +1099,10 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Create a new speculative batch of operations with this database as its parent.
     #[allow(clippy::type_complexity)]
@@ -1135,10 +1131,10 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync + 'static,
-    C: Mutable<Item = Operation<U>> + crate::Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<F, U>> + crate::Persistable<Error = crate::journal::Error>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<F, U>: Codec,
 {
     /// Apply a changeset to the database, returning the range of written operations.
     ///
@@ -1151,7 +1147,7 @@ where
     /// does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee durability.
     pub async fn apply_batch(
         &mut self,
-        batch: Changeset<F, U::Key, H::Digest, Operation<U>>,
+        batch: Changeset<F, U::Key, H::Digest, Operation<F, U>>,
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let journal_size = *self.last_commit_loc + 1;
         if batch.db_size != journal_size {
@@ -1203,7 +1199,7 @@ where
 }
 
 /// Extract the value from an Update operation via the `Update` trait.
-fn extract_update_value<U: update::Update>(op: &Operation<U>) -> U::Value {
+fn extract_update_value<F: Family, U: update::Update>(op: &Operation<F, U>) -> U::Value {
     match op {
         Operation::Update(update) => update.value().clone(),
         _ => unreachable!("floor raise should only re-append Update operations"),
@@ -1230,13 +1226,13 @@ mod trait_impls {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+        C: Mutable<Item = Operation<MmrFamily, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = crate::mmr::Location>,
         H: Hasher,
-        Operation<update::Unordered<K, V>>: Codec,
+        Operation<MmrFamily, update::Unordered<K, V>>: Codec,
         P: Readable<Family = MmrFamily, Digest = H::Digest, Error = crate::mmr::Error>
             + ChainInfo<MmrFamily, Digest = H::Digest>
-            + BatchChain<Operation<update::Unordered<K, V>>>,
+            + BatchChain<Operation<MmrFamily, update::Unordered<K, V>>>,
     {
         type K = K;
         type V = V::Value;
@@ -1265,13 +1261,13 @@ mod trait_impls {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
+        C: Mutable<Item = Operation<MmrFamily, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = crate::mmr::Location>,
         H: Hasher,
-        Operation<update::Ordered<K, V>>: Codec,
+        Operation<MmrFamily, update::Ordered<K, V>>: Codec,
         P: Readable<Family = MmrFamily, Digest = H::Digest, Error = crate::mmr::Error>
             + ChainInfo<MmrFamily, Digest = H::Digest>
-            + BatchChain<Operation<update::Ordered<K, V>>>,
+            + BatchChain<Operation<MmrFamily, update::Ordered<K, V>>>,
     {
         type K = K;
         type V = V::Value;
@@ -1297,16 +1293,16 @@ mod trait_impls {
     where
         E: Storage + Clock + Metrics,
         U: update::Update + Send + Sync + 'static,
-        C: Mutable<Item = Operation<U>>,
+        C: Mutable<Item = Operation<MmrFamily, U>>,
         I: UnorderedIndex<Value = crate::mmr::Location>,
         H: Hasher,
-        Operation<U>: Codec,
+        Operation<MmrFamily, U>: Codec,
         P: Readable<Family = MmrFamily, Digest = H::Digest, Error = crate::mmr::Error>
             + ChainInfo<MmrFamily, Digest = H::Digest>
-            + BatchChain<Operation<U>>,
+            + BatchChain<Operation<MmrFamily, U>>,
     {
         type Digest = H::Digest;
-        type Changeset = Changeset<MmrFamily, U::Key, H::Digest, Operation<U>>;
+        type Changeset = Changeset<MmrFamily, U::Key, H::Digest, Operation<MmrFamily, U>>;
 
         fn root(&self) -> H::Digest {
             self.root()
@@ -1322,15 +1318,16 @@ mod trait_impls {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<update::Unordered<K, V>>>
+        C: Mutable<Item = Operation<MmrFamily, update::Unordered<K, V>>>
             + crate::Persistable<Error = crate::journal::Error>,
         I: UnorderedIndex<Value = crate::mmr::Location>,
         H: Hasher,
-        Operation<update::Unordered<K, V>>: Codec,
+        Operation<MmrFamily, update::Unordered<K, V>>: Codec,
     {
         type K = K;
         type V = V::Value;
-        type Changeset = Changeset<MmrFamily, K, H::Digest, Operation<update::Unordered<K, V>>>;
+        type Changeset =
+            Changeset<MmrFamily, K, H::Digest, Operation<MmrFamily, update::Unordered<K, V>>>;
         type Batch<'a>
             = UnmerkleizedBatch<
             'a,
@@ -1363,15 +1360,16 @@ mod trait_impls {
         E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<update::Ordered<K, V>>>
+        C: Mutable<Item = Operation<MmrFamily, update::Ordered<K, V>>>
             + crate::Persistable<Error = crate::journal::Error>,
         I: OrderedIndex<Value = crate::mmr::Location>,
         H: Hasher,
-        Operation<update::Ordered<K, V>>: Codec,
+        Operation<MmrFamily, update::Ordered<K, V>>: Codec,
     {
         type K = K;
         type V = V::Value;
-        type Changeset = Changeset<MmrFamily, K, H::Digest, Operation<update::Ordered<K, V>>>;
+        type Changeset =
+            Changeset<MmrFamily, K, H::Digest, Operation<MmrFamily, update::Ordered<K, V>>>;
         type Batch<'a>
             = UnmerkleizedBatch<
             'a,
