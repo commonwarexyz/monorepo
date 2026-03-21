@@ -6,7 +6,7 @@
 
 use crate::{
     journal::contiguous::Contiguous,
-    mmr::{Location, Position},
+    mmr::Location,
     qmdb::{
         self,
         any::traits::DbAny,
@@ -59,10 +59,10 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
     /// Get the MMR and journal from the database
     fn into_log_components(self) -> (Self::Mmr, Self::Journal);
 
-    /// Get the pinned nodes at a given position
+    /// Get the pinned nodes at a given location
     fn pinned_nodes_at(
         &self,
-        pos: Position,
+        loc: Location,
     ) -> impl std::future::Future<Output = Vec<Self::Digest>> + Send;
 }
 
@@ -1030,9 +1030,7 @@ where
         let target_db_op_count = bounds.end;
         let target_db_inactivity_floor_loc = db.inactivity_floor_loc().await;
 
-        let pinned_nodes = db
-            .pinned_nodes_at(Position::try_from(db.inactivity_floor_loc().await).unwrap())
-            .await;
+        let pinned_nodes = db.pinned_nodes_at(db.inactivity_floor_loc().await).await;
         let (_, journal) = db.into_log_components();
 
         let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
@@ -1106,9 +1104,7 @@ where
         let target_hash = target_db.root();
 
         // Get pinned nodes at the sync lower bound from the target db (which has all the data).
-        let pinned_nodes = target_db
-            .pinned_nodes_at(Position::try_from(sync_lower_bound).unwrap())
-            .await;
+        let pinned_nodes = target_db.pinned_nodes_at(sync_lower_bound).await;
 
         let (mmr, journal) = target_db.into_log_components();
 
@@ -1165,9 +1161,7 @@ where
         let upper_bound = source_db.bounds().await.end;
 
         // Get pinned nodes and target hash before deconstructing source_db
-        let pinned_nodes = source_db
-            .pinned_nodes_at(Position::try_from(lower_bound).unwrap())
-            .await;
+        let pinned_nodes = source_db.pinned_nodes_at(lower_bound).await;
         let target_hash = source_db.root();
         let target_op_count = source_db.bounds().await.end;
         let target_inactivity_floor = source_db.inactivity_floor_loc().await;

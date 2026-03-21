@@ -121,7 +121,6 @@ mod tests {
 
         let root = *mmb.root();
         let prune_loc = Location::new(9);
-        let prune_pos = Position::try_from(prune_loc).unwrap();
         mmb.prune(prune_loc).unwrap();
 
         assert_eq!(mmb.bounds().start, prune_loc);
@@ -142,7 +141,7 @@ mod tests {
             Config {
                 nodes: mmb.nodes.iter().copied().collect(),
                 pruned_to: prune_loc,
-                pinned_nodes: mmb.node_digests_to_pin(prune_pos),
+                pinned_nodes: mmb.node_digests_to_pin(prune_loc),
             },
             &hasher,
         )
@@ -214,7 +213,7 @@ mod tests {
         let nodes: Vec<_> = (6..*mmb.size())
             .map(|i| *mmb.get_node_unchecked(Position::new(i)))
             .collect();
-        let pinned_nodes = mmb.node_digests_to_pin(Position::new(6));
+        let pinned_nodes = mmb.node_digests_to_pin(Location::new(4));
 
         assert!(Mmb::init(
             Config {
