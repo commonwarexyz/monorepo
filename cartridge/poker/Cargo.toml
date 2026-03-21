@@ -1,0 +1,19 @@
+[package]
+name = "cartridge-poker"
+edition.workspace = true
+publish = true
+version.workspace = true
+license.workspace = true
+description = "Deterministic poker state machine for WIM execution."
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+rand = { workspace = true, features = ["std", "std_rng"] }
+
+[features]
+default = ["std"]
+std = []

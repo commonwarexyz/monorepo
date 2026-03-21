@@ -4,6 +4,7 @@ members = [
     "codec",
     "coding",
     "collector",
+    "cartridge/poker",
     "commitment",
     "wim",
     "conformance",
