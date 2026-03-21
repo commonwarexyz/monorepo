@@ -4,7 +4,7 @@
 //! - [`select!`] - Biased async select over multiple futures (requires `std` feature)
 //! - [`select_loop!`] - Continuous select loop with shutdown handling (requires `std` feature)
 //! - [`stability`], [`stability_mod!`], [`stability_scope!`] - API stability annotations
-//! - [`test_async`], [`test_traced`], [`test_collect_traces`] - Test utilities
+//! - [`test_async`], [`test_traced`], [`test_collect_traces`], [`fuzzable_test`] - Test utilities
 //! - [`test_group`] - Nextest filter group annotations
 
 #![doc(
@@ -331,6 +331,7 @@ pub use commonware_macros_impl::test_group;
 ///     assert_eq!(2 + 2, 4);
 /// }
 /// ```
+pub use commonware_macros_impl::fuzzable_test;
 pub use commonware_macros_impl::test_traced;
 
 #[doc(hidden)]

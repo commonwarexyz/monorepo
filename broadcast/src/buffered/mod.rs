@@ -28,14 +28,16 @@ pub use ingress::Mailbox;
 pub(crate) use ingress::Message;
 mod metrics;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fuzz"))]
 pub mod mocks;
 
-#[cfg(test)]
-mod tests {
+#[cfg(any(test, feature = "fuzz"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
+pub mod tests {
     use super::{mocks::TestMessage, *};
     use crate::Broadcaster;
     use commonware_codec::RangeCfg;
+    use commonware_macros::fuzzable_test;
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Digestible, Hasher, Sha256, Signer as _,
@@ -52,6 +54,9 @@ mod tests {
 
     // Number of messages to cache per sender
     const CACHE_SIZE: usize = 10;
+
+    // Maximum message length for codec (prevents OOM under fuzz mutation)
+    const MAX_LEN: usize = 10_485_760;
 
     // Enough time to receive a cached message. Cannot be instantaneous as the test runtime
     // requires some time to switch context.
@@ -147,7 +152,7 @@ mod tests {
                 mailbox_size: 1024,
                 deque_size: CACHE_SIZE,
                 priority: false,
-                codec_config: RangeCfg::from(..),
+                codec_config: RangeCfg::from(..=MAX_LEN),
                 peer_provider: oracle.manager(),
             };
             let (engine, engine_mailbox) =
@@ -158,6 +163,7 @@ mod tests {
         mailboxes
     }
 
+    #[fuzzable_test]
     #[test_traced]
     fn test_broadcast() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
@@ -211,6 +217,7 @@ mod tests {
         });
     }
 
+    #[fuzzable_test]
     #[test_traced]
     fn test_self_retrieval() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
@@ -266,6 +273,7 @@ mod tests {
         });
     }
 
+    #[fuzzable_test]
     #[test_traced]
     fn test_packet_loss() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -311,6 +319,7 @@ mod tests {
         });
     }
 
+    #[fuzzable_test]
     #[test_traced]
     fn test_get_cached() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
@@ -342,6 +351,7 @@ mod tests {
         });
     }
 
+    #[fuzzable_test]
     #[test_traced]
     fn test_get_nonexistent() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
@@ -376,6 +386,7 @@ mod tests {
         });
     }
 
+    #[fuzzable_test]
     #[test_traced]
     fn test_cache_eviction_single_peer() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
@@ -415,6 +426,7 @@ mod tests {
         });
     }
 
+    #[fuzzable_test]
     #[test_traced]
     fn test_cache_eviction_multi_peer() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
@@ -480,6 +492,7 @@ mod tests {
         });
     }
 
+    #[fuzzable_test]
     #[test_traced]
     fn test_selective_recipients() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
@@ -522,6 +535,7 @@ mod tests {
         });
     }
 
+    #[fuzzable_test]
     #[test_traced]
     fn test_ref_count_across_peers() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
@@ -685,7 +699,7 @@ mod tests {
                 mailbox_size: 1024,
                 deque_size: CACHE_SIZE,
                 priority: false,
-                codec_config: RangeCfg::from(..),
+                codec_config: RangeCfg::from(..=MAX_LEN),
                 peer_provider: oracle.manager(),
             };
             let (engine, mailbox) =
@@ -774,7 +788,7 @@ mod tests {
                 mailbox_size: 1024,
                 deque_size: CACHE_SIZE,
                 priority: false,
-                codec_config: RangeCfg::from(..),
+                codec_config: RangeCfg::from(..=MAX_LEN),
                 peer_provider: oracle.manager(),
             };
             let (engine, engine_mailbox) =
@@ -785,6 +799,7 @@ mod tests {
         (mailboxes, handles)
     }
 
+    #[fuzzable_test]
     #[test_traced]
     fn test_operations_after_shutdown_do_not_panic() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
@@ -890,6 +905,7 @@ mod tests {
         });
     }
 
+    #[fuzzable_test]
     #[test]
     fn test_clean_shutdown() {
         for seed in 0..25 {
@@ -915,7 +931,7 @@ mod tests {
                 mailbox_size: 1024,
                 deque_size: CACHE_SIZE,
                 priority: false,
-                codec_config: RangeCfg::from(..),
+                codec_config: RangeCfg::from(..=MAX_LEN),
                 peer_provider: oracle.manager(),
             };
             let (engine_b, mailbox_b) =
@@ -932,7 +948,7 @@ mod tests {
                     mailbox_size: 1024,
                     deque_size: CACHE_SIZE,
                     priority: false,
-                    codec_config: RangeCfg::from(..),
+                    codec_config: RangeCfg::from(..=MAX_LEN),
                     peer_provider: oracle.manager(),
                 };
                 let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
@@ -986,7 +1002,7 @@ mod tests {
                 mailbox_size: 1024,
                 deque_size: CACHE_SIZE,
                 priority: false,
-                codec_config: RangeCfg::from(..),
+                codec_config: RangeCfg::from(..=MAX_LEN),
                 peer_provider: oracle.manager(),
             };
             let (engine_b, mailbox_b) =
@@ -1003,7 +1019,7 @@ mod tests {
                     mailbox_size: 1024,
                     deque_size: CACHE_SIZE,
                     priority: false,
-                    codec_config: RangeCfg::from(..),
+                    codec_config: RangeCfg::from(..=MAX_LEN),
                     peer_provider: oracle.manager(),
                 };
                 let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);

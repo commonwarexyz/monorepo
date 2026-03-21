@@ -27,5 +27,8 @@ tracing.workspace = true
 [dev-dependencies]
 tracing-subscriber.workspace = true
 
+[features]
+fuzz = []
+
 [lib]
 bench = false
