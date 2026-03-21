@@ -92,7 +92,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
             return Err(Error::InvalidSize(*size));
         }
 
-        let expected_pinned_positions = F::nodes_to_pin(size, pruned_to_pos);
+        let leaves = Location::try_from(size).expect("valid size");
+        let expected_pinned_positions = F::nodes_to_pin(leaves, config.pruned_to);
         if config.pinned_nodes.len() != expected_pinned_positions.len() {
             return Err(Error::InvalidPinnedNodes);
         }
@@ -228,9 +229,9 @@ impl<F: Family, D: Digest> Mem<F, D> {
     }
 
     /// Get the nodes (position + digest) that need to be pinned (those required for proof
-    /// generation) when pruned to position `prune_pos`.
-    pub(crate) fn nodes_to_pin(&self, prune_pos: Position<F>) -> BTreeMap<Position<F>, D> {
-        F::nodes_to_pin(self.size(), prune_pos)
+    /// generation) when pruned to leaf location `prune_loc`.
+    pub(crate) fn nodes_to_pin(&self, prune_loc: Location<F>) -> BTreeMap<Position<F>, D> {
+        F::nodes_to_pin(self.leaves(), prune_loc)
             .into_iter()
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
@@ -253,20 +254,21 @@ impl<F: Family, D: Digest> Mem<F, D> {
             return Ok(());
         }
 
-        self.prune_to_pos(pos);
+        self.prune_to_loc(loc);
         Ok(())
     }
 
     /// Prune all retained nodes.
     pub fn prune_all(&mut self) {
         if !self.nodes.is_empty() {
-            self.prune_to_pos(self.size());
+            self.prune_to_loc(self.leaves());
         }
     }
 
-    /// Position-based pruning. Assumes `pos` is leaf-aligned.
-    fn prune_to_pos(&mut self, pos: Position<F>) {
-        self.pinned_nodes = self.nodes_to_pin(pos);
+    /// Location-based pruning.
+    fn prune_to_loc(&mut self, loc: Location<F>) {
+        self.pinned_nodes = self.nodes_to_pin(loc);
+        let pos = Position::try_from(loc).expect("valid location");
         let retained_nodes = self.pos_to_index(pos);
         self.nodes.drain(0..retained_nodes);
         self.pruned_to_pos = pos;
@@ -318,8 +320,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
     /// Get the digests of nodes that need to be pinned at the provided pruning boundary.
     #[cfg(test)]
-    pub(crate) fn node_digests_to_pin(&self, prune_pos: Position<F>) -> Vec<D> {
-        F::nodes_to_pin(self.size(), prune_pos)
+    pub(crate) fn node_digests_to_pin(&self, prune_loc: Location<F>) -> Vec<D> {
+        F::nodes_to_pin(self.leaves(), prune_loc)
             .into_iter()
             .map(|pos| *self.get_node_unchecked(pos))
             .collect()
@@ -408,8 +410,8 @@ impl<F: Family, D: Digest> Readable for Mem<F, D> {
         *self.root()
     }
 
-    fn pruned_to_pos(&self) -> Position<F> {
-        self.pruned_to_pos
+    fn pruned_to_loc(&self) -> Location<F> {
+        Location::try_from(self.pruned_to_pos).expect("valid pruned_to_pos")
     }
 
     fn proof(
@@ -614,8 +616,7 @@ mod tests {
             // Correct pinned nodes from a built structure succeed.
             let mem = build::<F>(&hasher, 50);
             let prune_loc = Location::<F>::new(25);
-            let prune_pos = Position::try_from(prune_loc).unwrap();
-            let pinned_nodes = mem.node_digests_to_pin(prune_pos);
+            let pinned_nodes = mem.node_digests_to_pin(prune_loc);
             assert!(Mem::<F, D>::init(
                 Config {
                     nodes: vec![],
