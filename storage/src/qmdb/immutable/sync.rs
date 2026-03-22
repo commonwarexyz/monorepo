@@ -286,6 +286,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 0,
             };
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -364,6 +367,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 0,
             };
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -413,6 +419,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 0,
             };
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -497,6 +506,9 @@ mod tests {
                     max_outstanding_requests: 10,
                     apply_batch_size: 1024,
                     update_rx: Some(update_receiver),
+                    finish_rx: None,
+                    reached_target_tx: None,
+                    max_retained_roots: 1,
                 };
                 let mut client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
                 loop {
@@ -585,6 +597,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 0,
             };
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -646,6 +661,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 0,
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -703,6 +721,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 0,
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -749,6 +770,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
             let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
 
@@ -809,6 +833,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
             let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
 
@@ -887,6 +914,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
 
             // Send target update with increased upper bound
@@ -945,6 +975,9 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
 
             // Complete the sync

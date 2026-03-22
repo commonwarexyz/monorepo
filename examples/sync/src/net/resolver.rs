@@ -82,6 +82,7 @@ where
         start_loc: Location,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
+        _cancel_rx: oneshot::Receiver<()>,
     ) -> Result<sync::resolver::FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let request_id = self.request_id_generator.next();
         let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {

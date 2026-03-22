@@ -2,6 +2,7 @@
 
 use crate::{types::Height, Block, Heightable};
 use commonware_cryptography::Digestible;
+use commonware_utils::sync::Mutex;
 use futures::{
     future::{BoxFuture, OptionFuture},
     FutureExt, Stream,
@@ -10,6 +11,7 @@ use pin_project::pin_project;
 use std::{
     future::Future,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -34,6 +36,45 @@ pub trait BlockProvider: Clone + Send + 'static {
     ) -> impl Future<Output = Option<Self::Block>> + Send;
 }
 
+/// A type-erased [`BlockProvider`] that wraps any concrete provider behind
+/// a shared closure.
+///
+/// Used by actor mailboxes and other channel-based patterns where a generic
+/// `BlockProvider` type parameter must be eliminated before sending across
+/// a channel.
+#[derive(Clone)]
+pub struct ErasedBlockProvider<B: Block> {
+    fetch: Arc<dyn Fn(<B as Digestible>::Digest) -> BoxFuture<'static, Option<B>> + Send + Sync>,
+}
+
+impl<B: Block> ErasedBlockProvider<B> {
+    /// Erase a concrete [`BlockProvider`] into a type-erased provider.
+    ///
+    /// The provider is wrapped in a `Mutex` so that the resulting closure
+    /// is `Sync` (required by `Arc<dyn Fn + Send + Sync>`). The lock is
+    /// held only for the duration of `clone()`, never across an await.
+    pub fn new<M: BlockProvider<Block = B>>(provider: M) -> Self {
+        let provider = Arc::new(Mutex::new(provider));
+        Self {
+            fetch: Arc::new(move |digest| {
+                let p = provider.lock().clone();
+                Box::pin(async move { p.fetch_block(digest).await })
+            }),
+        }
+    }
+}
+
+impl<B: Block> BlockProvider for ErasedBlockProvider<B> {
+    type Block = B;
+
+    fn fetch_block(
+        self,
+        digest: <B as Digestible>::Digest,
+    ) -> impl Future<Output = Option<B>> + Send {
+        (self.fetch)(digest)
+    }
+}
+
 /// Yields the ancestors of a block while prefetching parents, _not_ including the genesis block.
 ///
 // TODO(<https://github.com/commonwarexyz/monorepo/issues/2982>): Once marshal can also yield the genesis block,
@@ -47,6 +88,31 @@ pub struct AncestorStream<M, B: Block> {
 }
 
 impl<M, B: Block> AncestorStream<M, B> {
+    /// Returns a reference to the next block that will be yielded by the
+    /// stream, without consuming it.
+    ///
+    /// Returns `None` if the buffer is empty and the next block is being
+    /// fetched asynchronously.
+    pub fn peek(&self) -> Option<&B> {
+        self.buffered.last()
+    }
+
+    /// Erase the block provider type, producing an
+    /// `AncestorStream<ErasedBlockProvider<B>, B>`.
+    ///
+    /// The returned stream behaves identically but can be sent across
+    /// channels that require a concrete type.
+    pub fn erase(self) -> AncestorStream<ErasedBlockProvider<B>, B>
+    where
+        M: BlockProvider<Block = B>,
+    {
+        AncestorStream {
+            buffered: self.buffered,
+            marshal: ErasedBlockProvider::new(self.marshal),
+            pending: self.pending,
+        }
+    }
+
     /// Creates a new [AncestorStream] starting from the given ancestry.
     ///
     /// # Panics
