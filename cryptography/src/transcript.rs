@@ -533,7 +533,6 @@ mod test {
         assert!(transcript.verify(&pk, &sig));
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn test_summary_add_to_batch_matches_transcript() {
         let sk = ed25519::PrivateKey::from_seed(7);
