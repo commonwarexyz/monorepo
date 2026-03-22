@@ -1,17 +1,6 @@
-use crate::{deterministic::Auditor, Buf, Error, IoBufs, IoBufsMut};
+use crate::{deterministic::Auditor, Error, IoBufs, IoBufsMut};
 use sha2::digest::Update;
 use std::sync::Arc;
-
-fn hash_iobufs(hasher: &mut impl Update, mut bufs: IoBufs) {
-    while bufs.has_remaining() {
-        let len = {
-            let chunk = bufs.chunk();
-            hasher.update(chunk);
-            chunk.len()
-        };
-        bufs.advance(len);
-    }
-}
 
 #[derive(Clone)]
 pub struct Storage<S: crate::Storage> {
@@ -121,7 +110,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
             hasher.update(&offset.to_be_bytes());
-            hash_iobufs(hasher, bufs.clone());
+            bufs.for_each_chunk(|chunk| hasher.update(chunk));
         });
         self.inner.write_at(offset, bufs).await
     }

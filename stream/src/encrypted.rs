@@ -302,17 +302,9 @@ pub struct Sender<O> {
 }
 
 impl<O: Sink> Sender<O> {
-    fn max_ciphertext_size(&self) -> u32 {
-        self.max_message_size.saturating_add(TAG_SIZE)
-    }
-
-    fn max_batched_send_size(&self) -> usize {
-        self.pool.config().max_size.get()
-    }
-
     fn encrypt_frame_into(&mut self, frame: &mut IoBufMut, bufs: impl Into<IoBufs>) -> Result<usize, Error> {
         let mut bufs = bufs.into();
-        let max_ciphertext_size = self.max_ciphertext_size();
+        let max_ciphertext_size = self.max_message_size.saturating_add(TAG_SIZE);
         append_frame(
             frame,
             bufs.len() + TAG_SIZE as usize,
@@ -338,7 +330,7 @@ impl<O: Sink> Sender<O> {
     /// concatenation copy.
     fn encrypt_frame(&mut self, bufs: impl Into<IoBufs>) -> Result<IoBuf, Error> {
         let bufs = bufs.into();
-        let max_ciphertext_size = self.max_ciphertext_size();
+        let max_ciphertext_size = self.max_message_size.saturating_add(TAG_SIZE);
         let frame_len = framed_len(bufs.len() + TAG_SIZE as usize, max_ciphertext_size)?;
         let mut frame = self.pool.alloc(frame_len);
         self.encrypt_frame_into(&mut frame, bufs)?;
@@ -388,8 +380,8 @@ impl<O: Sink> Sender<O> {
         let mut frames = Vec::with_capacity(lower.max(1));
         let mut batch = Vec::new();
         let mut batch_total = 0usize;
-        let max_ciphertext_size = self.max_ciphertext_size();
-        let max_batch_size = self.max_batched_send_size();
+        let max_ciphertext_size = self.max_message_size.saturating_add(TAG_SIZE);
+        let max_batch_size = self.pool.config().max_size.get();
 
         for buf in bufs {
             let msg = buf.into();
