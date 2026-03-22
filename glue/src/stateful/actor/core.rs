@@ -104,11 +104,11 @@ where
     /// list is bounded by protocol behavior.
     held_verify_responses: Vec<oneshot::Sender<bool>>,
 
-    /// Finalization acknowledgements held while syncing.
+    /// Finalizations held while syncing.
     ///
-    /// Marshal bounds these by `max_pending_acks`, so this list is also
-    /// bounded by protocol behavior.
-    held_finalized_acks: Vec<Exact>,
+    /// Marshal bounds in-flight application updates by `max_pending_acks`,
+    /// so this list is also bounded by protocol behavior.
+    held_finalizations: Vec<(A::Block, Exact)>,
 }
 
 impl<E, A, R> SyncingState<E, A, R>
@@ -126,7 +126,7 @@ where
             tip_sender,
             sync_resolvers,
             held_verify_responses: Vec::new(),
-            held_finalized_acks: Vec::new(),
+            held_finalizations: Vec::new(),
         }
     }
 }
@@ -338,24 +338,35 @@ where
                             "verify held: state sync in progress"
                         );
                     }
-                    (Mode::Syncing(syncing), Message::Finalized { block, acknowledgement }) => {
-                        // In startup state sync mode, bootstrap calls `marshal.set_floor()` before
-                        // sending `SyncComplete`. Marshal drops all pending app acknowledgements
-                        // when floor is raised, so these held acknowledgements are intentionally
-                        // retained only until we leave syncing mode.
-                        debug!(height = block.height().get(), "finalization held during sync");
-                        syncing.held_finalized_acks.push(acknowledgement);
+                    (
+                        Mode::Syncing(syncing),
+                        Message::Finalized {
+                            block,
+                            acknowledgement,
+                        },
+                    ) => {
+                        debug!(
+                            height = block.height().get(),
+                            "finalization held during sync"
+                        );
+                        syncing.held_finalizations.push((block, acknowledgement));
                     }
                     (Mode::Syncing(syncing), Message::Tip { height, digest }) => {
                         handle_tip(&mut self.shared, syncing, height, digest).await;
                     }
-                    (Mode::Syncing(syncing), Message::SyncComplete {
-                        databases,
-                        last_processed_digest,
-                    }) => {
+                    (
+                        Mode::Syncing(syncing),
+                        Message::SyncComplete {
+                            databases,
+                            last_processed_height,
+                            last_processed_digest,
+                        },
+                    ) => {
                         let processor = handle_sync_complete(
+                            self.shared.context.as_present(),
                             syncing,
                             databases,
+                            last_processed_height,
                             last_processed_digest,
                         )
                         .await;
@@ -363,7 +374,14 @@ where
                     }
 
                     // Processing mode
-                    (Mode::Processing(processor), Message::Propose { context, ancestry, response }) => {
+                    (
+                        Mode::Processing(processor),
+                        Message::Propose {
+                            context,
+                            ancestry,
+                            response,
+                        },
+                    ) => {
                         processor
                             .propose(
                                 self.shared.context.as_present(),
@@ -375,7 +393,14 @@ where
                             )
                             .await;
                     }
-                    (Mode::Processing(processor), Message::Verify { context, ancestry, response }) => {
+                    (
+                        Mode::Processing(processor),
+                        Message::Verify {
+                            context,
+                            ancestry,
+                            response,
+                        },
+                    ) => {
                         processor
                             .verify(
                                 self.shared.context.as_present(),
@@ -386,9 +411,16 @@ where
                             )
                             .await;
                     }
-                    (Mode::Processing(processor), Message::Finalized { block, acknowledgement }) => {
-                        if let FinalizeStatus::Persisted { height } =
-                            processor.finalize(self.shared.context.as_present(), block).await
+                    (
+                        Mode::Processing(processor),
+                        Message::Finalized {
+                            block,
+                            acknowledgement,
+                        },
+                    ) => {
+                        if let FinalizeStatus::Persisted { height } = processor
+                            .finalize(self.shared.context.as_present(), block)
+                            .await
                         {
                             info!(height = height.get(), "persisted finalized database batch");
                         }
@@ -397,7 +429,7 @@ where
                     (Mode::Processing(_), Message::Tip { .. }) => {}
                     (Mode::Processing(_), Message::SyncComplete { .. }) => {}
                 }
-            }
+            },
         }
     }
 }
@@ -440,8 +472,10 @@ async fn handle_tip<E, A, P, R>(
 /// Attaches resolvers to the databases and returns a [`Processor`] ready for
 /// consensus execution.
 async fn handle_sync_complete<E, A, R>(
+    context: &E,
     syncing: &mut SyncingState<E, A, R>,
     databases: A::Databases,
+    last_processed_height: Height,
     last_processed_digest: <A::Block as Digestible>::Digest,
 ) -> Processor<E, A>
 where
@@ -454,10 +488,18 @@ where
         .sync_resolvers
         .attach_databases(databases.clone())
         .await;
-    for a in syncing.held_finalized_acks.drain(..) {
-        a.acknowledge();
+    let mut processor = Processor::new(app, databases, last_processed_digest);
+
+    // In case any finalizations were delivered after the floor was updated,
+    // process them now to ensure we progress marshal.
+    for (block, acknowledgement) in syncing.held_finalizations.drain(..) {
+        if block.height() <= last_processed_height {
+            continue;
+        }
+        processor.finalize(context, block).await;
+        acknowledgement.acknowledge();
     }
 
-    info!("sync complete, transitioning to processing mode");
-    Processor::new(app, databases, last_processed_digest)
+    info!("sync complete, database attached to processor");
+    processor
 }

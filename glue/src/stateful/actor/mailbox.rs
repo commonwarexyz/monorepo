@@ -63,6 +63,7 @@ where
     /// to `Mode::Processing`.
     SyncComplete {
         databases: A::Databases,
+        last_processed_height: Height,
         last_processed_digest: <A::Block as Digestible>::Digest,
     },
 }
@@ -113,11 +114,13 @@ where
     pub async fn sync_complete(
         &self,
         databases: A::Databases,
+        last_processed_height: Height,
         last_processed_digest: <A::Block as Digestible>::Digest,
     ) {
         self.sender
             .send(Message::SyncComplete {
                 databases,
+                last_processed_height,
                 last_processed_digest,
             })
             .await

@@ -173,16 +173,16 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
         );
 
         let databases = A::Databases::init(config.context.clone(), config.db_config).await;
-        let (_, digest) = current_anchor(&marshal, &mut application).await;
-        application.sync_complete(databases, digest).await;
+        let (height, digest) = current_anchor(&marshal, &mut application).await;
+        application.sync_complete(databases, height, digest).await;
         return;
     }
 
-    let (databases, last_processed_digest, new_marshal_floor) = match config.mode {
+    let (databases, last_processed_height, last_processed_digest, new_marshal_floor) = match config.mode {
         Mode::MarshalSync => {
             let databases = A::Databases::init(config.context.clone(), config.db_config).await;
             let genesis_digest = application.genesis().await.digest();
-            (databases, genesis_digest, None)
+            (databases, Height::zero(), genesis_digest, None)
         }
         Mode::StateSync {
             block,
@@ -203,7 +203,7 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
                 )
                 .await
                 .unwrap_or_else(|err| panic!("state sync failed: {err:?}"));
-            (databases, sync_digest, Some(sync_height))
+            (databases, sync_height, sync_digest, Some(sync_height))
         }
     };
 
@@ -227,7 +227,7 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
         .expect("must persist state sync completion metadata");
 
     application
-        .sync_complete(databases, last_processed_digest)
+        .sync_complete(databases, last_processed_height, last_processed_digest)
         .await;
 }
 
