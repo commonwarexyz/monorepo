@@ -1293,6 +1293,8 @@ fn transcript_for_log<V: Variant, P: PublicKey>(
     out
 }
 
+/// Accumulates dealer logs for a DKG round and caches verification results so
+/// `pre_verify` work can be reused until a dealer's log is replaced.
 #[derive(Clone)]
 pub struct Logs<V: Variant, P: PublicKey, M: Faults> {
     info: Info<V, P>,
