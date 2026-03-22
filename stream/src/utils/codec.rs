@@ -1,9 +1,9 @@
 use crate::encrypted::Error;
 use commonware_codec::{
     varint::{Decoder, UInt, MAX_U32_VARINT_SIZE},
-    Encode,
+    Encode, EncodeSize, Write,
 };
-use commonware_runtime::{Buf, IoBuf, IoBufs, Sink, Stream};
+use commonware_runtime::{Buf, IoBuf, IoBufMut, IoBufs, Sink, Stream};
 
 /// Validates the frame size and assembles the frame via the caller's closure.
 ///
@@ -23,6 +23,33 @@ pub(crate) fn build_frame<T>(
     }
     let prefix = UInt(payload_len as u32);
     assemble(prefix)
+}
+
+/// Returns the total size of a length-prefixed frame.
+pub(crate) fn framed_len(payload_len: usize, max_message_size: u32) -> Result<usize, Error> {
+    build_frame(payload_len, max_message_size, |prefix| {
+        Ok(prefix.encode_size() + payload_len)
+    })
+}
+
+/// Appends one length-prefixed frame to a contiguous output buffer.
+///
+/// The callback receives the offset of the frame payload, which is useful when
+/// callers need to operate on the payload bytes after copying them.
+pub(crate) fn append_frame(
+    frame: &mut IoBufMut,
+    payload_len: usize,
+    max_message_size: u32,
+    append_payload: impl FnOnce(&mut IoBufMut, usize) -> Result<(), Error>,
+) -> Result<usize, Error> {
+    build_frame(payload_len, max_message_size, |prefix| {
+        let start = frame.len();
+        prefix.write(frame);
+        let payload_offset = frame.len();
+        append_payload(frame, payload_offset)?;
+        assert_eq!(frame.len() - payload_offset, payload_len);
+        Ok(frame.len() - start)
+    })
 }
 
 /// Sends data to the sink with a varint length prefix.
