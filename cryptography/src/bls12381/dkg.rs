@@ -342,7 +342,7 @@ const NOISE_PRE_VERIFY: &[u8] = b"pre_verify";
 /// [`Error::MissingPlayerDealing`] happens through mistakes or faults when the state
 /// of a player is restored after a crash.
 ///
-/// The other errors are due to issues with configuration.
+/// The other errors are due to issues with configuration or misuse.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("missing dealer's share from the previous round")]
@@ -357,6 +357,8 @@ pub enum Error {
     NumPlayers(usize),
     #[error("dkg failed for some reason")]
     DkgFailed,
+    #[error("logs are bound to a different dkg round")]
+    MismatchedLogs,
     /// The player's state is missing a dealing it should have.
     ///
     /// This error is emitted when the player is missing dealings that it should
@@ -1314,13 +1316,6 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         }
     }
 
-    fn assert_bound_to(&self, info: &Info<V, P>) {
-        assert!(
-            self.info == *info,
-            "logs must be bound to the expected DKG info"
-        );
-    }
-
     fn check_dealers<B: BatchVerifier<PublicKey = P>>(
         info: &Info<V, P>,
         rng: &mut impl CryptoRngCore,
@@ -1801,7 +1796,8 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// player's state has been corrupted, but the DKG has otherwise succeeded.
     /// However, this player's share is not recoverable without external intervention.
     ///
-    /// Otherwise, the only error this function can return is [`Error::DkgFailed`].
+    /// Otherwise, this function returns [`Error::DkgFailed`] if the DKG fails, or
+    /// [`Error::MismatchedLogs`] if `logs` are bound to a different DKG round.
     pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = S::PublicKey>>(
         self,
         logs: Logs<V, S::PublicKey, M>,
@@ -1812,7 +1808,9 @@ impl<V: Variant, S: Signer> Player<V, S> {
         // is trustworthy for this round/dealer/pub_msg transcript.
         // If there's a log that contains an ack of ours, but no corresponding view,
         // then we're missing a dealing.
-        logs.assert_bound_to(&self.info);
+        if logs.info != self.info {
+            return Err(Error::MismatchedLogs);
+        }
         let (_, selected) = logs.select::<B>(rng, strategy)?;
         if selected
             .iter_pairs()
@@ -3292,6 +3290,25 @@ mod test {
                 Err(Error::DkgFailed)
             ),
             "logs bound to a different round must reject these transcript-bound signatures"
+        );
+    }
+
+    #[test]
+    fn finalize_rejects_logs_bound_to_different_round() {
+        let fixture = PreVerifyFixture::new();
+        let player = Player::<MinPk, _>::new(fixture.info.clone(), ed25519::PrivateKey::from_seed(0))
+            .expect("player initialization must succeed");
+        let wrong_logs = fixture.logs_for(&fixture.wrong_info, &[false; PRE_VERIFY_DEALERS]);
+
+        let result = player.finalize::<QuorumTwo, ed25519::Batch>(
+            wrong_logs,
+            &mut test_rng(),
+            &Sequential,
+        );
+
+        assert!(
+            matches!(result, Err(Error::MismatchedLogs)),
+            "finalize should reject logs bound to a different round"
         );
     }
 
