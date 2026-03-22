@@ -1,6 +1,17 @@
-use crate::{deterministic::Auditor, Error, IoBufs, SinkOf, StreamOf};
-use sha2::Digest;
+use crate::{deterministic::Auditor, Buf, Error, IoBufs, SinkOf, StreamOf};
+use sha2::digest::Update;
 use std::{net::SocketAddr, sync::Arc};
+
+fn hash_iobufs(hasher: &mut impl Update, mut bufs: IoBufs) {
+    while bufs.has_remaining() {
+        let len = {
+            let chunk = bufs.chunk();
+            hasher.update(chunk);
+            chunk.len()
+        };
+        bufs.advance(len);
+    }
+}
 
 /// A sink that audits network operations.
 pub struct Sink<S: crate::Sink> {
@@ -11,13 +22,13 @@ pub struct Sink<S: crate::Sink> {
 
 impl<S: crate::Sink> crate::Sink for Sink<S> {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let buf = bufs.into().coalesce();
+        let bufs = bufs.into();
         self.auditor.event(b"send_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(buf.as_ref());
+            hash_iobufs(hasher, bufs.clone());
         });
 
-        self.inner.send(buf).await.inspect_err(|e| {
+        self.inner.send(bufs).await.inspect_err(|e| {
             self.auditor.event(b"send_failure", |hasher| {
                 hasher.update(self.remote_addr.to_string().as_bytes());
                 hasher.update(e.to_string().as_bytes());
@@ -42,10 +53,10 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         self.auditor.event(b"recv_attempt", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(len.to_be_bytes());
+            hasher.update(&len.to_be_bytes());
         });
 
-        let buf = self
+        let bufs = self
             .inner
             .recv(len)
             .await
@@ -54,15 +65,14 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
                     hasher.update(self.remote_addr.to_string().as_bytes());
                     hasher.update(e.to_string().as_bytes());
                 });
-            })?
-            .coalesce();
+            })?;
 
         self.auditor.event(b"recv_success", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
-            hasher.update(buf.as_ref());
+            hash_iobufs(hasher, bufs.clone());
         });
 
-        Ok(buf.into())
+        Ok(bufs)
     }
 
     fn peek(&self, max_len: usize) -> &[u8] {
@@ -198,10 +208,40 @@ mod tests {
             audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
             tests,
         },
-        Listener as _, Network as _, Sink as _, Stream as _,
+        Error, IoBuf, IoBufs, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
-    use std::{net::SocketAddr, sync::Arc};
+    use std::{
+        net::SocketAddr,
+        sync::{Arc, Mutex},
+    };
+
+    #[derive(Clone)]
+    struct RecordingSink {
+        chunk_counts: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl crate::Sink for RecordingSink {
+        async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.chunk_counts.lock().unwrap().push(bufs.into().chunk_count());
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingStream {
+        bufs: Arc<Mutex<Option<IoBufs>>>,
+    }
+
+    impl crate::Stream for RecordingStream {
+        async fn recv(&mut self, _len: usize) -> Result<IoBufs, Error> {
+            Ok(self.bufs.lock().unwrap().take().unwrap())
+        }
+
+        fn peek(&self, _max_len: usize) -> &[u8] {
+            &[]
+        }
+    }
 
     #[tokio::test]
     async fn test_trait() {
@@ -313,5 +353,48 @@ mod tests {
             assert!(result.is_err());
         }
         verify_auditors("after failed dial attempts");
+    }
+
+    #[tokio::test]
+    async fn test_sink_preserves_chunking() {
+        let chunk_counts = Arc::new(Mutex::new(Vec::new()));
+        let mut sink = super::Sink {
+            auditor: Arc::new(Auditor::default()),
+            inner: RecordingSink {
+                chunk_counts: chunk_counts.clone(),
+            },
+            remote_addr: SocketAddr::from(([127, 0, 0, 1], 1234)),
+        };
+
+        sink.send(IoBufs::from(vec![
+            IoBuf::from(b"a".to_vec()),
+            IoBuf::from(b"b".to_vec()),
+            IoBuf::from(b"c".to_vec()),
+            IoBuf::from(b"d".to_vec()),
+        ]))
+        .await
+        .unwrap();
+
+        assert_eq!(*chunk_counts.lock().unwrap(), vec![4]);
+    }
+
+    #[tokio::test]
+    async fn test_stream_preserves_chunking() {
+        let mut stream = super::Stream {
+            auditor: Arc::new(Auditor::default()),
+            inner: RecordingStream {
+                bufs: Arc::new(Mutex::new(Some(IoBufs::from(vec![
+                    IoBuf::from(b"a".to_vec()),
+                    IoBuf::from(b"b".to_vec()),
+                    IoBuf::from(b"c".to_vec()),
+                    IoBuf::from(b"d".to_vec()),
+                ])))),
+            },
+            remote_addr: SocketAddr::from(([127, 0, 0, 1], 1234)),
+        };
+
+        let received = stream.recv(4).await.unwrap();
+        assert_eq!(received.chunk_count(), 4);
+        assert_eq!(received.coalesce(), b"abcd");
     }
 }
