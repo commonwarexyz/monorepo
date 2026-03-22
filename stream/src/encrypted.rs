@@ -317,11 +317,7 @@ impl<O: Sink> Sender<O> {
     /// This lets chunk builders append multiple independently framed
     /// ciphertexts into a single contiguous allocation without staging each
     /// frame in its own buffer first.
-    fn append_encrypted_frame(
-        &mut self,
-        chunk: &mut IoBufMut,
-        bufs: IoBufs,
-    ) -> Result<(), Error> {
+    fn append_encrypted_frame(&mut self, chunk: &mut IoBufMut, bufs: IoBufs) -> Result<(), Error> {
         let mut bufs = bufs;
         append_frame(
             chunk,
