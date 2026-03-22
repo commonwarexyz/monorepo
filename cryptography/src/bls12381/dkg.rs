@@ -3296,15 +3296,13 @@ mod test {
     #[test]
     fn finalize_rejects_logs_bound_to_different_round() {
         let fixture = PreVerifyFixture::new();
-        let player = Player::<MinPk, _>::new(fixture.info.clone(), ed25519::PrivateKey::from_seed(0))
-            .expect("player initialization must succeed");
+        let player =
+            Player::<MinPk, _>::new(fixture.info.clone(), ed25519::PrivateKey::from_seed(0))
+                .expect("player initialization must succeed");
         let wrong_logs = fixture.logs_for(&fixture.wrong_info, &[false; PRE_VERIFY_DEALERS]);
 
-        let result = player.finalize::<QuorumTwo, ed25519::Batch>(
-            wrong_logs,
-            &mut test_rng(),
-            &Sequential,
-        );
+        let result =
+            player.finalize::<QuorumTwo, ed25519::Batch>(wrong_logs, &mut test_rng(), &Sequential);
 
         assert!(
             matches!(result, Err(Error::MismatchedLogs)),
