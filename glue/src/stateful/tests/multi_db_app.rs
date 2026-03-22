@@ -538,12 +538,18 @@ impl EngineDefinition for MultiDbEngine {
             };
 
         let genesis_block = {
-            let db_a = Qmdb::init(context.with_label("genesis_probe_db_a"), db_config.0.clone())
-                .await
-                .expect("failed to initialize multi-db genesis state A");
-            let db_b = Qmdb::init(context.with_label("genesis_probe_db_b"), db_config.1.clone())
-                .await
-                .expect("failed to initialize multi-db genesis state B");
+            let db_a = Qmdb::init(
+                context.with_label("genesis_probe_db_a"),
+                db_config.0.clone(),
+            )
+            .await
+            .expect("failed to initialize multi-db genesis state A");
+            let db_b = Qmdb::init(
+                context.with_label("genesis_probe_db_b"),
+                db_config.1.clone(),
+            )
+            .await
+            .expect("failed to initialize multi-db genesis state B");
             Block::genesis(
                 db_a.root(),
                 non_empty_range!(db_a.inactivity_floor_loc(), db_a.bounds().await.end),

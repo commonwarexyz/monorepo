@@ -209,7 +209,7 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
     if let Some(floor_height) = new_marshal_floor {
         // Raising the marshal floor also clears marshal's pending application
         // acknowledgements below that floor.
-        marshal.set_floor(floor_height).await;
+        marshal.set_floor(floor_height, true).await;
         marshal
             .get_processed_height()
             .await
@@ -294,7 +294,7 @@ where
                 return (search_height, anchor_digest);
             }
 
-            marshal.set_floor(search_height).await;
+            marshal.set_floor(search_height, false).await;
             marshal
                 .get_processed_height()
                 .await
