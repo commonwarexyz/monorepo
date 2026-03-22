@@ -409,7 +409,7 @@ impl<O: Sink> Sender<O> {
 
             // Close the current chunk before it would exceed one network
             // buffer-pool item.
-            if !batch.is_empty() && batch_total.saturating_add(frame_len) > max_batch_size {
+            if batch_total.saturating_add(frame_len) > max_batch_size {
                 frames.push(self.encrypt_batch(std::mem::take(&mut batch), batch_total)?);
                 batch_total = 0;
             }
