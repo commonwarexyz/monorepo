@@ -404,7 +404,10 @@ impl<O: Sink> Sender<O> {
             frame.put_slice(&tag);
         }
 
-        self.sink.send(frame.freeze()).await.map_err(Error::SendFailed)
+        self.sink
+            .send(frame.freeze())
+            .await
+            .map_err(Error::SendFailed)
     }
 }
 
@@ -452,11 +455,13 @@ mod test {
     use commonware_runtime::{
         deterministic, mocks, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
     };
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
     };
-    use std::time::Duration;
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer

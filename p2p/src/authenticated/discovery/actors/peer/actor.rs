@@ -1,7 +1,6 @@
 use super::{Config, Error, Message};
 use crate::authenticated::{
     data::EncodedData,
-    relay::{recv_prioritized, Prioritized},
     discovery::{
         actors::tracker,
         channels::Channels,
@@ -9,7 +8,7 @@ use crate::authenticated::{
         types::{self, InfoVerifier},
     },
     mailbox::UnboundedMailbox,
-    relay::Relay,
+    relay::{recv_prioritized, Prioritized, Relay},
     Mailbox,
 };
 use commonware_codec::Decode;
