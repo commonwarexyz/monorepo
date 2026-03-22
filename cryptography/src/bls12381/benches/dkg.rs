@@ -68,7 +68,7 @@ impl Bench {
             })
             .collect::<BTreeMap<_, _>>();
 
-        let mut logs = Logs::<V, PublicKey, N3f1>::default();
+        let mut logs = Logs::<V, PublicKey, N3f1>::new(info.clone());
         for sk in private_keys {
             let pk = sk.public_key();
             let (mut dealer, pub_msg, priv_msgs) = Dealer::start::<N3f1>(

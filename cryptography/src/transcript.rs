@@ -3,7 +3,7 @@
 //! This is useful for hashing data, committing to it, and extracting secure
 //! randomness from it. The API evades common footguns when doing these things
 //! in an ad hoc way.
-use crate::{Signer, Verifier};
+use crate::{BatchVerifier, Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
 use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
@@ -283,6 +283,18 @@ impl Transcript {
         // Note: We pass an empty namespace here, since the namespace may be included
         // within the transcript summary already via `Self::new`.
         v.verify(b"", self.summarize().hash.as_bytes(), sig)
+    }
+
+    /// Append a signature produced by [Transcript::sign] to a batch verifier.
+    pub fn add_to_batch<B: BatchVerifier>(
+        &self,
+        batch: &mut B,
+        public_key: &B::PublicKey,
+        signature: &<B::PublicKey as Verifier>::Signature,
+    ) -> bool {
+        // Note: We pass an empty namespace here, since the namespace may be included
+        // within the transcript summary already via `Self::new`.
+        batch.add(b"", self.summarize().hash.as_bytes(), public_key, signature)
     }
 }
 
