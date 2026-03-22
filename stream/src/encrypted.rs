@@ -302,65 +302,60 @@ pub struct Sender<O> {
 }
 
 impl<O: Sink> Sender<O> {
-    /// Encrypt one framed message directly into caller-provided storage.
+    /// Returns the total encoded size of one encrypted frame.
     ///
-    /// This lets batching helpers append multiple independently framed
-    /// ciphertexts into a single contiguous chunk without reallocating each
-    /// frame first.
-    fn encrypt_frame_into(
+    /// The returned size includes the length prefix, ciphertext, and AEAD tag.
+    fn encrypted_frame_len(&self, plaintext_len: usize) -> Result<usize, Error> {
+        framed_len(
+            plaintext_len + TAG_SIZE as usize,
+            self.max_message_size.saturating_add(TAG_SIZE),
+        )
+    }
+
+    /// Appends one encrypted frame directly into caller-provided storage.
+    ///
+    /// This lets chunk builders append multiple independently framed
+    /// ciphertexts into a single contiguous allocation without staging each
+    /// frame in its own buffer first.
+    fn append_encrypted_frame(
         &mut self,
-        frame: &mut IoBufMut,
-        bufs: impl Into<IoBufs>,
-    ) -> Result<usize, Error> {
-        let mut bufs = bufs.into();
-        let max_ciphertext_size = self.max_message_size.saturating_add(TAG_SIZE);
+        chunk: &mut IoBufMut,
+        bufs: IoBufs,
+    ) -> Result<(), Error> {
+        let mut bufs = bufs;
         append_frame(
-            frame,
+            chunk,
             bufs.len() + TAG_SIZE as usize,
-            max_ciphertext_size,
-            |frame, plaintext_offset| {
+            self.max_message_size.saturating_add(TAG_SIZE),
+            |chunk, plaintext_offset| {
                 // Copy the plaintext directly into the frame.
-                frame.put(&mut bufs);
+                chunk.put(&mut bufs);
 
                 // Encrypt in-place and append the tag to the frame.
                 let tag = self
                     .cipher
-                    .send_in_place(&mut frame.as_mut()[plaintext_offset..])?;
-                frame.put_slice(&tag);
+                    .send_in_place(&mut chunk.as_mut()[plaintext_offset..])?;
+                chunk.put_slice(&tag);
                 Ok(())
             },
-        )
+        )?;
+        Ok(())
     }
 
-    /// Build one complete encrypted frame in contiguous memory.
+    /// Builds one contiguous chunk containing one or more encrypted frames.
     ///
-    /// Keeping each frame contiguous lets callers batch multiple frames together
-    /// with `IoBufs` while preserving message boundaries and avoiding a second
-    /// concatenation copy.
-    fn encrypt_frame(&mut self, bufs: impl Into<IoBufs>) -> Result<IoBuf, Error> {
-        let bufs = bufs.into();
-        let max_ciphertext_size = self.max_message_size.saturating_add(TAG_SIZE);
-        let frame_len = framed_len(bufs.len() + TAG_SIZE as usize, max_ciphertext_size)?;
-        let mut frame = self.pool.alloc(frame_len);
-        self.encrypt_frame_into(&mut frame, bufs)?;
-        assert_eq!(frame.len(), frame_len);
-        Ok(frame.freeze())
-    }
-
-    /// Encrypt a size-capped batch of already-selected messages into one
-    /// contiguous chunk.
-    ///
-    /// `send_many` decides which messages fit together under the network buffer
-    /// pool cap, then this helper materializes that chunk so the final sink call
-    /// can submit one `IoBufs` containing one or more capped chunks.
-    fn encrypt_batch(&mut self, messages: Vec<IoBufs>, total: usize) -> Result<IoBuf, Error> {
-        assert!(!messages.is_empty());
-        let mut frame = self.pool.alloc(total);
+    /// Callers compute `total_len` up front so this helper can allocate once,
+    /// append each framed ciphertext in order, and freeze the result.
+    fn build_chunk<I>(&mut self, messages: I, total_len: usize) -> Result<IoBuf, Error>
+    where
+        I: IntoIterator<Item = IoBufs>,
+    {
+        let mut chunk = self.pool.alloc(total_len);
         for msg in messages {
-            self.encrypt_frame_into(&mut frame, msg)?;
+            self.append_encrypted_frame(&mut chunk, msg)?;
         }
-        assert_eq!(frame.len(), total);
-        Ok(frame.freeze())
+        assert_eq!(chunk.len(), total_len);
+        Ok(chunk.freeze())
     }
 
     /// Encrypts and sends a message to the peer.
@@ -368,8 +363,10 @@ impl<O: Sink> Sender<O> {
     /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
     /// and sends the ciphertext.
     pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
-        let frame = self.encrypt_frame(bufs)?;
-        self.sink.send(frame).await.map_err(Error::SendFailed)
+        let bufs = bufs.into();
+        let frame_len = self.encrypted_frame_len(bufs.len())?;
+        let chunk = self.build_chunk(std::iter::once(bufs), frame_len)?;
+        self.sink.send(chunk).await.map_err(Error::SendFailed)
     }
 
     /// Encrypts and sends multiple messages in a single sink call.
@@ -386,31 +383,30 @@ impl<O: Sink> Sender<O> {
     {
         let bufs = bufs.into_iter();
         let (lower, _) = bufs.size_hint();
-        let mut frames = Vec::with_capacity(lower.max(1));
+        let mut chunks = Vec::with_capacity(lower.max(1));
         let mut batch = Vec::new();
         let mut batch_total = 0usize;
-        let max_ciphertext_size = self.max_message_size.saturating_add(TAG_SIZE);
         let max_batch_size = self.pool.config().max_size.get();
 
         for buf in bufs {
             let msg = buf.into();
-            let frame_len = framed_len(msg.len() + TAG_SIZE as usize, max_ciphertext_size)?;
+            let frame_len = self.encrypted_frame_len(msg.len())?;
 
             // If one framed message is larger than the pooled batch cap, keep
             // current chunks intact and send that message as its own chunk.
             if frame_len > max_batch_size {
                 if !batch.is_empty() {
-                    frames.push(self.encrypt_batch(std::mem::take(&mut batch), batch_total)?);
+                    chunks.push(self.build_chunk(std::mem::take(&mut batch), batch_total)?);
                     batch_total = 0;
                 }
-                frames.push(self.encrypt_frame(msg)?);
+                chunks.push(self.build_chunk(std::iter::once(msg), frame_len)?);
                 continue;
             }
 
             // Close the current chunk before it would exceed one network
             // buffer-pool item.
             if batch_total.saturating_add(frame_len) > max_batch_size {
-                frames.push(self.encrypt_batch(std::mem::take(&mut batch), batch_total)?);
+                chunks.push(self.build_chunk(std::mem::take(&mut batch), batch_total)?);
                 batch_total = 0;
             }
 
@@ -419,15 +415,15 @@ impl<O: Sink> Sender<O> {
         }
 
         if !batch.is_empty() {
-            frames.push(self.encrypt_batch(batch, batch_total)?);
+            chunks.push(self.build_chunk(batch, batch_total)?);
         }
 
-        if frames.is_empty() {
+        if chunks.is_empty() {
             return Ok(());
         }
 
         self.sink
-            .send(IoBufs::from(frames))
+            .send(IoBufs::from(chunks))
             .await
             .map_err(Error::SendFailed)
     }
