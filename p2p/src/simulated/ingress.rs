@@ -40,7 +40,6 @@ pub enum Message<P: PublicKey, E: Clock> {
     AddLink {
         sender: P,
         receiver: P,
-        selector: LinkSelector,
         sampler: Normal<f64>,
         success_rate: f64,
         result: oneshot::Sender<Result<(), Error>>,
@@ -48,7 +47,6 @@ pub enum Message<P: PublicKey, E: Clock> {
     RemoveLink {
         sender: P,
         receiver: P,
-        selector: LinkSelector,
         result: oneshot::Sender<Result<(), Error>>,
     },
     Block {
@@ -105,15 +103,6 @@ pub struct Link {
 
     /// Probability of a message being delivered successfully (in range \[0,1\]).
     pub success_rate: f64,
-}
-
-/// Selects which traffic a simulated link rule applies to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum LinkSelector {
-    /// Apply the rule to every channel between two peers.
-    All,
-    /// Apply the rule only to one channel between two peers.
-    Channel(Channel),
 }
 
 /// Interface for modifying the simulated network.
@@ -205,21 +194,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     ///
     /// Link can be called before a peer is registered or bandwidth is specified.
     pub async fn add_link(&self, sender: P, receiver: P, config: Link) -> Result<(), Error> {
-        self.add_link_selected(sender, receiver, LinkSelector::All, config)
-            .await
-    }
-
-    /// Create a unidirectional link for selected traffic between two peers.
-    ///
-    /// The selected traffic is identified by its [`LinkSelector`]. Rules for
-    /// a specific channel override the default [`LinkSelector::All`] route.
-    pub async fn add_link_selected(
-        &self,
-        sender: P,
-        receiver: P,
-        selector: LinkSelector,
-        config: Link,
-    ) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
             return Err(Error::LinkingSelf);
@@ -240,7 +214,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
             .request(|result| Message::AddLink {
                 sender,
                 receiver,
-                selector,
                 sampler,
                 success_rate: config.success_rate,
                 result,
@@ -253,19 +226,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     ///
     /// If no link exists, this will return an error.
     pub async fn remove_link(&self, sender: P, receiver: P) -> Result<(), Error> {
-        self.remove_link_selected(sender, receiver, LinkSelector::All)
-            .await
-    }
-
-    /// Remove a unidirectional link for selected traffic between two peers.
-    ///
-    /// If no link exists for the selector, this returns an error.
-    pub async fn remove_link_selected(
-        &self,
-        sender: P,
-        receiver: P,
-        selector: LinkSelector,
-    ) -> Result<(), Error> {
         // Sanity checks
         if sender == receiver {
             return Err(Error::LinkingSelf);
@@ -276,7 +236,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
             .request(|result| Message::RemoveLink {
                 sender,
                 receiver,
-                selector,
                 result,
             })
             .await

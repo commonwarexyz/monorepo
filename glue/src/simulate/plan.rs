@@ -11,7 +11,7 @@ use super::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    simulated::{self, Link, LinkSelector, Network},
+    simulated::{self, Link, Network},
     Manager as _,
 };
 use commonware_runtime::{deterministic, Clock, Metrics, Runner as _, Spawner};
@@ -636,16 +636,6 @@ impl<D: EngineDefinition> Plan<D> {
                 ctx.sleep(time - elapsed).await;
             }
             match fault {
-                Fault::Partition { ref a, ref b } => {
-                    for pa in a {
-                        for pb in b {
-                            let _ = oracle.remove_link(pa.clone(), pb.clone()).await;
-                            let _ = oracle.remove_link(pb.clone(), pa.clone()).await;
-                        }
-                    }
-                    faults_applied.fetch_add(1, Ordering::Relaxed);
-                    info!(target: "simulator", "partition applied");
-                }
                 Fault::Heal(ref link) => {
                     for v1 in participants {
                         for v2 in participants {
@@ -657,7 +647,7 @@ impl<D: EngineDefinition> Plan<D> {
                         }
                     }
                     faults_applied.fetch_add(1, Ordering::Relaxed);
-                    info!(target: "simulator", "partition healed");
+                    info!(target: "simulator", "links reset");
                 }
                 Fault::UpdateLink {
                     ref from,
@@ -670,30 +660,6 @@ impl<D: EngineDefinition> Plan<D> {
                         .await;
                     faults_applied.fetch_add(1, Ordering::Relaxed);
                     info!(target: "simulator", ?from, ?to, "link updated");
-                }
-                Fault::UpdateChannelLink {
-                    ref from,
-                    ref to,
-                    channel,
-                    ref link,
-                } => {
-                    let _ = oracle
-                        .remove_link_selected(
-                            from.clone(),
-                            to.clone(),
-                            LinkSelector::Channel(channel),
-                        )
-                        .await;
-                    let _ = oracle
-                        .add_link_selected(
-                            from.clone(),
-                            to.clone(),
-                            LinkSelector::Channel(channel),
-                            link.clone(),
-                        )
-                        .await;
-                    faults_applied.fetch_add(1, Ordering::Relaxed);
-                    info!(target: "simulator", ?from, ?to, channel, "channel link updated");
                 }
                 Fault::Crash(ref pk) => {
                     if cmd_tx.send(ScheduleCmd::Crash(pk.clone())).await.is_err() {

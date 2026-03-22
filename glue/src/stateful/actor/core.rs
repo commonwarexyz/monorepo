@@ -454,6 +454,9 @@ where
         .sync_resolvers
         .attach_databases(databases.clone())
         .await;
+    for a in syncing.held_finalized_acks.drain(..) {
+        a.acknowledge();
+    }
 
     info!("sync complete, transitioning to processing mode");
     Processor::new(app, databases, last_processed_digest)

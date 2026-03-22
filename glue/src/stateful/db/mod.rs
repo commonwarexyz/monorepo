@@ -632,12 +632,12 @@ macro_rules! impl_state_sync_set {
                     finish_coordinator,
                 );
 
-                let converged_anchor = coordinator_result
-                    .lock()
-                    .take()
-                    .expect("finish coordinator must return an anchor on success");
+                let synced = ($(synced.$idx?,)+);
+                let Some(converged_anchor) = coordinator_result.lock().take() else {
+                    return Err("state sync coordinator did not report a converged anchor".into());
+                };
 
-                Ok((($(synced.$idx?,)+), converged_anchor))
+                Ok((synced, converged_anchor))
             }
         }
     };
@@ -1022,6 +1022,10 @@ mod tests {
         final_target: u64,
     }
 
+    struct ImmediateStateSyncDb;
+
+    struct FailingStateSyncDb;
+
     struct ObservedSlowSyncDb {
         final_target: u64,
     }
@@ -1116,6 +1120,46 @@ mod tests {
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("FastSyncDb is only constructed through state sync in tests")
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl<E: Send> ManagedDb<E> for FailingStateSyncDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            unreachable!("FailingStateSyncDb is only constructed through state sync in tests")
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl<E: Send> ManagedDb<E> for ImmediateStateSyncDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            unreachable!("ImmediateStateSyncDb is only constructed through state sync in tests")
         }
 
         async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
@@ -1293,6 +1337,43 @@ mod tests {
             }
 
             Ok(Self { final_target })
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestSyncError;
+
+    impl<E: Send> StateSyncDb<E, ()> for FailingStateSyncDb {
+        type SyncError = TestSyncError;
+
+        async fn sync_db(
+            _context: E,
+            _config: Self::Config,
+            _resolver: (),
+            _target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<Self, Self::SyncError> {
+            Err(TestSyncError)
+        }
+    }
+
+    impl<E: Send> StateSyncDb<E, ()> for ImmediateStateSyncDb {
+        type SyncError = Infallible;
+
+        async fn sync_db(
+            _context: E,
+            _config: Self::Config,
+            _resolver: (),
+            _target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<Self, Self::SyncError> {
+            Ok(Self)
         }
     }
 
@@ -1671,6 +1752,46 @@ mod tests {
                 converged_anchor.0.get(),
                 slow_target,
                 "returned anchor height should match the converged generation"
+            );
+        });
+    }
+
+    #[test]
+    fn tuple_state_sync_returns_db_error_instead_of_panicking_when_anchor_missing() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (_tip_tx, tip_rx) = mpsc::channel(1);
+
+            let result = <(
+                Arc<AsyncRwLock<ImmediateStateSyncDb>>,
+                Arc<AsyncRwLock<FailingStateSyncDb>>,
+            ) as StateSyncSet<deterministic::Context, ((), ()), sha256::Digest>>::sync(
+                context,
+                ((), ()),
+                ((), ()),
+                anchor(0),
+                (0, 0),
+                tip_rx,
+                SyncEngineConfig {
+                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                    apply_batch_size: 1,
+                    max_outstanding_requests: 1,
+                    update_channel_size: NonZeroUsize::new(1).unwrap(),
+                    max_retained_roots: 0,
+                },
+            )
+            .await;
+
+            let err = match result {
+                Ok(_) => panic!("tuple state sync should return the database sync error"),
+                Err(err) => err,
+            };
+            assert!(
+                err.contains("state sync failed (index 1, db"),
+                "error should include failing database index: {err}"
+            );
+            assert!(
+                err.contains("FailingStateSyncDb"),
+                "error should include failing database type: {err}"
             );
         });
     }

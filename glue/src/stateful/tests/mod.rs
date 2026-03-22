@@ -106,6 +106,13 @@ fn many_concurrent_crashes() {
     run_many_crashes(MultiDbEngine::new(NUM_VALIDATORS));
 }
 
+#[test_group("slow")]
+#[test_traced("DEBUG")]
+fn full_cluster_outage_and_recovery() {
+    run_total_shutdown(SingleDbEngine::new(NUM_VALIDATORS));
+    run_total_shutdown(MultiDbEngine::new(NUM_VALIDATORS));
+}
+
 fn run_finalize<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
@@ -254,6 +261,28 @@ where
         .exit_condition(ProcessedHeightAtLeast::new(20))
         .timeout(Duration::from_secs(300))
         .property(BlockAgreementAtHeight { height: 20 })
+        .run()
+        .unwrap();
+}
+
+fn run_total_shutdown<D>(engine: D)
+where
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: ProcessedHeight,
+    BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
+{
+    let total = engine.participants().len();
+
+    PlanBuilder::new(engine)
+        .crash(Crash::Random {
+            frequency: Duration::from_secs(2),
+            downtime: Duration::from_millis(500),
+            count: total,
+        })
+        .exit_condition(ProcessedHeightAtLeast::new(500))
+        .timeout(Duration::from_secs(2400))
+        .property(BlockAgreementAtHeight { height: 500 })
         .run()
         .unwrap();
 }

@@ -1,7 +1,7 @@
 //! Fault injection types for simulation testing.
 
 use commonware_cryptography::PublicKey;
-use commonware_p2p::{simulated::Link, Channel};
+use commonware_p2p::simulated::Link;
 use std::time::Duration;
 
 /// Fault injection strategy for a simulation run.
@@ -59,15 +59,7 @@ impl<P: PublicKey> Default for Schedule<P> {
 /// A single fault to inject at a specific time.
 #[derive(Clone)]
 pub enum Fault<P: PublicKey> {
-    /// Partition the network into two groups.
-    Partition {
-        /// First partition group.
-        a: Vec<P>,
-        /// Second partition group.
-        b: Vec<P>,
-    },
-
-    /// Heal all partitions, restoring full connectivity with the given link.
+    /// Reset all directed links, restoring full connectivity with the given link.
     Heal(Link),
 
     /// Update a specific directed link by removing and re-adding it.
@@ -76,18 +68,6 @@ pub enum Fault<P: PublicKey> {
         from: P,
         /// Destination peer.
         to: P,
-        /// New link configuration.
-        link: Link,
-    },
-
-    /// Update a specific directed link for one channel.
-    UpdateChannelLink {
-        /// Source peer.
-        from: P,
-        /// Destination peer.
-        to: P,
-        /// Channel to update.
-        channel: Channel,
         /// New link configuration.
         link: Link,
     },

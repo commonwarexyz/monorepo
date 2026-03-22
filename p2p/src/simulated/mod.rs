@@ -177,7 +177,7 @@ pub enum Error {
     PeerMissing,
 }
 
-pub use ingress::{Control, Link, LinkSelector, Manager, Oracle, SocketManager};
+pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
 pub use network::{
     Config, ConnectedPeerProvider, Network, Receiver, Sender, SplitForwarder, SplitOrigin,
     SplitRouter, SplitSender, SplitTarget, UnlimitedSender,
