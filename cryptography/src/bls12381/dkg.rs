@@ -1299,6 +1299,10 @@ pub struct Logs<V: Variant, P: PublicKey, M: Faults> {
     phantom_m: PhantomData<M>,
 }
 
+// Keep the selected logs paired with the bound round info without repeating
+// the tuple shape at each `select` call site.
+type SelectedLogs<V, P> = (Info<V, P>, Map<P, DealerLog<V, P>>);
+
 impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// Create a log set bound to a particular DKG round.
     pub fn new(info: Info<V, P>) -> Self {
@@ -1424,7 +1428,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         mut self,
         rng: &mut impl CryptoRngCore,
         strategy: &impl Strategy,
-    ) -> Result<(Info<V, P>, Map<P, DealerLog<V, P>>), Error> {
+    ) -> Result<SelectedLogs<V, P>, Error> {
         self.pre_verify::<B>(rng, strategy);
         let required_commitments = self.info.required_commitments::<M>() as usize;
         let out: Map<_, _> = self
