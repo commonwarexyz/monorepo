@@ -3296,6 +3296,21 @@ mod test {
     }
 
     #[test]
+    #[should_panic(expected = "logs must be bound to the expected DKG info")]
+    fn finalize_rejects_logs_from_a_different_round() {
+        let fixture = PreVerifyFixture::new();
+        let player = Player::<MinPk, _>::new(fixture.info.clone(), ed25519::PrivateKey::from_seed(0))
+            .expect("player initialization must succeed");
+        let wrong_logs = PreVerifyLogs::new(fixture.wrong_info);
+
+        let _ = player.finalize::<QuorumTwo, ed25519::Batch>(
+            wrong_logs,
+            &mut test_rng(),
+            &Sequential,
+        );
+    }
+
+    #[test]
     fn single_round() -> anyhow::Result<()> {
         Plan::new(NZU32!(4))
             .with(Round::new(vec![0, 1, 2, 3], vec![0, 1, 2, 3]))
