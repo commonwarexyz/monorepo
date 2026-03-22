@@ -302,6 +302,11 @@ pub struct Sender<O> {
 }
 
 impl<O: Sink> Sender<O> {
+    /// Encrypt one framed message directly into caller-provided storage.
+    ///
+    /// This lets batching helpers append multiple independently framed
+    /// ciphertexts into a single contiguous chunk without reallocating each
+    /// frame first.
     fn encrypt_frame_into(
         &mut self,
         frame: &mut IoBufMut,
@@ -314,10 +319,10 @@ impl<O: Sink> Sender<O> {
             bufs.len() + TAG_SIZE as usize,
             max_ciphertext_size,
             |frame, plaintext_offset| {
-                // Copy the plaintext directly into the frame, then encrypt that
-                // payload region in place before appending the authentication tag.
+                // Copy the plaintext directly into the frame.
                 frame.put(&mut bufs);
 
+                // Encrypt in-place and append the tag to the frame.
                 let tag = self
                     .cipher
                     .send_in_place(&mut frame.as_mut()[plaintext_offset..])?;
