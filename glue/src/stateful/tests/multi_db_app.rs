@@ -150,7 +150,12 @@ impl CertifiableBlock for Block {
 }
 
 impl Block {
-    fn genesis() -> Self {
+    fn genesis(
+        root_a: sha256::Digest,
+        range_a: NonEmptyRange<Location>,
+        root_b: sha256::Digest,
+        range_b: NonEmptyRange<Location>,
+    ) -> Self {
         Self {
             context: Context {
                 round: Round::new(Epoch::zero(), View::zero()),
@@ -159,10 +164,10 @@ impl Block {
             },
             parent: sha256::Digest::EMPTY,
             height: Height::zero(),
-            root_a: sha256::Digest::EMPTY,
-            range_a: non_empty_range!(Location::new(0), Location::new(1)),
-            root_b: sha256::Digest::EMPTY,
-            range_b: non_empty_range!(Location::new(0), Location::new(1)),
+            root_a,
+            range_a,
+            root_b,
+            range_b,
         }
     }
 }
@@ -177,10 +182,8 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
-        Self {
-            genesis: Block::genesis(),
-        }
+    fn new(genesis: Block) -> Self {
+        Self { genesis }
     }
 
     /// Execute a block against two databases.
@@ -534,8 +537,23 @@ impl EngineDefinition for MultiDbEngine {
                 (StartupMode::MarshalSync, prior)
             };
 
+        let genesis_block = {
+            let db_a = Qmdb::init(context.with_label("genesis_probe_db_a"), db_config.0.clone())
+                .await
+                .expect("failed to initialize multi-db genesis state A");
+            let db_b = Qmdb::init(context.with_label("genesis_probe_db_b"), db_config.1.clone())
+                .await
+                .expect("failed to initialize multi-db genesis state B");
+            Block::genesis(
+                db_a.root(),
+                non_empty_range!(db_a.inactivity_floor_loc(), db_a.bounds().await.end),
+                db_b.root(),
+                non_empty_range!(db_b.inactivity_floor_loc(), db_b.bounds().await.end),
+            )
+        };
+
         // Stateful actor
-        let app = App::new();
+        let app = App::new(genesis_block);
         let (stateful_actor, stateful_mailbox) = StatefulActor::init(
             context.clone(),
             StatefulConfig {

@@ -161,7 +161,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Sync target type for state sync of this database.
     ///
     /// Typically [`Target<Digest>`](commonware_storage::qmdb::sync::Target).
-    type SyncTarget: Clone + Send + Sync;
+    type SyncTarget: Clone + PartialEq + Send + Sync;
 
     /// Construct a new database from its configuration.
     fn init(
@@ -185,6 +185,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         &mut self,
         batch: Self::Merkleized,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Return the sync target for this database's current committed state.
+    fn sync_target(&self) -> impl Future<Output = Self::SyncTarget> + Send;
 }
 
 /// A collection of individually locked [`ManagedDb`] instances.
@@ -213,7 +216,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// For a single-database set this is typically
     /// [`Target<Digest>`](commonware_storage::qmdb::sync::Target). For
     /// multi-database sets it is a tuple of targets, one per database.
-    type SyncTargets: Clone + Send + Sync;
+    type SyncTargets: Clone + PartialEq + Send + Sync;
 
     /// Construct the database set from its configuration.
     fn init(context: E, config: Self::Config) -> impl Future<Output = Self> + Send;
@@ -232,6 +235,9 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     ///
     /// Acquires a write lock on each database.
     fn finalize(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
+
+    /// Return sync targets for the set's current committed state.
+    fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
 }
 
 /// Parameters for a one-time state-sync pass.
@@ -327,6 +333,11 @@ impl<E: Clone + Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<A
     async fn finalize(&self, batches: Self::Merkleized) {
         let mut database = self.write().await;
         finalize_or_panic(&mut *database, batches, None).await;
+    }
+
+    async fn committed_targets(&self) -> Self::SyncTargets {
+        let database = self.read().await;
+        T::sync_target(&*database).await
     }
 }
 
@@ -447,6 +458,15 @@ macro_rules! impl_database_set {
                         finalize_or_panic(&mut *database, batches.$idx, Some($idx)).await;
                     },
                 )+);
+            }
+
+            async fn committed_targets(&self) -> Self::SyncTargets {
+                join!($(
+                    async {
+                        let database = self.$idx.read().await;
+                        $T::sync_target(&*database).await
+                    },
+                )+)
             }
         }
     };
@@ -993,6 +1013,8 @@ mod tests {
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
             Ok(())
         }
+
+        async fn sync_target(&self) -> Self::SyncTarget {}
     }
 
     struct BlockingFinalizeDb {
@@ -1063,6 +1085,8 @@ mod tests {
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
             Err(TestFinalizeError)
         }
+
+        async fn sync_target(&self) -> Self::SyncTarget {}
     }
 
     impl<E: Send> ManagedDb<E> for BlockingFinalizeDb {
@@ -1089,6 +1113,8 @@ mod tests {
             }
             Ok(())
         }
+
+        async fn sync_target(&self) -> Self::SyncTarget {}
     }
 
     impl<E: Send> ManagedDb<E> for SlowSyncDb {
@@ -1108,6 +1134,10 @@ mod tests {
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
             Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            self.final_target
         }
     }
 
@@ -1129,6 +1159,10 @@ mod tests {
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
             Ok(())
         }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            self.final_target
+        }
     }
 
     impl<E: Send> ManagedDb<E> for FailingStateSyncDb {
@@ -1148,6 +1182,10 @@ mod tests {
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
             Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            0
         }
     }
 
@@ -1169,6 +1207,10 @@ mod tests {
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
             Ok(())
         }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            0
+        }
     }
 
     impl<E: Send> ManagedDb<E> for ObservedSlowSyncDb {
@@ -1189,6 +1231,10 @@ mod tests {
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
             Ok(())
         }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            self.final_target
+        }
     }
 
     impl<E: Send> ManagedDb<E> for ObservedFastSyncDb {
@@ -1208,6 +1254,10 @@ mod tests {
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
             Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            self.final_target
         }
     }
 

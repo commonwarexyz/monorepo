@@ -136,7 +136,7 @@ impl CertifiableBlock for Block {
 }
 
 impl Block {
-    fn genesis() -> Self {
+    fn genesis(state_root: sha256::Digest, range: NonEmptyRange<Location>) -> Self {
         Self {
             context: Context {
                 round: Round::new(Epoch::zero(), View::zero()),
@@ -145,8 +145,8 @@ impl Block {
             },
             parent: sha256::Digest::EMPTY,
             height: Height::zero(),
-            state_root: sha256::Digest::EMPTY,
-            range: non_empty_range!(Location::new(0), Location::new(1)),
+            state_root,
+            range,
         }
     }
 }
@@ -158,10 +158,8 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
-        Self {
-            genesis: Block::genesis(),
-        }
+    fn new(genesis: Block) -> Self {
+        Self { genesis }
     }
 
     /// Execute a block: increment "counter" and write `height -> height_val`.
@@ -445,8 +443,18 @@ impl EngineDefinition for SingleDbEngine {
                 (StartupMode::MarshalSync, prior)
             };
 
+        let genesis_block = {
+            let db = Qmdb::init(context.with_label("genesis_probe_db"), db_config.clone())
+                .await
+                .expect("failed to initialize single-db genesis state");
+            Block::genesis(
+                db.root(),
+                non_empty_range!(db.inactivity_floor_loc(), db.bounds().await.end),
+            )
+        };
+
         // Stateful actor
-        let app = App::new();
+        let app = App::new(genesis_block);
         let (stateful_actor, stateful_mailbox) = StatefulActor::init(
             context.clone(),
             StatefulConfig {

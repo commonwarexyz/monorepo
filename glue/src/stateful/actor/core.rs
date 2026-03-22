@@ -241,7 +241,6 @@ where
     where
         E: Rng + Spawner + Metrics + Clock + Storage,
         A: Application<E>,
-        A::Context: Send,
         A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
@@ -494,6 +493,9 @@ where
     // process them now to ensure we progress marshal.
     for (block, acknowledgement) in syncing.held_finalizations.drain(..) {
         if block.height() <= last_processed_height {
+            // Block is already persisted at or below the reconciled floor.
+            // The acknowledgement can be dropped, since marshal cancels
+            // pending acks when the floor is updated.
             continue;
         }
         processor.finalize(context, block).await;

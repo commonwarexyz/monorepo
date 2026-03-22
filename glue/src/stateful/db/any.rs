@@ -34,7 +34,7 @@ use commonware_storage::{
     translator::Translator,
     Persistable,
 };
-use commonware_utils::{channel::mpsc, sync::AsyncRwLock, Array};
+use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
 use std::sync::Arc;
 
 type AnyDbHandle<E, C, I, H, U> = Arc<AsyncRwLock<Db<E, C, I, H, U>>>;
@@ -251,6 +251,14 @@ where
         self.commit().await?;
         Ok(())
     }
+
+    async fn sync_target(&self) -> Self::SyncTarget {
+        let bounds = self.bounds().await;
+        sync::Target {
+            root: self.root(),
+            range: non_empty_range!(self.inactivity_floor_loc(), bounds.end),
+        }
+    }
 }
 
 /// Implement [`ManagedDb`] for unordered QMDB databases with variable-size values.
@@ -307,6 +315,14 @@ where
         self.apply_batch(changeset).await?;
         self.commit().await?;
         Ok(())
+    }
+
+    async fn sync_target(&self) -> Self::SyncTarget {
+        let bounds = self.bounds().await;
+        sync::Target {
+            root: self.root(),
+            range: non_empty_range!(self.inactivity_floor_loc(), bounds.end),
+        }
     }
 }
 

@@ -344,7 +344,8 @@ where
                 //
                 // This loop is cancellation-bound by consensus timeouts: the
                 // caller drops `response` when propose/verify expires, and every
-                // await in this method is wrapped with `await_or_cancel`.
+                // await in this method is wrapped with `await_or_cancel`. So,
+                // this will never deadlock.
                 debug!(
                     ?target,
                     ?current,
@@ -353,9 +354,9 @@ where
                 continue;
             };
 
-            // Marshal ancestry fetches cannot step past height 1 because
+            // Marshal ancestry fetches cannot step past genesis because
             // genesis is not served by the provider.
-            if block.height() <= Height::new(1) {
+            if block.height().previous().is_none() {
                 warn!(
                     ?target,
                     ?current,
@@ -419,6 +420,19 @@ where
             }
         };
 
+        // TODO: This is currently unsafe with multiple DBs.
+        //
+        // If we're persisting multiple databases to disk in parallel, and one succeeds
+        // but the other write is in-progress while we crash, the databases will be in
+        // an inconsistent state on restart. There currently is not a way to rewind QMDB
+        // to the correct location, so in this narrow case, we can cause permanent
+        // failure.
+        //
+        // A fix for this could be to rewind the databases to the processed height of
+        // marshal on restart, if the targets did not match it. That would also allow
+        // us to remove the fall-forward approach we have in `bootstrap` for the case where
+        // we crash after committing all DBs, but before marshal persists an update to
+        // the processed height.
         let round = Round::new(block.context().epoch(), block.context().view());
         self.databases.finalize(batch).await;
         self.pending.retain(|_, (r, _)| *r > round);

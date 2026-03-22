@@ -150,7 +150,6 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
 ) where
     E: Rng + Spawner + Metrics + Clock + Storage,
     A: Application<E>,
-    A::Context: Send,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: MarshalVariant<ApplicationBlock = A::Block>,
@@ -173,52 +172,49 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
         );
 
         let databases = A::Databases::init(config.context.clone(), config.db_config).await;
-        let (height, digest) = current_anchor(&marshal, &mut application).await;
+        let (height, digest) = current_anchor(&marshal, &mut application, &databases).await;
         application.sync_complete(databases, height, digest).await;
         return;
     }
 
-    let (databases, last_processed_height, last_processed_digest, new_marshal_floor) = match config.mode {
-        Mode::MarshalSync => {
-            let databases = A::Databases::init(config.context.clone(), config.db_config).await;
-            let genesis_digest = application.genesis().await.digest();
-            (databases, Height::zero(), genesis_digest, None)
-        }
-        Mode::StateSync {
-            block,
-            target_updates,
-            resolvers,
-        } => {
-            let initial_anchor = (block.height(), block.digest());
-            let initial_targets = A::sync_targets(&block);
-            let (databases, (sync_height, sync_digest)) =
-                <A::Databases as StateSyncSet<E, R, BlockDigest<A, E>>>::sync(
-                    config.context.clone(),
-                    config.db_config,
-                    resolvers,
-                    initial_anchor,
-                    initial_targets,
-                    target_updates,
-                    config.sync_config,
-                )
-                .await
-                .unwrap_or_else(|err| panic!("state sync failed: {err:?}"));
-            (databases, sync_height, sync_digest, Some(sync_height))
-        }
-    };
+    let (databases, last_processed_height, last_processed_digest, new_marshal_floor) =
+        match config.mode {
+            Mode::MarshalSync => {
+                let databases = A::Databases::init(config.context.clone(), config.db_config).await;
+                let genesis_digest = application.genesis().await.digest();
+                (databases, Height::zero(), genesis_digest, None)
+            }
+            Mode::StateSync {
+                block,
+                target_updates,
+                resolvers,
+            } => {
+                let initial_anchor = (block.height(), block.digest());
+                let initial_targets = A::sync_targets(&block);
+                let (databases, (sync_height, sync_digest)) =
+                    <A::Databases as StateSyncSet<E, R, BlockDigest<A, E>>>::sync(
+                        config.context.clone(),
+                        config.db_config,
+                        resolvers,
+                        initial_anchor,
+                        initial_targets,
+                        target_updates,
+                        config.sync_config,
+                    )
+                    .await
+                    .unwrap_or_else(|err| panic!("state sync failed: {err:?}"));
+                (databases, sync_height, sync_digest, Some(sync_height))
+            }
+        };
 
     if let Some(floor_height) = new_marshal_floor {
         // Raising the marshal floor also clears marshal's pending application
         // acknowledgements below that floor.
         marshal.set_floor(floor_height).await;
-        let processed_height = marshal
+        marshal
             .get_processed_height()
             .await
             .expect("marshal must respond with processed height after set_floor");
-        assert!(
-            processed_height == floor_height,
-            "marshal processed height must equal floor after set_floor"
-        );
     }
 
     metadata
@@ -231,38 +227,82 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
         .await;
 }
 
-/// Fetches the latest processed block's height and digest from `marshal`.
+/// Reconciles marshal's processed frontier with committed database state.
+///
+/// The restart path treats the database as the source of truth for what was
+/// durably committed and then finds the earliest marshal height that matches it:
+///
+/// 1. Read the database's committed sync targets.
+/// 2. Read marshal's current processed height.
+/// 3. Walk forward by height starting at that processed height.
+///    - At height `0`, compare against the application's genesis sync targets.
+///    - At height `> 0`, fetch the marshal block for that height and derive
+///      sync targets from that block.
+/// 4. When targets match:
+///    - If the match is exactly at marshal's processed height, return it.
+///    - If the match is ahead, raise marshal's floor to that height so marshal
+///      and the database resume from the same anchor.
 ///
 /// # Panics
 ///
-/// Panics if the latest processed block could not be fetched from marshal.
+/// - Marshal does not return its processed height.
+/// - Marshal does not have the block at its own processed height.
+/// - No matching anchor is found before marshal stops returning blocks.
 async fn current_anchor<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
     application: &mut ApplicationMailbox<E, A>,
+    databases: &A::Databases,
 ) -> (Height, <A::Block as Digestible>::Digest)
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    A::Context: Send,
     S: Scheme,
     V: MarshalVariant<ApplicationBlock = A::Block>,
 {
+    let db_targets = databases.committed_targets().await;
     let processed_height = marshal
         .get_processed_height()
         .await
-        .expect("state sync bootstrap failed to fetch marshal processed height");
-    if processed_height == Height::zero() {
-        let genesis_digest = application.genesis().await.digest();
-        return (Height::zero(), genesis_digest);
+        .expect("state sync bootstrap must fetch marshal processed height");
+    let genesis = application.genesis().await;
+    let genesis_digest = genesis.digest();
+
+    let mut search_height = processed_height;
+    loop {
+        let (anchor_targets, anchor_digest) = if search_height.is_zero() {
+            (A::sync_targets(&genesis), genesis_digest)
+        } else {
+            let Some(block) = marshal.get_block(Identifier::Height(search_height)).await else {
+                if search_height == processed_height {
+                    panic!(
+                        "state sync bootstrap missing processed block at height {}",
+                        processed_height.get()
+                    );
+                }
+
+                panic!(
+                    "database state does not match marshal processed block at height {}; no matching block found before height {}",
+                    processed_height.get(),
+                    search_height.get(),
+                );
+            };
+            let block = V::into_inner(block);
+            (A::sync_targets(&block), block.digest())
+        };
+
+        if anchor_targets == db_targets {
+            if search_height == processed_height {
+                return (search_height, anchor_digest);
+            }
+
+            marshal.set_floor(search_height).await;
+            marshal
+                .get_processed_height()
+                .await
+                .expect("marshal must respond with processed height");
+            return (search_height, anchor_digest);
+        }
+
+        search_height = search_height.next();
     }
-    let (_, digest) = marshal
-        .get_info(Identifier::Height(processed_height))
-        .await
-        .unwrap_or_else(|| {
-            panic!(
-                "state sync bootstrap missing processed block digest at height {}",
-                processed_height.get()
-            )
-        });
-    (processed_height, digest)
 }
