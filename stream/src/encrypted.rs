@@ -302,7 +302,11 @@ pub struct Sender<O> {
 }
 
 impl<O: Sink> Sender<O> {
-    fn encrypt_frame_into(&mut self, frame: &mut IoBufMut, bufs: impl Into<IoBufs>) -> Result<usize, Error> {
+    fn encrypt_frame_into(
+        &mut self,
+        frame: &mut IoBufMut,
+        bufs: impl Into<IoBufs>,
+    ) -> Result<usize, Error> {
         let mut bufs = bufs.into();
         let max_ciphertext_size = self.max_message_size.saturating_add(TAG_SIZE);
         append_frame(
@@ -693,7 +697,10 @@ mod test {
             assert_eq!(sends.load(Ordering::Relaxed), 1);
             assert_eq!(*chunk_counts.lock().unwrap(), vec![2]);
             for _ in 0..3 {
-                assert_eq!(listener_receiver.recv().await?.coalesce(), payload.as_slice());
+                assert_eq!(
+                    listener_receiver.recv().await?.coalesce(),
+                    payload.as_slice()
+                );
             }
             Ok(())
         })

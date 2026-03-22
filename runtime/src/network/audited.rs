@@ -45,16 +45,12 @@ impl<S: crate::Stream> crate::Stream for Stream<S> {
             hasher.update(&len.to_be_bytes());
         });
 
-        let bufs = self
-            .inner
-            .recv(len)
-            .await
-            .inspect_err(|e| {
-                self.auditor.event(b"recv_failure", |hasher| {
-                    hasher.update(self.remote_addr.to_string().as_bytes());
-                    hasher.update(e.to_string().as_bytes());
-                });
-            })?;
+        let bufs = self.inner.recv(len).await.inspect_err(|e| {
+            self.auditor.event(b"recv_failure", |hasher| {
+                hasher.update(self.remote_addr.to_string().as_bytes());
+                hasher.update(e.to_string().as_bytes());
+            });
+        })?;
 
         self.auditor.event(b"recv_success", |hasher| {
             hasher.update(self.remote_addr.to_string().as_bytes());
@@ -212,7 +208,10 @@ mod tests {
 
     impl crate::Sink for RecordingSink {
         async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            self.chunk_counts.lock().unwrap().push(bufs.into().chunk_count());
+            self.chunk_counts
+                .lock()
+                .unwrap()
+                .push(bufs.into().chunk_count());
             Ok(())
         }
     }

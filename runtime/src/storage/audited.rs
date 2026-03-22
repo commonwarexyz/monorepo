@@ -286,8 +286,15 @@ mod tests {
             unreachable!("not used in test");
         }
 
-        async fn write_at(&self, _offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            self.chunk_counts.lock().unwrap().push(bufs.into().chunk_count());
+        async fn write_at(
+            &self,
+            _offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.chunk_counts
+                .lock()
+                .unwrap()
+                .push(bufs.into().chunk_count());
             Ok(())
         }
 
