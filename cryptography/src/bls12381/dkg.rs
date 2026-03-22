@@ -247,7 +247,7 @@
 //! }
 //!
 //! // Step 3: Run dealer protocol for each participant
-//! let mut logs = Logs::<MinSig, ed25519::PublicKey, N3f1>::default();
+//! let mut logs = Logs::<MinSig, ed25519::PublicKey, N3f1>::new(info.clone());
 //! for dealer_priv in &private_keys {
 //!     // Each dealer generates messages for all players
 //!     let (mut dealer, pub_msg, priv_msgs) = Dealer::start::<N3f1>(
@@ -291,7 +291,6 @@
 //!
 //! // Step 5: Observer can also compute the public output
 //! let observer_output = observe::<MinSig, ed25519::PublicKey, N3f1, ed25519::Batch>(
-//!     info,
 //!     logs,
 //!     &mut rng,
 //!     &commonware_parallel::Sequential,
@@ -343,7 +342,7 @@ const NOISE_PRE_VERIFY: &[u8] = b"pre_verify";
 /// [`Error::MissingPlayerDealing`] happens through mistakes or faults when the state
 /// of a player is restored after a crash.
 ///
-/// The other errors are due to issues with configuration.
+/// The other errors are due to issues with configuration or misuse.
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("missing dealer's share from the previous round")]
@@ -358,6 +357,8 @@ pub enum Error {
     NumPlayers(usize),
     #[error("dkg failed for some reason")]
     DkgFailed,
+    #[error("logs are bound to a different dkg round")]
+    MismatchedLogs,
     /// The player's state is missing a dealing it should have.
     ///
     /// This error is emitted when the player is missing dealings that it should
@@ -626,9 +627,8 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         let Some(results_iter) = log.zip_players(&self.players) else {
             return false;
         };
-        let transcript = transcript_for_ack(round_transcript, dealer, &log.pub_msg);
+        let ack_summary = transcript_for_ack(round_transcript, dealer, &log.pub_msg).summarize();
         let mut ack_batch = B::new();
-        let ack_message = transcript.summarize();
         let mut reveal_count = 0;
         let max_reveals = self.max_reveals::<M>();
         let mut reveal_eval_points = Vec::new();
@@ -636,7 +636,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         for (player, result) in results_iter {
             match result {
                 AckOrReveal::Ack(ack) => {
-                    if !ack_batch.add(b"", ack_message.as_ref(), player, &ack.sig) {
+                    if !ack_summary.add_to_batch(&mut ack_batch, player, &ack.sig) {
                         return false;
                     }
                 }
@@ -1295,22 +1295,27 @@ fn transcript_for_log<V: Variant, P: PublicKey>(
 
 #[derive(Clone)]
 pub struct Logs<V: Variant, P: PublicKey, M: Faults> {
+    info: Info<V, P>,
     logs: BTreeMap<P, DealerLog<V, P>>,
     known: BTreeMap<P, bool>,
     phantom_m: PhantomData<M>,
 }
 
-impl<V: Variant, P: PublicKey, M: Faults> Default for Logs<V, P, M> {
-    fn default() -> Self {
+// Keep the selected logs paired with the bound round info without repeating
+// the tuple shape at each `select` call site.
+type SelectedLogs<V, P> = (Info<V, P>, Map<P, DealerLog<V, P>>);
+
+impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
+    /// Create a log set bound to a particular DKG round.
+    pub fn new(info: Info<V, P>) -> Self {
         Self {
+            info,
             logs: Default::default(),
             known: Default::default(),
             phantom_m: Default::default(),
         }
     }
-}
 
-impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     fn check_dealers<B: BatchVerifier<PublicKey = P>>(
         info: &Info<V, P>,
         rng: &mut impl CryptoRngCore,
@@ -1357,12 +1362,11 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// each call.
     pub fn pre_verify<B: BatchVerifier<PublicKey = P>>(
         &mut self,
-        info: &Info<V, P>,
         rng: &mut impl CryptoRngCore,
         strategy: &impl Strategy,
     ) {
-        let required_commitments = info.required_commitments::<M>() as usize;
-        let transcript = transcript_for_round(info);
+        let required_commitments = self.info.required_commitments::<M>() as usize;
+        let transcript = transcript_for_round(&self.info);
 
         // Create a pending batch, which we try and optimistically size as small as
         // possible, to avoid verifying more dealers than we need, if they're all
@@ -1384,7 +1388,8 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
             }
         }
 
-        let pending_results = Self::check_dealers::<B>(info, rng, strategy, &transcript, &pending);
+        let pending_results =
+            Self::check_dealers::<B>(&self.info, rng, strategy, &transcript, &pending);
         let mut all_pending_valid = true;
         for (dealer, is_valid) in pending_results {
             self.known.insert(dealer, is_valid);
@@ -1405,7 +1410,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         let remaining: Vec<_> = iter
             .filter(|(dealer, _)| !self.known.contains_key(*dealer))
             .collect();
-        let results = Self::check_dealers::<B>(info, rng, strategy, &transcript, &remaining);
+        let results = Self::check_dealers::<B>(&self.info, rng, strategy, &transcript, &remaining);
         for (dealer, is_valid) in results {
             self.known.insert(dealer, is_valid);
         }
@@ -1416,12 +1421,11 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     /// This might return an error if there are not enough good logs that we can use.
     fn select<B: BatchVerifier<PublicKey = P>>(
         mut self,
-        info: &Info<V, P>,
         rng: &mut impl CryptoRngCore,
         strategy: &impl Strategy,
-    ) -> Result<Map<P, DealerLog<V, P>>, Error> {
-        self.pre_verify::<B>(info, rng, strategy);
-        let required_commitments = info.required_commitments::<M>() as usize;
+    ) -> Result<SelectedLogs<V, P>, Error> {
+        self.pre_verify::<B>(rng, strategy);
+        let required_commitments = self.info.required_commitments::<M>() as usize;
         let out: Map<_, _> = self
             .logs
             .into_iter()
@@ -1432,7 +1436,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         if out.len() < required_commitments {
             return Err(Error::DkgFailed);
         }
-        Ok(out)
+        Ok((self.info, out))
     }
 }
 
@@ -1652,12 +1656,11 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 ///
 /// This will only ever return [`Error::DkgFailed`].
 pub fn observe<V: Variant, P: PublicKey, M: Faults, B: BatchVerifier<PublicKey = P>>(
-    info: Info<V, P>,
     logs: Logs<V, P, M>,
     rng: &mut impl CryptoRngCore,
     strategy: &impl Strategy,
 ) -> Result<Output<V, P>, Error> {
-    let selected = logs.select::<B>(&info, rng, strategy)?;
+    let (info, selected) = logs.select::<B>(rng, strategy)?;
     ObserveInner::<V, P>::reckon::<M>(info, selected, strategy).map(|x| x.output)
 }
 
@@ -1793,7 +1796,8 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// player's state has been corrupted, but the DKG has otherwise succeeded.
     /// However, this player's share is not recoverable without external intervention.
     ///
-    /// Otherwise, the only error this function can return is [`Error::DkgFailed`].
+    /// Otherwise, this function returns [`Error::DkgFailed`] if the DKG fails, or
+    /// [`Error::MismatchedLogs`] if `logs` are bound to a different DKG round.
     pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = S::PublicKey>>(
         self,
         logs: Logs<V, S::PublicKey, M>,
@@ -1804,7 +1808,10 @@ impl<V: Variant, S: Signer> Player<V, S> {
         // is trustworthy for this round/dealer/pub_msg transcript.
         // If there's a log that contains an ack of ours, but no corresponding view,
         // then we're missing a dealing.
-        let selected = logs.select::<B>(&self.info, rng, strategy)?;
+        if logs.info != self.info {
+            return Err(Error::MismatchedLogs);
+        }
+        let (_, selected) = logs.select::<B>(rng, strategy)?;
         if selected
             .iter_pairs()
             .any(|(d, l)| l.get_ack(&self.me_pub).is_some() && !self.view.contains_key(d))
@@ -2594,15 +2601,14 @@ mod test_plan {
                 }
 
                 // Make sure that bad dealers are not selected.
-                let mut logs = Logs::<_, _, N3f1>::default();
+                let mut logs = Logs::<_, _, N3f1>::new(info.clone());
                 for (dealer, log) in &dealer_logs {
                     logs.record(dealer.clone(), log.clone());
                 }
-                let selection = logs
-                    .clone()
-                    .select::<ed25519::Batch>(&info, &mut rng, &Sequential);
+                let selection = logs.clone().select::<ed25519::Batch>(&mut rng, &Sequential);
                 if let Ok(ref selection) = selection {
                     let good_pks = selection
+                        .1
                         .iter_pairs()
                         .map(|(pk, _)| pk.clone())
                         .collect::<BTreeSet<_>>();
@@ -2613,12 +2619,8 @@ mod test_plan {
                     }
                 }
                 // Run observer
-                let observe_result = observe::<_, _, N3f1, ed25519::Batch>(
-                    info.clone(),
-                    logs.clone(),
-                    &mut rng,
-                    &Sequential,
-                );
+                let observe_result =
+                    observe::<_, _, N3f1, ed25519::Batch>(logs.clone(), &mut rng, &Sequential);
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
@@ -2658,6 +2660,7 @@ mod test_plan {
 
                 // Map selected dealers to their key indices (for later use)
                 let selected_dealers: BTreeSet<u32> = selection
+                    .1
                     .keys()
                     .iter()
                     .filter_map(|pk| {
@@ -3012,6 +3015,7 @@ mod test {
 
     struct PreVerifyFixture {
         info: Info<MinPk, ed25519::PublicKey>,
+        wrong_info: Info<MinPk, ed25519::PublicKey>,
         dealers: Vec<PreVerifyDealer>,
     }
 
@@ -3118,7 +3122,11 @@ mod test {
                     }
                 })
                 .collect();
-            Self { info, dealers }
+            Self {
+                info,
+                wrong_info,
+                dealers,
+            }
         }
 
         fn required_commitments(&self) -> usize {
@@ -3151,13 +3159,17 @@ mod test {
             logs.record(dealer.key.clone(), log);
         }
 
-        fn logs(&self, valid: &[bool]) -> PreVerifyLogs {
+        fn logs_for(
+            &self,
+            info: &Info<MinPk, ed25519::PublicKey>,
+            valid: &[bool],
+        ) -> PreVerifyLogs {
             assert_eq!(
                 valid.len(),
                 self.dealers.len(),
                 "fixture size should match case"
             );
-            let mut logs = PreVerifyLogs::default();
+            let mut logs = PreVerifyLogs::new(info.clone());
             for (dealer_index, &is_valid) in valid.iter().enumerate() {
                 self.record(&mut logs, dealer_index, is_valid);
             }
@@ -3200,28 +3212,24 @@ mod test {
         fn run(self, fixture: &PreVerifyFixture) -> arbitrary::Result<()> {
             let required_commitments = fixture.required_commitments();
             let expected = fixture.expected(&self.valid);
-            let fresh = fixture.logs(&self.valid);
+            let fresh = fixture.logs_for(&fixture.info, &self.valid);
 
-            let mut incremental = PreVerifyLogs::default();
+            let mut incremental = PreVerifyLogs::new(fixture.info.clone());
             let mut incremental_rng = test_rng();
             for batch in &self.batches {
                 for &dealer_index in batch {
                     fixture.record(&mut incremental, dealer_index, self.valid[dealer_index]);
                 }
-                incremental.pre_verify::<ed25519::Batch>(
-                    &fixture.info,
-                    &mut incremental_rng,
-                    &Sequential,
-                );
+                incremental.pre_verify::<ed25519::Batch>(&mut incremental_rng, &Sequential);
             }
 
             let mut fresh_rng = test_rng();
             let fresh_selected = fresh
-                .select::<ed25519::Batch>(&fixture.info, &mut fresh_rng, &Sequential)
-                .map(|selection| selection.keys().clone());
+                .select::<ed25519::Batch>(&mut fresh_rng, &Sequential)
+                .map(|(_, selection)| selection.keys().clone());
             let incremental_selected = incremental
-                .select::<ed25519::Batch>(&fixture.info, &mut incremental_rng, &Sequential)
-                .map(|selection| selection.keys().clone());
+                .select::<ed25519::Batch>(&mut incremental_rng, &Sequential)
+                .map(|(_, selection)| selection.keys().clone());
 
             match &fresh_selected {
                 Ok(selected) => assert_eq!(
@@ -3259,6 +3267,47 @@ mod test {
     fn incremental_pre_verify_preserves_dealer_order() {
         let fixture = PreVerifyFixture::new();
         minifuzz::test(move |u| u.arbitrary::<IncrementalPreVerifyCase>()?.run(&fixture));
+    }
+
+    #[test]
+    fn logs_are_bound_to_constructor_info() {
+        let fixture = PreVerifyFixture::new();
+        let mut logs = fixture.logs_for(&fixture.info, &[false; PRE_VERIFY_DEALERS]);
+        let mut wrong_logs = fixture.logs_for(&fixture.wrong_info, &[false; PRE_VERIFY_DEALERS]);
+        let mut rng = test_rng();
+
+        logs.pre_verify::<ed25519::Batch>(&mut rng, &Sequential);
+        wrong_logs.pre_verify::<ed25519::Batch>(&mut rng, &Sequential);
+        assert!(
+            wrong_logs
+                .select::<ed25519::Batch>(&mut rng, &Sequential)
+                .is_ok(),
+            "control check: logs should verify when bound to the round they were created for"
+        );
+        assert!(
+            matches!(
+                logs.select::<ed25519::Batch>(&mut rng, &Sequential),
+                Err(Error::DkgFailed)
+            ),
+            "logs bound to a different round must reject these transcript-bound signatures"
+        );
+    }
+
+    #[test]
+    fn finalize_rejects_logs_bound_to_different_round() {
+        let fixture = PreVerifyFixture::new();
+        let player =
+            Player::<MinPk, _>::new(fixture.info.clone(), ed25519::PrivateKey::from_seed(0))
+                .expect("player initialization must succeed");
+        let wrong_logs = fixture.logs_for(&fixture.wrong_info, &[false; PRE_VERIFY_DEALERS]);
+
+        let result =
+            player.finalize::<QuorumTwo, ed25519::Batch>(wrong_logs, &mut test_rng(), &Sequential);
+
+        assert!(
+            matches!(result, Err(Error::MismatchedLogs)),
+            "finalize should reject logs bound to a different round"
+        );
     }
 
     #[test]

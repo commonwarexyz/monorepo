@@ -516,7 +516,7 @@ where
                         }
 
                         // Finalize the round before acknowledging
-                        let mut logs = Logs::<_, _, N3f1>::default();
+                        let mut logs = Logs::<_, _, N3f1>::new(round.clone());
                         for (dealer, log) in storage.logs(epoch) {
                             logs.record(dealer, log);
                         }
@@ -541,12 +541,7 @@ where
                                     ),
                                 }
                             } else {
-                                match observe::<_, _, N3f1, Batch>(
-                                    round.clone(),
-                                    logs,
-                                    &mut self.context,
-                                    &Sequential,
-                                ) {
+                                match observe::<_, _, N3f1, Batch>(logs, &mut self.context, &Sequential) {
                                     Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                     Err(_) => (
                                         false,
