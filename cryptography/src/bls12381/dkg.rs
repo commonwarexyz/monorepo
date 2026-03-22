@@ -627,7 +627,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         let Some(results_iter) = log.zip_players(&self.players) else {
             return false;
         };
-        let transcript = transcript_for_ack(round_transcript, dealer, &log.pub_msg);
+        let ack_summary = transcript_for_ack(round_transcript, dealer, &log.pub_msg).summarize();
         let mut ack_batch = B::new();
         let mut reveal_count = 0;
         let max_reveals = self.max_reveals::<M>();
@@ -636,7 +636,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         for (player, result) in results_iter {
             match result {
                 AckOrReveal::Ack(ack) => {
-                    if !transcript.add_to_batch(&mut ack_batch, player, &ack.sig) {
+                    if !ack_summary.add_to_batch(&mut ack_batch, player, &ack.sig) {
                         return false;
                     }
                 }
@@ -3309,21 +3309,6 @@ mod test {
         assert!(
             matches!(result, Err(Error::MismatchedLogs)),
             "finalize should reject logs bound to a different round"
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "logs must be bound to the expected DKG info")]
-    fn finalize_rejects_logs_from_a_different_round() {
-        let fixture = PreVerifyFixture::new();
-        let player = Player::<MinPk, _>::new(fixture.info.clone(), ed25519::PrivateKey::from_seed(0))
-            .expect("player initialization must succeed");
-        let wrong_logs = PreVerifyLogs::new(fixture.wrong_info);
-
-        let _ = player.finalize::<QuorumTwo, ed25519::Batch>(
-            wrong_logs,
-            &mut test_rng(),
-            &Sequential,
         );
     }
 
