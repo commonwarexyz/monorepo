@@ -107,7 +107,6 @@ impl<E, A> Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    A::Context: Send,
 {
     /// Signal that state sync is complete, providing the constructed databases
     /// and the finalized digest to transition the actor to processing mode.
@@ -132,7 +131,6 @@ impl<E, A> ConsensusApplication<E> for Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    A::Context: Send,
 {
     type SigningScheme = A::SigningScheme;
     type Context = A::Context;
@@ -166,7 +164,6 @@ impl<E, A> ConsensusVerifyingApplication<E> for Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    A::Context: Send,
 {
     async fn verify<BP: BlockProvider<Block = Self::Block>>(
         &mut self,
@@ -191,7 +188,6 @@ impl<E, A> Reporter for Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    A::Context: Send,
 {
     type Activity = Update<A::Block>;
 

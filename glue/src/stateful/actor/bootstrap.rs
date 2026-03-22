@@ -153,7 +153,6 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: MarshalVariant<ApplicationBlock = A::Block>,
-    R: Clone + Send + 'static,
 {
     let mut metadata = Metadata::<E, U64, bool>::init(
         config.context.with_label("state_sync_metadata"),

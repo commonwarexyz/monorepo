@@ -345,7 +345,7 @@ impl<E, T, R, D> StateSyncSet<E, R, D> for Arc<AsyncRwLock<T>>
 where
     E: Clone + Send + Sync,
     T: StateSyncDb<E, R> + 'static,
-    R: Clone + Send + 'static,
+    R: Send + 'static,
     D: Digest,
 {
     type Error = T::SyncError;
@@ -489,7 +489,7 @@ macro_rules! impl_state_sync_set {
             D: Digest,
             $(
                 $T: StateSyncDb<E, $R> + 'static,
-                $R: Clone + Send + 'static,
+                $R: Send + 'static,
             )+
         {
             type Error = String;

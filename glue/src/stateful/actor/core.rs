@@ -206,7 +206,6 @@ impl<E, A, P, R> Stateful<E, A, P, R>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    P: BlockProvider<Block = A::Block>,
 {
     /// Construct a [`Stateful`] actor and its [`Mailbox`].
     ///
@@ -244,8 +243,8 @@ where
         A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
-        P: Into<MarshalMailbox<S, V>>,
-        R: Clone + Send + AttachableResolverSet<A::Databases> + 'static,
+        P: BlockProvider<Block = A::Block> + Into<MarshalMailbox<S, V>>,
+        R: AttachableResolverSet<A::Databases>,
     {
         let (tip_sender, target_updates) =
             mpsc::channel(self.sync_config.update_channel_size.get());
@@ -303,7 +302,7 @@ where
 {
     async fn run(mut self)
     where
-        R: Clone + AttachableResolverSet<A::Databases>,
+        R: AttachableResolverSet<A::Databases>,
     {
         select_loop! {
             self.shared.context,
@@ -480,7 +479,7 @@ async fn handle_sync_complete<E, A, R>(
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    R: Clone + AttachableResolverSet<A::Databases>,
+    R: AttachableResolverSet<A::Databases>,
 {
     let app = syncing.app.clone();
     syncing
