@@ -857,7 +857,7 @@ impl IoBufs {
 
     /// Visit each readable chunk in order without coalescing.
     #[inline]
-    pub(crate) fn for_each_chunk(&self, mut f: impl FnMut(&[u8])) {
+    pub fn for_each_chunk(&self, mut f: impl FnMut(&[u8])) {
         match &self.inner {
             IoBufsInner::Single(buf) => {
                 let chunk = buf.as_ref();
