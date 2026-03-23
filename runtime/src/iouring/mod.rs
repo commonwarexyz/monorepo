@@ -482,11 +482,13 @@ impl IoUringLoop {
             // no guaranteed eventfd wake, because publish only rings after sleep
             // intent is armed.
             if self.waker.submitted() != self.processed_seq {
-                if at_capacity {
-                    // Pending submissions exist and staging stopped at capacity.
-                    //
+                if at_capacity || !self.pending_deadlines.is_empty() {
                     // Enter the kernel to submit pending SQEs and wait for at
                     // least one completion so capacity can open up.
+                    //
+                    // Also flush immediately when buffered deadlines exist so
+                    // they are scheduled against the current wheel tick before
+                    // timeout advancement in a subsequent loop iteration.
                     self.submit_and_wait(&mut ring, 1, None)
                         .expect("unable to submit to ring");
                 }
