@@ -118,10 +118,6 @@
 //! - If cancellation is disabled, callers must guarantee that in-flight operations never depend on
 //!   later queued operations, otherwise the loop can deadlock.
 
-mod timeout;
-mod waiter;
-mod waker;
-
 use crate::{IoBuf, IoBufMut, IoBufs};
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
@@ -142,8 +138,12 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+mod timeout;
 use timeout::{Tick, TimeoutWheel};
+mod waiter;
 use waiter::{CompletedWaiter, WaiterId, Waiters};
+mod waker;
 use waker::{Waker, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
 
 /// Packed `io_uring` `user_data` value.

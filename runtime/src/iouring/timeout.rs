@@ -87,6 +87,9 @@ pub struct TimeoutWheel {
 }
 
 impl TimeoutWheel {
+    /// Number of bits per word in the occupancy bitsets.
+    const WORD_BITS: usize = u64::BITS as usize;
+
     /// Convert a duration to nanoseconds, saturating at `u64::MAX`.
     ///
     /// We keep wheel arithmetic in `u64` nanoseconds for fast integer tick math.
@@ -138,10 +141,10 @@ impl TimeoutWheel {
         Self {
             slot_mask: slots - 1,
             buckets,
-            occupied: vec![0; slots.div_ceil(64)],
+            occupied: vec![0; slots.div_ceil(Self::WORD_BITS)],
             occupied_slots: 0,
             active_counts: vec![0; slots],
-            active_occupied: vec![0; slots.div_ceil(64)],
+            active_occupied: vec![0; slots.div_ceil(Self::WORD_BITS)],
             current_tick: 0,
             min_scheduled_tick: Tick::MAX,
             active_deadlines: 0,
@@ -195,8 +198,11 @@ impl TimeoutWheel {
         let slot = self.slot_index(target_tick);
         if self.buckets[slot].is_empty() {
             // Occupied bitset tracks non-empty buckets (active or stale) for bounded scans.
-            assert_eq!(self.occupied[slot / 64] & (1u64 << (slot % 64)), 0);
-            self.occupied[slot / 64] |= 1u64 << (slot % 64);
+            assert_eq!(
+                self.occupied[slot / Self::WORD_BITS] & (1u64 << (slot % Self::WORD_BITS)),
+                0
+            );
+            self.occupied[slot / Self::WORD_BITS] |= 1u64 << (slot % Self::WORD_BITS);
             self.occupied_slots += 1;
         }
 
@@ -212,7 +218,7 @@ impl TimeoutWheel {
 
         if new_count == 1 {
             // This slot transitioned from no active deadlines to active.
-            self.active_occupied[slot / 64] |= 1u64 << (slot % 64);
+            self.active_occupied[slot / Self::WORD_BITS] |= 1u64 << (slot % Self::WORD_BITS);
         }
 
         // Set lower bound for the next deadline query.
@@ -243,7 +249,7 @@ impl TimeoutWheel {
 
         if new_count == 0 {
             // Slot no longer contains active deadlines.
-            self.active_occupied[slot / 64] &= !(1u64 << (slot % 64));
+            self.active_occupied[slot / Self::WORD_BITS] &= !(1u64 << (slot % Self::WORD_BITS));
         }
 
         if self.active_deadlines == 0 {
@@ -365,7 +371,7 @@ impl TimeoutWheel {
         for word_index in 0..self.occupied.len() {
             let mut word = self.occupied[word_index];
             if word == 0 {
-                // No occupied slots in this 64-slot block.
+                // No occupied slots in this block.
                 continue;
             }
 
@@ -373,7 +379,7 @@ impl TimeoutWheel {
             self.occupied[word_index] = 0;
             while word != 0 {
                 let bit = word.trailing_zeros() as usize;
-                let slot = word_index * 64 + bit;
+                let slot = word_index * Self::WORD_BITS + bit;
 
                 assert!(
                     slot < self.buckets.len(),
@@ -399,18 +405,18 @@ impl TimeoutWheel {
         }
 
         // Iterate the minimal set of bitset words covering [start, end).
-        let start_word = start / 64;
-        let end_word = (end - 1) / 64;
+        let start_word = start / Self::WORD_BITS;
+        let end_word = (end - 1) / Self::WORD_BITS;
         for word_index in start_word..=end_word {
-            let word_start = word_index * 64;
+            let word_start = word_index * Self::WORD_BITS;
             let range_start = start.max(word_start);
-            let range_end = end.min(word_start + 64);
+            let range_end = end.min(word_start + Self::WORD_BITS);
 
             // Build a per-word mask for the [range_start, range_end) slice.
             let lo = range_start - word_start;
             let hi = range_end - word_start;
             let mut mask = u64::MAX << lo;
-            if hi < 64 {
+            if hi < Self::WORD_BITS {
                 // Keep only bits below `hi` when the range ends mid-word.
                 mask &= (1u64 << hi) - 1;
             }
@@ -458,16 +464,16 @@ impl TimeoutWheel {
 
             let mut bit = start;
             while bit < end {
-                let word_index = bit / 64;
-                let bit_in_word = bit % 64;
+                let word_index = bit / Self::WORD_BITS;
+                let bit_in_word = bit % Self::WORD_BITS;
                 let mut word = bits[word_index];
 
                 // Ignore bits below current scan cursor.
                 word &= u64::MAX << bit_in_word;
 
-                let word_end = ((word_index + 1) * 64).min(end);
-                let bits_in_range = word_end - (word_index * 64);
-                if bits_in_range < 64 {
+                let word_end = ((word_index + 1) * Self::WORD_BITS).min(end);
+                let bits_in_range = word_end - (word_index * Self::WORD_BITS);
+                if bits_in_range < Self::WORD_BITS {
                     // Ignore bits beyond range end in final partial word.
                     word &= (1u64 << bits_in_range) - 1;
                 }
@@ -475,11 +481,11 @@ impl TimeoutWheel {
                 if word != 0 {
                     // Found the first set slot in this word.
                     let trailing = word.trailing_zeros() as usize;
-                    return Some(word_index * 64 + trailing);
+                    return Some(word_index * Self::WORD_BITS + trailing);
                 }
 
                 // Advance to next word boundary.
-                bit = (word_index + 1) * 64;
+                bit = (word_index + 1) * Self::WORD_BITS;
             }
 
             None
@@ -957,7 +963,8 @@ mod tests {
         {
             let mut wheel = wheel(Duration::from_millis(100));
             let slot = 1usize;
-            wheel.occupied[slot / 64] |= 1u64 << (slot % 64);
+            wheel.occupied[slot / TimeoutWheel::WORD_BITS] |=
+                1u64 << (slot % TimeoutWheel::WORD_BITS);
             let err = catch_unwind(AssertUnwindSafe(|| {
                 wheel.schedule(WaiterId::new(1, 0), 1);
             }));
@@ -984,7 +991,8 @@ mod tests {
         {
             let mut wheel = wheel(Duration::from_millis(100));
             let invalid_slot = wheel.buckets.len();
-            wheel.occupied[invalid_slot / 64] |= 1u64 << (invalid_slot % 64);
+            wheel.occupied[invalid_slot / TimeoutWheel::WORD_BITS] |=
+                1u64 << (invalid_slot % TimeoutWheel::WORD_BITS);
             wheel.occupied_slots = 1;
             let err = catch_unwind(AssertUnwindSafe(|| {
                 wheel.drain_occupied_buckets(|_| {});
