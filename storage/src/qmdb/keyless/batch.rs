@@ -6,16 +6,16 @@ use crate::{
     merkle::batch::ChainInfo,
     mmr::{self, Location, Readable},
     qmdb::{any::VariableValue, keyless::operation::Operation, Error},
+    Context,
 };
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
 use std::sync::Arc;
 
 /// A speculative batch of operations whose root digest has not yet been
 /// computed, in contrast to [MerkleizedBatch].
 pub struct UnmerkleizedBatch<'a, E, V, H, P>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: VariableValue,
     H: Hasher,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
@@ -46,7 +46,7 @@ where
 /// in contrast to [UnmerkleizedBatch].
 pub struct MerkleizedBatch<'a, E, V, H, P>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: VariableValue,
     H: Hasher,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
@@ -83,7 +83,7 @@ pub struct Changeset<D: Digest, V: VariableValue> {
 
 impl<'a, E, V, H, P> UnmerkleizedBatch<'a, E, V, H, P>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: VariableValue,
     H: Hasher,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
@@ -165,7 +165,7 @@ where
 
 impl<'a, E, V, H, P> MerkleizedBatch<'a, E, V, H, P>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: VariableValue,
     H: Hasher,
     P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>

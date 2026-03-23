@@ -9,9 +9,9 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
@@ -22,9 +22,7 @@ pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;
 pub type Db<E, K, V, H, T> =
     super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
 
-impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Translator>
-    Db<E, K, V, H, T>
-{
+impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator> Db<E, K, V, H, T> {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
@@ -66,9 +64,9 @@ pub mod partitioned {
             Error,
         },
         translator::Translator,
+        Context,
     };
     use commonware_cryptography::Hasher;
-    use commonware_runtime::{Clock, Metrics, Storage};
     use commonware_utils::Array;
 
     /// A key-value QMDB with a partitioned snapshot index.
@@ -88,14 +86,8 @@ pub mod partitioned {
         Update<K, V>,
     >;
 
-    impl<
-            E: Storage + Clock + Metrics,
-            K: Array,
-            V: FixedValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-        > Db<E, K, V, H, T, P>
+    impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, const P: usize>
+        Db<E, K, V, H, T, P>
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
@@ -156,7 +148,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Runner as _,
+        Metrics, Runner as _,
     };
     use commonware_utils::{test_rng_seeded, NZU64};
     use rand::RngCore;

@@ -15,12 +15,11 @@ use crate::{
         self, batch, journaled::Mmr, Error as MmrError, Location, Position, Proof, Readable,
         StandardHasher,
     },
-    Persistable,
+    Context, Persistable,
 };
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::NonZeroU64;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use thiserror::Error;
@@ -43,7 +42,7 @@ pub trait BatchChain<Item> {
     fn collect(&self, into: &mut Vec<Arc<Vec<Item>>>);
 }
 
-impl<E: Storage + Clock + Metrics, D: Digest, Item> BatchChain<Item> for Mmr<E, D> {
+impl<E: Context, D: Digest, Item> BatchChain<Item> for Mmr<E, D> {
     // Recursion base case.
     fn collect(&self, _into: &mut Vec<Arc<Vec<Item>>>) {}
 }
@@ -239,7 +238,7 @@ pub struct Changeset<D: Digest, Item> {
 /// specific location.
 pub struct Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -256,7 +255,7 @@ where
 
 impl<E, C, H> Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -282,7 +281,7 @@ where
 
 impl<E, C, H> Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
@@ -295,7 +294,7 @@ where
 
 impl<E, C, H> Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Mutable<Item: EncodeShared>,
     H: Hasher,
 {
@@ -450,7 +449,7 @@ where
 
 impl<E, C, H> Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -528,7 +527,7 @@ where
 
 impl<E, C, H> Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
@@ -558,7 +557,7 @@ const APPLY_BATCH_SIZE: u64 = 1 << 16;
 
 impl<E, O, H> Journal<E, fixed::Journal<E, O>, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     O: CodecFixedShared,
     H: Hasher,
 {
@@ -597,7 +596,7 @@ where
 
 impl<E, O, H> Journal<E, variable::Journal<E, O>, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     O: CodecShared,
     H: Hasher,
 {
@@ -637,7 +636,7 @@ where
 
 impl<E, C, H> Contiguous for Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -654,7 +653,7 @@ where
 
 impl<E, C, H> Mutable for Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Mutable<Item: EncodeShared>,
     H: Hasher,
 {
@@ -688,7 +687,7 @@ where
 
 impl<E, C, H> Persistable for Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
@@ -719,7 +718,7 @@ where
 #[cfg(test)]
 impl<E, C, H> Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {

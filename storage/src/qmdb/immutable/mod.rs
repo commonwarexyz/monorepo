@@ -69,10 +69,10 @@ use crate::{
     },
     qmdb::{any::VariableValue, build_snapshot_from_log, Error},
     translator::Translator,
+    Context,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use std::{collections::BTreeMap, num::NonZeroU64, ops::Range, sync::Arc};
 use tracing::warn;
@@ -100,13 +100,7 @@ pub struct Config<T: Translator, C> {
 
 /// An authenticated database that only supports adding new keyed values (no updates or
 /// deletions), where values can have varying sizes.
-pub struct Immutable<
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: VariableValue,
-    H: CHasher,
-    T: Translator,
-> {
+pub struct Immutable<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> {
     /// Authenticated journal of operations.
     journal: Journal<E, K, V, H>,
 
@@ -122,9 +116,7 @@ pub struct Immutable<
 }
 
 // Shared read-only functionality.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
-    Immutable<E, K, V, H, T>
-{
+impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutable<E, K, V, H, T> {
     /// Return the Location of the next operation appended to this db.
     pub async fn size(&self) -> Location {
         self.bounds().await.end
@@ -398,7 +390,9 @@ pub(super) mod test {
     use crate::{mmr::StandardHasher, qmdb::verify_proof, translator::TwoCap};
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 

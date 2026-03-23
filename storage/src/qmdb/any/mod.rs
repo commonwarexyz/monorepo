@@ -85,10 +85,10 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_codec::{Codec, CodecFixedShared, Read};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use tracing::warn;
 
 pub mod batch;
@@ -137,7 +137,7 @@ pub(super) async fn init_fixed<E, U, H, T, I, F, NewIndex>(
     new_index: NewIndex,
 ) -> Result<db::Db<E, FJournal<E, Operation<U>>, I, H, U>, Error>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
@@ -174,7 +174,7 @@ pub(super) async fn init_variable<E, U, H, T, I, F, NewIndex>(
     new_index: NewIndex,
 ) -> Result<db::Db<E, VJournal<E, Operation<U>>, I, H, U>, Error>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
@@ -274,7 +274,9 @@ pub(crate) mod test {
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic::Context, BufferPooler};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Metrics,
+    };
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
 

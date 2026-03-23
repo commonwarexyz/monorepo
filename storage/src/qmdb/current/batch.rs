@@ -25,10 +25,10 @@ use crate::{
         operation::{Key, Operation as OperationTrait},
         Error,
     },
+    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::bitmap::Prunable as BitMap;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -292,7 +292,7 @@ impl<
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<'a, E, C, I, H, U, P, G, B, const N: usize>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -329,7 +329,7 @@ where
 #[allow(clippy::type_complexity)]
 pub struct MerkleizedBatch<'a, E, C, I, H, U, P, G, B, const N: usize>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -384,7 +384,7 @@ pub struct Changeset<K, D: Digest, Item: Send, const N: usize> {
 
 impl<'a, E, C, I, H, U, P, G, B, const N: usize> UnmerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -429,7 +429,7 @@ where
 impl<'a, E, K, V, C, I, H, P, G, B, const N: usize>
     UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<update::Unordered<K, V>>>,
@@ -479,7 +479,7 @@ where
 impl<'a, E, K, V, C, I, H, P, G, B, const N: usize>
     UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<update::Ordered<K, V>>>,
@@ -618,7 +618,7 @@ async fn compute_current_layer<'a, E, U, C, I, H, P, G, B, const N: usize>(
     bitmap_parent: &'a B,
 ) -> Result<MerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>, Error>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -717,7 +717,7 @@ where
 
 impl<'a, E, C, I, H, U, P, G, B, const N: usize> MerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -777,7 +777,7 @@ where
 impl<'a, E, K, V, C, I, H, P, G, B, const N: usize>
     MerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Contiguous<Item = Operation<update::Unordered<K, V>>>,
@@ -801,7 +801,7 @@ where
 impl<'a, E, K, V, C, I, H, P, G, B, const N: usize>
     MerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: ValueEncoding,
     C: Contiguous<Item = Operation<update::Ordered<K, V>>>,
@@ -824,7 +824,7 @@ where
 // Finalize (requires Mutable journal for apply_batch).
 impl<'a, E, C, I, H, U, P, G, B, const N: usize> MerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: update::Update + Send + Sync + 'static,
     C: Mutable<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -894,7 +894,7 @@ mod trait_impls {
     impl<'a, E, K, V, C, I, H, P, G, B, const N: usize> UnmerkleizedBatchTrait
         for UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<update::Unordered<K, V>>>,
@@ -929,7 +929,7 @@ mod trait_impls {
     impl<'a, E, K, V, C, I, H, P, G, B, const N: usize> UnmerkleizedBatchTrait
         for UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<update::Ordered<K, V>>>,
@@ -963,7 +963,7 @@ mod trait_impls {
     impl<'a, E, C, I, H, U, P, G, B, const N: usize> MerkleizedBatchTrait
         for super::MerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         U: update::Update + Send + Sync + 'static,
         C: Mutable<Item = Operation<U>>,
         I: UnorderedIndex<Value = Location>,
@@ -991,7 +991,7 @@ mod trait_impls {
     impl<E, K, V, C, I, H, const N: usize> BatchableDb
         for CurrentDb<E, C, I, H, update::Unordered<K, V>, N>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<update::Unordered<K, V>>>
@@ -1034,7 +1034,7 @@ mod trait_impls {
     impl<E, K, V, C, I, H, const N: usize> BatchableDb
         for CurrentDb<E, C, I, H, update::Ordered<K, V>, N>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<update::Ordered<K, V>>>

@@ -7,9 +7,9 @@ use crate::{
     mmr::{self, Location, Readable},
     qmdb::{any::VariableValue, immutable::operation::Operation, Error},
     translator::Translator,
+    Context,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -30,7 +30,7 @@ pub(crate) enum SnapshotDiff<K> {
 /// computed, in contrast to [MerkleizedBatch].
 pub struct UnmerkleizedBatch<'a, E, K, V, H, T, P>
 where
-    E: RStorage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: VariableValue,
     H: CHasher,
@@ -66,7 +66,7 @@ where
 /// in contrast to [UnmerkleizedBatch].
 pub struct MerkleizedBatch<'a, E, K, V, H, T, P>
 where
-    E: RStorage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: VariableValue,
     H: CHasher,
@@ -111,7 +111,7 @@ pub struct Changeset<K: Array, D: Digest, V: VariableValue> {
 
 impl<'a, E, K, V, H, T, P> UnmerkleizedBatch<'a, E, K, V, H, T, P>
 where
-    E: RStorage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: VariableValue,
     H: CHasher,
@@ -191,7 +191,7 @@ where
 
 impl<'a, E, K, V, H, T, P> MerkleizedBatch<'a, E, K, V, H, T, P>
 where
-    E: RStorage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: VariableValue,
     H: CHasher,

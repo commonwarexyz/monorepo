@@ -246,10 +246,10 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_codec::{Codec, CodecFixedShared, FixedSize, Read};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
 
 pub mod batch;
@@ -319,7 +319,7 @@ pub(super) async fn init_fixed<E, U, H, T, I, const N: usize, NewIndex>(
     new_index: NewIndex,
 ) -> Result<db::Db<E, FJournal<E, Operation<U>>, I, H, U, N>, Error>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update + Send + Sync,
     U::Key: Array,
     H: Hasher,
@@ -403,7 +403,7 @@ pub(super) async fn init_variable<E, U, H, T, I, const N: usize, NewIndex>(
     new_index: NewIndex,
 ) -> Result<db::Db<E, VJournal<E, Operation<U>>, I, H, U, N>, Error>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update + Send + Sync,
     U::Key: Key,
     H: Hasher,

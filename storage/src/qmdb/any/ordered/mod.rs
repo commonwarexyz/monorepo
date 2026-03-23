@@ -9,10 +9,10 @@ use crate::{
         operation::{Key, Operation as OperationTrait},
         Error,
     },
+    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use futures::{
     future::try_join_all,
     stream::{self, Stream},
@@ -31,7 +31,7 @@ pub use crate::qmdb::any::operation::{update::Ordered as Update, Ordered as Oper
 type LocatedKey<K, V> = Option<(Location, Update<K, V>)>;
 
 impl<
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
@@ -252,7 +252,7 @@ pub(crate) fn find_prev_key<'a, K: Ord, V>(
 crate::qmdb::any::traits::impl_db_any! {
     [E, K, V, C, I, H] Db<E, C, I, H, Update<K, V>>
     where {
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: PersistableMutableLog<Operation<K, V>>,
@@ -268,7 +268,7 @@ crate::qmdb::any::traits::impl_db_any! {
 crate::qmdb::any::traits::impl_provable! {
     [E, K, V, C, I, H] Db<E, C, I, H, Update<K, V>>
     where {
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: PersistableMutableLog<Operation<K, V>>,
@@ -285,7 +285,7 @@ mod test {
     use super::*;
     use crate::qmdb::any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _};
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_runtime::deterministic::Context;
+    use commonware_runtime::{deterministic::Context, Metrics};
     use commonware_utils::sequence::FixedBytes;
     use core::{future::Future, pin::Pin};
 

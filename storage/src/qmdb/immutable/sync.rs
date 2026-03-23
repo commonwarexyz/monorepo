@@ -13,15 +13,15 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
 
 impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: VariableValue,
     H: Hasher,

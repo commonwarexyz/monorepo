@@ -20,11 +20,12 @@ use crate::{
         mem::{Config as MemConfig, Mmr as MemMmr},
         verification, Error, Family, Location, Position, Proof, Readable,
     },
+    Context,
 };
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
+use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::{
     sequence::prefixed_u64::U64,
     sync::{AsyncMutex, RwLock},
@@ -93,7 +94,7 @@ pub struct SyncConfig<D: Digest> {
 }
 
 /// A MMR backed by a fixed-item-length journal.
-pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest> {
+pub struct Mmr<E: Context, D: Digest> {
     /// Lock-protected mutable state.
     inner: RwLock<Inner<D>>,
 
@@ -118,7 +119,7 @@ const NODE_PREFIX: u8 = 0;
 /// Prefix used for the key storing the pruning boundary (as a leaf index) in the metadata.
 const PRUNED_TO_PREFIX: u8 = 1;
 
-impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
+impl<E: Context, D: Digest> Mmr<E, D> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
@@ -897,7 +898,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 /// in-memory boundary (which may be tighter than the journal's prune boundary reported by
 /// [`Mmr::bounds`]). This means batch operations like `update_leaf` will correctly reject
 /// leaves that have been synced out of memory with [`Error::ElementPruned`].
-impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
+impl<E: Context, D: Digest> Readable for Mmr<E, D> {
     type Family = Family;
     type Digest = D;
     type Error = Error;
@@ -954,7 +955,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> ChainInfo<Family> for Mmr<E, D> {
+impl<E: Context, D: Digest> ChainInfo<Family> for Mmr<E, D> {
     type Digest = D;
 
     fn base_size(&self) -> Position {
@@ -964,7 +965,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> ChainInfo<Family> for Mmr<E, D> {
     fn collect_overwrites(&self, _into: &mut BTreeMap<Position, D>) {}
 }
 
-impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<Family> for Mmr<E, D> {
+impl<E: Context + Sync, D: Digest> Storage<Family> for Mmr<E, D> {
     type Digest = D;
 
     async fn size(&self) -> Position {
@@ -989,7 +990,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob as _, BufferPooler, Runner,
+        buffer::paged::CacheRef, deterministic, Blob as _, BufferPooler, Metrics, Runner, Storage,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;

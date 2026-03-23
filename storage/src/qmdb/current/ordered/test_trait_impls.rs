@@ -8,10 +8,10 @@ use crate::{
         operation::Key,
     },
     translator::Translator,
+    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 
 // =============================================================================
@@ -21,7 +21,7 @@ use commonware_utils::Array;
 crate::qmdb::any::traits::impl_db_any! {
     [E, K, V, H, T, const N: usize] fixed::Db<E, K, V, H, T, N>
     where {
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Array,
         V: FixedValue + 'static,
         H: Hasher,
@@ -37,7 +37,7 @@ crate::qmdb::any::traits::impl_db_any! {
 crate::qmdb::any::traits::impl_db_any! {
     [E, K, V, H, T, const N: usize] variable::Db<E, K, V, H, T, N>
     where {
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: VariableValue + 'static,
         H: Hasher,
@@ -51,14 +51,8 @@ crate::qmdb::any::traits::impl_db_any! {
 // BitmapPrunedBits trait implementations
 // =============================================================================
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > BitmapPrunedBits for fixed::Db<E, K, V, H, T, N>
+impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, const N: usize> BitmapPrunedBits
+    for fixed::Db<E, K, V, H, T, N>
 {
     fn pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
@@ -73,14 +67,8 @@ impl<
     }
 }
 
-impl<
-        E: Storage + Clock + Metrics,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > BitmapPrunedBits for variable::Db<E, K, V, H, T, N>
+impl<E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, const N: usize>
+    BitmapPrunedBits for variable::Db<E, K, V, H, T, N>
 where
     VariableOperation<K, V>: Codec,
 {
@@ -105,7 +93,7 @@ crate::qmdb::any::traits::impl_db_any! {
     [E, K, V, H, T, const P: usize, const N: usize]
     fixed::partitioned::Db<E, K, V, H, T, P, N>
     where {
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Array,
         V: FixedValue + 'static,
         H: Hasher,
@@ -115,7 +103,7 @@ crate::qmdb::any::traits::impl_db_any! {
 }
 
 impl<
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Array,
         V: FixedValue,
         H: Hasher,
@@ -145,7 +133,7 @@ crate::qmdb::any::traits::impl_db_any! {
     [E, K, V, H, T, const P: usize, const N: usize]
     variable::partitioned::Db<E, K, V, H, T, P, N>
     where {
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: VariableValue + 'static,
         H: Hasher,
@@ -156,7 +144,7 @@ crate::qmdb::any::traits::impl_db_any! {
 }
 
 impl<
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: VariableValue,
         H: Hasher,

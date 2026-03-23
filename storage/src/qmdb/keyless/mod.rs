@@ -63,9 +63,9 @@ use crate::{
         Location, Proof,
     },
     qmdb::{any::VariableValue, operation::Committable, Error},
+    Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use std::num::NonZeroU64;
 use tracing::{debug, warn};
 
@@ -87,7 +87,7 @@ pub struct Config<C> {
 type Journal<E, V, H> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H>;
 
 /// A keyless authenticated database for variable-length data.
-pub struct Keyless<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
+pub struct Keyless<E: Context, V: VariableValue, H: Hasher> {
     /// Authenticated journal of operations.
     journal: Journal<E, V, H>,
 
@@ -95,7 +95,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
     last_commit_loc: Location,
 }
 
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H> {
+impl<E: Context, V: VariableValue, H: Hasher> Keyless<E, V, H> {
     /// Get the value at location `loc` in the database.
     ///
     /// # Errors

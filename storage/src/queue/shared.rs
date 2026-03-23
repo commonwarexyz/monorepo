@@ -7,9 +7,8 @@
 //! Writers can be cloned to allow multiple tasks to enqueue items concurrently.
 
 use super::{Config, Error, Queue};
-use crate::Persistable;
+use crate::{Context, Persistable};
 use commonware_codec::CodecShared;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{channel::mpsc, sync::AsyncMutex};
 use std::{ops::Range, sync::Arc};
 use tracing::debug;
@@ -18,12 +17,12 @@ use tracing::debug;
 ///
 /// This handle can be cloned to allow multiple tasks to enqueue items concurrently.
 /// All clones share the same underlying queue and notification channel.
-pub struct Writer<E: Clock + Storage + Metrics, V: CodecShared> {
+pub struct Writer<E: Context, V: CodecShared> {
     queue: Arc<AsyncMutex<Queue<E, V>>>,
     notify: mpsc::Sender<()>,
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> Clone for Writer<E, V> {
+impl<E: Context, V: CodecShared> Clone for Writer<E, V> {
     fn clone(&self) -> Self {
         Self {
             queue: self.queue.clone(),
@@ -32,7 +31,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Clone for Writer<E, V> {
     }
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
+impl<E: Context, V: CodecShared> Writer<E, V> {
     /// Enqueue an item, returning its position. The lock is held for the
     /// full append + commit, so no reader can see the item until it is durable.
     ///
@@ -115,12 +114,12 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Writer<E, V> {
 /// Reader handle for dequeuing and acknowledging items.
 ///
 /// There should only be one reader per shared queue.
-pub struct Reader<E: Clock + Storage + Metrics, V: CodecShared> {
+pub struct Reader<E: Context, V: CodecShared> {
     queue: Arc<AsyncMutex<Queue<E, V>>>,
     notify: mpsc::Receiver<()>,
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> Reader<E, V> {
+impl<E: Context, V: CodecShared> Reader<E, V> {
     /// Receive the next unacknowledged item, waiting if necessary.
     ///
     /// This method is designed for use with `select!`. It will:
@@ -224,7 +223,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Reader<E, V> {
 ///     }
 /// }
 /// ```
-pub async fn init<E: Clock + Storage + Metrics, V: CodecShared>(
+pub async fn init<E: Context, V: CodecShared>(
     context: E,
     cfg: Config<V::Cfg>,
 ) -> Result<(Writer<E, V>, Reader<E, V>), Error> {
@@ -250,7 +249,7 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Spawner,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Clock, Metrics, Runner, Spawner,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
