@@ -121,10 +121,12 @@ fn pk_to_id(pk: &PublicKey, participants: &[PublicKey]) -> String {
     "unknown".to_string()
 }
 
-/// Formats a SHA256 digest as a short hex string for use as a quint `Block`.
+/// Formats a SHA256 digest as a full hex string for use as a quint `Block`.
+/// The full 32 bytes are kept so the encoder can recompute certifiability
+/// from the last byte (matching `Certifier::Sometimes` logic).
 fn format_block(digest: &Sha256Digest) -> String {
     let bytes: &[u8] = digest.as_ref();
-    bytes[..8].iter().map(|b| format!("{:02x}", b)).collect()
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Formats a vote using the quint constructor syntax from `types.qnt`.
