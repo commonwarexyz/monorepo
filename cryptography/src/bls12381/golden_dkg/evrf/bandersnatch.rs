@@ -169,6 +169,14 @@ impl arbitrary::Arbitrary<'_> for F {
 pub struct G(Projective<BandersnatchConfig>);
 
 impl G {
+    /// Map this point into the prime-order subgroup by multiplying by the cofactor (4).
+    pub fn clear_cofactor(&self) -> Self {
+        let mut p = self.0;
+        p.double_in_place();
+        p.double_in_place();
+        Self(p)
+    }
+
     fn to_bytes(&self) -> [u8; <Self as FixedSize>::SIZE] {
         let affine = self.0.into_affine();
         let mut bytes = [0u8; <Self as FixedSize>::SIZE];
