@@ -25,6 +25,7 @@ use crate::{
             grafting,
             proof::{OperationProof, RangeProof},
         },
+        operation::Operation as _,
         Error,
     },
     Persistable,
@@ -368,12 +369,36 @@ where
         self.flatten();
 
         let rewind_size = *size;
+        let current_size = *self.any.last_commit_loc + 1;
+        if rewind_size == current_size {
+            return Ok(());
+        }
+        if rewind_size == 0 || rewind_size > current_size {
+            return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
+        }
+
         let pruned_chunks = self.status.pruned_chunks();
         let pruned_bits = (pruned_chunks as u64)
             .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
             .ok_or_else(|| Error::DataCorrupted("pruned ops leaves overflow"))?;
         if rewind_size < pruned_bits {
             return Err(Error::Journal(JournalError::ItemPruned(rewind_size)));
+        }
+
+        // Ensure the target commit's logical range is fully representable with the current
+        // bitmap pruning boundary. Even if the ops log still retains older entries, rewinding
+        // to a commit with floor below `pruned_bits` would require bitmap chunks we've already
+        // discarded.
+        {
+            let reader = self.any.log.reader().await;
+            let rewind_last_loc = Location::new(rewind_size - 1);
+            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            let Some(rewind_floor) = rewind_last_op.has_floor() else {
+                return Err(Error::UnexpectedData(rewind_last_loc));
+            };
+            if *rewind_floor < pruned_bits {
+                return Err(Error::Journal(JournalError::ItemPruned(*rewind_floor)));
+            }
         }
 
         // Extract pinned nodes for the existing pruning boundary from the in-memory grafted MMR.

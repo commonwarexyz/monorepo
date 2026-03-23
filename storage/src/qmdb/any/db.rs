@@ -344,14 +344,12 @@ where
             }
         }
 
-        let new_active_keys = self.active_keys as isize + active_keys_delta;
-        debug_assert!(
-            new_active_keys >= 0,
-            "active_keys underflow while rewinding: base={}, delta={}",
-            self.active_keys,
-            active_keys_delta
-        );
-        self.active_keys = new_active_keys as usize;
+        self.active_keys = self
+            .active_keys
+            .checked_add_signed(active_keys_delta)
+            .ok_or(Error::DataCorrupted(
+                "active_keys underflow while rewinding",
+            ))?;
         self.last_commit_loc = Location::new(rewind_size - 1);
         self.inactivity_floor_loc = rewind_floor;
 

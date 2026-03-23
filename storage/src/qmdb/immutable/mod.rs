@@ -910,6 +910,7 @@ pub(super) mod test {
             let value1 = vec![11u8; 12];
             let value2 = vec![22u8; 16];
             let value3 = vec![33u8; 20];
+            let value1_new = vec![66u8; 12];
 
             let metadata_a = vec![44u8; 8];
             let first_range = commit_sets(
@@ -924,12 +925,23 @@ pub(super) mod test {
             assert_eq!(size_before, first_range.end);
 
             let metadata_b = vec![55u8; 8];
-            let second_range =
-                commit_sets(&mut db, [(key3, value3.clone())], Some(metadata_b.clone())).await;
+            let second_range = commit_sets(
+                &mut db,
+                [(key1, value1_new.clone()), (key3, value3.clone())],
+                Some(metadata_b.clone()),
+            )
+            .await;
             assert_eq!(second_range.start, size_before);
             assert_ne!(db.root(), root_before);
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_b));
             assert_eq!(db.get(&key3).await.unwrap(), Some(value3));
+            let key1_locs_before_rewind: Vec<_> = db.snapshot.get(&key1).copied().collect();
+            assert!(
+                key1_locs_before_rewind
+                    .iter()
+                    .any(|loc| *loc >= second_range.start && *loc < second_range.end),
+                "expected key1 to have a stale location in rewound range"
+            );
 
             db.rewind(size_before).await.unwrap();
             assert_eq!(db.root(), root_before);
@@ -939,6 +951,13 @@ pub(super) mod test {
             assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
             assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
             assert_eq!(db.get(&key3).await.unwrap(), None);
+            let key1_locs_after_rewind: Vec<_> = db.snapshot.get(&key1).copied().collect();
+            assert!(
+                !key1_locs_after_rewind
+                    .iter()
+                    .any(|loc| *loc >= second_range.start && *loc < second_range.end),
+                "rewind should remove stale key1 locations in rewound range"
+            );
 
             db.commit().await.unwrap();
             drop(db);
@@ -959,10 +978,8 @@ pub(super) mod test {
     pub fn test_immutable_db_rewind_pruned_target_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                log_items_per_section: NZU64!(1),
-                ..db_config("immutable-rewind-pruned", &context)
-            };
+            let mut cfg = db_config("immutable-rewind-pruned", &context);
+            cfg.log.items_per_section = NZU64!(1);
             let mut db: Db = Immutable::init(context.with_label("db"), cfg)
                 .await
                 .unwrap();

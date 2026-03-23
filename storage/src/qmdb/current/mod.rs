@@ -1313,6 +1313,86 @@ pub mod tests {
     }
 
     #[test_traced("INFO")]
+    fn test_current_rewind_recovery_pruned_repeated_updates() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 96;
+
+            let partition = "current-rewind-pruned-recovery";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            let key0 = key(0);
+            let mut history = Vec::new();
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(
+                    &mut db,
+                    [(key0, Some(val(20_000 + round)))],
+                    None,
+                )
+                .await;
+                history.push((
+                    db.bounds().await.end,
+                    db.inactivity_floor_loc(),
+                    db.root(),
+                    db.ops_root(),
+                    val(20_000 + round),
+                ));
+            }
+
+            // Keep most ops-log history, but force bitmap pruning so rewind uses pinned-node
+            // reconstruction (`pruned_chunks > 0` path).
+            db.prune(Location::new(1)).await.unwrap();
+            let pruned_bits = db.pruned_bits();
+            assert!(pruned_bits > 0, "expected bitmap pruning for rewind test");
+            let bounds = db.bounds().await;
+
+            let (target_size, target_root, target_ops_root, target_value) = history
+                .iter()
+                .enumerate()
+                .find_map(|(idx, (size, floor, root, ops_root, value))| {
+                    let removed_commits = history.len() - idx - 1;
+                    if removed_commits >= 3 && *size > bounds.start && *floor >= pruned_bits {
+                        Some((*size, root.clone(), ops_root.clone(), value.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected legal pruned rewind target with repeated updates; bounds={bounds:?}, pruned_bits={pruned_bits}, latest_floor={:?}, history={history:?}",
+                        db.inactivity_floor_loc()
+                    )
+                });
+
+            db.rewind(target_size).await.unwrap();
+            assert_eq!(db.root(), target_root);
+            assert_eq!(db.ops_root(), target_ops_root);
+            assert_eq!(db.bounds().await.end, target_size);
+            assert_eq!(db.get(&key0).await.unwrap(), Some(target_value));
+
+            db.commit().await.unwrap();
+            drop(db);
+
+            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen_pruned_recovery"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.root(), target_root);
+            assert_eq!(reopened.ops_root(), target_ops_root);
+            assert_eq!(reopened.bounds().await.end, target_size);
+            assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_value));
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_current_rewind_pruned_target_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1352,6 +1432,71 @@ pub mod tests {
             );
 
             let err = db.rewind(first_range.start).await.unwrap_err();
+            assert!(
+                matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+                "unexpected rewind error: {err:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_rewind_rejects_target_below_bitmap_floor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 96;
+
+            let partition = "current-rewind-bitmap-floor";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            let mut history = Vec::new();
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(
+                    &mut db,
+                    [(key(0), Some(val(10_000 + round)))],
+                    None,
+                )
+                .await;
+                history.push((db.bounds().await.end, db.inactivity_floor_loc()));
+            }
+            assert!(db.inactivity_floor_loc() > Location::new(64));
+
+            // Intentionally prune less than the inactivity floor: log retains older ops, but the
+            // bitmap still prunes to inactivity floor.
+            let prune_loc = Location::new(1);
+            db.prune(prune_loc).await.unwrap();
+            let pruned_bits = db.pruned_bits();
+            assert!(pruned_bits > 0);
+            let retained_start = db.bounds().await.start;
+
+            // Pick a historical commit that is still within retained log bounds but whose floor is
+            // below the bitmap pruning boundary.
+            let rewind_target = history
+                .iter()
+                .find_map(|(size, floor)| {
+                    if *size > *retained_start
+                        && *size >= pruned_bits
+                        && *floor >= *retained_start
+                        && *floor < pruned_bits
+                    {
+                        Some(*size)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected rewind target below bitmap boundary. retained_start={retained_start:?}, pruned_bits={pruned_bits}, latest_floor={:?}, history={history:?}",
+                        db.inactivity_floor_loc()
+                    )
+                });
+
+            let err = db.rewind(rewind_target).await.unwrap_err();
             assert!(
                 matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
                 "unexpected rewind error: {err:?}"

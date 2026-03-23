@@ -1174,6 +1174,8 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.with_label("db")).await;
+            let initial_root = db.root();
+            let initial_size = db.bounds().await.end;
 
             let value_a = vec![1u8; 12];
             let value_b = vec![2u8; 16];
@@ -1215,7 +1217,7 @@ mod test {
 
             db.commit().await.unwrap();
             drop(db);
-            let db = open_db(context.with_label("reopen")).await;
+            let mut db = open_db(context.with_label("reopen")).await;
             assert_eq!(db.root(), root_before);
             assert_eq!(db.bounds().await.end, size_before);
             assert_eq!(db.last_commit_loc(), commit_before);
@@ -1225,6 +1227,26 @@ mod test {
             assert!(matches!(
                 db.get(Location::new(4)).await,
                 Err(Error::LocationOutOfBounds(_, size)) if size == size_before
+            ));
+
+            db.rewind(initial_size).await.unwrap();
+            assert_eq!(db.root(), initial_root);
+            assert_eq!(db.bounds().await.end, initial_size);
+            assert_eq!(db.get_metadata().await.unwrap(), None);
+            assert!(matches!(
+                db.get(Location::new(1)).await,
+                Err(Error::LocationOutOfBounds(_, size)) if size == initial_size
+            ));
+
+            db.commit().await.unwrap();
+            drop(db);
+            let db = open_db(context.with_label("reopen_initial_boundary")).await;
+            assert_eq!(db.root(), initial_root);
+            assert_eq!(db.bounds().await.end, initial_size);
+            assert_eq!(db.get_metadata().await.unwrap(), None);
+            assert!(matches!(
+                db.get(Location::new(1)).await,
+                Err(Error::LocationOutOfBounds(_, size)) if size == initial_size
             ));
 
             db.destroy().await.unwrap();

@@ -450,6 +450,9 @@ pub(crate) mod test {
         let key0 = Sha256::hash(&0u64.to_be_bytes());
         let key1 = Sha256::hash(&1u64.to_be_bytes());
         let key2 = Sha256::hash(&2u64.to_be_bytes());
+        let initial_root = db.root();
+        let initial_size = db.size().await;
+        let initial_floor = db.inactivity_floor_loc().await;
 
         let value0_a = make_value(10);
         let value1_a = make_value(11);
@@ -489,6 +492,20 @@ pub(crate) mod test {
         assert_eq!(range_b.start, size_a);
         assert_ne!(db.root(), root_a);
 
+        let value0_c = make_value(30);
+        let metadata_c = make_value(31);
+        let finalized_c = db
+            .new_batch()
+            .write(key0, Some(value0_c))
+            .write(key2, None)
+            .merkleize(Some(metadata_c), &db)
+            .await
+            .unwrap()
+            .finalize();
+        db.apply_batch(finalized_c).await.unwrap();
+        db.commit().await.unwrap();
+
+        // Rewind across a tail where the same key (`key0`) was updated multiple times.
         db.rewind_to_size(size_a).await.unwrap();
         assert_eq!(db.root(), root_a);
         assert_eq!(db.size().await, size_a);
@@ -500,13 +517,34 @@ pub(crate) mod test {
 
         db.commit().await.unwrap();
         drop(db);
-        let db = reopen_db(context.with_label("reopen_after_rewind")).await;
+        let mut db = reopen_db(context.with_label("reopen_after_rewind")).await;
         assert_eq!(db.root(), root_a);
         assert_eq!(db.size().await, size_a);
         assert_eq!(db.inactivity_floor_loc().await, floor_a);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
         assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
+        assert_eq!(db.get(&key2).await.unwrap(), None);
+
+        // Rewind all the way to the initial commit boundary (`first_commit_loc + 1`).
+        db.rewind_to_size(initial_size).await.unwrap();
+        assert_eq!(db.root(), initial_root);
+        assert_eq!(db.size().await, initial_size);
+        assert_eq!(db.inactivity_floor_loc().await, initial_floor);
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+        assert_eq!(db.get(&key0).await.unwrap(), None);
+        assert_eq!(db.get(&key1).await.unwrap(), None);
+        assert_eq!(db.get(&key2).await.unwrap(), None);
+
+        db.commit().await.unwrap();
+        drop(db);
+        let db = reopen_db(context.with_label("reopen_initial_boundary")).await;
+        assert_eq!(db.root(), initial_root);
+        assert_eq!(db.size().await, initial_size);
+        assert_eq!(db.inactivity_floor_loc().await, initial_floor);
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+        assert_eq!(db.get(&key0).await.unwrap(), None);
+        assert_eq!(db.get(&key1).await.unwrap(), None);
         assert_eq!(db.get(&key2).await.unwrap(), None);
 
         db.destroy().await.unwrap();
@@ -1872,6 +1910,75 @@ pub(crate) mod test {
             );
 
             let err = db.rewind(first_range.start).await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
+                ),
+                "unexpected rewind error: {err:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Rewinding fails when the target commit's inactivity floor has been pruned, even if the
+    /// target commit location is still retained.
+    #[test_traced("INFO")]
+    fn test_any_rewind_rejects_target_with_pruned_floor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const KEYS: u64 = 64;
+
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariable =
+                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("rf", &ctx))
+                    .await
+                    .unwrap();
+
+            commit_writes(&mut db, (0..KEYS).map(|i| (key(i), Some(val(i)))), None).await;
+            commit_writes(
+                &mut db,
+                (0..KEYS).map(|i| (key(i), Some(val(1_000 + i)))),
+                None,
+            )
+            .await;
+
+            let rewind_target = db.size().await;
+            let target_floor = db.inactivity_floor_loc();
+            let prune_loc = Location::new(*target_floor + (KEYS / 2));
+            assert!(
+                rewind_target > *prune_loc,
+                "test setup expected target size > prune_loc; target={rewind_target:?}, floor={target_floor:?}"
+            );
+
+            let mut round = 0u64;
+            while db.inactivity_floor_loc() < prune_loc {
+                round += 1;
+                assert!(
+                    round <= 8,
+                    "failed to advance inactivity floor enough for floor-pruned rewind test"
+                );
+                commit_writes(
+                    &mut db,
+                    (0..KEYS).map(|i| (key(i), Some(val(10_000 + round * KEYS + i)))),
+                    None,
+                )
+                .await;
+            }
+
+            db.prune(prune_loc).await.unwrap();
+            let bounds = db.bounds().await;
+            assert!(
+                bounds.start > *target_floor,
+                "test setup expected pruned start beyond target floor; bounds={bounds:?}, target_floor={target_floor:?}"
+            );
+            assert!(
+                rewind_target > bounds.start,
+                "test setup expected target commit retained; target={rewind_target:?}, bounds={bounds:?}"
+            );
+
+            let err = db.rewind(rewind_target).await.unwrap_err();
             assert!(
                 matches!(
                     err,
