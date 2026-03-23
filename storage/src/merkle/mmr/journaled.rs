@@ -2101,13 +2101,15 @@ mod tests {
             let original_leaves = mmr.leaves();
             let original_root = mmr.root();
             let original_pruning_boundary = mmr.bounds().start;
+            let original_pruning_boundary_pos =
+                Position::try_from(original_pruning_boundary).unwrap();
 
             // Sync with boundaries that extend beyond existing data (partial overlap).
             let lower_bound_loc = original_pruning_boundary;
             let upper_bound_loc = original_leaves + 6; // Extend beyond existing data
 
             let mut expected_nodes = BTreeMap::new();
-            for pos in *original_pruning_boundary..*original_size {
+            for pos in *original_pruning_boundary_pos..*original_size {
                 let pos = Position::new(pos);
                 expected_nodes.insert(pos, mmr.get_node(pos).await.unwrap().unwrap());
             }
@@ -2133,7 +2135,7 @@ mod tests {
             assert_eq!(sync_mmr.root(), original_root);
 
             // Check that existing nodes are preserved in the overlapping range.
-            for pos in *original_pruning_boundary..*original_size {
+            for pos in *original_pruning_boundary_pos..*original_size {
                 let pos = Position::new(pos);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
