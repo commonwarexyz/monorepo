@@ -11,7 +11,10 @@ use crate::{
         Error as JournalError,
     },
     mmr::{iterator::nodes_to_pin, Location, Proof},
-    qmdb::{build_snapshot_from_log, operation::Operation as OperationTrait, Error},
+    qmdb::{
+        build_snapshot_from_log, delete_known_loc, operation::Operation as OperationTrait,
+        update_known_loc, Error,
+    },
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
@@ -21,6 +24,55 @@ use core::num::NonZeroU64;
 
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<E, C, H> = authenticated::Journal<E, C, H>;
+
+/// Snapshot mutation needed to undo one operation while rewinding.
+enum SnapshotUndo<K> {
+    Replace {
+        key: K,
+        old_loc: Location,
+        new_loc: Location,
+    },
+    Remove {
+        key: K,
+        old_loc: Location,
+    },
+    Insert {
+        key: K,
+        new_loc: Location,
+    },
+}
+
+/// Find the state of `key` immediately before `before_loc`.
+///
+/// Returns:
+/// - `Some(loc)` if the key's prior state was an active update at `loc`
+/// - `None` if the key's prior state was deleted or absent
+async fn find_previous_update_loc<U, C>(
+    reader: &C,
+    lower_bound: Location,
+    before_loc: Location,
+    key: &U::Key,
+) -> Result<Option<Location>, Error>
+where
+    U: Update,
+    C: Reader<Item = Operation<U>>,
+{
+    let mut loc = *before_loc;
+    while loc > *lower_bound {
+        loc -= 1;
+        match reader.read(loc).await? {
+            Operation::Update(update) if update.key() == key => {
+                return Ok(Some(Location::new(loc)));
+            }
+            Operation::Delete(deleted_key) if &deleted_key == key => {
+                return Ok(None);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(None)
+}
 
 /// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:
@@ -190,6 +242,120 @@ where
     ) -> Result<(Proof<H::Digest>, Vec<Operation<U>>), Error> {
         self.historical_proof(self.log.size().await, loc, max_ops)
             .await
+    }
+
+    /// Rewind the database to `size` operations, where `size` is the location of the next append.
+    ///
+    /// This rewinds both the authenticated log and the in-memory snapshot, then restores metadata
+    /// (`last_commit_loc`, `inactivity_floor_loc`, `active_keys`) for the new tip commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when:
+    /// - `size` is not a valid rewind target
+    /// - the target commit or required history has been pruned
+    /// - `size - 1` is not a commit operation
+    pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
+        let rewind_size = *size;
+        let current_size = *self.last_commit_loc + 1;
+
+        if rewind_size == current_size {
+            return Ok(());
+        }
+        if rewind_size == 0 || rewind_size > current_size {
+            return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
+        }
+
+        // Read everything needed for rewind before mutating storage.
+        let (rewind_floor, undos, active_keys_delta) = {
+            let reader = self.log.reader().await;
+            let bounds = reader.bounds();
+            if rewind_size < bounds.start {
+                return Err(Error::Journal(JournalError::ItemPruned(rewind_size)));
+            }
+
+            let rewind_last_loc = Location::new(rewind_size - 1);
+            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            let Some(rewind_floor) = rewind_last_op.has_floor() else {
+                return Err(Error::UnexpectedData(rewind_last_loc));
+            };
+            if *rewind_floor < bounds.start {
+                return Err(Error::Journal(JournalError::ItemPruned(*rewind_floor)));
+            }
+
+            let mut removed_ops = Vec::with_capacity((current_size - rewind_size) as usize);
+            for loc in rewind_size..current_size {
+                removed_ops.push((Location::new(loc), reader.read(loc).await?));
+            }
+
+            let mut undos = Vec::with_capacity(removed_ops.len());
+            let mut active_keys_delta = 0isize;
+            for (loc, op) in removed_ops.into_iter().rev() {
+                match op {
+                    Operation::CommitFloor(_, _) => {}
+                    Operation::Update(update) => {
+                        let key = update.key().clone();
+                        let previous_loc =
+                            find_previous_update_loc::<U, _>(&reader, rewind_floor, loc, &key)
+                                .await?;
+                        if let Some(previous_loc) = previous_loc {
+                            undos.push(SnapshotUndo::Replace {
+                                key,
+                                old_loc: loc,
+                                new_loc: previous_loc,
+                            });
+                            continue;
+                        }
+
+                        active_keys_delta -= 1;
+                        undos.push(SnapshotUndo::Remove { key, old_loc: loc });
+                    }
+                    Operation::Delete(key) => {
+                        let previous_loc =
+                            find_previous_update_loc::<U, _>(&reader, rewind_floor, loc, &key)
+                                .await?;
+                        if let Some(previous_loc) = previous_loc {
+                            active_keys_delta += 1;
+                            undos.push(SnapshotUndo::Insert {
+                                key,
+                                new_loc: previous_loc,
+                            });
+                        }
+                    }
+                }
+            }
+
+            (rewind_floor, undos, active_keys_delta)
+        };
+
+        self.log.rewind(rewind_size).await?;
+
+        for undo in undos {
+            match undo {
+                SnapshotUndo::Replace {
+                    key,
+                    old_loc,
+                    new_loc,
+                } => update_known_loc(&mut self.snapshot, &key, old_loc, new_loc),
+                SnapshotUndo::Remove { key, old_loc } => {
+                    delete_known_loc(&mut self.snapshot, &key, old_loc)
+                }
+                SnapshotUndo::Insert { key, new_loc } => self.snapshot.insert(&key, new_loc),
+            }
+        }
+
+        let new_active_keys = self.active_keys as isize + active_keys_delta;
+        debug_assert!(
+            new_active_keys >= 0,
+            "active_keys underflow while rewinding: base={}, delta={}",
+            self.active_keys,
+            active_keys_delta
+        );
+        self.active_keys = new_active_keys as usize;
+        self.last_commit_loc = Location::new(rewind_size - 1);
+        self.inactivity_floor_loc = rewind_floor;
+
+        Ok(())
     }
 }
 
