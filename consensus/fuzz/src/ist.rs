@@ -243,6 +243,24 @@ fn last_state_from_trace(trace: &Value) -> Result<(Value, Value), Error> {
     Ok((state.clone(), normalize_state(state)))
 }
 
+/// Extract the last two states from an ITF trace.
+///
+/// Returns (prev_normalized, last_normalized). Both states come from
+/// the same Z3 model, ensuring consistency for diffing.
+fn last_two_states_from_trace(trace: &Value) -> Result<(Value, Value), Error> {
+    let states = trace["states"]
+        .as_array()
+        .ok_or(Error::Setup("trace has no states array".into()))?;
+    if states.len() < 2 {
+        return Err(Error::Setup(
+            "trace needs at least 2 states for diffing".into(),
+        ));
+    }
+    let prev = normalize_state(&states[states.len() - 2]);
+    let last = normalize_state(&states[states.len() - 1]);
+    Ok((prev, last))
+}
+
 /// Gets the TLA+ source from config (pre-compiled file or quint compile).
 fn get_tla_source(cfg: &IstConfig) -> Result<String, Error> {
     let tla_source = if let Some(tla_path) = &cfg.tla_path {
@@ -370,7 +388,6 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
     // --- Inside runtime: interactive loop ---
     let executor = deterministic::Runner::timed(Duration::from_secs(600));
     let max_steps = cfg.max_steps;
-    let compact_every = cfg.compact_every;
 
     let report: Result<IstReport, Error> = executor.start(|mut context| async move {
         // Set up engines
@@ -467,8 +484,6 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
             (0..session.next_transitions.len()).collect();
 
         let mut block_map: HashMap<String, String> = HashMap::new();
-        let mut prev_votes = collect_store_vote(&init_state);
-        let mut prev_certs = collect_store_certificate(&init_state);
         let mut parent_tracker = ParentTracker::default();
 
         for step in 0..max_steps {
@@ -488,39 +503,34 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
                         let step_result = client.next_step(&session.id)?;
                         current_snapshot = step_result.snapshot_id;
 
-                        // 2. Query the concrete state
+                        // 2. Query the concrete state.
+                        // Extract both previous and current states from the
+                        // SAME trace query. This guarantees consistency
+                        // (both come from the same Z3 model), avoiding
+                        // re-concretization issues across queries.
                         let query_result =
                             client.query(&session.id, &["TRACE"], None)?;
                         let trace_val = query_result
                             .trace
                             .as_ref()
                             .ok_or(Error::Setup("no trace from query".into()))?;
-                        let (raw_state, new_state) = last_state_from_trace(trace_val)?;
+                        let (prev_state, new_state) =
+                            last_two_states_from_trace(trace_val)?;
 
                         let action_name = new_state
                             .get("lastAction")
                             .and_then(|v| v.as_str())
                             .unwrap_or("?");
 
-                        // Lock the full state via assume_state.
-                        // Unlike TFTP where lastAction is a rich variant
-                        // that pins the entire transition, our lastAction
-                        // is just a string label (e.g. "proposer"). Locking
-                        // only lastAction lets Z3 re-concretize store_vote,
-                        // store_certificate, etc. on subsequent queries.
-                        // Lock all variables to prevent this.
-                        if let Some(obj) = raw_state.as_object() {
-                            let equalities = Value::Object(obj.clone());
-                            let assume = client
-                                .assume_state(&session.id, &equalities, true)?;
-                            if assume.status == TransitionStatus::Enabled {
-                                current_snapshot = assume.snapshot_id;
-                            }
-                        }
-
-                        // 3. Diff to extract new messages
+                        // 3. Diff to extract new messages.
+                        // Both states come from the same trace query, so
+                        // the diff is consistent within this step.
+                        let prev_votes = collect_store_vote(&prev_state);
                         let new_votes = collect_store_vote(&new_state);
-                        let new_certs = collect_store_certificate(&new_state);
+                        let prev_certs =
+                            collect_store_certificate(&prev_state);
+                        let new_certs =
+                            collect_store_certificate(&new_state);
 
                         let vote_entries =
                             diff_store_vote(&prev_votes, &new_votes, &mut block_map);
@@ -721,8 +731,10 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
                             break;
                         }
 
-                        prev_votes = new_votes;
-                        prev_certs = new_certs;
+                        // Compact solver state to prevent Z3
+                        // re-concretization across steps.
+                        current_snapshot =
+                            client.compact(&session.id, current_snapshot)?;
                         steps_completed = step + 1;
                         found_enabled = true;
                         break;
@@ -751,12 +763,6 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
                 break;
             }
 
-            // Periodic compaction
-            if compact_every > 0 && (step + 1) % compact_every == 0 {
-                println!("step {step}: compacting solver state...");
-                current_snapshot =
-                    client.compact(&session.id, current_snapshot)?;
-            }
         }
 
         // Cleanup
