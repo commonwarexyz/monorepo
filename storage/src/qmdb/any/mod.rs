@@ -454,6 +454,23 @@ pub(crate) mod test {
         let initial_size = db.size().await;
         let initial_floor = db.inactivity_floor_loc().await;
 
+        // Empty-batch rewind on an otherwise empty DB should apply no snapshot undos.
+        let empty_finalized = db
+            .new_batch()
+            .merkleize(None, &db)
+            .await
+            .unwrap()
+            .finalize();
+        let empty_range = db.apply_batch(empty_finalized).await.unwrap();
+        db.commit().await.unwrap();
+        assert_eq!(empty_range.start, initial_size);
+        assert_eq!(db.size().await, empty_range.end);
+        db.rewind_to_size(initial_size).await.unwrap();
+        assert_eq!(db.root(), initial_root);
+        assert_eq!(db.size().await, initial_size);
+        assert_eq!(db.inactivity_floor_loc().await, initial_floor);
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+
         let value0_a = make_value(10);
         let value1_a = make_value(11);
         let metadata_a = make_value(12);
@@ -493,10 +510,12 @@ pub(crate) mod test {
         assert_ne!(db.root(), root_a);
 
         let value0_c = make_value(30);
-        let metadata_c = make_value(31);
+        let value1_c = make_value(31);
+        let metadata_c = make_value(32);
         let finalized_c = db
             .new_batch()
             .write(key0, Some(value0_c))
+            .write(key1, Some(value1_c))
             .write(key2, None)
             .merkleize(Some(metadata_c), &db)
             .await
@@ -505,7 +524,9 @@ pub(crate) mod test {
         db.apply_batch(finalized_c).await.unwrap();
         db.commit().await.unwrap();
 
-        // Rewind across a tail where the same key (`key0`) was updated multiple times.
+        // Rewind across a tail where:
+        // - the same key (`key0`) was updated multiple times
+        // - `key1` was deleted then recreated (exercises net-zero active_keys_delta path)
         db.rewind_to_size(size_a).await.unwrap();
         assert_eq!(db.root(), root_a);
         assert_eq!(db.size().await, size_a);
@@ -525,6 +546,31 @@ pub(crate) mod test {
         assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
         assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
         assert_eq!(db.get(&key2).await.unwrap(), None);
+
+        // Fresh writes from the rewound tip should produce a correct new chain and persist
+        // across reopen.
+        let value2_d = make_value(40);
+        let metadata_d = make_value(41);
+        let finalized_d = db
+            .new_batch()
+            .write(key2, Some(value2_d.clone()))
+            .merkleize(Some(metadata_d.clone()), &db)
+            .await
+            .unwrap()
+            .finalize();
+        db.apply_batch(finalized_d).await.unwrap();
+        db.commit().await.unwrap();
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_d.clone()));
+        assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
+        assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
+        assert_eq!(db.get(&key2).await.unwrap(), Some(value2_d.clone()));
+
+        drop(db);
+        let mut db = reopen_db(context.with_label("reopen_after_rewind_new_writes")).await;
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_d));
+        assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
+        assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
+        assert_eq!(db.get(&key2).await.unwrap(), Some(value2_d));
 
         // Rewind all the way to the initial commit boundary (`first_commit_loc + 1`).
         db.rewind_to_size(initial_size).await.unwrap();

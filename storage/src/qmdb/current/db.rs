@@ -365,6 +365,13 @@ where
     ///   underlying Any inactivity-floor boundary and bitmap pruning boundary)
     /// - `size - 1` is not a commit operation
     /// - `size` is below the bitmap pruning boundary
+    ///
+    /// Any error from this method is fatal for this handle. Rewind may mutate state in the
+    /// underlying Any database before this Current overlay finishes rebuilding. Callers must drop
+    /// this database handle after any `Err` from `rewind` and reopen from storage.
+    ///
+    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
+    /// [`Db::sync`].
     pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
         self.flatten();
 
@@ -403,7 +410,7 @@ where
 
         // Extract pinned nodes for the existing pruning boundary from the in-memory grafted MMR.
         let pinned_nodes = if pruned_chunks > 0 {
-            let mmr_size = Position::try_from(Location::new(pruned_chunks as u64))?;
+            let mmr_size = Location::new(pruned_chunks as u64);
             let mut pinned_nodes = Vec::new();
             for pos in nodes_to_pin(mmr_size) {
                 let digest = self
@@ -417,7 +424,8 @@ where
             Vec::new()
         };
 
-        // Rewind underlying ops log + Any state.
+        // Rewind underlying ops log + Any state. If a later overlay rebuild step fails, this
+        // handle may be internally diverged and must be dropped by the caller.
         self.any.rewind(size).await?;
 
         // Rebuild activity bitmap at the new size from the rewound Any state.

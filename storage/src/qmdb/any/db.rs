@@ -256,6 +256,13 @@ where
     /// - the target's required logical range is not fully retained (for example, the target
     ///   inactivity floor is pruned)
     /// - `size - 1` is not a commit operation
+    ///
+    /// Any error from this method is fatal for this handle. Rewind may mutate journal state before
+    /// all in-memory structures are rebuilt. Callers must drop this database handle after any `Err`
+    /// from `rewind` and reopen from storage.
+    ///
+    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
+    /// [`Db::sync`].
     pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
@@ -328,6 +335,9 @@ where
             (rewind_floor, undos, active_keys_delta)
         };
 
+        // Journal rewind happens before in-memory undo application. If any later step fails, this
+        // handle may be internally diverged and must be dropped by the caller. This step is not
+        // restart-stable until a later commit/sync boundary.
         self.log.rewind(rewind_size).await?;
 
         for undo in undos {

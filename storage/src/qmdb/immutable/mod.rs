@@ -96,6 +96,11 @@ pub struct Config<T: Translator, C> {
 
 /// An authenticated database that only supports adding new keyed values (no updates or
 /// deletions), where values can have varying sizes.
+///
+/// # Invariant
+///
+/// A key must be set at most once across the database history. Writing the same key more than
+/// once is undefined behavior.
 pub struct Immutable<
     E: RStorage + Clock + Metrics,
     K: Array,
@@ -241,6 +246,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     /// - the target's required logical range is not fully retained (for immutable, this means the
     ///   oldest retained location is already beyond the rewind boundary)
     /// - `size - 1` is not a commit operation
+    ///
+    /// Any error from this method is fatal for this handle. Rewind may mutate journal state
+    /// before this method finishes rebuilding in-memory rewind state. Callers must drop this
+    /// database handle after any `Err` from `rewind` and reopen from storage.
+    ///
+    /// A successful rewind is not restart-stable until a subsequent [`Immutable::commit`] or
+    /// [`Immutable::sync`].
     pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
@@ -267,18 +279,23 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
                 return Err(Error::UnexpectedData(rewind_last_loc));
             }
 
+            // Immutable operations do not have an inactivity floor (`Operation::has_floor()`
+            // is always `None` here). Rewind validity is determined by retained-location bounds
+            // and commit-target checks. Duplicate keys are unsupported and undefined behavior.
             let mut rewound_sets = Vec::new();
             for loc in rewind_size..current_size {
                 if let Operation::Set(key, _) = reader.read(loc).await? {
-                    rewound_sets.push((key, Location::new(loc)));
+                    rewound_sets.push((Location::new(loc), key));
                 }
             }
 
             (rewind_last_loc, rewound_sets)
         };
 
+        // Journal rewind happens before in-memory snapshot updates. If a later step fails, this
+        // handle may be internally diverged and must be dropped by the caller.
         self.journal.rewind(rewind_size).await?;
-        for (key, loc) in rewound_sets {
+        for (loc, key) in rewound_sets {
             delete_known_loc(&mut self.snapshot, &key, loc);
         }
         self.last_commit_loc = rewind_last_loc;
@@ -347,18 +364,13 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         let last_commit_loc = {
             // Get the start of the log.
             let reader = journal.reader().await;
-            let start_loc = Location::new(reader.bounds().start);
+            let bounds = reader.bounds();
+            let start_loc = Location::new(bounds.start);
 
             // Build snapshot from the log.
             build_snapshot_from_log(start_loc, &reader, &mut snapshot, |_, _| {}).await?;
 
-            Location::new(
-                reader
-                    .bounds()
-                    .end
-                    .checked_sub(1)
-                    .expect("commit should exist"),
-            )
+            Location::new(bounds.end.checked_sub(1).expect("commit should exist"))
         };
 
         Ok(Self {
@@ -420,12 +432,10 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         self.journal.apply_batch(batch.journal_finalized).await?;
 
         // Apply snapshot diffs.
-        let bounds = self.journal.reader().await.bounds();
         for diff in batch.snapshot_diffs {
             match diff {
                 batch::SnapshotDiff::Insert { key, new_loc } => {
-                    self.snapshot
-                        .insert_and_prune(&key, new_loc, |v| *v < bounds.start);
+                    self.snapshot.insert(&key, new_loc);
                 }
             }
         }
@@ -906,11 +916,12 @@ pub(super) mod test {
             let key1 = Sha256::hash(&1u64.to_be_bytes());
             let key2 = Sha256::hash(&2u64.to_be_bytes());
             let key3 = Sha256::hash(&3u64.to_be_bytes());
+            let key4 = Sha256::hash(&4u64.to_be_bytes());
 
             let value1 = vec![11u8; 12];
             let value2 = vec![22u8; 16];
             let value3 = vec![33u8; 20];
-            let value1_new = vec![66u8; 12];
+            let value4 = vec![66u8; 12];
 
             let metadata_a = vec![44u8; 8];
             let first_range = commit_sets(
@@ -927,7 +938,7 @@ pub(super) mod test {
             let metadata_b = vec![55u8; 8];
             let second_range = commit_sets(
                 &mut db,
-                [(key1, value1_new.clone()), (key3, value3.clone())],
+                [(key3, value3.clone()), (key4, value4.clone())],
                 Some(metadata_b.clone()),
             )
             .await;
@@ -935,13 +946,7 @@ pub(super) mod test {
             assert_ne!(db.root(), root_before);
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_b));
             assert_eq!(db.get(&key3).await.unwrap(), Some(value3));
-            let key1_locs_before_rewind: Vec<_> = db.snapshot.get(&key1).copied().collect();
-            assert!(
-                key1_locs_before_rewind
-                    .iter()
-                    .any(|loc| *loc >= second_range.start && *loc < second_range.end),
-                "expected key1 to have a stale location in rewound range"
-            );
+            assert_eq!(db.get(&key4).await.unwrap(), Some(value4));
 
             db.rewind(size_before).await.unwrap();
             assert_eq!(db.root(), root_before);
@@ -951,13 +956,7 @@ pub(super) mod test {
             assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
             assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
             assert_eq!(db.get(&key3).await.unwrap(), None);
-            let key1_locs_after_rewind: Vec<_> = db.snapshot.get(&key1).copied().collect();
-            assert!(
-                !key1_locs_after_rewind
-                    .iter()
-                    .any(|loc| *loc >= second_range.start && *loc < second_range.end),
-                "rewind should remove stale key1 locations in rewound range"
-            );
+            assert_eq!(db.get(&key4).await.unwrap(), None);
 
             db.commit().await.unwrap();
             drop(db);
@@ -969,6 +968,7 @@ pub(super) mod test {
             assert_eq!(db.get(&key1).await.unwrap(), Some(vec![11u8; 12]));
             assert_eq!(db.get(&key2).await.unwrap(), Some(vec![22u8; 16]));
             assert_eq!(db.get(&key3).await.unwrap(), None);
+            assert_eq!(db.get(&key4).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
