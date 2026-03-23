@@ -1398,6 +1398,61 @@ module replica {
         no_nullification_in_finalized_view
     }
 
+    // A correct node's notarization for (view, block) implies each signer
+    // actually sent a notarize vote for (view, block).
+    val notarization_requires_sent_votes = sent_certificate
+        .filter(cert => is_notarization_cert(cert) and cert_ghost_sender(cert).in(CORRECT))
+        .forall(cert => {
+            val v = cert_view(cert)
+            val b = cert_block(cert)
+            cert_signatures(cert).forall(sig =>
+                sent_vote.exists(vote => and {
+                    is_notarize(vote),
+                    vote_view(vote) == v,
+                    vote_block(vote) == b,
+                    vote_sig(vote) == sig,
+                })
+            )
+        })
+
+    // A correct node's nullification for (view) implies each signer
+    // actually sent a nullify vote for (view).
+    val nullification_requires_sent_votes = sent_certificate
+        .filter(cert => is_nullification_cert(cert) and cert_ghost_sender(cert).in(CORRECT))
+        .forall(cert => {
+            val v = cert_view(cert)
+            cert_signatures(cert).forall(sig =>
+                sent_vote.exists(vote => and {
+                    is_nullify(vote),
+                    vote_view(vote) == v,
+                    vote_sig(vote) == sig,
+                })
+            )
+        })
+
+    // A correct node's finalization for (view, block) implies each signer
+    // actually sent a finalize vote for (view, block).
+    val finalization_requires_sent_votes = sent_certificate
+        .filter(cert => is_finalization_cert(cert) and cert_ghost_sender(cert).in(CORRECT))
+        .forall(cert => {
+            val v = cert_view(cert)
+            val b = cert_block(cert)
+            cert_signatures(cert).forall(sig =>
+                sent_vote.exists(vote => and {
+                    is_finalize(vote),
+                    vote_view(vote) == v,
+                    vote_block(vote) == b,
+                    vote_sig(vote) == sig,
+                })
+            )
+        })
+
+    val certificates_require_sent_votes = and {
+        notarization_requires_sent_votes,
+        nullification_requires_sent_votes,
+        finalization_requires_sent_votes,
+    }
+
     val all_invariants = all {
         no_proposal_equivocation,
         agreement,
@@ -1413,6 +1468,7 @@ module replica {
         finalized_blocks_have_unique_parent,
         finalized_certificates_are_committed,
         committed_blocks_no_duplicates,
+        certificates_require_sent_votes,
     }
 
     val safe = all_invariants

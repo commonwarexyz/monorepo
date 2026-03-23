@@ -34,6 +34,8 @@ module tests {
         )
             .then(inject_proposal(invalid_proposal))
             .then(on_proposal("n0", invalid_proposal))
+            .then(on_proposal("n1", invalid_proposal))
+            .then(on_proposal("n2", invalid_proposal))
             .then(all {
                 assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_nullify(v))),
                 assert(replica_state.get("n0").nullified == true),
@@ -52,12 +54,35 @@ module tests {
     }
 
     run finalizationCertificateAdvancesViewTest = {
-        val cert = finalization(FIRST_VIEW, "val_b0", Set("n0", "n1", "n2"), "n2")
+        val proposal = {
+            block: "val_b0",
+            view: FIRST_VIEW,
+            view_parent: GENESIS_VIEW,
+            block_parent: GENESIS_BLOCK,
+            sig: sig_of("n0")
+        }
+        // Cert assembled by n0 from finalize votes of n0, n1, and n3 (byzantine).
+        val cert = finalization(FIRST_VIEW, "val_b0", Set("n0", "n1", "n3"), "n0")
 
         initWithLeaderAndCertifyTimeout(
             Map(0 -> "n2", 1 -> "n3", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
+            .then(inject_proposal(proposal))
+            .then(on_proposal("n0", proposal))
+            .then(on_proposal("n1", proposal))
+            .then(on_proposal("n2", proposal))
+            // n0 sees notarize quorum -> notarization, certifies, sends finalize
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n2"))
+            // n1 sees notarize quorum -> notarization, certifies, sends finalize
+            .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, "n2"))
+            // n3 (byzantine) also sent a finalize vote
+            .then(inject_vote(finalize(FIRST_VIEW, "n3", "val_b0")))
+            // n2 receives finalization cert from network (has not seen notarize quorum)
             .then(on_certificate("n2", cert))
             .then(all {
                 assert(store_certificate.get("n2").exists(c => cert_kind(c) == FinalizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b0"))),

@@ -22,10 +22,23 @@ module tests {
     run notarizationCertificateTriggersFinalizeTest = {
         val cert = notarization(FIRST_VIEW, "val_b1", Set("n0", "n1", "n2"), "n0")
 
+        val proposal = {
+            block: "val_b1",
+            view: FIRST_VIEW,
+            view_parent: GENESIS_VIEW,
+            block_parent: GENESIS_BLOCK,
+            sig: sig_of("n4")
+        }
+
         initWithLeaderAndCertifyTimeout(
             Map(0 -> "n2", 1 -> "n3", 2 -> "n4", 3 -> "n0", 4 -> "n1", 5 -> "n2", 6 -> "n3"),
             CERTIFY_ALL_TRUE
         )
+            .then(inject_proposal(proposal))
+            .then(on_proposal("n0", proposal))
+            .then(on_proposal("n1", proposal))
+            .then(on_proposal("n2", proposal))
+            .then(on_proposal("n3", proposal))
             .then(on_certificate("n3", cert))
             .then(all {
                 assert(store_certificate.get("n3").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b1"))),
