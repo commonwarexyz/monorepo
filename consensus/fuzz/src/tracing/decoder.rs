@@ -48,7 +48,7 @@ impl From<serde_json::Error> for DecodeError {
 /// Looks up a state variable by suffix in an ITF state object.
 /// ITF variables may be qualified (e.g. `itf_main::r::store_vote`),
 /// so we match by the trailing `::suffix` or exact name.
-fn get_var<'a>(state: &'a Value, suffix: &str) -> &'a Value {
+pub fn get_var<'a>(state: &'a Value, suffix: &str) -> &'a Value {
     if let Value::Object(obj) = state {
         // Try exact match first
         if let Some(v) = obj.get(suffix) {
@@ -66,7 +66,7 @@ fn get_var<'a>(state: &'a Value, suffix: &str) -> &'a Value {
 }
 
 /// Parses an ITF-encoded integer (JSON number or `{"#bigint": "N"}`).
-fn parse_int(v: &Value) -> u64 {
+pub fn parse_int(v: &Value) -> u64 {
     match v {
         Value::Number(n) => n.as_u64().unwrap_or(0),
         Value::Object(obj) => {
@@ -81,7 +81,7 @@ fn parse_int(v: &Value) -> u64 {
 }
 
 /// Parses an ITF-encoded set (`{"#set": [...]}`).
-fn parse_set(v: &Value) -> Vec<&Value> {
+pub fn parse_set(v: &Value) -> Vec<&Value> {
     match v {
         Value::Object(obj) => {
             if let Some(arr) = obj.get("#set").and_then(|v| v.as_array()) {
@@ -95,7 +95,7 @@ fn parse_set(v: &Value) -> Vec<&Value> {
 }
 
 /// Parses an ITF-encoded map (`{"#map": [[k, v], ...]}`).
-fn parse_map(v: &Value) -> Vec<(&Value, &Value)> {
+pub fn parse_map(v: &Value) -> Vec<(&Value, &Value)> {
     match v {
         Value::Object(obj) => {
             if let Some(arr) = obj.get("#map").and_then(|v| v.as_array()) {
@@ -119,7 +119,7 @@ fn parse_map(v: &Value) -> Vec<(&Value, &Value)> {
 
 /// Converts a Quint block name (e.g. "val_b0") to a deterministic hex digest
 /// (16 chars = 8 bytes). Uses SHA-1 for determinism.
-fn block_to_hex(name: &str, map: &mut HashMap<String, String>) -> String {
+pub fn block_to_hex(name: &str, map: &mut HashMap<String, String>) -> String {
     if let Some(hex) = map.get(name) {
         return hex.clone();
     }
@@ -131,7 +131,7 @@ fn block_to_hex(name: &str, map: &mut HashMap<String, String>) -> String {
 }
 
 /// Extracts the leader map from an ITF state.
-fn extract_leader_map(state: &Value) -> BTreeMap<u64, String> {
+pub fn extract_leader_map(state: &Value) -> BTreeMap<u64, String> {
     let mut map = BTreeMap::new();
     for (k, v) in parse_map(get_var(state, "leader")) {
         let view = parse_int(k);
@@ -144,7 +144,7 @@ fn extract_leader_map(state: &Value) -> BTreeMap<u64, String> {
 
 /// Computes the epoch from a round-robin leader map.
 /// Returns an error if the map is not compatible with round-robin.
-fn compute_epoch(
+pub fn compute_epoch(
     leader_map: &BTreeMap<u64, String>,
     n: usize,
 ) -> Result<u64, DecodeError> {
@@ -178,7 +178,7 @@ fn compute_epoch(
 }
 
 /// Parses a Quint Vote variant into a [`TracedVote`].
-fn parse_itf_vote(
+pub fn parse_itf_vote(
     v: &Value,
     block_map: &mut HashMap<String, String>,
 ) -> Option<TracedVote> {
@@ -209,7 +209,7 @@ fn parse_itf_vote(
 }
 
 /// Parses a Quint Certificate variant into a [`TracedCert`].
-fn parse_itf_cert(
+pub fn parse_itf_cert(
     v: &Value,
     block_map: &mut HashMap<String, String>,
 ) -> Option<TracedCert> {
@@ -284,7 +284,7 @@ fn cert_view(cert: &TracedCert) -> u64 {
 }
 
 /// Collects stored votes for each node from `store_vote` in a state.
-fn collect_store_vote(state: &Value) -> HashMap<String, Vec<Value>> {
+pub fn collect_store_vote(state: &Value) -> HashMap<String, Vec<Value>> {
     let mut result = HashMap::new();
     for (k, v) in parse_map(get_var(state, "store_vote")) {
         if let Some(node) = k.as_str() {
@@ -296,7 +296,7 @@ fn collect_store_vote(state: &Value) -> HashMap<String, Vec<Value>> {
 }
 
 /// Collects stored certificates for each node from `store_certificate` in a state.
-fn collect_store_certificate(state: &Value) -> HashMap<String, Vec<Value>> {
+pub fn collect_store_certificate(state: &Value) -> HashMap<String, Vec<Value>> {
     let mut result = HashMap::new();
     for (k, v) in parse_map(get_var(state, "store_certificate")) {
         if let Some(node) = k.as_str() {
@@ -309,7 +309,7 @@ fn collect_store_certificate(state: &Value) -> HashMap<String, Vec<Value>> {
 
 /// Finds new votes delivered between two consecutive states.
 /// Returns `(receiver, sender, vote)` triples.
-fn diff_store_vote(
+pub fn diff_store_vote(
     prev_store: &HashMap<String, Vec<Value>>,
     next_store: &HashMap<String, Vec<Value>>,
     block_map: &mut HashMap<String, String>,
@@ -338,7 +338,7 @@ fn diff_store_vote(
 
 /// Finds new certificates delivered between two consecutive states.
 /// Returns `(receiver, sender, cert)` triples.
-fn diff_store_certificate(
+pub fn diff_store_certificate(
     prev_store: &HashMap<String, Vec<Value>>,
     next_store: &HashMap<String, Vec<Value>>,
     block_map: &mut HashMap<String, String>,
@@ -366,7 +366,7 @@ fn diff_store_certificate(
 }
 
 /// Collects `sent_vote` (global set of all sent votes) from an ITF state.
-fn collect_sent_vote(state: &Value) -> Vec<Value> {
+pub fn collect_sent_vote(state: &Value) -> Vec<Value> {
     parse_set(get_var(state, "sent_vote"))
         .into_iter()
         .cloned()
@@ -379,6 +379,7 @@ fn collect_sent_vote(state: &Value) -> Vec<Value> {
 /// include self-delivery). `sent_vote` is the global set of all sent votes.
 /// We union in the node's own sent votes so the result always includes self,
 /// matching the Rust Reporter which always records self-constructed votes.
+#[allow(clippy::type_complexity)]
 fn extract_vote_signers(
     store_vote_map: &HashMap<String, Vec<Value>>,
     sent_votes: &[Value],
@@ -441,7 +442,7 @@ fn insert_vote_signer(
 }
 
 /// Extracts expected observable state from the final ITF state.
-fn extract_expected_state(
+pub fn extract_expected_state(
     state: &Value,
     correct_nodes: &[String],
     block_map: &HashMap<String, String>,
@@ -543,7 +544,7 @@ fn extract_expected_state(
 
 /// Identifies the correct node set from the ITF state.
 /// Correct nodes are those with entries in `replica_state`.
-fn identify_correct_nodes(state: &Value) -> Vec<String> {
+pub fn identify_correct_nodes(state: &Value) -> Vec<String> {
     let mut nodes: Vec<String> = parse_map(get_var(state, "replica_state"))
         .iter()
         .filter_map(|(k, _)| k.as_str().map(String::from))
@@ -553,7 +554,7 @@ fn identify_correct_nodes(state: &Value) -> Vec<String> {
 }
 
 /// Determines total node count from the leader map (all distinct node IDs).
-fn count_nodes(state: &Value) -> usize {
+pub fn count_nodes(state: &Value) -> usize {
     let mut all_nodes: BTreeSet<String> = BTreeSet::new();
     // Collect from leader map
     for (_, v) in parse_map(get_var(state, "leader")) {

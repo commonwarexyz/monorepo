@@ -215,6 +215,7 @@ module tests {
         leader' = leader,
         replica_state' = replica_state,
         certify_policy' = certify_policy,
+        lastAction' = "inject_proposal",
     }
 
     action inject_vote(vote: Vote): bool = all {
@@ -229,6 +230,7 @@ module tests {
         leader' = leader,
         replica_state' = replica_state,
         certify_policy' = certify_policy,
+        lastAction' = "inject_vote",
     }
 
     action replica_receives_notarize_vote(id: ReplicaId, block: Block, view: ViewNumber, src: ReplicaId): bool =
@@ -252,6 +254,7 @@ module tests {
         leader' = leader,
         replica_state' = replica_state,
         certify_policy' = certify_policy,
+        lastAction' = lastAction,
     }
 
     action replica_receives_notarize_quorum(id: ReplicaId, block: Block, view: ViewNumber, srcs: Set[ReplicaId]): bool =

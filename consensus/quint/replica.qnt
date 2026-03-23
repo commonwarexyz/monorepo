@@ -58,6 +58,8 @@ module replica {
     var ghost_committed_blocks: ReplicaId -> List[Block]
     // Replica-local deterministic certification policy from the application.
     var certify_policy: ReplicaId -> (Block -> bool)
+    // The last action taken (for IST assume_state).
+    var lastAction: str
 
     // Filter votes by view and kind.
     pure def vote_view(v: Vote): ViewNumber = {
@@ -442,7 +444,8 @@ module replica {
             parent_refs' = VIEWS.mapBy(_ => ParentTrackedBlocks.mapBy(_ => Set())),
             ghost_proposal' = CORRECT.mapBy(_ => Set()),
             leader' = l,
-            certify_policy' = certify
+            certify_policy' = certify,
+            lastAction' = "init"
         }
     }
 
@@ -469,6 +472,7 @@ module replica {
             ghost_proposal' = ghost_proposal,
             leader' = leader,
             certify_policy' = certify_policy,
+            lastAction' = "resolve_init"
         }
     }
 
@@ -495,6 +499,7 @@ module replica {
             all {
                 byzantine_replica_step,
                 _unchanged_replica_state,
+                lastAction' = "byzantine",
             }
         }
     }
@@ -620,7 +625,8 @@ module replica {
                     parent_refs' = parent_refs,
                     certify_policy' = certify_policy
                 }
-            }
+            },
+            lastAction' = "proposer"
         }
     }
 
@@ -690,7 +696,8 @@ module replica {
             store_certificate' = store_certificate,
             leader' = leader,
             ghost_committed_blocks' = ghost_committed_blocks,
-            certify_policy' = certify_policy
+            certify_policy' = certify_policy,
+            lastAction' = "on_proposal"
         }
     }
 
@@ -738,7 +745,8 @@ module replica {
                 leader' = leader,
                 ghost_proposal' = ghost_proposal,
                 parent_refs' = parent_refs,
-                certify_policy' = certify_policy
+                certify_policy' = certify_policy,
+                lastAction' = "on_vote_notarize"
             }
         }
     }
@@ -787,7 +795,8 @@ module replica {
                 leader' = leader,
                 ghost_proposal' = ghost_proposal,
                 parent_refs' = parent_refs,
-                certify_policy' = certify_policy
+                certify_policy' = certify_policy,
+                lastAction' = "on_vote_finalize"
             }
         }
     }
@@ -882,7 +891,8 @@ module replica {
                 leader' = leader,
                 ghost_proposal' = ghost_proposal,
                 parent_refs' = parent_refs,
-                certify_policy' = certify_policy
+                certify_policy' = certify_policy,
+                lastAction' = "on_vote_nullify"
             }
         }
     }
@@ -912,7 +922,8 @@ module replica {
             leader' = leader,
             ghost_proposal' = ghost_proposal,
             parent_refs' = parent_refs,
-            certify_policy' = certify_policy
+            certify_policy' = certify_policy,
+            lastAction' = "on_certificate"
         }
     }
 
@@ -1104,7 +1115,8 @@ module replica {
             ghost_committed_blocks' = ghost_committed_blocks,
             ghost_proposal' = ghost_proposal,
             parent_refs' = parent_refs,
-            certify_policy' = certify_policy
+            certify_policy' = certify_policy,
+            lastAction' = "timeout"
         }
     }
 

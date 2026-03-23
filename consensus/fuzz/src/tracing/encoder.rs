@@ -199,6 +199,7 @@ fn build_actions(
 
     // Collect all (signer, view, vote_type) combos from the trace
     // to know which self-deliveries are needed
+    #[allow(clippy::type_complexity)]
     let mut all_signers: HashMap<(u64, &str), Vec<(&str, Option<&str>)>> = HashMap::new();
     for entry in entries {
         if let TraceEntry::Vote { vote, .. } = entry {
@@ -226,6 +227,7 @@ fn build_actions(
     }
 
     // Deduplicate signers per (view, type)
+    #[allow(clippy::type_complexity)]
     let mut unique_signers: HashMap<(u64, &str), Vec<(String, Option<String>)>> = HashMap::new();
     for ((view, vtype), items) in &all_signers {
         let mut seen = HashSet::new();

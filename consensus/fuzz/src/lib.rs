@@ -1,6 +1,8 @@
+pub mod apalache;
 pub mod bounds;
 pub mod disrupter;
 pub mod invariants;
+pub mod ist;
 pub mod replayer;
 pub mod simplex;
 pub mod strategy;

@@ -3,7 +3,7 @@ TEST_DIR ?= traces
 
 FUZZ_RUNS ?= 1000
 
-.PHONY: test typecheck repl check clean get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces tv generate_itf convert_itf replay_itf clean_mbt_traces conformance_roundtrip
+.PHONY: test typecheck repl check clean get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces tv generate_itf convert_itf replay_itf clean_mbt_traces conformance_roundtrip ist
 
 typecheck:
 	quint typecheck types.qnt
@@ -130,6 +130,15 @@ conformance_roundtrip: clean_mbt_traces clean_fuzz_traces
 	OUT_ITF_DIR=$(ITF_DIR) ./scripts/test_traces.sh
 	$(MAKE) convert_itf
 	$(MAKE) replay_itf
+
+IST_STEPS ?= 200
+IST_URL ?= http://localhost:8822/rpc
+
+ist:
+	@echo "Starting IST (ensure Apalache is running on port 8822)"
+	@echo "  docker run --rm -p 8822:8822 ghcr.io/apalache-mc/apalache:latest server --server-type=explorer"
+	cargo run -p commonware-consensus-fuzz --bin ist -- \
+		--spec itf_n4f1b1.qnt --steps $(IST_STEPS) --url $(IST_URL)
 
 clean:
 	./scripts/verify.sh clean
