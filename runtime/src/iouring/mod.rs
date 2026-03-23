@@ -393,6 +393,12 @@ pub(crate) struct IoUringLoop {
     waker: Waker,
     wake_rearm_needed: bool,
     processed_seq: u64,
+    /// Waiter IDs awaiting cancel SQE staging.
+    pending_cancels: VecDeque<WaiterId>,
+    /// Deadline schedules buffered during `fill_submission_queue`, flushed
+    /// into the timeout wheel at the start of `submit_and_wait` just before
+    /// the SQEs are submitted to the kernel.
+    pending_deadlines: Vec<(WaiterId, Tick)>,
 }
 
 impl IoUringLoop {
@@ -438,6 +444,8 @@ impl IoUringLoop {
                 waker,
                 wake_rearm_needed: true,
                 processed_seq: 0,
+                pending_cancels: VecDeque::with_capacity(size),
+                pending_deadlines: Vec::with_capacity(size),
             },
         )
     }
@@ -447,7 +455,6 @@ impl IoUringLoop {
     /// This method blocks the current thread.
     pub(crate) fn run(mut self) {
         let mut ring = new_ring(&self.cfg).expect("unable to create io_uring instance");
-        let mut pending_cancels = VecDeque::with_capacity(self.cfg.size as usize);
         loop {
             // Process available completions.
             for cqe in ring.completion() {
@@ -456,11 +463,10 @@ impl IoUringLoop {
 
             // Process due deadlines before staging new submissions so timed-out
             // waiters move to cancellation promptly and free capacity sooner.
-            self.advance_timeouts(&mut pending_cancels);
+            self.advance_timeouts();
 
             // Stage as much inbound work as capacity allows.
-            let Some(at_capacity) = self.fill_submission_queue(&mut ring, &mut pending_cancels)
-            else {
+            let Some(at_capacity) = self.fill_submission_queue(&mut ring) else {
                 // Producer side disconnected. Drain in-flight operations and exit.
                 self.drain(&mut ring);
                 return;
@@ -481,7 +487,7 @@ impl IoUringLoop {
                     //
                     // Enter the kernel to submit pending SQEs and wait for at
                     // least one completion so capacity can open up.
-                    self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
+                    self.submit_and_wait(&mut ring, 1, None)
                         .expect("unable to submit to ring");
                 }
 
@@ -499,7 +505,7 @@ impl IoUringLoop {
             // and rings eventfd, so the loop is woken instead of sleeping
             // through newly published work.
             if at_capacity || self.waker.arm() == self.processed_seq {
-                self.submit_and_wait(&mut ring, 1, self.timeout_wheel.next_deadline())
+                self.submit_and_wait(&mut ring, 1, None)
                     .expect("unable to submit to ring");
             }
             // Disarm sleep intent as soon as we resume running. While disarmed,
@@ -517,11 +523,7 @@ impl IoUringLoop {
     ///
     /// Returns whether staging ended at waiter or SQ capacity, or `None` if the
     /// producer channel disconnected.
-    fn fill_submission_queue(
-        &mut self,
-        ring: &mut IoUring,
-        pending_cancels: &mut VecDeque<WaiterId>,
-    ) -> Option<bool> {
+    fn fill_submission_queue(&mut self, ring: &mut IoUring) -> Option<bool> {
         let mut drained = 0u64;
         let mut submission_queue = ring.submission();
         let mut wheel_aligned = self.timeout_wheel.next_deadline().is_some();
@@ -533,7 +535,7 @@ impl IoUringLoop {
         }
 
         // Stage pending cancel SQEs first so timed-out operations are canceled promptly.
-        if self.stage_cancellations(&mut submission_queue, pending_cancels) {
+        if self.stage_cancellations(&mut submission_queue) {
             // If cancels alone filled the SQ, submit them first.
             return Some(true);
         }
@@ -587,7 +589,7 @@ impl IoUringLoop {
             // Store in-flight operation state before submission.
             let waiter_id = self.waiters.insert(sender, buffer, fd, iovecs, target_tick);
             if let Some(target_tick) = target_tick {
-                self.timeout_wheel.schedule(waiter_id, target_tick);
+                self.pending_deadlines.push((waiter_id, target_tick));
             }
 
             // Tag SQE with waiter id for completion matching.
@@ -619,13 +621,9 @@ impl IoUringLoop {
     /// Stops when all queued cancellations are staged or the SQ reaches
     /// capacity. Returns `true` when SQ capacity is hit and at least one
     /// cancellation remains queued.
-    fn stage_cancellations(
-        &mut self,
-        submission_queue: &mut SubmissionQueue<'_>,
-        pending_cancels: &mut VecDeque<WaiterId>,
-    ) -> bool {
+    fn stage_cancellations(&mut self, submission_queue: &mut SubmissionQueue<'_>) -> bool {
         while !submission_queue.is_full() {
-            let Some(waiter_id) = pending_cancels.pop_front() else {
+            let Some(waiter_id) = self.pending_cancels.pop_front() else {
                 return false;
             };
 
@@ -641,7 +639,7 @@ impl IoUringLoop {
             }
         }
 
-        !pending_cancels.is_empty()
+        !self.pending_cancels.is_empty()
     }
 
     /// Handle a single CQE from the ring.
@@ -696,7 +694,7 @@ impl IoUringLoop {
     ///
     /// This is a no-op when no active deadlines exist. Expired stale wheel
     /// entries are ignored when waiter generation no longer matches.
-    fn advance_timeouts(&mut self, pending_cancels: &mut VecDeque<WaiterId>) {
+    fn advance_timeouts(&mut self) {
         // Fast path: no active deadlines means no clock read and no wheel scan.
         if self.timeout_wheel.next_deadline().is_none() {
             return;
@@ -717,7 +715,7 @@ impl IoUringLoop {
 
                 // Once cancel is requested, this waiter is no longer deadline-active.
                 self.timeout_wheel.remove(entry.target_tick);
-                pending_cancels.push_back(entry.waiter_id);
+                self.pending_cancels.push_back(entry.waiter_id);
             }
         }
     }
@@ -767,10 +765,12 @@ impl IoUringLoop {
     /// Attempts to wait for at least `want` completions but may return early on
     /// timeout or transient errors.
     ///
-    /// When a timeout is provided, this uses `submit_with_args` with the EXT_ARG
-    /// feature to implement a bounded wait without injecting a timeout SQE
-    /// (available since kernel 5.11+). Without a timeout, it falls back to the
-    /// standard `submit_and_wait`.
+    /// Before submitting, flushes buffered deadline schedules into the timeout
+    /// wheel. The effective wait timeout is the earlier of the wheel's next
+    /// deadline and the caller-provided `budget` (used by `drain` for shutdown).
+    ///
+    /// Uses `submit_with_args` with the EXT_ARG feature for bounded waits
+    /// (kernel 5.11+). Without a timeout, falls back to standard `submit_and_wait`.
     ///
     /// Transient `io_uring_enter(2)` errors (`EINTR`, `EAGAIN`, `EBUSY`) return
     /// `Ok(true)` so the caller can drain CQEs and re-enter through its event
@@ -781,11 +781,25 @@ impl IoUringLoop {
     /// * `Ok(false)` - Timed out waiting for completions (only when timeout is set)
     /// * `Err(e)` - An unrecoverable error occurred during submission or waiting
     fn submit_and_wait(
-        &self,
+        &mut self,
         ring: &mut IoUring,
         want: usize,
-        timeout: Option<Duration>,
+        budget: Option<Duration>,
     ) -> Result<bool, std::io::Error> {
+        // Activate buffered deadlines now that their SQEs are staged and about
+        // to be submitted. No `advance_timeouts` can run between this flush and
+        // the submit below, so deadlines cannot fire before the kernel sees the
+        // SQEs.
+        for (waiter_id, target_tick) in self.pending_deadlines.drain(..) {
+            self.timeout_wheel.schedule(waiter_id, target_tick);
+        }
+
+        // Use the earlier of the next wheel deadline and any caller budget.
+        let timeout = match (self.timeout_wheel.next_deadline(), budget) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+
         let result = timeout.map_or_else(
             || ring.submit_and_wait(want).map(|_| true),
             |timeout| {
@@ -906,7 +920,7 @@ mod tests {
     fn test_submit_and_wait_non_etime_error_is_not_misclassified() {
         let cfg = Config::default();
         let mut registry = Registry::default();
-        let (_submitter, iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
         // Force a deterministic kernel error path by closing the ring FD first.
@@ -953,7 +967,6 @@ mod tests {
 
         // Queue enough cancellations to overflow one staging pass once wake poll
         // rearm also consumes an SQE.
-        let mut pending_cancels = VecDeque::new();
         for _ in 0..cfg.size as usize {
             let (tx, _rx) = oneshot::channel();
             let waiter_id = iouring.waiters.insert(tx, None, None, None, None);
@@ -962,15 +975,15 @@ mod tests {
                 .cancel(waiter_id)
                 .expect("cancel should transition waiter to cancel-requested");
             assert_eq!(cancel_user_data, waiter_id.cancel_user_data());
-            pending_cancels.push_back(waiter_id);
+            iouring.pending_cancels.push_back(waiter_id);
         }
 
         // Staging should stop at SQ capacity and leave some cancels queued.
         let at_capacity = iouring
-            .fill_submission_queue(&mut ring, &mut pending_cancels)
+            .fill_submission_queue(&mut ring)
             .expect("channel should remain connected");
         assert!(at_capacity);
-        assert!(!pending_cancels.is_empty());
+        assert!(!iouring.pending_cancels.is_empty());
     }
 
     #[tokio::test]
@@ -979,7 +992,6 @@ mod tests {
         let mut registry = Registry::default();
         let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
-        let mut pending_cancels = VecDeque::new();
 
         // Keep this test focused on operation staging, not wake rearm behavior.
         iouring.wake_rearm_needed = false;
@@ -1002,11 +1014,11 @@ mod tests {
             .expect("failed to enqueue op");
 
         let at_capacity = iouring
-            .fill_submission_queue(&mut ring, &mut pending_cancels)
+            .fill_submission_queue(&mut ring)
             .expect("channel should remain connected");
 
         assert!(!at_capacity);
-        assert!(pending_cancels.is_empty());
+        assert!(iouring.pending_cancels.is_empty());
         assert!(iouring.waiters.is_empty());
         assert_eq!(ring.submission().len(), 0);
 
@@ -1093,7 +1105,6 @@ mod tests {
         };
         let mut registry = Registry::default();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
-        let mut pending_cancels = VecDeque::new();
 
         // Schedule an old waiter at tick 1, then complete it early so the wheel
         // retains a stale entry for this slot/tick pair.
@@ -1128,13 +1139,13 @@ mod tests {
         // At tick 1, only the stale old entry should expire. The new waiter must
         // stay active and no cancel should be queued.
         std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(2));
-        iouring.advance_timeouts(&mut pending_cancels);
-        assert!(pending_cancels.is_empty());
+        iouring.advance_timeouts();
+        assert!(iouring.pending_cancels.is_empty());
 
         // At tick 3, the real timeout should queue cancellation.
         std::thread::sleep((iouring.cfg.timeout_wheel_tick * 2) + Duration::from_millis(2));
-        iouring.advance_timeouts(&mut pending_cancels);
-        assert_eq!(pending_cancels.len(), 1);
+        iouring.advance_timeouts();
+        assert_eq!(iouring.pending_cancels.len(), 1);
     }
 
     #[test]
