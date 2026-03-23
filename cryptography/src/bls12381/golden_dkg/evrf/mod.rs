@@ -1,58 +1,86 @@
 mod bandersnatch;
 
+use bandersnatch::{F, G};
+
 use crate::{
     bls12381::primitives::group::{Scalar, G1},
-    ed25519,
     transcript::{Summary, Transcript},
     Secret,
 };
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    EncodeFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use commonware_math::algebra::{CryptoGroup, Random};
-use commonware_utils::{hex, ordered::Map, union_unique, Array, Span, TryCollect};
+use commonware_utils::{hex, ordered::Map, Array, Span, TryCollect};
 use core::{
     fmt::{Debug, Display},
-    hash::Hash,
+    hash::{Hash, Hasher},
     ops::Deref,
 };
-use curve25519_dalek::edwards::CompressedEdwardsY;
-use ed25519_consensus::VerificationKey;
 use rand_core::CryptoRngCore;
-use sha2::{Digest, Sha512};
 use std::num::NonZeroU32;
 use zeroize::Zeroizing;
 
-const PUBLIC_KEY_LENGTH: usize = 32;
+const SCHNORR_NS: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BANDERSNATCH_SCHNORR";
+
+const SCALAR_LENGTH: usize = 32;
+const POINT_LENGTH: usize = 32;
+const SIGNATURE_LENGTH: usize = POINT_LENGTH + SCALAR_LENGTH;
 
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
-    inner: Secret<ed25519_consensus::SigningKey>,
+    inner: Secret<F>,
 }
 
 impl Random for PrivateKey {
     fn random(rng: impl CryptoRngCore) -> Self {
         Self {
-            inner: Secret::new(ed25519_consensus::SigningKey::new(rng)),
+            inner: Secret::new(F::random(rng)),
         }
     }
 }
 
 impl crate::Signer for PrivateKey {
-    type Signature = ed25519::Signature;
+    type Signature = Signature;
     type PublicKey = PublicKey;
 
     fn public_key(&self) -> Self::PublicKey {
-        self.inner.expose(|key| PublicKey {
-            inner: key.verification_key(),
-        })
+        self.inner
+            .expose(|x| PublicKey::from_point(G::generator() * x))
     }
 
-    fn sign(&self, namespace: &[u8], msg: &[u8]) -> Self::Signature {
-        let payload = union_unique(namespace, msg);
-        self.inner.expose(|key| {
-            let sig = key.sign(&payload);
-            ed25519::Signature::read(&mut &sig.to_bytes()[..]).expect("valid 64-byte signature")
-        })
+    fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
+        let pk = self.public();
+        let mut t = Transcript::new(SCHNORR_NS);
+        t.commit(namespace);
+        t.commit(msg);
+        t.commit(pk.raw.as_slice());
+
+        // Derive deterministic nonce from secret key + public transcript state
+        let k = self.inner.expose(|x| {
+            let mut nonce_t = t.fork(b"nonce");
+            let x_bytes = Zeroizing::new(x.encode_fixed::<SCALAR_LENGTH>());
+            nonce_t.commit(x_bytes.as_slice());
+            F::random(&mut nonce_t.noise(b"k"))
+        });
+
+        let k_big = G::generator() * &k;
+        let k_big_bytes: [u8; POINT_LENGTH] = k_big.encode_fixed();
+        t.commit(k_big_bytes.as_slice());
+        let e = F::random(&mut t.noise(b"challenge"));
+
+        // s = k + e * x
+        let s = self.inner.expose(|x| {
+            let mut ex = e;
+            ex *= x;
+            k + &ex
+        });
+
+        let mut raw = [0u8; SIGNATURE_LENGTH];
+        raw[..POINT_LENGTH].copy_from_slice(&k_big_bytes);
+        raw[POINT_LENGTH..].copy_from_slice(&s.encode_fixed::<SCALAR_LENGTH>());
+        Signature { raw }
     }
 }
 
@@ -63,28 +91,11 @@ impl PrivateKey {
     }
 
     fn diffie_hellman(&self, public: &PublicKey, transcript: &mut Transcript) {
-        // Convert our ed25519 seed to an x25519 static secret.
-        // Ed25519 derives the scalar via SHA-512(seed)[0..32]; x25519 StaticSecret
-        // applies its own clamping on top of these bytes.
-        let x25519_secret = self.inner.expose(|key| {
-            let hash = Sha512::digest(key.as_bytes());
-            let mut scalar_bytes = [0u8; 32];
-            scalar_bytes.copy_from_slice(&hash[..32]);
-            x25519_dalek::StaticSecret::from(scalar_bytes)
+        let shared = self.inner.expose(|x| {
+            let raw = public.point.clone() * x;
+            raw.clear_cofactor()
         });
-
-        // Convert the ed25519 public key (compressed Edwards Y) to an x25519
-        // public key (Montgomery U-coordinate).
-        let edwards =
-            CompressedEdwardsY::from_slice(public.as_ref()).expect("public key is 32 bytes");
-        let montgomery = edwards
-            .decompress()
-            .expect("valid ed25519 public key decompresses")
-            .to_montgomery();
-        let x25519_public = x25519_dalek::PublicKey::from(montgomery.to_bytes());
-
-        let shared = x25519_secret.diffie_hellman(&x25519_public);
-        transcript.commit(shared.as_bytes().as_slice());
+        transcript.commit(shared.encode_fixed::<POINT_LENGTH>().as_slice());
     }
 
     /// Compute the VRF output between ourselves and the receiver, for a given message.
@@ -141,7 +152,8 @@ impl PrivateKey {
 
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.inner.expose(|key| key.as_bytes().write(buf));
+        self.inner
+            .expose(|x| buf.put_slice(&x.encode_fixed::<SCALAR_LENGTH>()));
     }
 }
 
@@ -150,36 +162,134 @@ impl Read for PrivateKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let key = ed25519_consensus::SigningKey::from(*raw);
+        let x: F = ReadExt::read(&mut raw.as_slice())?;
         Ok(Self {
-            inner: Secret::new(key),
+            inner: Secret::new(x),
         })
     }
 }
 
 impl FixedSize for PrivateKey {
-    const SIZE: usize = PUBLIC_KEY_LENGTH;
+    const SIZE: usize = SCALAR_LENGTH;
 }
 
-/// A public key, which we can use to create and check VRF outputs with.
+/// A Schnorr signature over the Bandersnatch curve.
+///
+/// Consists of a commitment point K and a scalar response s.
+#[derive(Clone, Eq, PartialEq)]
+pub struct Signature {
+    raw: [u8; SIGNATURE_LENGTH],
+}
+
+impl Write for Signature {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.raw.write(buf);
+    }
+}
+
+impl Read for Signature {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let raw = <[u8; SIGNATURE_LENGTH]>::read(buf)?;
+        Ok(Self { raw })
+    }
+}
+
+impl FixedSize for Signature {
+    const SIZE: usize = SIGNATURE_LENGTH;
+}
+
+impl crate::Signature for Signature {}
+
+impl Span for Signature {}
+
+impl Array for Signature {}
+
+impl Hash for Signature {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
+    }
+}
+
+impl Ord for Signature {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for Signature {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl AsRef<[u8]> for Signature {
+    fn as_ref(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
+impl Deref for Signature {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
+impl Debug for Signature {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
+impl Display for Signature {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", hex(&self.raw))
+    }
+}
+
+/// A public key on the Bandersnatch curve, used for signatures and VRF outputs.
 ///
 /// This can be created using [`PrivateKey::public`].
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone)]
 pub struct PublicKey {
-    inner: VerificationKey,
+    raw: [u8; POINT_LENGTH],
+    point: G,
+}
+
+impl PublicKey {
+    fn from_point(point: G) -> Self {
+        let raw: [u8; POINT_LENGTH] = point.encode_fixed();
+        Self { raw, point }
+    }
 }
 
 impl crate::Verifier for PublicKey {
-    type Signature = ed25519::Signature;
+    type Signature = Signature;
 
-    fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Self::Signature) -> bool {
-        let payload = union_unique(namespace, msg);
-        self.inner
-            .verify(
-                &ed25519_consensus::Signature::from(<[u8; 64]>::try_from(sig.as_ref()).unwrap()),
-                &payload,
-            )
-            .is_ok()
+    fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
+        let k_big: G = match ReadExt::read(&mut &sig.raw[..POINT_LENGTH]) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let s: F = match ReadExt::read(&mut &sig.raw[POINT_LENGTH..]) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        // Recompute the challenge
+        let mut t = Transcript::new(SCHNORR_NS);
+        t.commit(namespace);
+        t.commit(msg);
+        t.commit(self.raw.as_slice());
+        t.commit(sig.raw[..POINT_LENGTH].as_ref());
+        let e = F::random(&mut t.noise(b"challenge"));
+
+        // Check: s * G == K + e * X
+        let lhs = G::generator() * &s;
+        let rhs = k_big + &(self.point.clone() * &e);
+        lhs == rhs
     }
 }
 
@@ -187,7 +297,7 @@ impl crate::PublicKey for PublicKey {}
 
 impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.inner.as_bytes().write(buf);
+        self.raw.write(buf);
     }
 }
 
@@ -195,15 +305,14 @@ impl Read for PublicKey {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; PUBLIC_KEY_LENGTH]>::read_cfg(buf, &())?;
-        let inner = VerificationKey::try_from(raw)
-            .map_err(|e: ed25519_consensus::Error| CodecError::Wrapped("evrf", e.into()))?;
-        Ok(Self { inner })
+        let raw = <[u8; POINT_LENGTH]>::read_cfg(buf, &())?;
+        let point: G = ReadExt::read(&mut raw.as_slice())?;
+        Ok(Self { raw, point })
     }
 }
 
 impl FixedSize for PublicKey {
-    const SIZE: usize = PUBLIC_KEY_LENGTH;
+    const SIZE: usize = POINT_LENGTH;
 }
 
 impl Span for PublicKey {}
@@ -212,14 +321,40 @@ impl Array for PublicKey {}
 
 impl AsRef<[u8]> for PublicKey {
     fn as_ref(&self) -> &[u8] {
-        self.inner.as_ref()
+        &self.raw
     }
 }
 
 impl Deref for PublicKey {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        self.inner.as_ref()
+        &self.raw
+    }
+}
+
+impl Eq for PublicKey {}
+
+impl PartialEq for PublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl Ord for PublicKey {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for PublicKey {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Hash for PublicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
     }
 }
 
@@ -260,7 +395,7 @@ impl Proof {
 
 impl Write for Proof {
     fn write(&self, buf: &mut impl BufMut) {
-        self.key.inner.expose(|key| key.as_bytes().write(buf));
+        self.key.write(buf);
     }
 }
 

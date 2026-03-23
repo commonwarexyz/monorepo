@@ -92,14 +92,13 @@ mod evrf;
 
 use crate::{
     bls12381::{
-        golden_dkg::evrf::VrfCommitments,
+        golden_dkg::evrf::{Signature, VrfCommitments},
         primitives::{
             group::{Private, Scalar, Share, SmallScalar, G1},
             sharing::{Mode, ModeVersion, Sharing},
             variant::MinPk,
         },
     },
-    ed25519,
     transcript::{Summary, Transcript},
     Signer as _, Verifier as _,
 };
@@ -527,7 +526,7 @@ pub fn play<M: Faults>(
 /// dealer's public key and log.
 pub struct SignedDealerLog {
     dealer: PublicKey,
-    signature: ed25519::Signature,
+    signature: Signature,
     log: DealerLog,
 }
 
@@ -550,7 +549,7 @@ impl Read for SignedDealerLog {
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let dealer: PublicKey = ReadExt::read(buf)?;
-        let signature: ed25519::Signature = ReadExt::read(buf)?;
+        let signature: Signature = ReadExt::read(buf)?;
         let log = Read::read_cfg(buf, cfg)?;
         Ok(Self {
             dealer,
