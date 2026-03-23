@@ -253,7 +253,8 @@ where
     ///
     /// Returns an error when:
     /// - `size` is not a valid rewind target
-    /// - the target commit or required history has been pruned
+    /// - the target's required logical range is not fully retained (for example, the target
+    ///   inactivity floor is pruned)
     /// - `size - 1` is not a commit operation
     pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
         let rewind_size = *size;
@@ -270,11 +271,10 @@ where
         let (rewind_floor, undos, active_keys_delta) = {
             let reader = self.log.reader().await;
             let bounds = reader.bounds();
-            if rewind_size < bounds.start {
-                return Err(Error::Journal(JournalError::ItemPruned(rewind_size)));
-            }
-
             let rewind_last_loc = Location::new(rewind_size - 1);
+            if rewind_size <= bounds.start {
+                return Err(Error::Journal(JournalError::ItemPruned(*rewind_last_loc)));
+            }
             let rewind_last_op = reader.read(*rewind_last_loc).await?;
             let Some(rewind_floor) = rewind_last_op.has_floor() else {
                 return Err(Error::UnexpectedData(rewind_last_loc));

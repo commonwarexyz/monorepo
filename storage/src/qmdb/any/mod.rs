@@ -1861,6 +1861,16 @@ pub(crate) mod test {
                 }
             }
 
+            let oldest_retained = db.bounds().await.start;
+            let boundary_err = db.rewind(oldest_retained).await.unwrap_err();
+            assert!(
+                matches!(
+                    boundary_err,
+                    crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
+                ),
+                "unexpected rewind error at retained boundary: {boundary_err:?}"
+            );
+
             let err = db.rewind(first_range.start).await.unwrap_err();
             assert!(
                 matches!(

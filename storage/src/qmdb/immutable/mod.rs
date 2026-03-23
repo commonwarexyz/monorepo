@@ -238,7 +238,8 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
     ///
     /// Returns an error when:
     /// - `size` is not a valid rewind target
-    /// - `size - 1` has been pruned
+    /// - the target's required logical range is not fully retained (for immutable, this means the
+    ///   oldest retained location is already beyond the rewind boundary)
     /// - `size - 1` is not a commit operation
     pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
         let rewind_size = *size;
@@ -255,13 +256,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         let (rewind_last_loc, rewound_sets) = {
             let reader = self.journal.reader().await;
             let bounds = reader.bounds();
-            if rewind_size < bounds.start {
+            let rewind_last_loc = Location::new(rewind_size - 1);
+            if rewind_size <= bounds.start {
                 return Err(Error::Journal(crate::journal::Error::ItemPruned(
-                    rewind_size,
+                    *rewind_last_loc,
                 )));
             }
-
-            let rewind_last_loc = Location::new(rewind_size - 1);
             let rewind_last_op = reader.read(*rewind_last_loc).await?;
             if !matches!(rewind_last_op, Operation::Commit(_)) {
                 return Err(Error::UnexpectedData(rewind_last_loc));
@@ -997,6 +997,16 @@ pub(super) mod test {
                     break;
                 }
             }
+
+            let oldest_retained = db.bounds().await.start;
+            let boundary_err = db.rewind(oldest_retained).await.unwrap_err();
+            assert!(
+                matches!(
+                    boundary_err,
+                    Error::Journal(crate::journal::Error::ItemPruned(_))
+                ),
+                "unexpected rewind error at retained boundary: {boundary_err:?}"
+            );
 
             let err = db.rewind(first_range.start).await.unwrap_err();
             assert!(

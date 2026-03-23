@@ -360,7 +360,8 @@ where
     ///
     /// Returns an error when:
     /// - `size` is not a valid rewind target
-    /// - `size - 1` has been pruned
+    /// - the target's required logical range is not fully retained (for Current, this includes the
+    ///   underlying Any inactivity-floor boundary and bitmap pruning boundary)
     /// - `size - 1` is not a commit operation
     /// - `size` is below the bitmap pruning boundary
     pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
