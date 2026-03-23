@@ -173,17 +173,17 @@ where
         self.any.log.root()
     }
 
-    /// O(1) snapshot of the grafted MMR for use in batch chains.
+    /// Snapshot of the grafted MMR for use in batch chains.
     ///
-    /// Wraps in a `Snapshot` when the state has layers, so that `base_size() == size()` for the
-    /// batch chain. When the state is already `Base`, `base_size()` naturally equals the tip.
+    /// Wraps in a `Checkpoint` when the state has layers, so that `base_size() == size()` for
+    /// the batch chain. When the state is already `Base`, `base_size()` naturally equals the tip.
     pub(super) fn grafted_snapshot(&self) -> mmr::batch::MerkleizedBatch<H::Digest> {
         let state = self.grafted_mmr.clone();
         if matches!(state, mmr::batch::MerkleizedBatch::Base(_)) {
             return state;
         }
         let size = state.size();
-        mmr::batch::MerkleizedBatch::Snapshot {
+        mmr::batch::MerkleizedBatch::Checkpoint {
             inner: Arc::new(state),
             size,
         }
@@ -278,7 +278,7 @@ where
     /// Each [`Db::apply_batch`] pushes a new `Layer` on both the bitmap and the grafted MMR.
     /// These layers are cheap to create (O(changeset)) but make subsequent reads walk the full
     /// chain. Calling `flatten` collapses the chain into a single `Base`, bounding lookup cost
-    /// to O(1) and reducing memory overhead from stale intermediate layers.
+    /// and reducing memory overhead from stale intermediate layers.
     ///
     /// This is called automatically by [`Db::prune`]. Callers that apply many batches without
     /// pruning should call this periodically.

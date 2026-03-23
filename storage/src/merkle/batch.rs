@@ -2,15 +2,45 @@
 //!
 //! # Overview
 //!
-//! [`MerkleizedBatch`] is an immutable, reference-counted Merkle state (persistent data structure).
-//! [`UnmerkleizedBatch`] accumulates mutations against a parent batch. After merkleization the
-//! batch produces a new [`MerkleizedBatch`]. Because batches are behind [`Arc`], they can be
-//! freely cloned and stored in homogeneous collections regardless of chain depth.
+//! [`UnmerkleizedBatch`] accumulates mutations (appends and overwrites) against a parent
+//! [`MerkleizedBatch`]. Calling [`UnmerkleizedBatch::merkleize`] computes the root and
+//! produces a new [`MerkleizedBatch`]. Batches can be stacked to arbitrary depth
+//! (Base <- Layer <- Layer <- ...) to represent speculative chains.
 //!
-//! - [`Changeset`] -- owned delta that can be applied to the base.
-//! - [`MerkleizedBatch::Snapshot`] -- a sealed view where `base_size() == size()`, created by
-//!   [`Mem::to_batch()`](crate::merkle::mem::Mem::to_batch) to seal committed state as a fork
-//!   point.
+//! All batches are `Arc`-backed, so multiple forks can coexist on the same parent.
+//!
+//! # Lifecycle
+//!
+//! ```text
+//! MerkleizedBatch::Checkpoint                      (seal committed state as fork point)
+//!                           |
+//!                      new_batch()
+//!                           |
+//!                           v
+//!                    UnmerkleizedBatch              (accumulate mutations)
+//!                           |
+//!                      merkleize()
+//!                           |
+//!                           v
+//!                    MerkleizedBatch::Layer         (immutable, has root, supports proofs)
+//!                           |
+//!                      finalize()
+//!                           |
+//!                           v
+//!                       Changeset                   (owned delta relative to checkpoint)
+//!                           |
+//!                    mem.apply(cs)
+//!                           |
+//!                           v
+//!                          Mem                      (committed)
+//! ```
+//!
+//! # Checkpoints
+//!
+//! A [`MerkleizedBatch::Checkpoint`] records the committed size so that
+//! [`MerkleizedBatch::finalize`] produces changesets relative to that point. Without it,
+//! `base_size()` would recurse through any post-commit layers all the way to the original
+//! empty `Base`, producing a changeset the base would reject as stale.
 //!
 //! # Example (MMR)
 //!
@@ -19,7 +49,7 @@
 //! let mut mmr = Mmr::new(&hasher);
 //!
 //! // Fork two independent speculative chains from the same base.
-//! // Clone is O(1) -- just an Arc refcount bump.
+//! // Clone is cheap -- just an Arc refcount bump.
 //! let a1 = mmr.new_batch()
 //!     .add(&hasher, b"a1")
 //!     .merkleize(&hasher);
@@ -70,7 +100,6 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest> {
 
 impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     /// Create a new batch from `parent`.
-    /// O(1) time and space (the parent is an `Arc`-backed persistent structure).
     pub const fn new(parent: MerkleizedBatch<F, D>) -> Self {
         Self {
             parent,
@@ -365,10 +394,10 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
 // MerkleizedBatch
 // ---------------------------------------------------------------------------
 
-/// The data behind a [`MerkleizedBatch::Layer`].
+/// Inner data for a [`MerkleizedBatch::Layer`].
 #[derive(Debug)]
 pub struct MerkleizedBatchLayer<F: Family, D: Digest> {
-    /// The previous chain link (either another layer, a base, or a snapshot).
+    /// The previous chain link (either another layer, a base, or a checkpoint).
     parent: MerkleizedBatch<F, D>,
     /// Digests appended beyond the parent's tip.
     appended: Vec<D>,
@@ -384,31 +413,24 @@ pub struct MerkleizedBatchLayer<F: Family, D: Digest> {
 
 /// A batch whose root digest has been computed.
 ///
-/// `Clone` is O(1) (`Arc::clone`). Batches can be freely shared and stored in homogeneous
-/// collections regardless of chain depth.
+/// These form a singly-linked chain (e.g. `Checkpoint <- Layer <- Layer`) representing
+/// speculative state on top of committed data.
 #[derive(Clone, Debug)]
 pub enum MerkleizedBatch<F: Family, D: Digest> {
-    /// Committed Merkle structure (chain terminal). `Mem` is already `Arc`-wrapped internally,
-    /// so cloning is O(1).
+    /// The committed on-disk structure. Terminal node of the chain.
     Base(Mem<F, D>),
-    /// Speculative layer on top of a parent batch.
+
+    /// An uncommitted mutation on top of a parent batch.
     Layer(Arc<MerkleizedBatchLayer<F, D>>),
-    /// Sealed snapshot of a (possibly layered) chain.
-    ///
-    /// Acts as a chain terminator for [`MerkleizedBatch::base_size`]: the chain's tip size is
-    /// reported as the base, so [`Self::finalize`] produces changesets relative to the snapshot
-    /// point rather than recursing to the original `Base`.
-    ///
-    /// This is necessary because `push_changeset` builds a `Layer` on top of the existing
-    /// state. Without `Snapshot`, a batch forked from the post-push state would recurse through
-    /// the new `Layer` all the way to the original `Base`, yielding `base_size() == 0` instead
-    /// of the current tip. The resulting changeset would then fail the stale-changeset check in
-    /// [`Mem::apply`].
-    Snapshot {
-        /// The sealed chain. Reads (`get_node`, `root`, etc.) delegate here.
+
+    /// A wrapper around an existing batch that marks it as the base point for changeset
+    /// computation. Adds no data -- all reads delegate to the inner batch. The only
+    /// behavioral difference is that [`base_size()`](Self::base_size) returns the wrapped
+    /// batch's size instead of recursing further. See [module-level docs](self#checkpoints).
+    Checkpoint {
+        /// The wrapped batch. All reads delegate here.
         inner: Arc<Self>,
-        /// `inner.size()` cached at creation time. Returned by both `size()` and `base_size()`,
-        /// which is what prevents the `base_size` recursion from walking past this point.
+        /// `inner.size()` at creation time. Returned by both `size()` and `base_size()`.
         size: Position<F>,
     },
 }
@@ -419,7 +441,7 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         match self {
             Self::Base(mem) => mem.size(),
             Self::Layer(layer) => Position::new(*layer.parent_size + layer.appended.len() as u64),
-            Self::Snapshot { size, .. } => *size,
+            Self::Checkpoint { size, .. } => *size,
         }
     }
 
@@ -441,7 +463,7 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
                 }
                 layer.parent.get_node(pos)
             }
-            Self::Snapshot { inner, .. } => inner.get_node(pos),
+            Self::Checkpoint { inner, .. } => inner.get_node(pos),
         }
     }
 
@@ -450,7 +472,7 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         match self {
             Self::Base(mem) => *mem.root(),
             Self::Layer(layer) => layer.root,
-            Self::Snapshot { inner, .. } => inner.root(),
+            Self::Checkpoint { inner, .. } => inner.root(),
         }
     }
 
@@ -459,7 +481,7 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         match self {
             Self::Base(mem) => Readable::pruned_to_pos(mem),
             Self::Layer(layer) => layer.parent.pruned_to_pos(),
-            Self::Snapshot { inner, .. } => inner.pruned_to_pos(),
+            Self::Checkpoint { inner, .. } => inner.pruned_to_pos(),
         }
     }
 
@@ -482,7 +504,7 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         match self {
             Self::Base(_) => None,
             Self::Layer(layer) => layer.pool.clone(),
-            Self::Snapshot { inner, .. } => inner.pool(),
+            Self::Checkpoint { inner, .. } => inner.pool(),
         }
     }
 
@@ -528,16 +550,15 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         }
     }
 
-    /// Number of nodes in the structure that this batch chain was forked from.
+    /// Number of nodes in the committed structure this chain was forked from.
     ///
-    /// For `Base` and `Layer` this recurses to the root of the chain.
-    /// For `Snapshot` it returns the size at the snapshot point, allowing
-    /// child chains to treat the snapshot as their base.
+    /// Recurses to the chain root for `Base` and `Layer`. Stops at `Checkpoint`,
+    /// which defines the boundary.
     pub fn base_size(&self) -> Position<F> {
         match self {
             Self::Base(mem) => mem.size(),
             Self::Layer(layer) => layer.parent.base_size(),
-            Self::Snapshot { size, .. } => *size,
+            Self::Checkpoint { size, .. } => *size,
         }
     }
 
@@ -546,7 +567,7 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
     /// overwrite earlier ones.
     fn collect_overwrites(&self, into: &mut BTreeMap<Position<F>, D>) {
         match self {
-            Self::Base(_) | Self::Snapshot { .. } => {}
+            Self::Base(_) | Self::Checkpoint { .. } => {}
             Self::Layer(layer) => {
                 layer.parent.collect_overwrites(into);
                 for (&pos, &d) in &layer.overwrites {
@@ -595,7 +616,7 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
     }
 
     /// Push a changeset as a new layer on top of this batch, mutating `self` in place.
-    /// `self.clone()` is O(1) (Arc clone). The old value becomes the parent of the new layer.
+    /// The old value becomes the parent of the new layer.
     /// Panics if the changeset base size does not match the current size.
     pub(crate) fn push_changeset(&mut self, changeset: Changeset<F, D>) {
         let parent_size = self.size();

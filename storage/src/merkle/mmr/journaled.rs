@@ -898,13 +898,15 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         UnmerkleizedBatch(batch)
     }
 
-    /// Create an owned [`MerkleizedBatch`] representing the current committed state.
+    /// Capture the current committed state as a [`MerkleizedBatch`].
     ///
-    /// This is O(1) -- it clones the inner `Arc`s, not the MMR data. When the state has `Layer`
-    /// variants, wraps in `Snapshot` so that [`MerkleizedBatch::base_size`] equals the current
-    /// tip, keeping [`MerkleizedBatch::finalize`] consistent with the stale-changeset check in
-    /// [`apply`](Self::apply). When the state is already `Base`, `base_size()` naturally equals
-    /// the tip, so `Snapshot` is unnecessary.
+    /// Use this as the starting point for batch chains: call `.new_batch()` on the
+    /// returned value to create speculative batches whose changesets are computed
+    /// relative to this point.
+    ///
+    /// When the internal state has `Layer` variants, wraps in `Checkpoint` so that
+    /// `base_size()` equals the current tip. When the state is already `Base`,
+    /// `base_size()` naturally equals the tip, so `Checkpoint` is unnecessary.
     pub fn to_batch(&self) -> MerkleizedBatch<D> {
         let inner = self.inner.read();
         let state = inner.state.clone();
@@ -912,7 +914,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             return state;
         }
         let size = state.size();
-        MerkleizedBatch::Snapshot {
+        MerkleizedBatch::Checkpoint {
             inner: Arc::new(state),
             size,
         }

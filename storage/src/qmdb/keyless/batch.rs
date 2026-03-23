@@ -72,7 +72,7 @@ where
         E: Storage + Clock + Metrics,
     {
         Self {
-            journal_batch: keyless.journal.to_batch().new_batch::<H>(),
+            journal_batch: keyless.journal.into_merkleized_batch().new_batch::<H>(),
             appends: Vec::new(),
             base_operations: Vec::new(),
             base_size: journal_size,
@@ -240,7 +240,7 @@ where
     pub fn to_batch(&self) -> MerkleizedBatch<H::Digest, V> {
         let journal_size = *self.last_commit_loc + 1;
         MerkleizedBatch {
-            journal_batch: self.journal.to_batch(),
+            journal_batch: self.journal.into_merkleized_batch(),
             total_size: journal_size,
             db_size: journal_size,
         }

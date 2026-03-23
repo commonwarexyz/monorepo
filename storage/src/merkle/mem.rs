@@ -36,7 +36,7 @@ pub struct Config<F: Family, D: Digest> {
 
 /// The shared, reference-counted data behind a [`Mem`].
 ///
-/// Separated so that `Mem::clone()` is O(1) (Arc refcount bump). Mutation goes through
+/// Separated so that `Mem::clone()` is a refcount bump. Mutation goes through
 /// `Arc::make_mut`, which is in-place when the refcount is 1 and COW-copies otherwise.
 #[derive(Clone, Debug)]
 struct MemInner<F: Family, D: Digest> {
@@ -423,24 +423,13 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
     /// Create a new speculative batch with this structure as its parent.
     ///
-    /// This is O(1) -- it clones the inner `Arc`, not the data. However, the batch holds a
-    /// shared reference. If the batch (or any [`MerkleizedBatch`](batch::MerkleizedBatch)
-    /// derived from it) is still alive when [`apply`](Self::apply) or another mutating method
-    /// is called, the mutation triggers an O(N) copy-on-write.
+    /// The batch holds a shared reference. If the batch (or any
+    /// [`MerkleizedBatch`](batch::MerkleizedBatch) derived from it) is still alive when
+    /// [`apply`](Self::apply) or another mutating method is called, the mutation triggers a
+    /// copy-on-write.
     pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, D> {
         let base = batch::MerkleizedBatch::Base(self.clone());
         batch::UnmerkleizedBatch::new(base)
-    }
-
-    /// Create a [`batch::MerkleizedBatch::Snapshot`] of the current committed state.
-    ///
-    /// The snapshot seals the current size as the base, so that batches forked from it produce
-    /// changesets relative to this point.
-    pub fn to_batch(&self) -> batch::MerkleizedBatch<F, D> {
-        batch::MerkleizedBatch::Snapshot {
-            inner: Arc::new(batch::MerkleizedBatch::Base(self.clone())),
-            size: self.size(),
-        }
     }
 
     /// Apply a changeset produced by

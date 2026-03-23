@@ -233,14 +233,14 @@ where
     where
         C::Item: Encode,
     {
-        self.to_batch().new_batch()
+        self.into_merkleized_batch().new_batch()
     }
 
     /// Create an owned [`MerkleizedBatch`] representing the current committed state.
     ///
     /// The batch has no items (the committed items are on disk, not in memory).
     /// This is the starting point for building owned batch chains.
-    pub fn to_batch(&self) -> MerkleizedBatch<H::Digest, C::Item> {
+    pub(crate) fn into_merkleized_batch(&self) -> MerkleizedBatch<H::Digest, C::Item> {
         MerkleizedBatch {
             inner: self.mmr.to_batch(),
             items: Vec::new(),

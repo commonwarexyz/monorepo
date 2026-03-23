@@ -720,8 +720,7 @@ where
 
 /// Immutable bitmap state at any point in a batch chain.
 ///
-/// `Clone` is O(1) (`Arc::clone`). This mirrors the [`crate::mmr::batch::MerkleizedBatch`]
-/// pattern.
+/// Mirrors the [`crate::mmr::batch::MerkleizedBatch`] pattern.
 #[derive(Clone, Debug)]
 pub(crate) enum BitmapBatch<const N: usize> {
     /// Committed bitmap (chain terminal).
@@ -811,7 +810,7 @@ impl<const N: usize> BitmapRead<N> for BitmapBatch<N> {
 impl<const N: usize> BitmapBatch<N> {
     /// Push a changeset as a new layer on top of this bitmap, mutating `self` in place.
     ///
-    /// `self.clone()` is O(1) (Arc clone). The old value becomes the parent of the new layer.
+    /// The old value becomes the parent of the new layer.
     pub(super) fn push_changeset(&mut self, pushed_bits: Vec<bool>, cleared_bits: Vec<Location>) {
         if pushed_bits.is_empty() && cleared_bits.is_empty() {
             return;
