@@ -869,8 +869,8 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Persistable for Journal<
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared>
-    crate::journal::authenticated::Initializable<E> for Journal<E, A>
+impl<E: Clock + Storage + Metrics, A: CodecFixedShared> crate::journal::authenticated::Inner<E>
+    for Journal<E, A>
 {
     type Config = Config;
 

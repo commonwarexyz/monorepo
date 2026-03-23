@@ -232,7 +232,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        authenticated::Initializable,
+        authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
     mmr::{journaled::Config as MmrConfig, Location, StandardHasher},
@@ -304,7 +304,7 @@ where
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
-    J: Initializable<E, Item = Operation<U>>,
+    J: Inner<E, Item = Operation<U>>,
     Operation<U>: Committable + CodecShared,
     NewIndex: FnOnce(E, T) -> I,
 {

@@ -651,16 +651,8 @@ where
     }
 }
 
-/// A [Mutable] journal that knows how to construct an authenticated
-/// [Journal] wrapping itself.
-///
-/// Each concrete journal type ([fixed](super::contiguous::fixed::Journal),
-/// [variable](super::contiguous::variable::Journal)) implements this with the appropriate codec
-/// bounds, enabling generic code that constructs an authenticated journal without knowing
-/// whether the inner journal is fixed or variable.
-pub trait Initializable<E: Storage + Clock + Metrics>:
-    Mutable + Persistable<Error = JournalError>
-{
+/// A [Mutable] journal that can serve as the inner journal of an authenticated [Journal].
+pub trait Inner<E: Storage + Clock + Metrics>: Mutable + Persistable<Error = JournalError> {
     /// The configuration needed to initialize this journal.
     type Config: Clone + Send;
 
