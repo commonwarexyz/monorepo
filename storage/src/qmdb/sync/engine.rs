@@ -18,7 +18,10 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::Metrics as _;
 use commonware_utils::{
-    channel::{fallible::OneshotExt as _, fallible::AsyncFallibleExt, mpsc, oneshot},
+    channel::{
+        fallible::{AsyncFallibleExt, OneshotExt as _},
+        mpsc, oneshot,
+    },
     NZU64,
 };
 use futures::{
@@ -73,19 +76,19 @@ pub(super) struct IndexedFetchResult<Op, D: Digest, E> {
 /// Wait for the next synchronization event.
 /// Returns `None` when there are no outstanding requests and no channels to wait on.
 async fn wait_for_event<Op, D: Digest, E>(
-    update_receiver: &mut Option<mpsc::Receiver<Target<D>>>,
-    finish_receiver: &mut Option<mpsc::Receiver<()>>,
+    update_rx: &mut Option<mpsc::Receiver<Target<D>>>,
+    finish_rx: &mut Option<mpsc::Receiver<()>>,
     outstanding_requests: &mut Requests<Op, D, E>,
 ) -> Option<Event<Op, D, E>> {
-    if outstanding_requests.len() == 0 && update_receiver.is_none() && finish_receiver.is_none() {
+    if outstanding_requests.len() == 0 && update_rx.is_none() && finish_rx.is_none() {
         return None;
     }
 
-    let target_update_fut = update_receiver.as_mut().map_or_else(
+    let target_update_fut = update_rx.as_mut().map_or_else(
         || Either::Right(pending()),
         |update_rx| Either::Left(update_rx.recv()),
     );
-    let finish_fut = finish_receiver.as_mut().map_or_else(
+    let finish_fut = finish_rx.as_mut().map_or_else(
         || Either::Right(pending()),
         |finish_rx| Either::Left(finish_rx.recv()),
     );
@@ -211,13 +214,20 @@ where
     config: DB::Config,
 
     /// Optional receiver for target updates during sync
-    update_receiver: Option<mpsc::Receiver<Target<DB::Digest>>>,
+    update_rx: Option<mpsc::Receiver<Target<DB::Digest>>>,
 
-    /// Optional receiver for explicit finish requests.
-    finish_receiver: Option<mpsc::Receiver<()>>,
+    /// Channel that requests sync completion once the current target is reached.
+    ///
+    /// When `None`, sync completes as soon as the target is reached.
+    finish_rx: Option<mpsc::Receiver<()>>,
 
-    /// Optional sender used to report when the current target is reached.
-    reached_target_sender: Option<mpsc::Sender<Target<DB::Digest>>>,
+    /// Channel used to notify an observer once the current target is reached.
+    /// The engine sends at most one notification for each target.
+    ///
+    /// When `reached_target_tx` is `Some(...)`, this receiver must be actively
+    /// drained by the observer. The engine awaits send capacity on this channel before
+    /// proceeding, so backpressure can pause progress at target.
+    reached_target_tx: Option<mpsc::Sender<Target<DB::Digest>>>,
 
     /// Whether explicit finish has been requested.
     finish_requested: bool,
@@ -277,9 +287,9 @@ where
             hasher: StandardHasher::<DB::Hasher>::new(),
             context: config.context,
             config: config.db_config,
-            update_receiver: config.update_rx,
-            finish_receiver: config.finish_rx,
-            reached_target_sender: config.reached_target_tx,
+            update_rx: config.update_rx,
+            finish_rx: config.finish_rx,
+            reached_target_tx: config.reached_target_tx,
             finish_requested: false,
             reached_current_target_reported: false,
         };
@@ -420,7 +430,7 @@ where
     /// mode via [`Self::accept_finish`]. If the finish channel is disconnected before
     /// a finish request is observed, this returns [`EngineError::FinishChannelClosed`].
     fn drain_finish_requests(&mut self) -> Result<(), Error<DB, R>> {
-        let Some(finish_rx) = self.finish_receiver.as_mut() else {
+        let Some(finish_rx) = self.finish_rx.as_mut() else {
             return Ok(());
         };
         match finish_rx.try_recv() {
@@ -441,7 +451,7 @@ where
     /// engine may complete as soon as it is at a target (or the next time it reaches one).
     fn accept_finish(&mut self) {
         self.finish_requested = true;
-        self.finish_receiver = None;
+        self.finish_rx = None;
     }
 
     /// Notify an observer that the current target has been reached. The notification is sent
@@ -455,9 +465,9 @@ where
         if self.reached_current_target_reported {
             return;
         }
-        if let Some(sender) = self.reached_target_sender.as_ref() {
+        if let Some(sender) = self.reached_target_tx.as_ref() {
             if !sender.send_lossy(self.target.clone()).await {
-                self.reached_target_sender = None;
+                self.reached_target_tx = None;
             }
         }
         self.reached_current_target_reported = true;
@@ -537,7 +547,7 @@ where
     }
 
     /// Check if sync is complete based on the current journal size and target
-    pub async fn is_complete(&self) -> Result<bool, Error<DB, R>> {
+    pub async fn is_at_target(&self) -> Result<bool, Error<DB, R>> {
         let journal_size = self.journal.size().await;
         let target_journal_size = self.target.range.end();
 
@@ -659,7 +669,7 @@ where
                 Ok(NextStep::Continue(updated_self))
             }
             Event::UpdateChannelClosed => {
-                self.update_receiver = None;
+                self.update_rx = None;
                 Ok(NextStep::Continue(self))
             }
             Event::FinishRequested => {
@@ -690,13 +700,13 @@ where
         self.drain_finish_requests()?;
 
         // Check if sync is complete
-        if self.is_complete().await? {
+        if self.is_at_target().await? {
             self.report_reached_target().await;
 
-            if self.finish_receiver.is_some() && !self.finish_requested {
+            if self.finish_rx.is_some() && !self.finish_requested {
                 let event = wait_for_event(
-                    &mut self.update_receiver,
-                    &mut self.finish_receiver,
+                    &mut self.update_rx,
+                    &mut self.finish_rx,
                     &mut self.outstanding_requests,
                 )
                 .await
@@ -732,8 +742,8 @@ where
 
         // Wait for the next synchronization event
         let event = wait_for_event(
-            &mut self.update_receiver,
-            &mut self.finish_receiver,
+            &mut self.update_rx,
+            &mut self.finish_rx,
             &mut self.outstanding_requests,
         )
         .await
