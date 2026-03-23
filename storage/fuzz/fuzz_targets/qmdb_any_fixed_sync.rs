@@ -136,6 +136,7 @@ async fn test_sync<
         resolver,
         apply_batch_size: 100,
         max_outstanding_requests: 10,
+        max_retained_roots: 8,
     };
 
     if let Ok(synced) = sync::sync(sync_config).await {

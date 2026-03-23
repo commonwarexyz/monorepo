@@ -23,7 +23,12 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
-use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, NZU64};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    non_empty_range,
+    sync::AsyncRwLock,
+    NZU64,
+};
 use rand::RngCore as _;
 use std::{num::NonZeroU64, sync::Arc};
 
@@ -127,6 +132,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 8,
         };
 
         // Create the engine
@@ -168,6 +174,7 @@ where
             fetch_batch_size: NZU64!(2),
             db_config,
             update_rx: None,
+            max_retained_roots: 8,
         };
 
         let result: Result<H::Db, _> = sync::sync(engine_config).await;
@@ -216,6 +223,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 8,
         };
 
         // Perform sync
@@ -296,6 +304,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 8,
         };
 
         let synced_db: H::Db = sync::sync(config).await.unwrap();
@@ -369,6 +378,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -469,6 +479,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -530,6 +541,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
+            max_retained_roots: 1,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -596,6 +608,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
+            max_retained_roots: 1,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -676,6 +689,7 @@ where
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: Some(update_receiver),
+                max_retained_roots: 1,
             };
 
             // Send target update with increased bounds
@@ -745,6 +759,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
+            max_retained_roots: 1,
         };
 
         // Complete the sync
@@ -816,6 +831,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 max_outstanding_requests: 10,
                 apply_batch_size: 1024,
                 update_rx: Some(update_receiver),
+                max_retained_roots: 1,
             };
             let mut client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
             loop {
@@ -922,6 +938,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -987,6 +1004,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -1269,10 +1287,17 @@ impl<R: Resolver<Digest = Digest>> Resolver for CorruptFirstPinnedNodesResolver<
         start_loc: Location,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
+        cancel_rx: oneshot::Receiver<()>,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let mut result = self
             .inner
-            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes)
+            .get_operations(
+                op_count,
+                start_loc,
+                max_ops,
+                include_pinned_nodes,
+                cancel_rx,
+            )
             .await?;
         // Corrupt pinned nodes only on the first request that includes them.
         if result.pinned_nodes.is_some()
@@ -1332,6 +1357,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            max_retained_roots: 8,
         };
 
         // Sync should succeed on the second attempt after the first corrupted pinned nodes
