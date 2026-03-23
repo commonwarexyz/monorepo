@@ -634,12 +634,12 @@ impl<V: Variant, C: Signer> Player<V, C> {
     /// Finalize the player's participation in the DKG round.
     pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = C::PublicKey>>(
         self,
-        logs: Logs<V, C::PublicKey, M>,
         rng: &mut impl CryptoRngCore,
+        logs: Logs<V, C::PublicKey, M>,
         strategy: &impl Strategy,
     ) -> Result<(Output<V, C::PublicKey>, Share), commonware_cryptography::bls12381::dkg::Error>
     {
-        self.player.finalize::<M, B>(logs, rng, strategy)
+        self.player.finalize::<M, B>(rng, logs, strategy)
     }
 }
 

@@ -281,8 +281,8 @@
 //! let mut player_shares = BTreeMap::new();
 //! for (player_pk, player) in players {
 //!     let (output, share) = player.finalize::<N3f1, ed25519::Batch>(
-//!       logs.clone(),
 //!       &mut rng,
+//!       logs.clone(),
 //!       &commonware_parallel::Sequential,
 //!     )?;
 //!     println!("Player {:?} got share at index {}", player_pk, share.index);
@@ -291,8 +291,8 @@
 //!
 //! // Step 5: Observer can also compute the public output
 //! let observer_output = observe::<MinSig, ed25519::PublicKey, N3f1, ed25519::Batch>(
-//!     logs,
 //!     &mut rng,
+//!     logs,
 //!     &commonware_parallel::Sequential,
 //! )?;
 //! println!("DKG completed with threshold {}", observer_output.quorum::<N3f1>());
@@ -1319,8 +1319,8 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     }
 
     fn check_dealers<B: BatchVerifier<PublicKey = P>>(
-        info: &Info<V, P>,
         rng: &mut impl CryptoRngCore,
+        info: &Info<V, P>,
         strategy: &impl Strategy,
         transcript: &Transcript,
         dealers: &[(&P, &DealerLog<V, P>)],
@@ -1391,7 +1391,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         }
 
         let pending_results =
-            Self::check_dealers::<B>(&self.info, rng, strategy, &transcript, &pending);
+            Self::check_dealers::<B>(rng, &self.info, strategy, &transcript, &pending);
         let mut all_pending_valid = true;
         for (dealer, is_valid) in pending_results {
             self.known.insert(dealer, is_valid);
@@ -1412,7 +1412,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         let remaining: Vec<_> = iter
             .filter(|(dealer, _)| !self.known.contains_key(*dealer))
             .collect();
-        let results = Self::check_dealers::<B>(&self.info, rng, strategy, &transcript, &remaining);
+        let results = Self::check_dealers::<B>(rng, &self.info, strategy, &transcript, &remaining);
         for (dealer, is_valid) in results {
             self.known.insert(dealer, is_valid);
         }
@@ -1658,8 +1658,8 @@ impl<V: Variant, P: PublicKey> ObserveInner<V, P> {
 ///
 /// This will only ever return [`Error::DkgFailed`].
 pub fn observe<V: Variant, P: PublicKey, M: Faults, B: BatchVerifier<PublicKey = P>>(
-    logs: Logs<V, P, M>,
     rng: &mut impl CryptoRngCore,
+    logs: Logs<V, P, M>,
     strategy: &impl Strategy,
 ) -> Result<Output<V, P>, Error> {
     let (info, selected) = logs.select::<B>(rng, strategy)?;
@@ -1802,8 +1802,8 @@ impl<V: Variant, S: Signer> Player<V, S> {
     /// [`Error::MismatchedLogs`] if `logs` are bound to a different DKG round.
     pub fn finalize<M: Faults, B: BatchVerifier<PublicKey = S::PublicKey>>(
         self,
-        logs: Logs<V, S::PublicKey, M>,
         rng: &mut impl CryptoRngCore,
+        logs: Logs<V, S::PublicKey, M>,
         strategy: &impl Strategy,
     ) -> Result<(Output<V, S::PublicKey>, Share), Error> {
         // `Logs::select` verifies ack signatures, so any ack present in `selected`
@@ -2622,7 +2622,7 @@ mod test_plan {
                 }
                 // Run observer
                 let observe_result =
-                    observe::<_, _, N3f1, ed25519::Batch>(logs.clone(), &mut rng, &Sequential);
+                    observe::<_, _, N3f1, ed25519::Batch>(&mut rng, logs.clone(), &Sequential);
                 if round.expect_failure(previous_successful_round) {
                     assert!(
                         observe_result.is_err(),
@@ -2716,8 +2716,8 @@ mod test_plan {
                         )
                         .expect("resume should succeed with stale logs");
                         let finalize_res = resumed.finalize::<N3f1, ed25519::Batch>(
-                            logs.clone(),
                             &mut rng,
+                            logs.clone(),
                             &Sequential,
                         );
                         assert!(
@@ -2760,7 +2760,7 @@ mod test_plan {
                 // Finalize each player
                 for (player_pk, player) in players.into_iter() {
                     let (player_output, share) = player
-                        .finalize::<N3f1, ed25519::Batch>(logs.clone(), &mut rng, &Sequential)
+                        .finalize::<N3f1, ed25519::Batch>(&mut rng, logs.clone(), &Sequential)
                         .expect("Player finalize should succeed");
 
                     assert_eq!(
@@ -3304,7 +3304,7 @@ mod test {
         let wrong_logs = fixture.logs_for(&fixture.wrong_info, &[false; PRE_VERIFY_DEALERS]);
 
         let result =
-            player.finalize::<QuorumTwo, ed25519::Batch>(wrong_logs, &mut test_rng(), &Sequential);
+            player.finalize::<QuorumTwo, ed25519::Batch>(&mut test_rng(), wrong_logs, &Sequential);
 
         assert!(
             matches!(result, Err(Error::MismatchedLogs)),

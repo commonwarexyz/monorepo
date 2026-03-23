@@ -523,8 +523,8 @@ where
                         let (success, next_round, next_output, next_share) =
                             if let Some(ps) = player_state.take() {
                                 match ps.finalize::<N3f1, Batch>(
-                                    logs,
                                     &mut self.context,
+                                    logs,
                                     &Sequential,
                                 ) {
                                     Ok((new_output, new_share)) => (
@@ -541,7 +541,11 @@ where
                                     ),
                                 }
                             } else {
-                                match observe::<_, _, N3f1, Batch>(logs, &mut self.context, &Sequential) {
+                                match observe::<_, _, N3f1, Batch>(
+                                    &mut self.context,
+                                    logs,
+                                    &Sequential,
+                                ) {
                                     Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                     Err(_) => (
                                         false,

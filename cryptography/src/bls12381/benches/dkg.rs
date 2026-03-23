@@ -144,15 +144,15 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
                             if concurrency > 1 {
                                 black_box(
                                     player
-                                        .finalize::<N3f1, Batch>(logs, &mut finalize_rng, &strategy)
+                                        .finalize::<N3f1, Batch>(&mut finalize_rng, logs, &strategy)
                                         .unwrap(),
                                 );
                             } else {
                                 black_box(
                                     player
                                         .finalize::<N3f1, Batch>(
-                                            logs,
                                             &mut finalize_rng,
+                                            logs,
                                             &Sequential,
                                         )
                                         .unwrap(),
