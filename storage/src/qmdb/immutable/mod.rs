@@ -59,11 +59,11 @@ use crate::{
         authenticated,
         contiguous::{
             variable::{self, Config as JournalConfig},
-            Contiguous as _, Reader,
+            Contiguous as _, Mutable as _, Reader,
         },
     },
     mmr::{iterator::nodes_to_pin, journaled::Config as MmrConfig, Location, Proof},
-    qmdb::{any::VariableValue, build_snapshot_from_log, Error},
+    qmdb::{any::VariableValue, build_snapshot_from_log, delete_known_loc, Error},
     translator::Translator,
 };
 use commonware_codec::Read;
@@ -225,6 +225,63 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
             return Err(Error::PruneBeyondMinRequired(loc, self.last_commit_loc));
         }
         self.journal.prune(loc).await?;
+
+        Ok(())
+    }
+
+    /// Rewind the database to `size` operations, where `size` is the location of the next append.
+    ///
+    /// This rewinds both the operations journal and its MMR to the historical state at `size`,
+    /// and removes rewound set operations from the in-memory snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when:
+    /// - `size` is not a valid rewind target
+    /// - `size - 1` has been pruned
+    /// - `size - 1` is not a commit operation
+    pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
+        let rewind_size = *size;
+        let current_size = *self.last_commit_loc + 1;
+        if rewind_size == current_size {
+            return Ok(());
+        }
+        if rewind_size == 0 || rewind_size > current_size {
+            return Err(Error::Journal(crate::journal::Error::InvalidRewind(
+                rewind_size,
+            )));
+        }
+
+        let (rewind_last_loc, rewound_sets) = {
+            let reader = self.journal.reader().await;
+            let bounds = reader.bounds();
+            if rewind_size < bounds.start {
+                return Err(Error::Journal(crate::journal::Error::ItemPruned(
+                    rewind_size,
+                )));
+            }
+
+            let rewind_last_loc = Location::new(rewind_size - 1);
+            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            if !matches!(rewind_last_op, Operation::Commit(_)) {
+                return Err(Error::UnexpectedData(rewind_last_loc));
+            }
+
+            let mut rewound_sets = Vec::new();
+            for loc in rewind_size..current_size {
+                if let Operation::Set(key, _) = reader.read(loc).await? {
+                    rewound_sets.push((key, Location::new(loc)));
+                }
+            }
+
+            (rewind_last_loc, rewound_sets)
+        };
+
+        self.journal.rewind(rewind_size).await?;
+        for (key, loc) in rewound_sets {
+            delete_known_loc(&mut self.snapshot, &key, loc);
+        }
+        self.last_commit_loc = rewind_last_loc;
 
         Ok(())
     }
@@ -427,6 +484,21 @@ pub(super) mod test {
     ) -> Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap> {
         let cfg = db_config("partition", &context);
         Immutable::init(context, cfg).await.unwrap()
+    }
+
+    async fn commit_sets(
+        db: &mut Db,
+        sets: impl IntoIterator<Item = (Digest, Vec<u8>)>,
+        metadata: Option<Vec<u8>>,
+    ) -> Range<Location> {
+        let mut batch = db.new_batch();
+        for (key, value) in sets {
+            batch = batch.set(key, value);
+        }
+        let finalized = batch.merkleize(metadata).finalize();
+        let range = db.apply_batch(finalized).await.unwrap();
+        db.commit().await.unwrap();
+        range
     }
 
     #[test_traced("WARN")]
@@ -825,6 +897,117 @@ pub(super) mod test {
         });
     }
 
+    #[test_traced("INFO")]
+    pub fn test_immutable_db_rewind_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            let key1 = Sha256::hash(&1u64.to_be_bytes());
+            let key2 = Sha256::hash(&2u64.to_be_bytes());
+            let key3 = Sha256::hash(&3u64.to_be_bytes());
+
+            let value1 = vec![11u8; 12];
+            let value2 = vec![22u8; 16];
+            let value3 = vec![33u8; 20];
+
+            let metadata_a = vec![44u8; 8];
+            let first_range = commit_sets(
+                &mut db,
+                [(key1, value1.clone()), (key2, value2.clone())],
+                Some(metadata_a.clone()),
+            )
+            .await;
+            let size_before = db.bounds().await.end;
+            let root_before = db.root();
+            let last_commit_before = db.last_commit_loc;
+            assert_eq!(size_before, first_range.end);
+
+            let metadata_b = vec![55u8; 8];
+            let second_range =
+                commit_sets(&mut db, [(key3, value3.clone())], Some(metadata_b.clone())).await;
+            assert_eq!(second_range.start, size_before);
+            assert_ne!(db.root(), root_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_b));
+            assert_eq!(db.get(&key3).await.unwrap(), Some(value3));
+
+            db.rewind(size_before).await.unwrap();
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.bounds().await.end, size_before);
+            assert_eq!(db.last_commit_loc, last_commit_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a.clone()));
+            assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+            assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
+            assert_eq!(db.get(&key3).await.unwrap(), None);
+
+            db.commit().await.unwrap();
+            drop(db);
+            let db = open_db(context.with_label("reopen")).await;
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.bounds().await.end, size_before);
+            assert_eq!(db.last_commit_loc, last_commit_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
+            assert_eq!(db.get(&key1).await.unwrap(), Some(vec![11u8; 12]));
+            assert_eq!(db.get(&key2).await.unwrap(), Some(vec![22u8; 16]));
+            assert_eq!(db.get(&key3).await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    pub fn test_immutable_db_rewind_pruned_target_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                log_items_per_section: NZU64!(1),
+                ..db_config("immutable-rewind-pruned", &context)
+            };
+            let mut db: Db = Immutable::init(context.with_label("db"), cfg)
+                .await
+                .unwrap();
+
+            let first_range = commit_sets(
+                &mut db,
+                (0u64..16).map(|i| (Sha256::hash(&i.to_be_bytes()), vec![i as u8; 8])),
+                None,
+            )
+            .await;
+
+            let mut round = 0u64;
+            loop {
+                round += 1;
+                assert!(
+                    round <= 64,
+                    "failed to prune enough history for rewind test"
+                );
+
+                commit_sets(
+                    &mut db,
+                    (0u64..16).map(|i| {
+                        let seed = round * 100 + i;
+                        (Sha256::hash(&seed.to_be_bytes()), vec![seed as u8; 8])
+                    }),
+                    None,
+                )
+                .await;
+                db.prune(db.last_commit_loc).await.unwrap();
+
+                if db.bounds().await.start > first_range.start {
+                    break;
+                }
+            }
+
+            let err = db.rewind(first_range.start).await.unwrap_err();
+            assert!(
+                matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+                "unexpected rewind error: {err:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     type Db = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     fn is_send<T: Send>(_: T) {}
@@ -835,6 +1018,7 @@ pub(super) mod test {
         is_send(db.get_metadata());
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.sync());
+        is_send(db.rewind(loc));
     }
 
     /// batch.get() reads pending mutations and falls through to base DB.
