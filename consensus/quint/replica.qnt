@@ -1398,60 +1398,42 @@ module replica {
         no_nullification_in_finalized_view
     }
 
-    // A correct node's notarization for (view, block) implies each signer
-    // actually sent a notarize vote for (view, block).
-    val notarization_requires_sent_votes = sent_certificate
-        .filter(cert => is_notarization_cert(cert) and cert_ghost_sender(cert).in(CORRECT))
-        .forall(cert => {
-            val v = cert_view(cert)
-            val b = cert_block(cert)
-            cert_signatures(cert).forall(sig =>
-                sent_vote.exists(vote => and {
-                    is_notarize(vote),
-                    vote_view(vote) == v,
-                    vote_block(vote) == b,
-                    vote_sig(vote) == sig,
-                })
-            )
-        })
+     def supporting_vote_sigs(cert: Certificate): Set[Signature] = {
+        match (cert) {
+            | Notarization(n) =>
+                sent_vote
+                    .filter(v => and {
+                        is_notarize(v),
+                        vote_view(v) == n.view,
+                        vote_block(v) == Some(n.block),
+                    })
+                    .map(v => vote_sig(v))
 
-    // A correct node's nullification for (view) implies each signer
-    // actually sent a nullify vote for (view).
-    val nullification_requires_sent_votes = sent_certificate
-        .filter(cert => is_nullification_cert(cert) and cert_ghost_sender(cert).in(CORRECT))
-        .forall(cert => {
-            val v = cert_view(cert)
-            cert_signatures(cert).forall(sig =>
-                sent_vote.exists(vote => and {
-                    is_nullify(vote),
-                    vote_view(vote) == v,
-                    vote_sig(vote) == sig,
-                })
-            )
-        })
+            | Nullification(n) =>
+                sent_vote
+                    .filter(v => and {
+                        is_nullify(v),
+                        vote_view(v) == n.view,
+                    })
+                    .map(v => vote_sig(v))
 
-    // A correct node's finalization for (view, block) implies each signer
-    // actually sent a finalize vote for (view, block).
-    val finalization_requires_sent_votes = sent_certificate
-        .filter(cert => is_finalization_cert(cert) and cert_ghost_sender(cert).in(CORRECT))
-        .forall(cert => {
-            val v = cert_view(cert)
-            val b = cert_block(cert)
-            cert_signatures(cert).forall(sig =>
-                sent_vote.exists(vote => and {
-                    is_finalize(vote),
-                    vote_view(vote) == v,
-                    vote_block(vote) == b,
-                    vote_sig(vote) == sig,
-                })
-            )
-        })
-
-    val certificates_require_sent_votes = and {
-        notarization_requires_sent_votes,
-        nullification_requires_sent_votes,
-        finalization_requires_sent_votes,
+            | Finalization(f) =>
+                sent_vote
+                    .filter(v => and {
+                        is_finalize(v),
+                        vote_view(v) == f.view,
+                        vote_block(v) == Some(f.block),
+                    })
+                    .map(v => vote_sig(v))
+        }
     }
+
+    val certificates_require_sent_votes =
+        sent_certificate
+            .filter(cert => cert_ghost_sender(cert).in(CORRECT))
+            .forall(cert =>
+                cert_signatures(cert).subseteq(supporting_vote_sigs(cert))
+            )
 
     val all_invariants = all {
         no_proposal_equivocation,
