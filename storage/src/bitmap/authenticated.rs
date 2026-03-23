@@ -353,7 +353,7 @@ impl<E: Clock + RStorage + Metrics, D: Digest, const N: usize> MerkleizedBitMap<
         let mmr = Mmr::init(
             Config {
                 nodes: Vec::new(),
-                pruned_to: Location::new(pruned_chunks as u64),
+                pruning_boundary: Location::new(pruned_chunks as u64),
                 pinned_nodes,
             },
             hasher,
