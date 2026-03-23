@@ -136,8 +136,8 @@ impl<
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
-    fn pruned_to_pos(&self) -> Position {
-        self.inner.pruned_to_pos()
+    fn pruning_boundary(&self) -> Location {
+        self.inner.pruning_boundary()
     }
 
     fn proof(

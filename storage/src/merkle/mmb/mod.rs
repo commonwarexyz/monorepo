@@ -183,8 +183,8 @@ impl merkle::Family for Family {
         iterator::PeakIterator::new(size)
     }
 
-    fn nodes_to_pin(size: Position, prune_pos: Position) -> alloc::vec::Vec<Position> {
-        iterator::nodes_to_pin(size, prune_pos)
+    fn nodes_to_pin(leaves: Location, prune_loc: Location) -> alloc::vec::Vec<Position> {
+        iterator::nodes_to_pin(leaves, prune_loc)
     }
 
     fn children(pos: Position, height: u32) -> (Position, Position) {
@@ -195,9 +195,8 @@ impl merkle::Family for Family {
         Location::try_from(size).is_ok()
     }
 
-    fn parent_heights(size: Position) -> impl Iterator<Item = u32> {
-        let loc = Location::try_from(size).expect("invalid mmb size");
-        let leaf = loc.as_u64();
+    fn parent_heights(leaves: Location) -> impl Iterator<Item = u32> {
+        let leaf = *leaves;
         let height = if (leaf + 2).is_power_of_two() {
             None
         } else {
@@ -209,7 +208,7 @@ impl merkle::Family for Family {
 
 #[cfg(test)]
 mod tests {
-    use super::Position;
+    use super::Location;
 
     /// Verify the MMB merge schedule via `Family::parent_heights`.
     #[test]
@@ -234,12 +233,8 @@ mod tests {
         ];
 
         for (i, expected) in expected.iter().enumerate() {
-            let size = if i == 0 {
-                Position::new(0)
-            } else {
-                Position::new(2 * i as u64 - (i as u64 + 1).ilog2() as u64)
-            };
-            let height: Option<u32> = crate::merkle::Family::parent_heights(size).next();
+            let loc = Location::new(i as u64);
+            let height: Option<u32> = crate::merkle::Family::parent_heights(loc).next();
             assert_eq!(height, *expected, "mismatch at loc={i}");
         }
     }

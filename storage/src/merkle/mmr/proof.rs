@@ -78,11 +78,11 @@ impl<D: Digest> Proof<Family, D> {
             return pinned_nodes.is_empty();
         }
 
-        let Ok(start_pos) = Position::try_from(start_loc) else {
+        if !start_loc.is_valid() || start_loc > self.leaves {
             return false;
-        };
+        }
 
-        let pinned_positions: Vec<Position> = nodes_to_pin(start_pos).collect();
+        let pinned_positions: Vec<Position> = nodes_to_pin(start_loc).collect();
         if pinned_positions.len() != pinned_nodes.len() {
             return false;
         }
@@ -432,10 +432,7 @@ mod tests {
             .range_proof(&hasher, start_loc..Location::new(3))
             .unwrap();
 
-        let pinned: Vec<Digest> = mmr
-            .nodes_to_pin(Position::try_from(start_loc).unwrap())
-            .into_values()
-            .collect();
+        let pinned: Vec<Digest> = mmr.nodes_to_pin(start_loc).into_values().collect();
         assert_eq!(pinned.len(), 1, "should have exactly one pinned node");
 
         // Correct pinned nodes must verify.
@@ -500,10 +497,7 @@ mod tests {
             .range_proof(&hasher, start_loc..Location::new(10))
             .unwrap();
 
-        let pinned: Vec<Digest> = mmr
-            .nodes_to_pin(Position::try_from(start_loc).unwrap())
-            .into_values()
-            .collect();
+        let pinned: Vec<Digest> = mmr.nodes_to_pin(start_loc).into_values().collect();
         assert_eq!(pinned.len(), 1, "should have one fold-prefix peak");
 
         assert!(

@@ -249,7 +249,15 @@ pub(crate) fn leaf_pos(leaf_index: Location) -> Position {
 ///
 /// If `update_leaf` after pruning is not needed (e.g., append-only with pruning but no
 /// mutations), pinning only peaks would suffice and be cheaper.
-pub(crate) fn nodes_to_pin(mmb_size: Position, prune_pos: Position) -> alloc::vec::Vec<Position> {
+///
+/// # Panics
+///
+/// Panics if `leaves` or `prune_loc` is not a valid location.
+pub(crate) fn nodes_to_pin(leaves: Location, prune_loc: Location) -> alloc::vec::Vec<Position> {
+    assert!(leaves.is_valid(), "leaves invalid");
+    assert!(prune_loc.is_valid(), "prune_loc invalid");
+    let mmb_size = Family::location_to_position(leaves);
+    let prune_pos = Family::location_to_position(prune_loc);
     let mut pinned = alloc::vec::Vec::new();
     let mut first_leaf = 0u64;
 
@@ -427,14 +435,12 @@ mod tests {
     #[test]
     fn test_nodes_to_pin_matches_reference() {
         for n in 0u64..=256 {
-            let size = if n == 0 {
-                Position::new(0)
-            } else {
-                Position::try_from(Location::new(n)).unwrap()
-            };
-            for prune in 0..=size.as_u64() {
-                let prune_pos = Position::new(prune);
-                let fast = nodes_to_pin(size, prune_pos);
+            let loc = Location::new(n);
+            let size = Family::location_to_position(loc);
+            for prune in 0..=n {
+                let prune_loc = Location::new(prune);
+                let prune_pos = Family::location_to_position(prune_loc);
+                let fast = nodes_to_pin(loc, prune_loc);
                 let slow = nodes_to_pin_slow(size, prune_pos);
                 assert_eq!(fast, slow, "n={n}, prune={prune}");
             }
