@@ -93,7 +93,7 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
-        mmr: MmrConfig {
+        mmr_config: MmrConfig {
             journal_partition: format!("{test_name}-mmr"),
             metadata_partition: format!("{test_name}-meta"),
             items_per_blob: NZU64!(3),
@@ -101,7 +101,7 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
             thread_pool: None,
             page_cache: page_cache.clone(),
         },
-        log: FConfig {
+        journal_config: FConfig {
             partition: format!("{test_name}-log"),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),

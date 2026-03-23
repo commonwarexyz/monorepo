@@ -9,7 +9,7 @@ use crate::{
     journal::contiguous::variable::Journal,
     mmr::Location,
     qmdb::{
-        any::{init_variable, unordered, value::VariableEncoding, VariableConfig, VariableValue},
+        any::{unordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
         Error,
     },
@@ -53,7 +53,7 @@ where
         known_inactivity_floor: Option<Location>,
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
-        init_variable(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+        crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
             Index::new(ctx, t)
         })
         .await
@@ -72,7 +72,7 @@ pub mod partitioned {
         journal::contiguous::variable::Journal,
         mmr::Location,
         qmdb::{
-            any::{init_variable, VariableConfig, VariableValue},
+            any::{VariableConfig, VariableValue},
             operation::Key,
             Error,
         },
@@ -131,7 +131,7 @@ pub mod partitioned {
             known_inactivity_floor: Option<Location>,
             callback: impl FnMut(bool, Option<Location>),
         ) -> Result<Self, Error> {
-            init_variable(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+            crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
                 Index::new(ctx, t)
             })
             .await
@@ -173,7 +173,7 @@ pub(crate) mod test {
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            mmr: crate::mmr::journaled::Config {
+            mmr_config: crate::mmr::journaled::Config {
                 journal_partition: format!("journal-{seed}"),
                 metadata_partition: format!("metadata-{seed}"),
                 items_per_blob: NZU64!(13),
@@ -181,7 +181,7 @@ pub(crate) mod test {
                 thread_pool: None,
                 page_cache: page_cache.clone(),
             },
-            log: crate::journal::contiguous::variable::Config {
+            journal_config: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{seed}"),
                 items_per_section: NZU64!(7),
                 write_buffer: NZUsize!(1024),

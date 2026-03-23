@@ -107,7 +107,7 @@ fn fuzz(data: FuzzInput) {
             NZUsize!(PAGE_CACHE_SIZE),
         );
         let cfg = Config {
-            mmr: MmrConfig {
+            mmr_config: MmrConfig {
                 journal_partition: "fuzz-current-mmr-journal".into(),
                 metadata_partition: "fuzz-current-mmr-metadata".into(),
                 items_per_blob: NZU64!(MMR_ITEMS_PER_BLOB),
@@ -115,7 +115,7 @@ fn fuzz(data: FuzzInput) {
                 thread_pool: None,
                 page_cache: page_cache.clone(),
             },
-            log: FConfig {
+            journal_config: FConfig {
                 partition: "fuzz-current-log-journal".into(),
                 items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),

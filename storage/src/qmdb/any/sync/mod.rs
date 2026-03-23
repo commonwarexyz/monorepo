@@ -113,7 +113,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = config.mmr.clone();
+        let mmr_config = config.mmr_config.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, Self::Op, _, H, UnorderedFixedUpdate<K, V>, _>(
             context,
@@ -156,7 +156,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = config.mmr.clone();
+        let mmr_config = config.mmr_config.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, Self::Op, _, H, UnorderedVariableUpdate<K, V>, _>(
             context,
@@ -198,7 +198,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = config.mmr.clone();
+        let mmr_config = config.mmr_config.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, Self::Op, _, H, OrderedFixedUpdate<K, V>, _>(
             context,
@@ -241,7 +241,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = config.mmr.clone();
+        let mmr_config = config.mmr_config.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, Self::Op, _, H, OrderedVariableUpdate<K, V>, _>(
             context,
