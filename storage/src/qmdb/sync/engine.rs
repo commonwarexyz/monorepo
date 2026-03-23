@@ -350,9 +350,10 @@ where
             );
             self.retained_roots_order.push_back(old_target_size);
             while self.retained_roots.len() > self.max_retained_roots {
-                if let Some(oldest) = self.retained_roots_order.pop_front() {
-                    self.retained_roots.remove(&oldest);
-                }
+                let Some(oldest) = self.retained_roots_order.pop_front() else {
+                    break;
+                };
+                self.retained_roots.remove(&oldest);
             }
         }
 
