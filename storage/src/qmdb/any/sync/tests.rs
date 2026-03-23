@@ -132,7 +132,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
-            max_retained_roots: 0,
+            max_retained_roots: 8,
         };
 
         // Create the engine
@@ -174,7 +174,7 @@ where
             fetch_batch_size: NZU64!(2),
             db_config,
             update_rx: None,
-            max_retained_roots: 0,
+            max_retained_roots: 8,
         };
 
         let result: Result<H::Db, _> = sync::sync(engine_config).await;
@@ -223,7 +223,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
-            max_retained_roots: 0,
+            max_retained_roots: 8,
         };
 
         // Perform sync
@@ -304,7 +304,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
-            max_retained_roots: 0,
+            max_retained_roots: 8,
         };
 
         let synced_db: H::Db = sync::sync(config).await.unwrap();
@@ -378,7 +378,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
-            max_retained_roots: 0,
+            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -479,7 +479,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
-            max_retained_roots: 0,
+            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -938,7 +938,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
-            max_retained_roots: 0,
+            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -1004,7 +1004,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
-            max_retained_roots: 0,
+            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -1357,7 +1357,7 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
-            max_retained_roots: 0,
+            max_retained_roots: 8,
         };
 
         // Sync should succeed on the second attempt after the first corrupted pinned nodes

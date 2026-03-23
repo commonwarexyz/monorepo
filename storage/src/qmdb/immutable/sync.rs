@@ -286,7 +286,7 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
-                max_retained_roots: 0,
+                max_retained_roots: 8,
             };
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -365,7 +365,7 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
-                max_retained_roots: 0,
+                max_retained_roots: 8,
             };
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -415,7 +415,7 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
-                max_retained_roots: 0,
+                max_retained_roots: 8,
             };
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -589,7 +589,7 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
-                max_retained_roots: 0,
+                max_retained_roots: 8,
             };
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -651,7 +651,7 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
-                max_retained_roots: 0,
+                max_retained_roots: 8,
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -709,7 +709,7 @@ mod tests {
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
-                max_retained_roots: 0,
+                max_retained_roots: 8,
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 

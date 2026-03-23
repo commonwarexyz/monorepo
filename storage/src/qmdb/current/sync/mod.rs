@@ -66,7 +66,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
+use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, sync::AsyncMutex, Array};
 use std::ops::Range;
 
 #[cfg(test)]
@@ -483,7 +483,7 @@ macro_rules! impl_current_resolver {
                 start_loc: Location,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: commonware_utils::channel::oneshot::Receiver<()>,
+                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, Self::Error> {
                 let (proof, operations) = self.any
                     .historical_proof(op_count, start_loc, max_ops)
@@ -496,7 +496,7 @@ macro_rules! impl_current_resolver {
                 Ok(crate::qmdb::sync::FetchResult {
                     proof,
                     operations,
-                    success_tx: commonware_utils::channel::oneshot::channel().0,
+                    success_tx: oneshot::channel().0,
                     pinned_nodes,
                 })
             }
@@ -527,7 +527,7 @@ macro_rules! impl_current_resolver {
                 start_loc: Location,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: commonware_utils::channel::oneshot::Receiver<()>,
+                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let db = self.read().await;
                 let (proof, operations) = db.any
@@ -541,7 +541,7 @@ macro_rules! impl_current_resolver {
                 Ok(crate::qmdb::sync::FetchResult {
                     proof,
                     operations,
-                    success_tx: commonware_utils::channel::oneshot::channel().0,
+                    success_tx: oneshot::channel().0,
                     pinned_nodes,
                 })
             }
@@ -572,7 +572,7 @@ macro_rules! impl_current_resolver {
                 start_loc: Location,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
-                _cancel_rx: commonware_utils::channel::oneshot::Receiver<()>,
+                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
@@ -587,7 +587,7 @@ macro_rules! impl_current_resolver {
                 Ok(crate::qmdb::sync::FetchResult {
                     proof,
                     operations,
-                    success_tx: commonware_utils::channel::oneshot::channel().0,
+                    success_tx: oneshot::channel().0,
                     pinned_nodes,
                 })
             }

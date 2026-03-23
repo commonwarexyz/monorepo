@@ -18,7 +18,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::Metrics as _;
 use commonware_utils::{
-    channel::{mpsc, oneshot},
+    channel::{fallible::OneshotExt as _, mpsc, oneshot},
     NZU64,
 };
 use futures::{future::Either, StreamExt};
@@ -342,8 +342,12 @@ where
         // retained requests that were issued against this target.
         if self.max_retained_roots > 0 {
             let old_target_size = self.target.range.end();
-            self.retained_roots
-                .insert(old_target_size, self.target.root);
+            assert!(
+                self.retained_roots
+                    .insert(old_target_size, self.target.root)
+                    .is_none(),
+                "duplicate retained root for tree size {old_target_size:?}"
+            );
             self.retained_roots_order.push_back(old_target_size);
             while self.retained_roots.len() > self.max_retained_roots {
                 if let Some(oldest) = self.retained_roots_order.pop_front() {
@@ -476,7 +480,7 @@ where
         if operations_len == 0 || operations_len > self.fetch_batch_size.get() {
             // Invalid batch size - notify resolver of failure.
             // We will request these operations again when we scan for unfetched operations.
-            let _ = success_tx.send(false);
+            success_tx.send_lossy(false);
             return Ok(());
         }
 
@@ -488,7 +492,9 @@ where
             &self.target.root
         } else {
             let Some(root) = self.retained_roots.get(&proof.leaves) else {
-                let _ = success_tx.send(false);
+                // No historical root to verify against (evicted or
+                // max_retained_roots is 0). Drop the result without
+                // penalizing the resolver — the data may be valid.
                 return Ok(());
             };
             root
@@ -514,7 +520,7 @@ where
         };
 
         // Report success or failure to the resolver.
-        let _ = success_tx.send(valid);
+        success_tx.send_lossy(valid);
 
         if !valid {
             if need_pinned {
