@@ -2666,9 +2666,9 @@ mod tests {
                 .await;
 
             let duplicate_window = context.current() + Duration::from_millis(300);
-            while context.current() < duplicate_window {
+            loop {
                 select! {
-                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    _ = context.sleep_until(duplicate_window) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         batcher::Message::Constructed(Vote::Nullify(nullify))
@@ -3417,9 +3417,9 @@ mod tests {
             // Wait until we actually broadcast a vote in our leader view.
             let ready_deadline = context.current() + Duration::from_secs(1);
             let mut became_ready = false;
-            while context.current() < ready_deadline {
+            loop {
                 select! {
-                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    _ = context.sleep_until(ready_deadline) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         batcher::Message::Constructed(_) => {}
@@ -3501,9 +3501,9 @@ mod tests {
             // We should still broadcast for target_view (typically a nullify after timeout).
             let target_deadline = context.current() + Duration::from_secs(1);
             let mut saw_target_network_vote = false;
-            while context.current() < target_deadline {
+            loop {
                 select! {
-                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    _ = context.sleep_until(target_deadline) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         batcher::Message::Constructed(_) => {}
@@ -5758,8 +5758,9 @@ mod tests {
             // see nullify in this 2s window after proposal handling, even though
             // leader timeout has elapsed.
             let no_nullify_deadline = context.current() + Duration::from_secs(2);
-            while context.current() < no_nullify_deadline {
+            loop {
                 select! {
+                    _ = context.sleep_until(no_nullify_deadline) => break,
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
@@ -5770,8 +5771,7 @@ mod tests {
                         }
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         _ => {}
-                    },
-                    _ = context.sleep(Duration::from_millis(10)) => {}
+                    }
                 }
             }
 
@@ -5888,8 +5888,9 @@ mod tests {
             // emit a notarize vote or nullify in this 2s window after certificate handling,
             // even though leader timeout has elapsed.
             let quiet_deadline = context.current() + Duration::from_secs(2);
-            while context.current() < quiet_deadline {
+            loop {
                 select! {
+                    _ = context.sleep_until(quiet_deadline) => break,
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Notarize(v)) if v.view() == target_view => {
                             panic!(
@@ -5905,8 +5906,7 @@ mod tests {
                         }
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         _ => {}
-                    },
-                    _ = context.sleep(Duration::from_millis(10)) => {}
+                    }
                 }
             }
 
@@ -5952,6 +5952,153 @@ mod tests {
         recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
             secp256r1::fixture,
         );
+    }
+
+    /// Regression: after a timed-out view is nullified and the voter advances,
+    /// the next view must start with a fresh leader timeout.
+    fn next_view_gets_fresh_timeout_after_prior_view_nullifies<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"next_view_gets_fresh_timeout_after_prior_view_nullifies".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(15));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                Duration::from_secs(1),
+                Duration::from_secs(5),
+                Duration::from_mins(60),
+                mocks::application::Certifier::Always,
+            )
+            .await;
+
+            // Wait for the initial view 1 batcher update.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current, response, ..
+                    } => {
+                        response.send(None).unwrap();
+                        if current == View::new(1) {
+                            break;
+                        }
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // Allow view 1 to time out and emit a nullify vote.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(1) =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected nullify for view 1");
+                    },
+                }
+            }
+
+            // Deliver a nullification certificate for view 1 so the voter enters view 2.
+            let (_, nullification) =
+                build_nullification(&schemes, Round::new(Epoch::new(333), View::new(1)), quorum);
+            mailbox
+                .resolved(Certificate::Nullification(nullification))
+                .await;
+
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(2) =>
+                        {
+                            panic!(
+                                "received nullify for view 2 before its fresh leader timeout elapsed"
+                            );
+                        }
+                        batcher::Message::Update {
+                            current, response, ..
+                        } => {
+                            response.send(None).unwrap();
+                            if current == View::new(2) {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected voter to advance to view 2");
+                    },
+                }
+            }
+
+            // The old view timed out, but the new view should still get its own leader timeout
+            // rather than immediately nullifying on entry.
+            let quiet_deadline = context.current() + Duration::from_millis(500);
+            loop {
+                select! {
+                    _ = context.sleep_until(quiet_deadline) => break,
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(2) =>
+                        {
+                            panic!(
+                                "received nullify for view 2 before its fresh leader timeout elapsed"
+                            );
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    }
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_next_view_gets_fresh_timeout_after_prior_view_nullifies() {
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(ed25519::fixture);
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(secp256r1::fixture);
     }
 
     /// Regression: the first view should make progress without timing out when peers are online.
@@ -6069,10 +6216,8 @@ mod tests {
 
             let deadline = context.current() + Duration::from_secs(3);
             let reached_view2 = loop {
-                if context.current() >= deadline {
-                    break false;
-                }
                 select! {
+                    _ = context.sleep_until(deadline) => break false,
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Finalize(finalize))
                             if finalize.view() == View::new(1) =>
@@ -6093,17 +6238,14 @@ mod tests {
                             }
                         }
                         _ => {}
-                    },
-                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    }
                 }
             };
             assert!(!reached_view2, "view advanced before finalize for view 1");
 
             let reached_view2 = loop {
-                if context.current() >= deadline {
-                    break false;
-                }
                 select! {
+                    _ = context.sleep_until(deadline) => break false,
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == View::new(1) =>
@@ -6119,8 +6261,7 @@ mod tests {
                             }
                         }
                         _ => {}
-                    },
-                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    }
                 }
             };
             assert!(reached_view2, "expected progress to view 2 from view 1");

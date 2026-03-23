@@ -4,8 +4,9 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
+    journal::contiguous::variable::Config as VConfig,
     merkle::Family as _,
-    mmr::{self, Family, StandardHasher as Standard},
+    mmr::{self, journaled::Config as MmrConfig, Family, StandardHasher as Standard},
     qmdb::{
         any::{unordered::variable::Db, VariableConfig as Config},
         verify_proof,
@@ -139,19 +140,25 @@ fn test_config(
     test_name: &str,
     pooler: &impl BufferPooler,
 ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
-        mmr_journal_partition: format!("{test_name}-mmr"),
-        mmr_metadata_partition: format!("{test_name}-meta"),
-        mmr_items_per_blob: NZU64!(3),
-        mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("{test_name}-log"),
-        log_items_per_blob: NZU64!(3),
-        log_write_buffer: NZUsize!(1024),
-        log_compression: None,
-        log_codec_config: ((), ((0..=100000).into(), ())),
+        mmr: MmrConfig {
+            journal_partition: format!("{test_name}-mmr"),
+            metadata_partition: format!("{test_name}-meta"),
+            items_per_blob: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        log: VConfig {
+            partition: format!("{test_name}-log"),
+            items_per_section: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            compression: None,
+            codec_config: ((), ((0..=100000).into(), ())),
+            page_cache,
+        },
         translator: TwoCap,
-        thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1)),
     }
 }
 

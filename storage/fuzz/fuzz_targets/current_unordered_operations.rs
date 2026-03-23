@@ -4,7 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
-    mmr::Location,
+    journal::contiguous::fixed::Config as FConfig,
+    mmr::{journaled::Config as MmrConfig, Location},
     qmdb::current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
     translator::TwoCap,
 };
@@ -100,22 +101,28 @@ fn fuzz(data: FuzzInput) {
 
     runner.start(|context| async move {
         let mut hasher = Sha256::new();
+        let page_cache = CacheRef::from_pooler(
+            &context,
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        );
         let cfg = Config {
-            mmr_journal_partition: "fuzz-current-mmr-journal".into(),
-            mmr_metadata_partition: "fuzz-current-mmr-metadata".into(),
-            mmr_items_per_blob: NZU64!(MMR_ITEMS_PER_BLOB),
-            mmr_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-            log_journal_partition: "fuzz-current-log-journal".into(),
-            log_items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
-            log_write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+            mmr: MmrConfig {
+                journal_partition: "fuzz-current-mmr-journal".into(),
+                metadata_partition: "fuzz-current-mmr-metadata".into(),
+                items_per_blob: NZU64!(MMR_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            log: FConfig {
+                partition: "fuzz-current-log-journal".into(),
+                items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+                page_cache,
+            },
             grafted_mmr_metadata_partition: "fuzz-current-grafted-mmr-metadata".into(),
             translator: TwoCap,
-            page_cache: CacheRef::from_pooler(
-                &context,
-                PAGE_SIZE,
-                NZUsize!(PAGE_CACHE_SIZE),
-            ),
-            thread_pool: None,
         };
 
         let mut db = Db::init(context.clone(), cfg)
