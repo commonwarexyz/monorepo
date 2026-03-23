@@ -248,7 +248,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
     #[cfg(any(feature = "std", test))]
     pub fn update_leaf_batched(mut self, updates: &[(Location<F>, D)]) -> Result<Self, Error<F>> {
         let leaves = self.leaves();
-        let prune_boundary = self.parent.pruned_to_loc();
+        let prune_boundary = self.parent.pruning_boundary();
         for (loc, _) in updates {
             if *loc >= leaves {
                 return Err(Error::LeafOutOfBounds(*loc));
@@ -400,7 +400,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
         if loc >= leaves {
             return Err(Error::LeafOutOfBounds(loc));
         }
-        if loc < self.parent.pruned_to_loc() {
+        if loc < self.parent.pruning_boundary() {
             return Err(Error::ElementPruned(Position::try_from(loc)?));
         }
         let pos = Position::try_from(loc)?;
@@ -417,7 +417,7 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Unmerkleized
         if loc >= leaves {
             return Err(Error::LeafOutOfBounds(loc));
         }
-        if loc < self.parent.pruned_to_loc() {
+        if loc < self.parent.pruning_boundary() {
             return Err(Error::ElementPruned(Position::try_from(loc)?));
         }
         let pos = Position::try_from(loc)?;
@@ -472,8 +472,8 @@ impl<'a, F: Family, D: Digest, P: Readable<Family = F, Digest = D>> Readable
         self.state.root
     }
 
-    fn pruned_to_loc(&self) -> Location<F> {
-        self.parent.pruned_to_loc()
+    fn pruning_boundary(&self) -> Location<F> {
+        self.parent.pruning_boundary()
     }
 
     fn proof(

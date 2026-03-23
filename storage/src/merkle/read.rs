@@ -25,7 +25,7 @@ pub trait Readable: Send + Sync {
     fn root(&self) -> Self::Digest;
 
     /// Leaf location up to which pruning has been performed, or 0 if never pruned.
-    fn pruned_to_loc(&self) -> Location<Self::Family>;
+    fn pruning_boundary(&self) -> Location<Self::Family>;
 
     /// Inclusion proof for the element at `loc`.
     fn proof(
@@ -48,6 +48,6 @@ pub trait Readable: Send + Sync {
 
     /// `[start, end)` range of retained leaf locations.
     fn bounds(&self) -> Range<Location<Self::Family>> {
-        self.pruned_to_loc()..self.leaves()
+        self.pruning_boundary()..self.leaves()
     }
 }

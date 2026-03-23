@@ -144,7 +144,7 @@ mod tests {
             let mmr_copy = Mmr::init(
                 Config {
                     nodes: mmr.nodes.iter().copied().collect(),
-                    pruned_to: oldest_loc,
+                    pruning_boundary: oldest_loc,
                     pinned_nodes: digests,
                 },
                 &hasher,
@@ -208,7 +208,7 @@ mod tests {
             let mut mmr = Mmr::init(
                 Config {
                     nodes: vec![],
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 &hasher,
@@ -240,7 +240,7 @@ mod tests {
             assert!(Mmr::init(
                 Config::<sha256::Digest> {
                     nodes: vec![],
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 &hasher,
@@ -251,7 +251,7 @@ mod tests {
                 Mmr::init(
                     Config {
                         nodes: vec![Sha256::hash(b"node1"), Sha256::hash(b"node2")],
-                        pruned_to: Location::new(0),
+                        pruning_boundary: Location::new(0),
                         pinned_nodes: vec![],
                     },
                     &hasher,
@@ -266,7 +266,7 @@ mod tests {
                         Sha256::hash(b"leaf2"),
                         Sha256::hash(b"parent"),
                     ],
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 &hasher,
@@ -289,7 +289,7 @@ mod tests {
             assert!(Mmr::init(
                 Config {
                     nodes,
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 &hasher,
@@ -313,7 +313,7 @@ mod tests {
             assert!(Mmr::init(
                 Config {
                     nodes: nodes.clone(),
-                    pruned_to: Location::new(4),
+                    pruning_boundary: Location::new(4),
                     pinned_nodes: pinned_nodes.clone(),
                 },
                 &hasher,
@@ -324,7 +324,7 @@ mod tests {
                 Mmr::init(
                     Config {
                         nodes,
-                        pruned_to: Location::new(5),
+                        pruning_boundary: Location::new(5),
                         pinned_nodes,
                     },
                     &hasher,
