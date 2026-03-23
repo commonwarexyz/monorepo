@@ -6,7 +6,7 @@ use super::batch::BitmapRead;
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher as _, storage::Storage as MerkleStorage},
@@ -349,6 +349,97 @@ where
         self.sync_metadata().await?;
 
         self.any.prune(prune_loc).await
+    }
+
+    /// Rewind the database to `size` operations, where `size` is the location of the next append.
+    ///
+    /// This rewinds the underlying Any database and rebuilds the Current overlay state (bitmap,
+    /// grafted MMR, and canonical root) for the rewound size.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when:
+    /// - `size` is not a valid rewind target
+    /// - `size - 1` has been pruned
+    /// - `size - 1` is not a commit operation
+    /// - `size` is below the bitmap pruning boundary
+    pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
+        self.flatten();
+
+        let rewind_size = *size;
+        let pruned_chunks = self.status.pruned_chunks();
+        let pruned_bits = (pruned_chunks as u64)
+            .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
+            .ok_or_else(|| Error::DataCorrupted("pruned ops leaves overflow"))?;
+        if rewind_size < pruned_bits {
+            return Err(Error::Journal(JournalError::ItemPruned(rewind_size)));
+        }
+
+        // Extract pinned nodes for the existing pruning boundary from the in-memory grafted MMR.
+        let pinned_nodes = if pruned_chunks > 0 {
+            let mmr_size = Position::try_from(Location::new(pruned_chunks as u64))?;
+            let mut pinned_nodes = Vec::new();
+            for pos in nodes_to_pin(mmr_size) {
+                let digest = self
+                    .grafted_mmr
+                    .get_node(pos)
+                    .ok_or(mmr::Error::MissingNode(pos))?;
+                pinned_nodes.push(digest);
+            }
+            pinned_nodes
+        } else {
+            Vec::new()
+        };
+
+        // Rewind underlying ops log + Any state.
+        self.any.rewind(size).await?;
+
+        // Rebuild activity bitmap at the new size from the rewound Any state.
+        let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
+            .map_err(|_| Error::DataCorrupted("pruned chunks overflow"))?;
+        {
+            let reader = self.any.log.reader().await;
+            let bounds = reader.bounds();
+            for loc in status.len()..bounds.end {
+                let bit = if loc < bounds.start {
+                    false
+                } else {
+                    let loc = Location::new(loc);
+                    match reader.read(*loc).await? {
+                        Operation::Update(update) => self
+                            .any
+                            .snapshot
+                            .get(update.key())
+                            .any(|&active_loc| active_loc == loc),
+                        Operation::Delete(_) => false,
+                        Operation::CommitFloor(_, _) => loc == self.any.last_commit_loc,
+                    }
+                };
+                status.push(bit);
+            }
+        }
+
+        // Rebuild grafted MMR and canonical root for the rebuilt bitmap.
+        let hasher = StandardHasher::<H>::new();
+        let grafted_mmr = build_grafted_mmr::<H, N>(
+            &hasher,
+            &status,
+            &pinned_nodes,
+            &self.any.log.mmr,
+            self.thread_pool.as_ref(),
+        )
+        .await?;
+        let storage =
+            grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &self.any.log.mmr);
+        let partial_chunk = partial_chunk(&status);
+        let ops_root = self.any.log.root();
+        let root = compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
+
+        self.status = super::batch::BitmapBatch::Base(Arc::new(status));
+        self.grafted_mmr = mmr::batch::MerkleizedBatch::Base(grafted_mmr);
+        self.root = root;
+
+        Ok(())
     }
 
     /// Sync the metadata to disk.
