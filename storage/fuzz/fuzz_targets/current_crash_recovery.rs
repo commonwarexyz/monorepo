@@ -14,7 +14,8 @@ use commonware_runtime::{
     Metrics as _, Runner,
 };
 use commonware_storage::{
-    mmr::Location,
+    journal::contiguous::variable::Config as VConfig,
+    mmr::{journaled::Config as MmrConfig, Location},
     qmdb::current::{unordered::variable::Db as Current, VariableConfig},
     translator::TwoCap,
 };
@@ -95,20 +96,26 @@ fn make_config(
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
 ) -> VariableConfig<TwoCap, ((), ())> {
+    let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     VariableConfig {
-        mmr_journal_partition: format!("crash-mmr-journal-{suffix}"),
-        mmr_metadata_partition: format!("crash-mmr-metadata-{suffix}"),
-        mmr_items_per_blob: NZU64!(mmr_items_per_blob),
-        mmr_write_buffer: write_buffer,
-        log_partition: format!("crash-log-{suffix}"),
-        log_items_per_blob: NZU64!(log_items_per_blob),
-        log_write_buffer: write_buffer,
-        log_compression: None,
-        log_codec_config: ((), ()),
+        mmr_config: MmrConfig {
+            journal_partition: format!("crash-mmr-journal-{suffix}"),
+            metadata_partition: format!("crash-mmr-metadata-{suffix}"),
+            items_per_blob: NZU64!(mmr_items_per_blob),
+            write_buffer,
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        journal_config: VConfig {
+            partition: format!("crash-log-{suffix}"),
+            items_per_section: NZU64!(log_items_per_blob),
+            write_buffer,
+            compression: None,
+            codec_config: ((), ()),
+            page_cache,
+        },
         grafted_mmr_metadata_partition: format!("crash-grafted-mmr-metadata-{suffix}"),
         translator: TwoCap,
-        page_cache: CacheRef::from_pooler(ctx, page_size, page_cache_size),
-        thread_pool: None,
     }
 }
 

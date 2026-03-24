@@ -4,6 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
+    journal::contiguous::fixed::Config as FConfig,
+    mmr::journaled::Config as MmrConfig,
     qmdb::any::{ordered::fixed::Db as AnyDb, FixedConfig as Config},
     translator::EightCap,
 };
@@ -68,17 +70,23 @@ fn fuzz(data: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = Config::<EightCap> {
-            mmr_journal_partition: "test-qmdb-mmr-journal".into(),
-            mmr_items_per_blob: NZU64!(500000),
-            mmr_write_buffer: NZUsize!(1024),
-            mmr_metadata_partition: "test-qmdb-mmr-metadata".into(),
-            log_journal_partition: "test-qmdb-log-journal".into(),
-            log_items_per_blob: NZU64!(500000),
-            log_write_buffer: NZUsize!(1024),
+            mmr_config: MmrConfig {
+                journal_partition: "test-qmdb-mmr-journal".into(),
+                metadata_partition: "test-qmdb-mmr-metadata".into(),
+                items_per_blob: NZU64!(500000),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: FConfig {
+                partition: "test-qmdb-log-journal".into(),
+                items_per_blob: NZU64!(500000),
+                write_buffer: NZUsize!(1024),
+                page_cache,
+            },
             translator: EightCap,
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 
         let mut db = Db::init(context.clone(), cfg.clone())

@@ -986,7 +986,9 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let mut registry = Registry::default();
             let pool = BufferPool::new(
-                BufferPoolConfig::for_storage().with_max_per_class(NZUsize!(2)),
+                BufferPoolConfig::for_storage()
+                    .with_pool_min_size(PAGE_SIZE.get() as usize)
+                    .with_max_per_class(NZUsize!(2)),
                 &mut registry,
             );
             let cache_ref = CacheRef::new(pool.clone(), PAGE_SIZE, NZUsize!(1));

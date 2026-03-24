@@ -4,7 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
-    mmr::{Location, StandardHasher as Standard},
+    journal::contiguous::variable::Config as VConfig,
+    mmr::{journaled::Config as MmrConfig, Location, StandardHasher as Standard},
     qmdb::{
         keyless::{Config, Keyless},
         verify_proof,
@@ -127,18 +128,24 @@ fn test_config(
     test_name: &str,
     pooler: &impl BufferPooler,
 ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
+    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
-        mmr_journal_partition: format!("{test_name}-mmr"),
-        mmr_metadata_partition: format!("{test_name}-meta"),
-        mmr_items_per_blob: NZU64!(3),
-        mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("{test_name}-log"),
-        log_write_buffer: NZUsize!(1024),
-        log_compression: None,
-        log_codec_config: ((0..=10000).into(), ()),
-        log_items_per_section: NZU64!(7),
-        thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        mmr: MmrConfig {
+            journal_partition: format!("{test_name}-mmr"),
+            metadata_partition: format!("{test_name}-meta"),
+            items_per_blob: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        log: VConfig {
+            partition: format!("{test_name}-log"),
+            write_buffer: NZUsize!(1024),
+            compression: None,
+            codec_config: ((0..=10000).into(), ()),
+            items_per_section: NZU64!(7),
+            page_cache,
+        },
     }
 }
 

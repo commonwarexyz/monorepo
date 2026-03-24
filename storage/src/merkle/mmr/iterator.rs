@@ -3,7 +3,7 @@
 //! new MMR variants or extensions.
 
 use crate::merkle::{
-    mmr::{Family, Position},
+    mmr::{Family, Location, Position},
     Family as MerkleFamily,
 };
 
@@ -142,7 +142,13 @@ pub(crate) const fn pos_to_height(pos: Position) -> u32 {
 /// exactly the set of peaks for an MMR whose size equals the pruning boundary. If the pruning
 /// boundary is not a valid MMR size, then the set corresponds to the peaks of the largest MMR
 /// whose size is less than the pruning boundary.
-pub(crate) fn nodes_to_pin(start_pos: Position) -> impl Iterator<Item = Position> {
+///
+/// # Panics
+///
+/// Panics if `start_loc` is not a valid location.
+pub(crate) fn nodes_to_pin(start_loc: Location) -> impl Iterator<Item = Position> {
+    assert!(start_loc.is_valid(), "start_loc invalid");
+    let start_pos = Family::location_to_position(start_loc);
     PeakIterator::new(PeakIterator::to_nearest_size(start_pos)).map(|(pos, _)| pos)
 }
 

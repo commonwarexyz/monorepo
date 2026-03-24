@@ -10,7 +10,7 @@ use crate::{
     journal::contiguous::variable::Journal,
     mmr::Location,
     qmdb::{
-        any::{init_variable, ordered, value::VariableEncoding, VariableConfig, VariableValue},
+        any::{ordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
         Error,
     },
@@ -54,7 +54,7 @@ where
         known_inactivity_floor: Option<Location>,
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
-        init_variable(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+        crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
             Index::new(ctx, t)
         })
         .await
@@ -73,7 +73,7 @@ pub mod partitioned {
         journal::contiguous::variable::Journal,
         mmr::Location,
         qmdb::{
-            any::{init_variable, VariableConfig, VariableValue},
+            any::{VariableConfig, VariableValue},
             operation::Key,
             Error,
         },
@@ -132,7 +132,7 @@ pub mod partitioned {
             known_inactivity_floor: Option<Location>,
             callback: impl FnMut(bool, Option<Location>),
         ) -> Result<Self, Error> {
-            init_variable(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+            crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
                 Index::new(ctx, t)
             })
             .await
@@ -156,7 +156,6 @@ pub mod partitioned {
 pub(crate) mod test {
     use super::*;
     use crate::{
-        mmr::Position,
         qmdb::any::{
             ordered::test::{
                 test_ordered_any_db_basic, test_ordered_any_db_empty,
@@ -188,19 +187,26 @@ pub(crate) mod test {
     pub(crate) type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
+        let page_cache =
+            CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         VariableConfig {
-            mmr_journal_partition: format!("mmr-journal-{seed}"),
-            mmr_metadata_partition: format!("mmr-metadata-{seed}"),
-            mmr_items_per_blob: NZU64!(12), // intentionally small and janky size
-            mmr_write_buffer: NZUsize!(64),
-            log_partition: format!("log-journal-{seed}"),
-            log_items_per_blob: NZU64!(14), // intentionally small and janky size
-            log_write_buffer: NZUsize!(64),
-            log_compression: None,
-            log_codec_config: ((), ((0..=10000).into(), ())),
+            mmr_config: crate::mmr::journaled::Config {
+                journal_partition: format!("mmr-journal-{seed}"),
+                metadata_partition: format!("mmr-metadata-{seed}"),
+                items_per_blob: NZU64!(12), // intentionally small and janky size
+                write_buffer: NZUsize!(64),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: crate::journal::contiguous::variable::Config {
+                partition: format!("log-journal-{seed}"),
+                items_per_section: NZU64!(14), // intentionally small and janky size
+                write_buffer: NZUsize!(64),
+                compression: None,
+                codec_config: ((), ((0..=10000).into(), ())),
+                page_cache,
+            },
             translator: TwoCap,
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE)),
         }
     }
 
@@ -466,8 +472,8 @@ pub(crate) mod test {
                 (self.log.mmr, self.log.journal)
             }
 
-            async fn pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
-                join_all(nodes_to_pin(pos).map(|p| self.log.mmr.get_node(p)))
+            async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
+                join_all(nodes_to_pin(loc).map(|p| self.log.mmr.get_node(p)))
                     .await
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())

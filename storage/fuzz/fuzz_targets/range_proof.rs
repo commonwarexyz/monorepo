@@ -30,7 +30,7 @@ fn fuzz(input: FuzzInput) {
 
     let config = Config {
         nodes,
-        pruned_to: Location::new(input.pruned_to),
+        pruning_boundary: Location::new(input.pruned_to),
         pinned_nodes,
     };
 

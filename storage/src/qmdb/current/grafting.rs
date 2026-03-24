@@ -787,8 +787,8 @@ mod tests {
         // Simulate pruning 4 chunks. The pruned sub-MMR has 4 grafted leaves,
         // mmr_size(4) = 7, with one peak at grafted position 6.
         let pinned_digest = Sha256::fill(0xAA);
-        let grafted_pruned_to = Location::new(4);
-        assert_eq!(*Position::try_from(grafted_pruned_to).unwrap(), 7);
+        let grafted_pruning_boundary = Location::new(4);
+        assert_eq!(*Position::try_from(grafted_pruning_boundary).unwrap(), 7);
 
         // Build a grafted MMR from pruned components + one new leaf.
         let d4 = Sha256::fill(0xBB);
@@ -796,7 +796,7 @@ mod tests {
         let mut grafted = Mmr::from_components(
             &grafted_hasher,
             Vec::new(),
-            grafted_pruned_to,
+            grafted_pruning_boundary,
             vec![pinned_digest],
         )
         .unwrap();
