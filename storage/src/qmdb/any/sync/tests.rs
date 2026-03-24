@@ -868,7 +868,7 @@ where
             reached = reached_receiver.recv() => {
                 let reached = reached.expect("engine should report reached-target before finish");
                 assert_eq!(reached, initial_target);
-            }
+            },
         }
         assert!(
             sync_handle.as_mut().now_or_never().is_none(),
@@ -887,7 +887,7 @@ where
             reached = reached_receiver.recv() => {
                 let reached = reached.expect("engine should report updated target before finish");
                 assert_eq!(reached, updated_target);
-            }
+            },
         }
         assert!(
             sync_handle.as_mut().now_or_never().is_none(),

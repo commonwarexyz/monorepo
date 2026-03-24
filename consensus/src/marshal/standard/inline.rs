@@ -98,7 +98,8 @@ where
             );
             None
         },
-        result = block_rx => result.map_or_else(|_| {
+        result = block_rx => result.map_or_else(
+            |_| {
                 debug!(
                     stage,
                     ?digest,
@@ -106,7 +107,9 @@ where
                     "skipping block wait"
                 );
                 None
-            }, Some),
+            },
+            Some
+        ),
     }
 }
 
