@@ -8,8 +8,8 @@ use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner,
 };
 use commonware_storage::mmr::{
-    journaled::{CleanMmr, Config, DirtyMmr},
-    Location, Position, StandardHasher,
+    journaled::{Config, Mmr as JournaledMmr},
+    Location, StandardHasher,
 };
 use commonware_utils::NZU64;
 use libfuzzer_sys::fuzz_target;
@@ -21,8 +21,7 @@ const DATA_SIZE: usize = 32;
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type MerkleizedMmr = CleanMmr<deterministic::Context, Digest>;
-type UnmerkleizedMmr = DirtyMmr<deterministic::Context, Digest>;
+type Mmr = JournaledMmr<deterministic::Context, Digest>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -50,12 +49,10 @@ fn bounded_nonzero_rate(u: &mut Unstructured<'_>) -> Result<f64> {
 enum MmrOperation {
     /// Add a leaf to the MMR.
     Add { data: [u8; DATA_SIZE] },
-    /// Pop leaves from the MMR.
-    Pop { count: u8 },
     /// Sync the MMR to storage.
     Sync,
-    /// Prune nodes up to a position.
-    PruneToPos { pos: u64 },
+    /// Prune leaves up to a location.
+    PruneToLoc { loc: u64 },
     /// Prune all nodes.
     PruneAll,
 }
@@ -116,8 +113,8 @@ struct ExpectedBounds {
 }
 
 async fn run_operations(
-    mut mmr: UnmerkleizedMmr,
-    hasher: &mut StandardHasher<Sha256>,
+    mmr: &mut Mmr,
+    hasher: &StandardHasher<Sha256>,
     operations: &[MmrOperation],
 ) -> ExpectedBounds {
     let mut min_size = 0u64;
@@ -128,131 +125,91 @@ async fn run_operations(
     let mut max_pruned = mmr.bounds().start.as_u64();
 
     for op in operations.iter() {
-        let step_result: Result<UnmerkleizedMmr, ()> = match op {
+        let failed = match op {
             MmrOperation::Add { data } => {
-                let leaves_before = mmr.leaves().as_u64();
-
-                if mmr.add(hasher, data).is_err() {
-                    // Partial write possible: max is size after one leaf added
-                    max_size = max_size.max(
-                        Position::try_from(Location::new(leaves_before).unwrap() + 1)
-                            .unwrap()
-                            .as_u64(),
-                    );
-                    max_leaves = max_leaves.max(leaves_before + 1);
-                    Err(())
-                } else {
-                    max_size = max_size.max(mmr.size().as_u64());
-                    max_leaves = max_leaves.max(mmr.leaves().as_u64());
-                    Ok(mmr)
-                }
-            }
-
-            MmrOperation::Pop { count } => {
-                let count = *count as usize;
-                if count == 0 || count as u64 > mmr.leaves().as_u64() {
-                    Ok(mmr)
-                } else {
-                    let target_leaves = mmr.leaves().as_u64() - count as u64;
-
-                    if mmr.pop(count).await.is_err() {
-                        // Partial pop possible: min could be target
-                        min_leaves = min_leaves.min(target_leaves);
-                        if target_leaves > 0 {
-                            let target_size =
-                                Position::try_from(Location::new(target_leaves).unwrap())
-                                    .unwrap()
-                                    .as_u64();
-                            min_size = min_size.min(target_size);
-                        } else {
-                            min_size = 0;
-                        }
-                        Err(())
-                    } else {
-                        // Pop decreases size: update min bounds
-                        min_size = min_size.min(mmr.size().as_u64());
-                        min_leaves = min_leaves.min(mmr.leaves().as_u64());
-                        Ok(mmr)
-                    }
-                }
+                let changeset = mmr
+                    .new_batch()
+                    .add(hasher, data)
+                    .merkleize(hasher)
+                    .finalize();
+                mmr.apply(changeset).unwrap();
+                max_size = max_size.max(mmr.size().as_u64());
+                max_leaves = max_leaves.max(mmr.leaves().as_u64());
+                false
             }
 
             MmrOperation::Sync => {
-                let clean_mmr = mmr.merkleize(hasher);
-                if clean_mmr.sync().await.is_err() {
-                    Err(())
+                if mmr.sync().await.is_err() {
+                    true
                 } else {
                     // Sync commits state: update all bounds to current values
-                    let size = clean_mmr.size().as_u64();
-                    let leaves = clean_mmr.leaves().as_u64();
-                    let pruned = clean_mmr.bounds().start.as_u64();
+                    let size = mmr.size().as_u64();
+                    let leaves = mmr.leaves().as_u64();
+                    let pruned = mmr.bounds().start.as_u64();
                     min_size = size;
                     max_size = max_size.max(size);
                     min_leaves = leaves;
                     max_leaves = max_leaves.max(leaves);
                     min_pruned = pruned;
                     max_pruned = max_pruned.max(pruned);
-                    Ok(clean_mmr.into_dirty())
+                    false
                 }
             }
 
-            MmrOperation::PruneToPos { pos } => {
-                let size = mmr.size().as_u64();
-                let current_pruned = mmr.bounds().start.as_u64();
-                let safe_pos = (*pos).min(size);
+            MmrOperation::PruneToLoc { loc } => {
+                let leaves = *mmr.leaves();
+                let current_pruned = *mmr.bounds().start;
+                let safe_loc = (*loc).min(leaves);
 
-                if safe_pos <= current_pruned {
+                if safe_loc <= current_pruned {
                     // No-op: already pruned past this point
-                    Ok(mmr)
+                    false
                 } else {
-                    let mut clean_mmr = mmr.merkleize(hasher);
-                    match clean_mmr.prune_to_pos(Position::new(safe_pos)).await {
+                    match mmr.prune(Location::new(safe_loc)).await {
                         Err(_) => {
                             // Partial prune possible
-                            max_pruned = max_pruned.max(safe_pos);
-                            Err(())
+                            max_pruned = max_pruned.max(safe_loc);
+                            true
                         }
                         Ok(_) => {
                             // Prune commits: update both bounds to actual value
-                            let pruned = clean_mmr.bounds().start.as_u64();
+                            let pruned = mmr.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
-                            Ok(clean_mmr.into_dirty())
+                            false
                         }
                     }
                 }
             }
 
             MmrOperation::PruneAll => {
-                let size = mmr.size().as_u64();
+                let leaves = mmr.leaves().as_u64();
                 let current_pruned = mmr.bounds().start.as_u64();
 
-                if size == 0 || current_pruned >= size {
+                if leaves == 0 || current_pruned >= leaves {
                     // No-op: nothing to prune
-                    Ok(mmr)
+                    false
                 } else {
-                    let mut clean_mmr = mmr.merkleize(hasher);
-                    match clean_mmr.prune_all().await {
+                    match mmr.prune_all().await {
                         Err(_) => {
                             // Partial prune possible
-                            max_pruned = max_pruned.max(size);
-                            Err(())
+                            max_pruned = max_pruned.max(leaves);
+                            true
                         }
                         Ok(_) => {
                             // Prune commits: update both bounds to actual value
-                            let pruned = clean_mmr.bounds().start.as_u64();
+                            let pruned = mmr.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
-                            Ok(clean_mmr.into_dirty())
+                            false
                         }
                     }
                 }
             }
         };
 
-        mmr = match step_result {
-            Ok(mmr) => mmr,
-            Err(_) => break,
+        if failed {
+            break;
         }
     }
 
@@ -287,10 +244,10 @@ fn fuzz(input: FuzzInput) {
         let partition_suffix = partition_suffix.clone();
         let operations = operations.clone();
         async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
-            let mmr = MerkleizedMmr::init(
+            let hasher = StandardHasher::<Sha256>::new();
+            let mut mmr = Mmr::init(
                 ctx.with_label("mmr"),
-                &mut hasher,
+                &hasher,
                 mmr_config(
                     &partition_suffix,
                     &ctx,
@@ -310,7 +267,7 @@ fn fuzz(input: FuzzInput) {
                 ..Default::default()
             };
 
-            run_operations(mmr.into_dirty(), &mut hasher, &operations).await
+            run_operations(&mut mmr, &hasher, &operations).await
         }
     });
 
@@ -319,10 +276,10 @@ fn fuzz(input: FuzzInput) {
     runner.start(|ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-        let mut hasher = StandardHasher::<Sha256>::new();
-        let mmr = MerkleizedMmr::init(
+        let hasher = StandardHasher::<Sha256>::new();
+        let mut mmr = Mmr::init(
             ctx.with_label("recovered"),
-            &mut hasher,
+            &hasher,
             mmr_config(
                 &partition_suffix,
                 &ctx,
@@ -379,10 +336,12 @@ fn fuzz(input: FuzzInput) {
 
         // Verify we can add new data after recovery
         let test_data = [0xABu8; DATA_SIZE];
-        let mmr = mmr.into_dirty();
-        mmr.add(&mut hasher, &test_data)
-            .expect("Should be able to add after recovery");
-        let mmr = mmr.merkleize(&mut hasher);
+        let changeset = mmr
+            .new_batch()
+            .add(&hasher, &test_data)
+            .merkleize(&hasher)
+            .finalize();
+        mmr.apply(changeset).unwrap();
         mmr.destroy().await.expect("Should be able to destroy MMR");
     });
 }

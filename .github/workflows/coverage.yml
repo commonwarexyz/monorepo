@@ -15,22 +15,28 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  NIGHTLY_VERSION: nightly-2025-11-15
 
 jobs:
   Coverage:
-    name: "Coverage (partition: ${{ matrix.partition }}/8)"
+    name: "Coverage (flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/8)"
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       matrix:
         partition: [1, 2, 3, 4, 5, 6, 7, 8]
+        flags:
+          - "--features commonware-runtime/iouring-storage"
+          - "--features commonware-runtime/iouring-network"
+          - "--no-default-features"
+          - ""
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: part-${{ matrix.partition }}
+        additional-cache-key: ${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
     - name: Remove fuzz
       run: |
         rm -rf broadcast/fuzz
@@ -47,17 +53,26 @@ jobs:
     - name: Remove fuzz targets from Cargo.toml
       run: |
         sed -i.bak '/fuzz/d' Cargo.toml
+    - name: Install nightly Rust toolchain
+      run: rustup toolchain install ${{ env.NIGHTLY_VERSION }}
     - name: Install coverage tooling
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
-        tool: cargo-llvm-cov@0.6.19,cargo-nextest@0.9.104
+        tool: cargo-llvm-cov@0.8.4,cargo-nextest@0.9.129
+    - name: Normalize flags for paths
+      id: path-normalization
+      run: |
+        name="${{ matrix.flags }}"
+        name="${name// /-}"
+        name="${name//\//-}"
+        echo "flags=${name:-default}" >> "$GITHUB_OUTPUT"
     - name: Generate coverage report
-      run: cargo llvm-cov nextest --workspace --lcov --output-path lcov-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/8 --profile all
+      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest --branch --workspace ${{ matrix.flags }} --lcov --output-path lcov-${{ steps.path-normalization.outputs.flags }}-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/8 --profile all
     - name: Store coverage report
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:
-        name: coverage-lcov-${{ matrix.partition }}
-        path: lcov-${{ matrix.partition }}.info
+        name: coverage-lcov-${{ steps.path-normalization.outputs.flags }}-${{ matrix.partition }}
+        path: lcov-${{ steps.path-normalization.outputs.flags }}-${{ matrix.partition }}.info
         retention-days: 1
 
   Upload:

@@ -193,11 +193,11 @@ mod tests {
         ed25519::{self, PrivateKey, PublicKey},
         Signer as _,
     };
-    use commonware_macros::select;
+    use commonware_macros::{select, test_group};
     use commonware_runtime::{
         count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota, Runner, Spawner,
     };
-    use commonware_utils::{channel::mpsc, hostname, ordered::Map, NZU32};
+    use commonware_utils::{channel::mpsc, hostname, ordered, ordered::Map, NZU32};
     use rand::Rng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
@@ -325,6 +325,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_determinism() {
         compare_outputs(25, 25);
@@ -3305,6 +3306,39 @@ mod tests {
             socket_manager
                 .overwrite([(pk1.clone(), addr.clone())].try_into().unwrap())
                 .await;
+        });
+    }
+
+    #[test]
+    fn test_subscribe_returns_current_peer_set() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(3),
+                },
+            );
+            network.start();
+
+            // Create peers and track them
+            let pk1 = PrivateKey::from_seed(0).public_key();
+            let pk2 = PrivateKey::from_seed(1).public_key();
+            let peers = ordered::Set::try_from(vec![pk1.clone(), pk2.clone()]).unwrap();
+
+            let mut manager = oracle.manager();
+            Manager::track(&mut manager, 0, peers.clone()).await;
+
+            // Subscribe after tracking. The current peer set should be
+            // available immediately on the subscription channel.
+            let mut subscription = Provider::subscribe(&mut manager).await;
+            let (id, set, _all) = subscription
+                .try_recv()
+                .expect("current peer set should be available immediately after subscribe");
+            assert_eq!(id, 0);
+            assert_eq!(set, peers);
         });
     }
 }

@@ -4,44 +4,48 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
-    mmr::{Location, Proof},
+    journal::contiguous::variable::Config as VConfig,
+    mmr::{journaled::Config as MmrConfig, Location, Proof},
     qmdb::{
         self,
         immutable::{self, Config},
-        store::LogStore,
-        Durable, Merkleized,
     },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
-/// Database type alias for the clean (merkleized, durable) state.
-pub type Database<E> =
-    immutable::Immutable<E, Key, Value, Hasher, Translator, Merkleized<Hasher>, Durable>;
+/// Database type alias.
+pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
 pub type Operation = immutable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
+    let page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
+        context,
+        NZU16!(2048),
+        NZUsize!(10),
+    );
     Config {
-        mmr_journal_partition: "mmr-journal".into(),
-        mmr_metadata_partition: "mmr-metadata".into(),
-        mmr_items_per_blob: NZU64!(4096),
-        mmr_write_buffer: NZUsize!(4096),
-        log_partition: "log".into(),
-        log_items_per_section: NZU64!(4096),
-        log_compression: None,
-        log_codec_config: (),
-        log_write_buffer: NZUsize!(4096),
+        mmr: MmrConfig {
+            journal_partition: "mmr-journal".into(),
+            metadata_partition: "mmr-metadata".into(),
+            items_per_blob: NZU64!(4096),
+            write_buffer: NZUsize!(4096),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        log: VConfig {
+            partition: "log".into(),
+            items_per_section: NZU64!(4096),
+            compression: None,
+            codec_config: (),
+            write_buffer: NZUsize!(4096),
+            page_cache,
+        },
         translator: commonware_storage::translator::EightCap,
-        thread_pool: None,
-        page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
-            context,
-            NZU16!(2048),
-            NZUsize!(10),
-        ),
     }
 }
 
@@ -87,34 +91,30 @@ where
     }
 
     async fn add_operations(
-        self,
+        &mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<Self, commonware_storage::qmdb::Error> {
+    ) -> Result<(), commonware_storage::qmdb::Error> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             // Ignore bad inputs rather than return errors.
             error!("operations must end with a commit");
-            return Ok(self);
+            return Ok(());
         }
-        let mut db = self.into_mutable();
-        let num_ops = operations.len();
 
-        for (i, operation) in operations.into_iter().enumerate() {
+        let mut batch = self.new_batch();
+        for operation in operations {
             match operation {
                 Operation::Set(key, value) => {
-                    db.set(key, value).await?;
+                    batch = batch.set(key, value);
                 }
                 Operation::Commit(metadata) => {
-                    let (durable_db, _) = db.commit(metadata).await?;
-                    if i == num_ops - 1 {
-                        // Last operation - return the clean database
-                        return Ok(durable_db.into_merkleized());
-                    }
-                    // Not the last operation - continue in mutable state
-                    db = durable_db.into_mutable();
+                    let finalized = batch.merkleize(metadata).finalize();
+                    self.apply_batch(finalized).await?;
+                    self.commit().await?;
+                    batch = self.new_batch();
                 }
             }
         }
-        unreachable!("operations must end with a commit");
+        Ok(())
     }
 
     fn root(&self) -> Key {
@@ -122,13 +122,13 @@ where
     }
 
     async fn size(&self) -> Location {
-        LogStore::bounds(self).await.end
+        self.bounds().await.end
     }
 
     async fn inactivity_floor(&self) -> Location {
         // For Immutable databases, all retained operations are active,
         // so the inactivity floor equals the pruning boundary.
-        LogStore::bounds(self).await.start
+        self.bounds().await.start
     }
 
     fn historical_proof(
@@ -138,6 +138,13 @@ where
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
         self.historical_proof(op_count, start_loc, max_ops)
+    }
+
+    fn pinned_nodes_at(
+        &self,
+        loc: Location,
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error>> + Send {
+        self.pinned_nodes_at(loc)
     }
 
     fn name() -> &'static str {

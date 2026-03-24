@@ -38,6 +38,7 @@ use crate::{
     },
     invariants,
 };
+use crate::config::ForwardingPolicy;
 use commonware_consensus::{
     simplex::{
         config,
@@ -464,6 +465,7 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
+                forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(ctx.with_label("engine"), engine_cfg);
             engine.start(

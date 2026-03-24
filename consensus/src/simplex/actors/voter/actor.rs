@@ -13,6 +13,7 @@ use crate::{
             Activity, Artifact, Certificate, Context, Finalization, Finalize, Notarization,
             Notarize, Nullification, Nullify, Proposal, Vote,
         },
+        Plan,
     },
     types::{Round as Rnd, View},
     CertifiableAutomaton, Relay, Reporter, Viewable, LATENCY,
@@ -127,7 +128,7 @@ impl<
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Digest = D, Context = Context<D, S::PublicKey>>,
-        R: Relay<Digest = D>,
+        R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
         F: Reporter<Activity = Activity<S, D>>,
     > Actor<E, S, L, B, D, A, R, F>
 {
@@ -234,7 +235,7 @@ impl<
     async fn append_journal(&mut self, view: View, artifact: Artifact<S, D>) {
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .append(view.get(), artifact)
+                .append(view.get(), &artifact)
                 .await
                 .expect("unable to append to journal");
         }
@@ -322,7 +323,7 @@ impl<
         Some(Request(context, receiver))
     }
 
-    /// Records a locally verified nullify vote and ensures the round exists.
+    /// Persists our nullify vote to the journal for crash recovery.
     async fn handle_nullify(&mut self, nullify: Nullify<S>) {
         self.append_journal(nullify.view(), Artifact::Nullify(nullify))
             .await;
@@ -361,10 +362,7 @@ impl<
         // Attempt to broadcast a nullify vote for the current view (as many times as required
         // until we exit the view)
         let view = self.state.current_view();
-        let Some(retry) = self
-            .try_broadcast_nullify(batcher, vote_sender, view, true)
-            .await
-        else {
+        let Some(retry) = self.try_broadcast_nullify(batcher, vote_sender, view).await else {
             return;
         };
 
@@ -534,17 +532,13 @@ impl<
     }
 
     /// Broadcast a nullify vote for `view` if the state machine allows it.
-    ///
-    /// When `timeout` is true, this uses timeout semantics (current view only, retries allowed).
-    /// When `timeout` is false, this uses certificate semantics (requires nullification for `view`).
     async fn try_broadcast_nullify<Sp: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
-        timeout: bool,
     ) -> Option<bool> {
-        let (was_retry, nullify) = self.state.construct_nullify(view, timeout)?;
+        let (was_retry, nullify) = self.state.construct_nullify(view)?;
         self.broadcast_nullify(batcher, vote_sender, was_retry, nullify)
             .await;
         Some(was_retry)
@@ -677,8 +671,7 @@ impl<
             .await;
         self.try_broadcast_notarization(resolver, certificate_sender, view, resolved)
             .await;
-        self.try_broadcast_nullify(batcher, vote_sender, view, false)
-            .await;
+        // We handle broadcast of `Nullify` votes in `timeout`, so this only emits certificates.
         self.try_broadcast_nullification(resolver, certificate_sender, view, resolved)
             .await;
         self.try_broadcast_finalize(batcher, vote_sender, view)
@@ -804,7 +797,7 @@ impl<
         }
         self.journal = Some(journal);
 
-        // Update current view and immediately move to timeout (very unlikely we restarted and still within timeout)
+        // Log current view after recovery
         let end = self.context.current();
         let elapsed = end.duration_since(start).unwrap_or_default();
         let observed_view = self.state.current_view();
@@ -813,20 +806,19 @@ impl<
             ?elapsed,
             "consensus initialized"
         );
-        self.state
-            .trigger_timeout(observed_view, TimeoutReason::Initialization);
 
         // Initialize batcher with leader for current view
-        //
-        // We don't worry about sending any constructed messages here because we expect the view to immediately timeout
-        // and we'll send our nullify vote shortly.
         let leader = self
             .state
             .leader_index(observed_view)
             .expect("leader not set");
-        batcher
-            .update(observed_view, leader, self.state.last_finalized())
-            .await;
+        if let Some(reason) = batcher
+            .update(observed_view, leader, self.state.last_finalized(), None)
+            .await
+        {
+            debug!(%observed_view, %leader, ?reason, "nullifying round");
+            self.state.trigger_timeout(observed_view, reason);
+        }
 
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
@@ -928,7 +920,7 @@ impl<
                 view = self.state.current_view();
 
                 // Notify application of proposal
-                self.relay.broadcast(proposed).await;
+                self.relay.broadcast(proposed, Plan::Propose).await;
             },
             (context, verified) = verify_wait => {
                 // Clear verify waiter
@@ -942,7 +934,7 @@ impl<
                         self.state.verified(view);
                     }
                     Ok(false) => {
-                        debug!(round = ?context.round, "proposal failed verification");
+                        warn!(round = ?context.round, "proposal failed verification");
                         self.state
                             .trigger_timeout(context.view(), TimeoutReason::InvalidProposal);
                     }
@@ -959,6 +951,9 @@ impl<
                 view = round.view();
                 match certified {
                     Ok(certified) => {
+                        if !certified {
+                            warn!(?round, "proposal failed certification");
+                        }
                         let Some(notarization) = self.handle_certification(view, certified).await
                         else {
                             continue;
@@ -1074,10 +1069,21 @@ impl<
                         .leader_index(current_view)
                         .expect("leader not set");
 
+                    // If we skip a view, we don't worry about forwarding our latest certified proposal
+                    // because the network has already moved on
+                    let forwardable_proposal = current_view
+                        .previous()
+                        .and_then(|view| self.state.forwardable_proposal(view));
+
                     // If the leader nullified or is inactive, reduce leader
                     // timeout to now
                     if let Some(reason) = batcher
-                        .update(current_view, leader, self.state.last_finalized())
+                        .update(
+                            current_view,
+                            leader,
+                            self.state.last_finalized(),
+                            forwardable_proposal,
+                        )
                         .await
                     {
                         debug!(%current_view, %leader, ?reason, "nullifying round");

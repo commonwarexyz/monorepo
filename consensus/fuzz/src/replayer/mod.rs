@@ -33,6 +33,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use commonware_consensus::simplex::config::ForwardingPolicy;
 
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -128,6 +129,7 @@ pub fn replay_trace(trace: &TraceData) -> Vec<ReplayedReplicaState> {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
+                forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(ctx.with_label("engine"), engine_cfg);
             engine.start(

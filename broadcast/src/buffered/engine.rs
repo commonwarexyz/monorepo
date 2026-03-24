@@ -5,7 +5,7 @@ use commonware_cryptography::{Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     utils::codec::{wrap, WrappedSender},
-    PeerSetSubscription, Receiver, Recipients, Sender,
+    Provider, Receiver, Recipients, Sender,
 };
 use commonware_runtime::{
     spawn_cell,
@@ -32,11 +32,12 @@ struct Waiter<M> {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
-pub struct Engine<E, P, M>
+pub struct Engine<E, P, M, D>
 where
     E: BufferPooler + Clock + Spawner + Metrics,
     P: PublicKey,
     M: Digestible + Codec,
+    D: Provider<PublicKey = P>,
 {
     ////////////////////////////////////////
     // Interfaces
@@ -67,8 +68,8 @@ where
     /// Pending requests from the application.
     waiters: BTreeMap<M::Digest, Vec<Waiter<M>>>,
 
-    /// Subscription to peer set changes.
-    peer_set_subscription: PeerSetSubscription<P>,
+    /// Provider for peer set changes.
+    peer_provider: D,
 
     ////////////////////////////////////////
     // Cache
@@ -96,15 +97,16 @@ where
     metrics: metrics::Metrics,
 }
 
-impl<E, P, M> Engine<E, P, M>
+impl<E, P, M, D> Engine<E, P, M, D>
 where
     E: BufferPooler + Clock + Spawner + Metrics,
     P: PublicKey,
     M: Digestible + Codec,
+    D: Provider<PublicKey = P>,
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<P, M::Cfg>) -> (Self, Mailbox<P, M>) {
+    pub fn new(context: E, cfg: Config<P, M::Cfg, D>) -> (Self, Mailbox<P, M>) {
         let (mailbox_sender, mailbox_receiver) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
 
@@ -122,7 +124,7 @@ where
             deques: BTreeMap::new(),
             items: BTreeMap::new(),
             counts: BTreeMap::new(),
-            peer_set_subscription: cfg.peer_set_subscription,
+            peer_provider: cfg.peer_provider,
             metrics,
         };
 
@@ -145,6 +147,7 @@ where
             network.0,
             network.1,
         );
+        let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {
             self.context,
@@ -207,7 +210,7 @@ where
                     .inc();
                 self.handle_network(peer, msg);
             },
-            Some((_, _, tracked_peers)) = self.peer_set_subscription.recv() else {
+            Some((_, _, tracked_peers)) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 break;
             } => {

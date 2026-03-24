@@ -5,7 +5,7 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{elector::Config as Elector, types::Activity},
+    simplex::{elector::Config as Elector, types::Activity, Plan},
     types::{Epoch, ViewDelta},
     CertifiableAutomaton, Relay, Reporter,
 };
@@ -24,7 +24,7 @@ pub struct Config<
     B: Blocker,
     D: Digest,
     A: CertifiableAutomaton,
-    R: Relay<Digest = D>,
+    R: Relay<Digest = D, PublicKey = S::PublicKey, Plan = Plan<S::PublicKey>>,
     F: Reporter<Activity = Activity<S, D>>,
 > {
     pub scheme: S,
@@ -395,6 +395,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -424,6 +425,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(101));
                         assert_eq!(finalized, View::new(100));
@@ -481,6 +483,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(301));
                         assert_eq!(finalized, View::new(300));
@@ -636,6 +639,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -673,6 +677,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(51));
                         assert_eq!(finalized, View::new(50));
@@ -767,6 +772,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(101));
                         assert_eq!(finalized, View::new(100));
@@ -857,6 +863,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -984,6 +991,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -1503,6 +1511,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -1530,6 +1539,7 @@ mod tests {
                         leader: _,
                         finalized,
                         response,
+                        ..
                     } => {
                         assert_eq!(current, View::new(2));
                         assert_eq!(finalized, View::new(1));
@@ -1709,6 +1719,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -1799,6 +1810,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(3));
                     assert_eq!(finalized, View::new(2));
@@ -1826,6 +1838,201 @@ mod tests {
         populate_resolver_on_restart::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
         populate_resolver_on_restart::<_, _, RoundRobin>(ed25519::fixture);
         populate_resolver_on_restart::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
+    /// Regression: startup must consume timeout hints returned by initial batcher update.
+    ///
+    /// On restart, we recover into `target_view` and inject `LeaderNullify` from the
+    /// first `batcher.update`. Even with long timeouts, voter must emit `nullify(target_view)`
+    /// immediately rather than waiting for `leader_timeout`.
+    fn startup_update_timeout_hint_nullifies_recovered_view<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"startup_update_timeout_hint_nullify".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let me = participants[0].clone();
+
+            let elector = RoundRobin::<Sha256>::default();
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app"), app_cfg);
+            app_actor.start();
+
+            let partition = "voter_startup_update_timeout_hint_nullify".to_string();
+            let epoch = Epoch::new(333);
+            let make_cfg = |page_cache: CacheRef| Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: partition.clone(),
+                epoch,
+                mailbox_size: 128,
+                // Long deadlines prove nullify comes from startup timeout hint, not timer expiry.
+                leader_timeout: Duration::from_secs(10),
+                certification_timeout: Duration::from_secs(10),
+                timeout_retry: Duration::from_mins(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache,
+            };
+
+            // First run: persist progress to a later view.
+            let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter_initial"), cfg);
+
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            let handle = voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                certificate_sender,
+            );
+
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                _ => panic!("expected initial update"),
+            }
+
+            let target_view = View::new(3);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            handle.abort();
+
+            // Restart and inject startup timeout hint from first update.
+            let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), cfg);
+
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(32);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (certificate_sender, _) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                certificate_sender,
+            );
+
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update {
+                    current,
+                    finalized,
+                    response,
+                    ..
+                } => {
+                    assert_eq!(current, target_view);
+                    assert_eq!(finalized, target_view.previous().unwrap());
+                    response.send(Some(TimeoutReason::LeaderNullify)).unwrap();
+                }
+                _ => panic!("expected startup update after restart"),
+            }
+
+            // Expect immediate nullify from startup timeout hint despite 10s timeouts.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => {
+                        panic!(
+                            "expected immediate nullify for recovered view {target_view} from startup timeout hint"
+                        );
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_startup_update_timeout_hint_nullifies_recovered_view() {
+        startup_update_timeout_hint_nullifies_recovered_view::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        startup_update_timeout_hint_nullifies_recovered_view::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        startup_update_timeout_hint_nullifies_recovered_view::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        startup_update_timeout_hint_nullifies_recovered_view::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        startup_update_timeout_hint_nullifies_recovered_view::<_, _>(ed25519::fixture);
+        startup_update_timeout_hint_nullifies_recovered_view::<_, _>(secp256r1::fixture);
     }
 
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
@@ -1882,6 +2089,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -1989,6 +2197,7 @@ mod tests {
                     leader: _,
                     finalized,
                     response,
+                    ..
                 } => {
                     assert_eq!(current, View::new(1));
                     assert_eq!(finalized, View::new(0));
@@ -2457,9 +2666,9 @@ mod tests {
                 .await;
 
             let duplicate_window = context.current() + Duration::from_millis(300);
-            while context.current() < duplicate_window {
+            loop {
                 select! {
-                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    _ = context.sleep_until(duplicate_window) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         batcher::Message::Constructed(Vote::Nullify(nullify))
@@ -2887,6 +3096,161 @@ mod tests {
         dropped_verify_emits_nullify_immediately::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    /// Tests that permanently invalid proposal ancestry fast-paths `nullify`
+    /// instead of waiting for the local timeout.
+    fn invalid_ancestry_emits_nullify_immediately<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: ElectorConfig<S> + Default,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"invalid_ancestry_emits_nullify_immediately".to_vec();
+        let epoch = Epoch::new(333);
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                L::default(),
+                Duration::from_secs(10),
+                Duration::from_secs(10),
+                Duration::from_mins(60),
+                mocks::application::Certifier::Sometimes,
+            )
+            .await;
+
+            // Advance until we are a verifier in a post-finalization view.
+            let me = Participant::new(0);
+            let (mut current_view, mut current_leader) =
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current,
+                        leader,
+                        response,
+                        ..
+                    } => {
+                        response.send(None).unwrap();
+                        (current, leader)
+                    }
+                    _ => panic!("expected initial update"),
+                };
+
+            while current_view == View::new(1) || current_leader == me {
+                let proposal = Proposal::new(
+                    Round::new(epoch, current_view),
+                    current_view.previous().unwrap_or(View::zero()),
+                    Sha256::hash(current_view.get().to_be_bytes().as_slice()),
+                );
+                let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+                mailbox
+                    .resolved(Certificate::Finalization(finalization))
+                    .await;
+
+                loop {
+                    match batcher_receiver.recv().await.unwrap() {
+                        batcher::Message::Update {
+                            current,
+                            leader,
+                            response,
+                            ..
+                        } if current > current_view => {
+                            response.send(None).unwrap();
+                            current_view = current;
+                            current_leader = leader;
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Constructed(_) => {}
+                    }
+                }
+            }
+
+            // Inject a proposal whose parent is below the finalized floor.
+            let target_view = current_view;
+            let invalid_parent = target_view
+                .previous()
+                .expect("target view must have a finalized predecessor")
+                .previous()
+                .unwrap_or(View::zero());
+            let proposal = Proposal::new(
+                Round::new(epoch, target_view),
+                invalid_parent,
+                Sha256::hash(b"invalid_parent_before_finalized"),
+            );
+            mailbox.proposal(proposal).await;
+
+            // With 10s timeouts, seeing nullify within 1s proves we fast-pathed on invalid ancestry.
+            loop {
+                select! {
+                    message = batcher_receiver.recv() => match message.unwrap() {
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Constructed(_) => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => {
+                        panic!(
+                            "expected nullify for view {} within 1s (timeouts are 10s)",
+                            target_view
+                        );
+                    },
+                }
+            }
+
+            // Ensure invalid ancestry maps to the expected timeout reason metric.
+            let encoded = context.encode();
+            assert!(
+                encoded.lines().any(|line| {
+                    line.contains("_timeouts")
+                        && line.contains("reason=\"InvalidProposal\"")
+                        && !line.ends_with(" 0")
+                }),
+                "expected non-zero timeout metric with reason=InvalidProposal"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_invalid_ancestry_emits_nullify_immediately() {
+        invalid_ancestry_emits_nullify_immediately::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        invalid_ancestry_emits_nullify_immediately::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(ed25519::fixture);
+        invalid_ancestry_emits_nullify_immediately::<_, _, RoundRobin>(secp256r1::fixture);
+    }
+
     /// Tests that a later dropped verification still yields network voting after
     /// prior successful participation.
     fn dropped_verify_still_votes_after_prior_participation<S, F>(mut fixture: F)
@@ -3053,9 +3417,9 @@ mod tests {
             // Wait until we actually broadcast a vote in our leader view.
             let ready_deadline = context.current() + Duration::from_secs(1);
             let mut became_ready = false;
-            while context.current() < ready_deadline {
+            loop {
                 select! {
-                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    _ = context.sleep_until(ready_deadline) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         batcher::Message::Constructed(_) => {}
@@ -3137,9 +3501,9 @@ mod tests {
             // We should still broadcast for target_view (typically a nullify after timeout).
             let target_deadline = context.current() + Duration::from_secs(1);
             let mut saw_target_network_vote = false;
-            while context.current() < target_deadline {
+            loop {
                 select! {
-                    _ = context.sleep(Duration::from_millis(10)) => {},
+                    _ = context.sleep_until(target_deadline) => break,
                     message = batcher_receiver.recv() => match message.unwrap() {
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         batcher::Message::Constructed(_) => {}
@@ -3398,7 +3762,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
             let (resolver_sender, _) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -3834,100 +4198,6 @@ mod tests {
         certification_still_reports_to_resolver_after_nullification::<_, _, RoundRobin>(
             secp256r1::fixture,
         );
-    }
-
-    /// Regression: exiting the current view via nullification should still emit a
-    /// nullify vote for activity tracking if we have not timed out yet.
-    fn nullification_exit_emits_nullify_vote<S, F>(mut fixture: F)
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-    {
-        let n = 5;
-        let quorum = quorum(n);
-        let namespace = b"nullification_exit_emits_nullify_vote".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(30));
-        executor.start(|mut context| async move {
-            // Create simulated network.
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: None,
-                },
-            );
-            network.start();
-
-            // Build participants and voter.
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = fixture(&mut context, &namespace, n);
-            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
-                &mut context,
-                &oracle,
-                &participants,
-                &schemes,
-                RoundRobin::<Sha256>::default(),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-                mocks::application::Certifier::Always,
-            )
-            .await;
-
-            // Move into a concrete current view.
-            let target_view = View::new(3);
-            advance_to_view(
-                &mut mailbox,
-                &mut batcher_receiver,
-                &schemes,
-                quorum,
-                target_view,
-            )
-            .await;
-
-            // Receive nullification for current view (before local timeout).
-            let (_, nullification) =
-                build_nullification(&schemes, Round::new(Epoch::new(333), target_view), quorum);
-            mailbox
-                .resolved(Certificate::Nullification(nullification))
-                .await;
-
-            let emitted_nullify = loop {
-                select! {
-                    msg = batcher_receiver.recv() => match msg.unwrap() {
-                        batcher::Message::Constructed(Vote::Nullify(nullify))
-                            if nullify.view() == target_view =>
-                        {
-                            break true;
-                        }
-                        batcher::Message::Update { response, .. } => {
-                            response.send(None).unwrap();
-                        }
-                        _ => {}
-                    },
-                    _ = context.sleep(Duration::from_secs(2)) => break false,
-                }
-            };
-
-            assert!(
-                emitted_nullify,
-                "expected nullify vote when exiting view via nullification certificate"
-            );
-        });
-    }
-
-    #[test_traced]
-    fn test_nullification_exit_emits_nullify_vote() {
-        nullification_exit_emits_nullify_vote::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        nullification_exit_emits_nullify_vote::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        nullification_exit_emits_nullify_vote::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
-        nullification_exit_emits_nullify_vote::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
-        nullification_exit_emits_nullify_vote::<_, _>(ed25519::fixture);
-        nullification_exit_emits_nullify_vote::<_, _>(secp256r1::fixture);
     }
 
     /// Regression: a notarization arriving after nullification for the same view
@@ -4631,8 +4901,9 @@ mod tests {
 
     /// Regression: a canceled certification attempt must not be persisted as failure.
     ///
-    /// We first trigger a canceled certify receiver, restart the voter, and then require
-    /// successful certification for the same view from replayed notarization state.
+    /// We first trigger a canceled certify receiver, restart the voter, and then require:
+    /// 1. successful certification for the same view from replayed notarization state, and
+    /// 2. no immediate timeout/nullify for that view after restart.
     fn cancelled_certification_recertifies_after_restart<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -4785,13 +5056,15 @@ mod tests {
             handle.abort();
 
             // Second run: certification should succeed from replayed state.
+            // Use a longer certify latency so there is a real window where an
+            // incorrect immediate nullify could fire after restart.
             let app_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
                 relay: relay.clone(),
                 me: me.clone(),
                 propose_latency: (1.0, 0.0),
                 verify_latency: (1.0, 0.0),
-                certify_latency: (1.0, 0.0),
+                certify_latency: (2_000.0, 0.0), // 2 seconds
                 should_certify: mocks::application::Certifier::Always,
             };
             let (app_actor, application) =
@@ -4816,7 +5089,7 @@ mod tests {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
-            let (voter, _) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+            let (voter, _mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
 
             let (resolver_sender, mut resolver_receiver) = mpsc::channel(8);
             let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
@@ -4844,28 +5117,46 @@ mod tests {
                 response.send(None).unwrap();
             }
 
-            let recertified = loop {
+            loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
                         MailboxMessage::Certified { view, success } if view == target_view => {
-                            break success;
+                            assert!(success, "expected successful certification after restart for canceled certification view");
+                            break;
                         }
                         MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
                     },
                     msg = batcher_receiver.recv() => {
-                        if let batcher::Message::Update { response, .. } = msg.unwrap() {
-                            response.send(None).unwrap();
+                        match msg.unwrap() {
+                            batcher::Message::Constructed(Vote::Nullify(nullify))
+                                if nullify.view() == target_view =>
+                            {
+                                panic!("unexpected immediate nullify for view {target_view} after restart");
+                            }
+                            batcher::Message::Update { response, .. } => {
+                                response.send(None).unwrap();
+                            }
+                            _ => {}
                         }
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        break false;
+                        panic!(
+                            "timed out waiting for successful certification for restarted view {target_view}"
+                        );
                     },
                 }
             };
 
+            // Give reporter a moment to ingest any late events and ensure no nullify artifacts
+            // were emitted for the restarted target view.
+            context.sleep(Duration::from_millis(100)).await;
             assert!(
-                recertified,
-                "expected successful certification after restart for canceled certification view"
+                !reporter.nullifies.lock().contains_key(&target_view),
+                "did not expect nullify votes for restarted view {target_view}"
+            );
+            assert!(
+                !reporter.nullifications.lock().contains_key(&target_view),
+                "did not expect nullification certificate for restarted view {target_view}"
             );
         });
     }
@@ -5467,8 +5758,9 @@ mod tests {
             // see nullify in this 2s window after proposal handling, even though
             // leader timeout has elapsed.
             let no_nullify_deadline = context.current() + Duration::from_secs(2);
-            while context.current() < no_nullify_deadline {
+            loop {
                 select! {
+                    _ = context.sleep_until(no_nullify_deadline) => break,
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
@@ -5479,8 +5771,7 @@ mod tests {
                         }
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         _ => {}
-                    },
-                    _ = context.sleep(Duration::from_millis(10)) => {}
+                    }
                 }
             }
 
@@ -5524,8 +5815,8 @@ mod tests {
         proposal_clears_leader_timeout_before_certification_timeout::<_, _>(secp256r1::fixture);
     }
 
-    /// Regression: when a proposal is first observed through a notarization certificate,
-    /// leader timeout must still be cleared for the current view.
+    /// Regression: proposals recovered from notarization certificates must clear the
+    /// current view's leader timeout without emitting a local notarize vote.
     ///
     /// We require:
     /// 1. No nullify before `certification_timeout` even though `leader_timeout` has elapsed.
@@ -5593,30 +5884,19 @@ mod tests {
                 .recovered(Certificate::Notarization(notarization))
                 .await;
 
-            // Ensure certificate processing happened and proposal from certificate
-            // is treated as verified by checking that we notarize.
+            // `leader_timeout` is 1s and `certification_timeout` is 5s. We should not
+            // emit a notarize vote or nullify in this 2s window after certificate handling,
+            // even though leader timeout has elapsed.
+            let quiet_deadline = context.current() + Duration::from_secs(2);
             loop {
                 select! {
+                    _ = context.sleep_until(quiet_deadline) => break,
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Notarize(v)) if v.view() == target_view => {
-                            break;
+                            panic!(
+                                "unexpected notarize for view {target_view} from recovered certificate"
+                            );
                         }
-                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
-                        _ => {}
-                    },
-                    _ = context.sleep(Duration::from_secs(2)) => {
-                        panic!("expected notarize vote for view {target_view} from recovered certificate");
-                    },
-                }
-            }
-
-            // `leader_timeout` is 1s and `certification_timeout` is 5s. We should not
-            // see nullify in this 2s window after certificate handling, even though
-            // leader timeout has elapsed.
-            let no_nullify_deadline = context.current() + Duration::from_secs(2);
-            while context.current() < no_nullify_deadline {
-                select! {
-                    msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Constructed(Vote::Nullify(nullify))
                             if nullify.view() == target_view =>
                         {
@@ -5626,8 +5906,7 @@ mod tests {
                         }
                         batcher::Message::Update { response, .. } => response.send(None).unwrap(),
                         _ => {}
-                    },
-                    _ = context.sleep(Duration::from_millis(10)) => {}
+                    }
                 }
             }
 
@@ -5673,5 +5952,348 @@ mod tests {
         recovered_proposal_clears_leader_timeout_before_certification_timeout::<_, _>(
             secp256r1::fixture,
         );
+    }
+
+    /// Regression: after a timed-out view is nullified and the voter advances,
+    /// the next view must start with a fresh leader timeout.
+    fn next_view_gets_fresh_timeout_after_prior_view_nullifies<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"next_view_gets_fresh_timeout_after_prior_view_nullifies".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(15));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                Duration::from_secs(1),
+                Duration::from_secs(5),
+                Duration::from_mins(60),
+                mocks::application::Certifier::Always,
+            )
+            .await;
+
+            // Wait for the initial view 1 batcher update.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update {
+                        current, response, ..
+                    } => {
+                        response.send(None).unwrap();
+                        if current == View::new(1) {
+                            break;
+                        }
+                    }
+                    batcher::Message::Constructed(_) => {}
+                }
+            }
+
+            // Allow view 1 to time out and emit a nullify vote.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(1) =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected nullify for view 1");
+                    },
+                }
+            }
+
+            // Deliver a nullification certificate for view 1 so the voter enters view 2.
+            let (_, nullification) =
+                build_nullification(&schemes, Round::new(Epoch::new(333), View::new(1)), quorum);
+            mailbox
+                .resolved(Certificate::Nullification(nullification))
+                .await;
+
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(2) =>
+                        {
+                            panic!(
+                                "received nullify for view 2 before its fresh leader timeout elapsed"
+                            );
+                        }
+                        batcher::Message::Update {
+                            current, response, ..
+                        } => {
+                            response.send(None).unwrap();
+                            if current == View::new(2) {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected voter to advance to view 2");
+                    },
+                }
+            }
+
+            // The old view timed out, but the new view should still get its own leader timeout
+            // rather than immediately nullifying on entry.
+            let quiet_deadline = context.current() + Duration::from_millis(500);
+            loop {
+                select! {
+                    _ = context.sleep_until(quiet_deadline) => break,
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(2) =>
+                        {
+                            panic!(
+                                "received nullify for view 2 before its fresh leader timeout elapsed"
+                            );
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    }
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_next_view_gets_fresh_timeout_after_prior_view_nullifies() {
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(ed25519::fixture);
+        next_view_gets_fresh_timeout_after_prior_view_nullifies::<_, _>(secp256r1::fixture);
+    }
+
+    /// Regression: the first view should make progress without timing out when peers are online.
+    ///
+    /// We require:
+    /// 1. No `nullify(1)` is emitted while quorum certificates arrive promptly.
+    /// 2. The voter emits `notarize(1)`.
+    /// 3. After successful certification, the voter emits `finalize(1)` before
+    ///    advancing to view 2.
+    fn first_view_progress_without_timeout<S, F, L>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: ElectorConfig<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"first_view_progress_without_timeout".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(15));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let elector = L::default();
+            let first_round = Round::new(Epoch::new(333), View::new(1));
+            let leader_idx = elector
+                .clone()
+                .build(schemes[0].participants())
+                .elect(first_round, None);
+            let leader = participants[usize::from(leader_idx)].clone();
+
+            let (mut mailbox, mut batcher_receiver, _, relay, reporter) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_secs(1),
+                Duration::from_secs(5),
+                Duration::from_mins(60),
+                mocks::application::Certifier::Always,
+            )
+            .await;
+
+            // Wait for initial batcher notification.
+            let message = batcher_receiver.recv().await.unwrap();
+            match message {
+                batcher::Message::Update {
+                    current,
+                    finalized,
+                    response,
+                    ..
+                } => {
+                    assert_eq!(current, View::new(1));
+                    assert_eq!(finalized, View::new(0));
+                    response.send(None).unwrap();
+                }
+                _ => panic!("unexpected batcher message"),
+            }
+
+            // Build a valid first-view proposal (parent is genesis at view 0).
+            let mut hasher = Sha256::default();
+            hasher.update(&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode());
+            let genesis = hasher.finalize();
+            let proposal = Proposal::new(
+                first_round,
+                View::zero(),
+                Sha256::hash(b"first_view_progress_without_timeout"),
+            );
+            let contents = (proposal.round, genesis, 0u64).encode();
+            relay.broadcast(&leader, (proposal.payload, contents));
+            mailbox.proposal(proposal.clone()).await;
+
+            // The voter should notarize view 1 and must not nullify it.
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Notarize(notarize))
+                            if notarize.view() == View::new(1) =>
+                        {
+                            break;
+                        }
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(1) =>
+                        {
+                            panic!("unexpected nullify for view 1 while peers are online");
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("expected notarize for view 1");
+                    },
+                }
+            }
+
+            // Deliver quorum notarization and ensure we finalize + advance to view 2 without nullify.
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization))
+                .await;
+
+            let deadline = context.current() + Duration::from_secs(3);
+            let reached_view2 = loop {
+                select! {
+                    _ = context.sleep_until(deadline) => break false,
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Finalize(finalize))
+                            if finalize.view() == View::new(1) =>
+                        {
+                            break false;
+                        }
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(1) =>
+                        {
+                            panic!("unexpected nullify for view 1 while peers are online");
+                        }
+                        batcher::Message::Update {
+                            current, response, ..
+                        } => {
+                            response.send(None).unwrap();
+                            if current >= View::new(2) {
+                                break true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            };
+            assert!(!reached_view2, "view advanced before finalize for view 1");
+
+            let reached_view2 = loop {
+                select! {
+                    _ = context.sleep_until(deadline) => break false,
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(1) =>
+                        {
+                            panic!("unexpected nullify for view 1 while peers are online");
+                        }
+                        batcher::Message::Update {
+                            current, response, ..
+                        } => {
+                            response.send(None).unwrap();
+                            if current >= View::new(2) {
+                                break true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            };
+            assert!(reached_view2, "expected progress to view 2 from view 1");
+
+            // Give the reporter a moment to receive any late events and verify no first-view nullify artifacts.
+            context.sleep(Duration::from_millis(50)).await;
+            assert!(
+                !reporter.nullifies.lock().contains_key(&View::new(1)),
+                "did not expect nullify votes for view 1"
+            );
+            assert!(
+                !reporter.nullifications.lock().contains_key(&View::new(1)),
+                "did not expect a nullification certificate for view 1"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_first_view_progress_without_timeout() {
+        first_view_progress_without_timeout::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        first_view_progress_without_timeout::<_, _, Random>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        first_view_progress_without_timeout::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        first_view_progress_without_timeout::<_, _, RoundRobin>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        first_view_progress_without_timeout::<_, _, RoundRobin>(ed25519::fixture);
+        first_view_progress_without_timeout::<_, _, RoundRobin>(secp256r1::fixture);
     }
 }

@@ -12,6 +12,8 @@ use commonware_utils::{
 
 pub mod codec;
 pub mod limited;
+#[cfg(feature = "mocks")]
+pub mod mocks;
 pub mod mux;
 
 /// A [Provider] over a static set of peers.

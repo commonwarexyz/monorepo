@@ -27,7 +27,7 @@ struct FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    let mut hasher: Standard<Sha256> = Standard::new();
+    let hasher: Standard<Sha256> = Standard::new();
 
     let digests = input
         .digests
@@ -48,13 +48,14 @@ fn fuzz(input: FuzzInput) {
             payload.truncate(MAX_OPERATION_BYTES);
         }
         // Only add operations with valid locations
-        if let Some(location) = Location::new(entry.location) {
+        let location = Location::new(entry.location);
+        if location.is_valid() {
             operations.push((location, payload));
         }
     }
 
     let root = Digest::from(input.root);
-    let _ = verify_multi_proof(&mut hasher, &proof, operations.as_slice(), &root);
+    let _ = verify_multi_proof(&hasher, &proof, operations.as_slice(), &root);
 }
 
 fuzz_target!(|data: &[u8]| {

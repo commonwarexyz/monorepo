@@ -20,12 +20,13 @@ use crate::{
     utils::{link_peers, register, Action, Partition},
 };
 use arbitrary::Arbitrary;
+use crate::config::ForwardingPolicy;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
         config,
         elector::RoundRobin,
-        mocks::{application, relay, reporter, twins::Strategy},
+        mocks::{application, relay, reporter},
         types::{Certificate, Vote},
         Engine,
     },
@@ -62,6 +63,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use commonware_consensus::simplex::mocks::twins;
 
 pub const EPOCH: u64 = 333;
 
@@ -273,16 +275,16 @@ fn start_disrupter<P: simplex::Simplex>(
     scheme: P::Scheme,
     strategy: &StrategyChoice,
     vote_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     ),
     certificate_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     ),
     resolver_network: (
-        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey> + 'static,
-        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey> + 'static,
+        impl commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+        impl commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
     ),
 ) {
     match *strategy {
@@ -340,15 +342,37 @@ fn spawn_disrupter<P: simplex::Simplex>(
 }
 
 /// Spawn an honest validator with application, reporter, and engine.
-fn spawn_honest_validator<P: simplex::Simplex>(
+#[allow(clippy::too_many_arguments)]
+fn spawn_honest_validator<
+    P,
+    PendingSender,
+    PendingReceiver,
+    RecoveredSender,
+    RecoveredReceiver,
+    ResolverSender,
+    ResolverReceiver,
+>(
     context: deterministic::Context,
     oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
     participants: &[Ed25519PublicKey],
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
-    channels: NetworkChannels,
-) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
+    leader_timeout: Duration,
+    certification_timeout: Duration,
+    pending: (PendingSender, PendingReceiver),
+    recovered: (RecoveredSender, RecoveredReceiver),
+    resolver: (ResolverSender, ResolverReceiver),
+) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>
+where
+    P: simplex::Simplex,
+    PendingSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+    PendingReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
+    RecoveredSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+    RecoveredReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
+    ResolverSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
+    ResolverReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
+{
     let elector = P::Elector::default();
     let reporter_cfg = reporter::Config {
         participants: participants.try_into().expect("public keys are unique"),
@@ -356,8 +380,6 @@ fn spawn_honest_validator<P: simplex::Simplex>(
         elector: elector.clone(),
     };
     let reporter = reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
-
-    let (pending, recovered, resolver) = channels;
 
     let app_cfg = application::Config {
         hasher: Sha256::default(),
@@ -383,8 +405,8 @@ fn spawn_honest_validator<P: simplex::Simplex>(
         partition: validator.to_string(),
         mailbox_size: 1024,
         epoch: Epoch::new(EPOCH),
-        leader_timeout: Duration::from_secs(1),
-        certification_timeout: Duration::from_secs(2),
+        leader_timeout,
+        certification_timeout,
         timeout_retry: Duration::from_secs(10),
         fetch_timeout: Duration::from_secs(1),
         activity_timeout: Delta::new(10),
@@ -394,6 +416,7 @@ fn spawn_honest_validator<P: simplex::Simplex>(
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
+        forwarding: ForwardingPolicy::Disabled,
     };
     let engine = Engine::new(context.with_label("engine"), engine_cfg);
     engine.start(pending, recovered, resolver);
@@ -425,16 +448,20 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
         // Spawn honest validators
         for i in (config.faults as usize)..(config.n as usize) {
             let validator = participants[i].clone();
-            let channels = registrations.remove(&validator).unwrap();
+            let (pending, recovered, resolver) = registrations.remove(&validator).unwrap();
             let ctx = context.with_label(&format!("validator_{validator}"));
-            let reporter = spawn_honest_validator::<P>(
+            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
                 &participants,
                 schemes[i].clone(),
                 validator,
                 relay.clone(),
-                channels,
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                pending,
+                recovered,
+                resolver,
             );
             reporters.push(reporter);
         }
@@ -467,11 +494,22 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let (oracle, participants, schemes, mut registrations) =
+        let (mut oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
         let participants: Arc<[_]> = participants.into();
 
-        let strategy = Strategy::View;
+        link_peers(
+            &mut oracle,
+            participants.as_ref(),
+            Action::Update(Link {
+                latency: Duration::from_millis(500),
+                jitter: Duration::from_millis(500),
+                success_rate: 1.0,
+            }),
+            input.partition.filter(),
+        )
+        .await;
+
         let relay = Arc::new(relay::Relay::new());
         let mut reporters = Vec::new();
         let config = input.configuration;
@@ -491,7 +529,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
-                        strategy.partitions(msg.view(), participants.as_ref());
+                        twins::view_partitions(msg.view(), participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -509,26 +547,20 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
-                        strategy.partitions(msg.view(), participants.as_ref());
+                        twins::view_partitions(msg.view(), participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
                     }
                 }
             };
-            let make_resolver_forwarder = || {
-                move |_: SplitOrigin, recipients: &Recipients<_>, _: &IoBuf| {
-                    Some(recipients.clone())
-                }
-            };
-
             let make_vote_router = || {
                 let participants = participants.clone();
                 move |(sender, message): &(_, IoBuf)| {
                     let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
                         return SplitTarget::None;
                     };
-                    strategy.route(msg.view(), sender, participants.as_ref())
+                    twins::view_route(msg.view(), sender, participants.as_ref())
                 }
             };
             let make_certificate_router = || {
@@ -541,11 +573,9 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     ) else {
                         return SplitTarget::None;
                     };
-                    strategy.route(msg.view(), sender, participants.as_ref())
+                    twins::view_route(msg.view(), sender, participants.as_ref())
                 }
             };
-            let make_resolver_router = || move |(_sender, _message): &(_, IoBuf)| SplitTarget::Both;
-
             let (vote_sender, vote_receiver) = vote_network;
             let (certificate_sender, certificate_receiver) = certificate_network;
             let (resolver_sender, resolver_receiver) = resolver_network;
@@ -563,13 +593,12 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     context.with_label(&format!("recovered_split_{idx}")),
                     make_certificate_router(),
                 );
-            let (resolver_sender_primary, resolver_sender_secondary) =
-                resolver_sender.split_with(make_resolver_forwarder());
+            let (resolver_sender_primary, resolver_sender_secondary) = resolver_sender
+                .split_with(|_origin, recipients, _message| Some(recipients.clone()));
             let (resolver_receiver_primary, resolver_receiver_secondary) = resolver_receiver
-                .split_with(
-                    context.with_label(&format!("resolver_split_{idx}")),
-                    make_resolver_router(),
-                );
+                .split_with(context.with_label(&format!("resolver_split_{idx}")), |_| {
+                    SplitTarget::Both
+                });
 
             // Primary: legitimate engine
             let primary_label = format!("twin_{idx}_primary");
@@ -611,7 +640,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 mailbox_size: 1024,
                 epoch: Epoch::new(EPOCH),
                 leader_timeout: Duration::from_secs(1),
-                certification_timeout: Duration::from_secs(2),
+                certification_timeout: Duration::from_millis(1_500),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: Delta::new(10),
@@ -621,6 +650,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
+                forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);
             engine.start(
@@ -643,17 +673,21 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
         // Spawn honest validators
         for (idx, validator) in participants.iter().enumerate().skip(config.faults as usize) {
             let ctx = context.with_label(&format!("honest_{idx}"));
-            let channels = registrations
+            let (pending, recovered, resolver) = registrations
                 .remove(validator)
                 .expect("validator should be registered");
-            let reporter = spawn_honest_validator::<P>(
+            let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
                 participants.as_ref(),
                 schemes[idx].clone(),
                 validator.clone(),
                 relay.clone(),
-                channels,
+                Duration::from_secs(1),
+                Duration::from_millis(1_500),
+                pending,
+                recovered,
+                resolver,
             );
             reporters.push(reporter);
         }
@@ -816,8 +850,6 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 .remove(&validator)
                 .expect("validator should be registered");
 
-            let strategy = Strategy::View;
-
             let make_vote_forwarder = || {
                 let participants = participants_arc.clone();
                 move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
@@ -829,7 +861,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
-                        strategy.partitions(msg.view(), participants.as_ref());
+                        twins::view_partitions(msg.view(), participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -847,7 +879,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
-                        strategy.partitions(msg.view(), participants.as_ref());
+                        twins::view_partitions(msg.view(), participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -870,7 +902,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                     else {
                         return SplitTarget::None;
                     };
-                    strategy.route(msg.view(), sender, participants.as_ref())
+                    twins::view_route(msg.view(), sender, participants.as_ref())
                 }
             };
             let make_certificate_router = || {
@@ -883,7 +915,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                     >::decode_cfg(&mut message.as_ref(), &codec) else {
                         return SplitTarget::None;
                     };
-                    strategy.route(msg.view(), sender, participants.as_ref())
+                    twins::view_route(msg.view(), sender, participants.as_ref())
                 }
             };
             let make_resolver_router = || move |(_sender, _message): &(_, IoBuf)| SplitTarget::Both;
@@ -983,6 +1015,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
+                forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(primary_context.with_label("engine"), engine_cfg);
             engine.start(
@@ -1060,6 +1093,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&secondary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
+                forwarding: ForwardingPolicy::Disabled,
             };
             let secondary_engine =
                 Engine::new(secondary_context.with_label("engine"), secondary_engine_cfg);
@@ -1143,6 +1177,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
+                forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(ctx.with_label("engine"), engine_cfg);
             engine.start(
@@ -1343,6 +1378,7 @@ pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
+                forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(ctx.with_label("engine"), engine_cfg);
             engine.start(

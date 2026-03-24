@@ -12,6 +12,7 @@ use crate::{
 };
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
+use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
 use std::sync::Arc;
 
@@ -66,6 +67,7 @@ where
     H: Hasher,
     P: PublicKey,
 {
+    type PublicKey = P;
     type CachedBlock = Arc<CodedBlock<B, C, H>>;
 
     async fn find_by_digest(
@@ -97,7 +99,7 @@ where
         self.prune(commitment).await;
     }
 
-    async fn proposed(&self, round: Round, block: CodedBlock<B, C, H>) {
+    async fn send(&self, round: Round, block: CodedBlock<B, C, H>, _recipients: Recipients<P>) {
         self.proposed(round, block).await;
     }
 }

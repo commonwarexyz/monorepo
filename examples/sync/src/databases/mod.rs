@@ -54,12 +54,12 @@ pub trait Syncable: Sized {
     /// The returned operations must end with a commit operation.
     fn create_test_operations(count: usize, seed: u64) -> Vec<Self::Operation>;
 
-    /// Add operations to the database and return the clean database, ignoring any input that
-    /// doesn't end with a commit operation (since without a commit, we can't return a clean DB).
+    /// Add operations to the database, ignoring any input that doesn't end with a commit
+    /// operation.
     fn add_operations(
-        self,
+        &mut self,
         operations: Vec<Self::Operation>,
-    ) -> impl Future<Output = Result<Self, qmdb::Error>>;
+    ) -> impl Future<Output = Result<(), qmdb::Error>>;
 
     /// Get the database's root digest.
     fn root(&self) -> Key;
@@ -77,6 +77,12 @@ pub trait Syncable: Sized {
         start_loc: Location,
         max_ops: NonZeroU64,
     ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send;
+
+    /// Get the pinned MMR nodes for a lower operation boundary of `loc`.
+    fn pinned_nodes_at(
+        &self,
+        loc: Location,
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error>> + Send;
 
     /// Get the database type name for logging.
     fn name() -> &'static str;

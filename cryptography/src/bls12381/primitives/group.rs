@@ -303,6 +303,18 @@ impl SmallScalar {
     }
 }
 
+impl From<SmallScalar> for Scalar {
+    fn from(small: SmallScalar) -> Self {
+        let mut fr = blst_fr::default();
+        // SAFETY: small.inner is a valid blst_scalar with only the lower 128 bits set,
+        // which is well within the field modulus.
+        unsafe {
+            blst_fr_from_scalar(&mut fr, &small.inner);
+        }
+        Self(fr)
+    }
+}
+
 /// This constant serves as the multiplicative identity (i.e., "one") in the
 /// BLS12-381 finite field, ensuring that arithmetic is carried out within the
 /// correct modulo.
@@ -564,17 +576,23 @@ impl Scalar {
         Self(fr)
     }
 
-    /// Creates a new scalar from the provided integer.
-    pub(crate) fn from_u64(i: u64) -> Self {
-        // Create a new scalar
+    /// Creates a new scalar from the given limbs in little-endian representation.
+    ///
+    /// The limbs represent an integer `l[0] + l[1]*2^64 + l[2]*2^128 + l[3]*2^192`, which is then
+    /// converted into [`blst_fr`]'s internal Montgomery form.
+    pub fn from_limbs(limbs: [u64; 4]) -> Self {
         let mut ret = blst_fr::default();
-        let buffer = [i, 0, 0, 0];
 
         // SAFETY: blst_fr_from_uint64 reads exactly 4 u64 values from the buffer.
         //
         // Reference: https://github.com/supranational/blst/blob/415d4f0e2347a794091836a3065206edfd9c72f3/bindings/blst.h#L102
-        unsafe { blst_fr_from_uint64(&mut ret, buffer.as_ptr()) };
+        unsafe { blst_fr_from_uint64(&mut ret, limbs.as_ptr()) };
         Self(ret)
+    }
+
+    /// Creates a new scalar from the provided integer.
+    pub fn from_u64(i: u64) -> Self {
+        Self::from_limbs([i, 0, 0, 0])
     }
 
     /// Encodes the scalar into a byte array.
@@ -686,6 +704,12 @@ impl Drop for Scalar {
 impl ZeroizeOnDrop for Scalar {}
 
 impl Object for Scalar {}
+
+impl From<u64> for Scalar {
+    fn from(value: u64) -> Self {
+        Self::from_u64(value)
+    }
+}
 
 impl<'a> AddAssign<&'a Self> for Scalar {
     fn add_assign(&mut self, rhs: &'a Self) {
@@ -1750,6 +1774,7 @@ mod tests {
     use crate::bls12381::primitives::group::Scalar;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_invariants::minifuzz;
+    use commonware_macros::test_group;
     use commonware_math::algebra::{test_suites, Random};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::test_rng;
@@ -1938,6 +1963,7 @@ mod tests {
         assert_eq!(expected_g1, result_g1, "G1 MSM basic case failed");
     }
 
+    #[test_group("slow")]
     #[test]
     fn test_g2_msm() {
         let mut rng = test_rng();
@@ -2273,6 +2299,14 @@ mod tests {
             CodecConformance<Scalar>,
             CodecConformance<Share>
         }
+    }
+
+    #[test]
+    fn test_small_scalar_to_scalar_preserves_bytes() {
+        let small = SmallScalar::random(test_rng());
+        let scalar = Scalar::from(small.clone());
+        let round_tripped = scalar.as_blst_scalar();
+        assert_eq!(small.as_bytes(), round_tripped.b.as_slice());
     }
 
     #[test]

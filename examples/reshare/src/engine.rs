@@ -23,7 +23,8 @@ use commonware_cryptography::{
         dkg::Output,
         primitives::{group, variant::Variant},
     },
-    Hasher, Signer,
+    ed25519::Batch,
+    BatchVerifier, Hasher, Signer,
 };
 use commonware_p2p::{Blocker, Manager, Receiver, Sender};
 use commonware_parallel::Strategy;
@@ -96,7 +97,7 @@ where
     config: Config<C, P, B, V, T>,
     dkg: dkg::Actor<E, P, H, C, V>,
     dkg_mailbox: dkg::Mailbox<H, C, V>,
-    buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>>,
+    buffer: buffered::Engine<E, C::PublicKey, Block<H, C, V>, P>,
     buffered_mailbox: buffered::Mailbox<C::PublicKey, Block<H, C, V>>,
     #[allow(clippy::type_complexity)]
     marshal: MarshalActor<
@@ -134,9 +135,10 @@ where
     S: Scheme<H::Digest, PublicKey = C::PublicKey>,
     L: Elector<S>,
     T: Strategy,
+    Batch: BatchVerifier<PublicKey = C::PublicKey>,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
-    pub async fn new(context: E, mut config: Config<C, P, B, V, T>) -> Self {
+    pub async fn new(context: E, config: Config<C, P, B, V, T>) -> Self {
         let page_cache = CacheRef::from_pooler(&context, PAGE_CACHE_PAGE_SIZE, PAGE_CACHE_CAPACITY);
         let consensus_namespace = union(&config.namespace, b"_CONSENSUS");
         let num_participants = NZU32!(config.peer_config.max_participants_per_round());
@@ -161,7 +163,7 @@ where
                 deque_size: DEQUE_SIZE,
                 priority: true,
                 codec_config: num_participants,
-                peer_set_subscription: config.manager.subscribe().await,
+                peer_provider: config.manager.clone(),
             },
         );
 

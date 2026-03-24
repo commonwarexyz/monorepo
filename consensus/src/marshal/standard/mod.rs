@@ -62,7 +62,7 @@ mod tests {
         sha256::Sha256,
         Digestible, Hasher as _,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::channel::oneshot;
     use std::time::Duration;
@@ -77,6 +77,7 @@ mod tests {
         assert_eq!(r1, r2);
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_standard_finalize_good_links() {
         for seed in 0..5 {
@@ -85,6 +86,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_standard_finalize_bad_links() {
         for seed in 0..5 {
@@ -93,6 +95,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_standard_finalize_good_links_quorum_sees_finalization() {
         for seed in 0..5 {
@@ -101,6 +104,7 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_standard_finalize_bad_links_quorum_sees_finalization() {
         for seed in 0..5 {

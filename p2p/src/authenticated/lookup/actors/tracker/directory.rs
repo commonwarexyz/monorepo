@@ -1,13 +1,15 @@
 use super::{metrics::Metrics, record::Record, Metadata, Reservation};
 use crate::{
-    authenticated::lookup::{actors::tracker::ingress::Releaser, metrics},
+    authenticated::{
+        dialing::{earliest, DialStatus, Dialable, ReserveResult},
+        lookup::{actors::tracker::ingress::Releaser, metrics},
+    },
     types::Address,
     Ingress,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Clock, KeyedRateLimiter, Metrics as RuntimeMetrics,
-    Quota, Spawner,
+    telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
 use commonware_utils::{
     ordered::{Map, Set},
@@ -35,8 +37,8 @@ pub struct Config {
     /// The maximum number of peer sets to track.
     pub max_sets: usize,
 
-    /// The rate limit for allowing reservations per-peer.
-    pub rate_limit: Quota,
+    /// The cooldown between reservations for a given peer.
+    pub peer_connection_cooldown: Duration,
 
     /// Duration after which a blocked peer is allowed to reconnect.
     pub block_duration: Duration,
@@ -62,15 +64,15 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Duration after which a blocked peer is allowed to reconnect.
     block_duration: Duration,
 
+    /// Minimum duration between reservations for a given peer.
+    peer_connection_cooldown: Duration,
+
     // ---------- State ----------
     /// The records of all peers.
     peers: HashMap<C, Record>,
 
     /// The peer sets
     sets: BTreeMap<u64, Set<C>>,
-
-    /// Rate limiter for connection attempts.
-    rate_limiter: KeyedRateLimiter<C, E>,
 
     /// Tracks blocked peers and their unblock time. This is the source of truth for
     /// whether a peer is blocked, persisting even if the peer record is deleted.
@@ -92,9 +94,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let mut peers = HashMap::new();
         peers.insert(myself, Record::myself());
 
-        // Other initialization.
-        let rate_limiter = KeyedRateLimiter::hashmap_with_clock(cfg.rate_limit, context.clone());
-
         let metrics = Metrics::init(context.clone());
         let _ = metrics.tracked.try_set(peers.len() - 1); // Exclude self
 
@@ -105,9 +104,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             allow_dns: cfg.allow_dns,
             bypass_ip_check: cfg.bypass_ip_check,
             block_duration: cfg.block_duration,
+            peer_connection_cooldown: cfg.peer_connection_cooldown,
             peers,
             sets: BTreeMap::new(),
-            rate_limiter,
             blocked: PrioritySet::new(),
             releaser,
             metrics,
@@ -123,6 +122,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return;
         };
         record.release();
+        self.metrics.connected.remove(&metrics::Peer::new(peer));
         self.metrics.reserved.dec();
         self.delete_if_needed(peer);
     }
@@ -136,6 +136,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
         record.connect();
+        let _ = self
+            .metrics
+            .connected
+            .get_or_create(&metrics::Peer::new(peer))
+            .try_set(self.context.current().epoch_millis());
     }
 
     /// Stores a new peer set.
@@ -197,13 +202,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             });
         }
 
-        // Attempt to remove any old records from the rate limiter.
-        // This is a best-effort attempt to prevent memory usage from growing indefinitely.
-        //
-        // We don't reduce the capacity of the rate limiter to avoid re-allocation on
-        // future peer set additions.
-        self.rate_limiter.retain_recent();
-
         Some((deleted_peers, changed_peers))
     }
 
@@ -248,13 +246,20 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.reserve(Metadata::Listener(peer.clone()))
     }
 
+    /// Returns `true` if the peer is actively blocked (entry exists and has not expired).
+    fn is_blocked(&self, peer: &C) -> bool {
+        self.blocked
+            .get(peer)
+            .is_some_and(|t| t > self.context.current())
+    }
+
     /// Attempt to block a peer for the configured duration, updating the metrics accordingly.
     ///
     /// Peers can be blocked even if they don't have a record yet. The block will be applied
     /// when they are added to a peer set via `add_set`.
     pub fn block(&mut self, peer: &C) {
-        // Already blocked in queue
-        if self.blocked.contains(peer) {
+        // Already blocked
+        if self.is_blocked(peer) {
             return;
         }
 
@@ -292,22 +297,33 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// This does NOT check IP validity - that is done separately for dialing (ingress)
     /// and accepting (egress).
     pub fn eligible(&self, peer: &C) -> bool {
-        !self.blocked.contains(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
+        !self.is_blocked(peer) && self.peers.get(peer).is_some_and(|r| r.eligible())
     }
 
-    /// Returns a vector of dialable peers. That is, unconnected peers for which we have a socket.
-    pub fn dialable(&self) -> Vec<C> {
-        // Collect peers with known addresses (excluding blocked peers)
-        let mut result: Vec<_> = self
-            .peers
-            .iter()
-            .filter(|&(peer, r)| {
-                !self.blocked.contains(peer) && r.dialable(self.allow_private_ips, self.allow_dns)
-            })
-            .map(|(peer, _)| peer.clone())
-            .collect();
-        result.sort();
-        result
+    /// Returns dialable peers and the next time another peer may become dialable.
+    pub fn dialable(&self) -> Dialable<C> {
+        let now = self.context.current();
+        let mut next_query_at: Option<SystemTime> = None;
+        let mut peers = Vec::new();
+        for (peer, record) in &self.peers {
+            if let Some(blocked_until) = self.blocked.get(peer).filter(|t| *t > now) {
+                next_query_at = earliest(next_query_at, blocked_until);
+                continue;
+            }
+            match record.dialable(now, self.allow_private_ips, self.allow_dns) {
+                DialStatus::Now => peers.push(peer.clone()),
+                DialStatus::After(t) => {
+                    next_query_at = earliest(next_query_at, t);
+                }
+                DialStatus::Unavailable => {}
+            }
+        }
+        peers.sort();
+
+        Dialable {
+            peers,
+            next_query_at,
+        }
     }
 
     /// Returns true if this peer is acceptable (can accept an incoming connection from them).
@@ -315,7 +331,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Checks eligibility (peer set membership), blocked status, egress IP match (if not bypass_ip_check),
     /// and connection status.
     pub fn acceptable(&self, peer: &C, source_ip: IpAddr) -> bool {
-        !self.blocked.contains(peer)
+        !self.is_blocked(peer)
             && self
                 .peers
                 .get(peer)
@@ -330,7 +346,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     pub fn listenable(&self) -> HashSet<IpAddr> {
         self.peers
             .iter()
-            .filter(|(peer, r)| !self.blocked.contains(peer) && r.eligible())
+            .filter(|(peer, r)| !self.is_blocked(peer) && r.eligible())
             .filter_map(|(_, r)| r.egress_ip())
             .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
             .collect()
@@ -384,27 +400,22 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             return None;
         }
 
-        // Already reserved
-        let record = self.peers.get_mut(peer).unwrap();
-        if record.reserved() {
-            return None;
-        }
-
-        // Rate limit
-        if self.rate_limiter.check_key(peer).is_err() {
-            self.metrics
-                .limits
-                .get_or_create(&metrics::Peer::new(peer))
-                .inc();
-            return None;
-        }
-
         // Reserve
-        if record.reserve() {
-            self.metrics.reserved.inc();
-            return Some(Reservation::new(metadata, self.releaser.clone()));
+        let record = self.peers.get_mut(peer).unwrap();
+        match record.reserve(&mut self.context, self.peer_connection_cooldown) {
+            ReserveResult::Reserved => {
+                self.metrics.reserved.inc();
+                Some(Reservation::new(metadata, self.releaser.clone()))
+            }
+            ReserveResult::RateLimited => {
+                self.metrics
+                    .limits
+                    .get_or_create(&metrics::Peer::new(peer))
+                    .inc();
+                None
+            }
+            ReserveResult::Unavailable => None,
         }
-        None
     }
 
     /// Attempt to delete a record.
@@ -438,8 +449,8 @@ mod tests {
         Ingress,
     };
     use commonware_cryptography::{ed25519, Signer};
-    use commonware_runtime::{deterministic, Clock, Quota, Runner};
-    use commonware_utils::{hostname, NZU32};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_utils::{hostname, SystemTimeExt};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -447,6 +458,14 @@ mod tests {
 
     fn addr(socket: SocketAddr) -> Address {
         Address::Symmetric(socket)
+    }
+
+    fn metric_value(metrics: &str, name: &str, peer: &str) -> Option<i64> {
+        metrics
+            .lines()
+            .find(|line| line.starts_with(&format!("{name}{{peer=\"{peer}\"}} ")))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<i64>().ok())
     }
 
     #[test]
@@ -460,7 +479,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -523,7 +542,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -602,6 +621,49 @@ mod tests {
     }
 
     #[test]
+    fn test_connected_metric_tracks_active_peers() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory
+                .add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap())
+                .unwrap();
+
+            let _reservation = directory.listen(&pk_1).expect("peer should reserve");
+            let connected_at: i64 = context.current().epoch_millis().try_into().unwrap();
+            directory.connect(&pk_1);
+
+            context.sleep(Duration::from_secs(5)).await;
+
+            let metrics = context.encode();
+            assert_eq!(
+                metric_value(&metrics, "connected", &pk_1.to_string()),
+                Some(connected_at)
+            );
+
+            directory.release(super::Metadata::Listener(pk_1.clone()));
+
+            let metrics = context.encode();
+            assert_eq!(metric_value(&metrics, "connected", &pk_1.to_string()), None);
+        });
+    }
+
+    #[test]
     fn test_blocked_peer_remains_blocked_on_update() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
@@ -613,7 +675,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -681,7 +743,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -781,7 +843,7 @@ mod tests {
             allow_dns: false,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -829,8 +891,8 @@ mod tests {
 
             // Only socket peer should be dialable (DNS ingress invalid when disabled)
             let dialable = directory.dialable();
-            assert_eq!(dialable.len(), 1);
-            assert_eq!(dialable[0], pk_socket);
+            assert_eq!(dialable.peers.len(), 1);
+            assert_eq!(dialable.peers[0], pk_socket);
         });
     }
 
@@ -847,7 +909,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -892,8 +954,8 @@ mod tests {
 
             // Only public peer should be dialable (private ingress IP not allowed)
             let dialable = directory.dialable();
-            assert_eq!(dialable.len(), 1);
-            assert_eq!(dialable[0], pk_public);
+            assert_eq!(dialable.peers.len(), 1);
+            assert_eq!(dialable.peers[0], pk_public);
 
             // Verify listenable() only returns public IP (private IP excluded from filter)
             let listenable = directory.listenable();
@@ -913,7 +975,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -976,7 +1038,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1055,7 +1117,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 1, // Only keep 1 set so we can evict peers
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1153,7 +1215,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1243,7 +1305,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1288,7 +1350,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1380,7 +1442,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1481,7 +1543,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1493,7 +1555,7 @@ mod tests {
 
             // Peer should be dialable before blocking
             assert!(
-                directory.dialable().contains(&pk_1),
+                directory.dialable().peers.contains(&pk_1),
                 "Peer should be dialable before blocking"
             );
 
@@ -1502,7 +1564,7 @@ mod tests {
 
             // Peer should NOT be dialable while blocked
             assert!(
-                !directory.dialable().contains(&pk_1),
+                !directory.dialable().peers.contains(&pk_1),
                 "Blocked peer should not be dialable"
             );
 
@@ -1512,8 +1574,242 @@ mod tests {
 
             // Peer should be dialable again after unblock
             assert!(
-                directory.dialable().contains(&pk_1),
+                directory.dialable().peers.contains(&pk_1),
                 "Peer should be dialable after unblock"
+            );
+        });
+    }
+
+    #[test]
+    fn test_reservation_rate_limits_redial() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let cooldown = Duration::from_secs(1);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            peer_connection_cooldown: cooldown,
+            block_duration: Duration::from_secs(100),
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // First reservation succeeds.
+            let reservation = directory.dial(&pk_1).expect("first dial should succeed");
+
+            // Release the reservation.
+            drop(reservation);
+            directory.release(super::Metadata::Dialer(pk_1.clone()));
+
+            // Immediate re-dial is rate-limited.
+            assert!(
+                directory.dial(&pk_1).is_none(),
+                "should be rate-limited immediately after release"
+            );
+            assert!(
+                !directory.dialable().peers.contains(&pk_1),
+                "should not appear in dialable list during rate-limit window"
+            );
+
+            // After the jitter window (up to 2x interval), peer becomes dialable again.
+            context.sleep(cooldown * 2).await;
+            assert!(directory.dialable().peers.contains(&pk_1));
+            let (_reservation, ingress) = directory
+                .dial(&pk_1)
+                .expect("should succeed after interval");
+            assert_eq!(ingress, Ingress::Socket(addr_1));
+        });
+    }
+
+    #[test]
+    fn test_dialable_next_query_at_reflects_rate_limit() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let cooldown = Duration::from_secs(1);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            peer_connection_cooldown: cooldown,
+            block_duration: Duration::from_secs(100),
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // Reserve and release.
+            let reservation = directory.dial(&pk_1).expect("first dial should succeed");
+            let reserved_at = context.current();
+            drop(reservation);
+            directory.release(super::Metadata::Dialer(pk_1.clone()));
+
+            // next_query_at reflects the jittered next_dial_at (between 1x and 2x interval).
+            let interval = cooldown;
+            let dialable = directory.dialable();
+            assert!(!dialable.peers.contains(&pk_1));
+            let nqa = dialable.next_query_at.unwrap();
+            assert!(nqa >= reserved_at + interval);
+            assert!(nqa <= reserved_at + interval * 2);
+        });
+    }
+
+    #[test]
+    fn test_dialable_empty() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let cooldown = Duration::from_millis(200);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            peer_connection_cooldown: cooldown,
+            block_duration: Duration::from_secs(100),
+        };
+
+        runtime.start(|context| async move {
+            let directory = Directory::init(context.clone(), my_pk, config, releaser);
+
+            let dialable = directory.dialable();
+            assert!(dialable.peers.is_empty());
+            assert_eq!(dialable.next_query_at, None);
+        });
+    }
+
+    #[test]
+    fn test_dialable_next_query_at_includes_blocked() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let cooldown = Duration::from_millis(200);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            peer_connection_cooldown: cooldown,
+            block_duration: Duration::from_secs(3600),
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            // Block the only peer. No peers are immediately dialable, but
+            // next_query_at should point to the blocked peer's unblock time
+            // so the dialer knows when to re-check.
+            directory.block(&pk_1);
+            let dialable = directory.dialable();
+            assert!(dialable.peers.is_empty());
+            assert_eq!(
+                dialable.next_query_at,
+                Some(context.current() + Duration::from_secs(3600))
+            );
+        });
+    }
+
+    #[test]
+    fn test_dialable_expired_block_without_unblock() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(1);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            peer_connection_cooldown: Duration::from_millis(200),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            directory.block(&pk_1);
+            assert!(directory.dialable().peers.is_empty());
+
+            // Advance past the block expiry but do NOT call unblock_expired().
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+
+            // The peer should still be dialable despite the stale block entry.
+            let dialable = directory.dialable();
+            assert!(
+                dialable.peers.contains(&pk_1),
+                "expired block should not prevent dialing"
+            );
+            assert_eq!(
+                dialable.next_query_at, None,
+                "expired block should not contribute a stale hint"
+            );
+
+            // Reservation should also succeed.
+            directory
+                .dial(&pk_1)
+                .expect("expired block should not prevent reservation");
+        });
+    }
+
+    #[test]
+    fn test_reblock_after_expired_block_without_unblock() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let block_duration = Duration::from_secs(1);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            peer_connection_cooldown: Duration::from_millis(200),
+            block_duration,
+        };
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
+            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+
+            directory.block(&pk_1);
+            assert!(directory.dialable().peers.is_empty());
+
+            // Advance past expiry without calling unblock_expired().
+            context.sleep(block_duration + Duration::from_secs(1)).await;
+
+            // Re-block should succeed despite stale entry.
+            directory.block(&pk_1);
+            assert!(
+                directory.dialable().peers.is_empty(),
+                "re-blocked peer should not be dialable"
+            );
+            assert!(
+                directory.dial(&pk_1).is_none(),
+                "re-blocked peer should not be reservable"
             );
         });
     }
@@ -1532,7 +1828,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: true, // Bypass IP check to simplify test
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1583,7 +1879,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1634,7 +1930,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1682,7 +1978,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -1720,7 +2016,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -1746,7 +2042,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 1,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -1779,7 +2075,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
 
@@ -1807,7 +2103,7 @@ mod tests {
                 directory.peers.get(&pk_1).unwrap().ingress(),
                 Some(Ingress::Socket(addr_2))
             );
-            assert!(directory.dialable().contains(&pk_1));
+            assert!(directory.dialable().peers.contains(&pk_1));
         });
     }
 
@@ -1822,7 +2118,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
@@ -1847,7 +2143,7 @@ mod tests {
             allow_dns: true,
             bypass_ip_check: false,
             max_sets: 3,
-            rate_limit: Quota::per_second(NZU32!(10)),
+            peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
 
