@@ -178,12 +178,7 @@ impl Config {
     }
 
     // Setters
-    /// Returns a copy of this config with a new tokio worker thread count.
-    ///
-    /// Buffer pools that have not been explicitly configured via
-    /// [`with_network_buffer_pool_config`](Self::with_network_buffer_pool_config) or
-    /// [`with_storage_buffer_pool_config`](Self::with_storage_buffer_pool_config)
-    /// will derive their thread-cache parallelism from this value.
+    /// See [Config]
     pub const fn with_worker_threads(mut self, n: usize) -> Self {
         self.worker_threads = n;
         self
