@@ -1277,17 +1277,16 @@ module replica {
         nullified_views.intersect(finalized_views) == Set()
     })
 
-    // No correct proposer sends two different proposals in the same view.
-    val no_proposal_equivocation = tuples(sent_proposal, sent_proposal).forall(((m1, m2)) => or {
-        not(m1.view == m2.view and m1.sig == m2.sig),
-        ByzantineSigs.contains(m1.sig),
-        ByzantineSigs.contains(m2.sig),
-        and {
-          m1.block == m2.block,
-          m1.block_parent == m2.block_parent,
-          m1.view_parent == m2.view_parent,
-        },
-      })
+    val no_proposal_equivocation = CORRECT.forall(id => {
+        or {
+            id.in(ByzantineSigs),
+            VIEWS.forall(v =>
+                sent_proposal
+                    .filter(p => p.sig == id and p.view == v)
+                    .size() <= 1
+            )
+        }
+    })
 
     val valid_last_finalized = CORRECT.forall(id => {
         val self = replica_state.get(id)
@@ -1347,7 +1346,7 @@ module replica {
     })
 
     // If there is a finalized block in view v, there is no notarization for another block in view v.
-    val no_notarization_in_finalized_view = tuples(CORRECT, VIEWS).forall(((id, v)) => {
+    val no_notarization_in_finalized_view2 = tuples(CORRECT, VIEWS).forall(((id, v)) => {
         val certs = store_certificate.get(id)
         AllBlocks.forall(b => or {
             not(certs.exists(c => is_finalization_cert(c) and cert_view(c) == v and cert_block(c) == Some(b))),
@@ -1355,11 +1354,29 @@ module replica {
         })
     })
 
-    val finalize_requires_notarization = CORRECT.forall(id => {
+    val unique_notarized_or_finalized_block_per_view =
+        tuples(CORRECT, VIEWS).forall(((id, v)) => {
+            val certs = store_certificate.get(id)
+            certs
+                .filter(c => and {
+                    cert_view(c) == v,
+                    is_notarization_cert(c) or is_finalization_cert(c),
+                })
+                .map(c => cert_block(c))
+                .size() <= 1
+        })
+
+    val finalize_vote_requires_notarization_cert = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
         sent_vote
             .filter(v => vote_sig(v) == id and is_finalize(v))
-            .forall(v => option_has(vote_block(v), b => is_block_notarized(vote_view(v), b, certs)))
+            .forall(v => option_has(vote_block(v), b =>
+                certs.exists(c => and {
+                    is_notarization_cert(c),
+                    cert_view(c) == vote_view(v),
+                    cert_block(c) == Some(b),
+                })
+            ))
     })
 
     // A finalized (view, block) must not have conflicting parent references.
@@ -1394,7 +1411,7 @@ module replica {
     })
 
     val safe_finalization = all {
-        no_notarization_in_finalized_view,
+        unique_notarized_or_finalized_block_per_view
         no_nullification_in_finalized_view
     }
 
@@ -1446,7 +1463,7 @@ module replica {
         notarized_consistency,
         parent_refs_well_formed,
         safe_finalization,
-        finalize_requires_notarization,
+        finalize_vote_requires_notarization_cert,
         finalized_blocks_have_unique_parent,
         finalized_certificates_are_committed,
         committed_blocks_no_duplicates,
