@@ -158,6 +158,8 @@
 //! - Partial synchrony.
 //!
 //! Simplex externalizes proof artifacts (`notarization`, `nullification`, `finalization`) so downstream systems can consume standalone certificates of progress.
+//! This specification does not model optional implementation-level liveness features
+//! that are disabled by default, such as proposal forwarding policies.
 //!
 //! ## 2. Model & Parameters
 //!
@@ -174,8 +176,6 @@
 //!   for view `u` updates `r.latest_seen[l] = max(r.latest_seen[l], u)`. Must
 //!   satisfy `skip_timeout <= activity_timeout`.
 //! - `T` is the retry period used by the retry timer.
-//! - `forwarding_policy` is an optional liveness policy used when entering a new view:
-//!   `Disabled | Silent | NextLeader`.
 //!
 //! ## 3. Quorums and Certificates
 //!
@@ -311,31 +311,6 @@
 //!         return None;
 //!     }
 //!     return Some(c);
-//! }
-//!
-//! fn forwardable_proposal(r, v) -> Option<c> {
-//!     if r.round[v].proposal = Some(c) and is_certified(r, v) = Some(c) {
-//!         return Some(c);
-//!     }
-//!     return None;
-//! }
-//!
-//! fn forwarding_targets(r, v_entered, c_prev) -> Set<replica> {
-//!     if forwarding_policy = Disabled {
-//!         return {};
-//!     }
-//!     if forwarding_policy = Silent {
-//!         return { r' : r' did not send `notarize(c_prev, v_entered - 1)` and
-//!                         r' did not send `finalize(c_prev, v_entered - 1)` };
-//!     }
-//!     if forwarding_policy = NextLeader {
-//!         let l = leader(v_entered);
-//!         if l did not send `notarize(c_prev, v_entered - 1)` and
-//!            l did not send `finalize(c_prev, v_entered - 1)` {
-//!             return { l };
-//!         }
-//!         return {};
-//!     }
 //! }
 //!
 //! fn parent_certificate(r, v) -> Option<certificate> {
@@ -493,8 +468,6 @@
 //!    1. Let `l = r.round[v].leader`.
 //!    1. If `r != l` and `!is_active(r, l)`,
 //!       set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
-//!    1. Let `c_prev = forwardable_proposal(r, v - 1)`.
-//!    1. If `c_prev != None`, forward `c_prev` to every replica in `forwarding_targets(r, v, c_prev)`.
 //!    1. If `r == l`, attempt to propose:
 //!       1. Let `parent = find_parent(r, v)`.
 //!       1. If `parent = Err(_)`, return.
@@ -546,7 +519,7 @@
 //! 1. On receiving `nullify(v)` from replica `r'`:
 //!    1. If `!record_message(r, r', nullify(v))`, return.
 //!    2. If `r' == leader(v)`:
-//!       3. Set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
+//!       1. Set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
 //! 1. On observing `≥ Q` `nullify(v)` votes:
 //!    1. Assemble `nullification(v)`.
 //! 1. On constructing or receiving the first `nullification(v)`:
@@ -596,16 +569,14 @@
 //! 1. To propose in view `v+k`, the leader must reference a certified parent in some view `v_p`
 //!    and possess nullification certificates for every view between `v_p` and `v+k`.
 //! 2. A nullification certificate for view `v` requires `2f+1` `nullify(v)` votes.
-//! 3. An honest participant broadcasts `nullify(v)` in exactly three cases:
-//!    a timeout fires (`t_l`, `t_r` or `t_a`), certification fails, or
-//!    `nullification(v)` is observed first and the participant has not yet broadcast `finalize(c,v)`.
+//! 3. An honest participant broadcasts `nullify(v)` in exactly two cases:
+//!    a timeout fires (`t_l`, `t_r` or `t_a`), or certification fails.
 //!
 //! Therefore, if view `v` completes without timeout and certification succeeds, no honest
 //! participant has broadcast a pre-certificate `nullify(v)`. With at most `f` Byzantine participants,
-//! at most `f` such votes exist, which is insufficient to form `nullification(v)`. The
-//! certificate-triggered `nullify(v)` case cannot occur without `nullification(v)` already existing.
-//! Without that certificate, no future leader can skip view `v`, and the notarized payload must be
-//! included as an ancestor in all subsequent proposals.
+//! at most `f` such votes exist, which is insufficient to form `nullification(v)`.
+//! Without that certificate, no future leader can skip view `v`, and the notarized payload
+//! must be included as an ancestor in all subsequent proposals.
 //!
 //! ### Optimistic Finality
 //!
