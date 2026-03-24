@@ -30,10 +30,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    mmr::{
-        self, hasher::Hasher as _, journaled::Config as MmrConfig, Location, Position,
-        StandardHasher,
-    },
+    mmr::{self, Location, StandardHasher},
     qmdb::{
         self,
         any::{
@@ -47,8 +44,7 @@ use crate::{
                 fixed::{Operation as UnorderedFixedOp, Update as UnorderedFixedUpdate},
                 variable::{Operation as UnorderedVariableOp, Update as UnorderedVariableUpdate},
             },
-            FixedConfig as AnyFixedConfig, FixedValue, VariableConfig as AnyVariableConfig,
-            VariableValue,
+            FixedValue, VariableValue,
         },
         current::{
             db, grafting,
@@ -69,51 +65,17 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
+use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, sync::AsyncMutex, Array};
 use std::ops::Range;
 
 #[cfg(test)]
 pub(crate) mod tests;
 
-impl<T: Translator> Config for FixedConfig<T> {
-    type JournalConfig = fixed::Config;
+impl<T: Translator, J: Clone> Config for super::Config<T, J> {
+    type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
-        let any_config: AnyFixedConfig<T> = self.clone().into();
-        <AnyFixedConfig<T> as Config>::journal_config(&any_config)
-    }
-}
-
-impl<T: Translator, C: Clone> Config for VariableConfig<T, C> {
-    type JournalConfig = variable::Config<C>;
-
-    fn journal_config(&self) -> Self::JournalConfig {
-        let any_config: AnyVariableConfig<T, C> = self.clone().into();
-        <AnyVariableConfig<T, C> as Config>::journal_config(&any_config)
-    }
-}
-
-/// Extract MMR config from [FixedConfig].
-fn mmr_config_from_fixed<T: Translator>(config: &FixedConfig<T>) -> MmrConfig {
-    MmrConfig {
-        journal_partition: config.mmr_journal_partition.clone(),
-        metadata_partition: config.mmr_metadata_partition.clone(),
-        items_per_blob: config.mmr_items_per_blob,
-        write_buffer: config.mmr_write_buffer,
-        thread_pool: config.thread_pool.clone(),
-        page_cache: config.page_cache.clone(),
-    }
-}
-
-/// Extract MMR config from [VariableConfig].
-fn mmr_config_from_variable<T: Translator, C>(config: &VariableConfig<T, C>) -> MmrConfig {
-    MmrConfig {
-        journal_partition: config.mmr_journal_partition.clone(),
-        metadata_partition: config.mmr_metadata_partition.clone(),
-        items_per_blob: config.mmr_items_per_blob,
-        write_buffer: config.mmr_write_buffer,
-        thread_pool: config.thread_pool.clone(),
-        page_cache: config.page_cache.clone(),
+        self.journal_config.clone()
     }
 }
 
@@ -127,7 +89,7 @@ fn mmr_config_from_variable<T: Translator, C>(config: &VariableConfig<T, C>) -> 
 #[allow(clippy::too_many_arguments)]
 async fn build_db<E, U, I, H, J, const N: usize>(
     context: E,
-    mmr_config: MmrConfig,
+    mmr_config: mmr::journaled::Config,
     log: J,
     index: I,
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -198,7 +160,7 @@ where
     // `popcount(pruned_chunks)` are at or above the grafting height. The remaining
     // smaller peaks cover the partial trailing chunk and are not grafted pinned nodes.
     let grafted_pinned_nodes = {
-        let ops_pin_positions = mmr::iterator::nodes_to_pin(Position::try_from(range.start)?);
+        let ops_pin_positions = mmr::iterator::nodes_to_pin(range.start);
         let num_grafted_pins = (pruned_chunks as u64).count_ones() as usize;
         let mut pins = Vec::with_capacity(num_grafted_pins);
         for pos in ops_pin_positions.take(num_grafted_pins) {
@@ -287,9 +249,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = mmr_config_from_fixed(&config);
+        let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.thread_pool.clone();
+        let thread_pool = config.mmr_config.thread_pool.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, UnorderedFixedUpdate<K, V>, _, H, _, N>(
             context,
@@ -336,9 +298,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = mmr_config_from_variable(&config);
+        let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.thread_pool.clone();
+        let thread_pool = config.mmr_config.thread_pool.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, UnorderedVariableUpdate<K, V>, _, H, _, N>(
             context,
@@ -384,9 +346,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = mmr_config_from_fixed(&config);
+        let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.thread_pool.clone();
+        let thread_pool = config.mmr_config.thread_pool.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, OrderedFixedUpdate<K, V>, _, H, _, N>(
             context,
@@ -433,9 +395,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = mmr_config_from_variable(&config);
+        let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.thread_pool.clone();
+        let thread_pool = config.mmr_config.thread_pool.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, OrderedVariableUpdate<K, V>, _, H, _, N>(
             context,
@@ -486,6 +448,7 @@ macro_rules! impl_current_resolver {
                 start_loc: Location,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, Self::Error> {
                 let (proof, operations) = self.any
                     .historical_proof(op_count, start_loc, max_ops)
@@ -498,7 +461,7 @@ macro_rules! impl_current_resolver {
                 Ok(crate::qmdb::sync::FetchResult {
                     proof,
                     operations,
-                    success_tx: commonware_utils::channel::oneshot::channel().0,
+                    success_tx: oneshot::channel().0,
                     pinned_nodes,
                 })
             }
@@ -529,6 +492,7 @@ macro_rules! impl_current_resolver {
                 start_loc: Location,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let db = self.read().await;
                 let (proof, operations) = db.any
@@ -542,7 +506,7 @@ macro_rules! impl_current_resolver {
                 Ok(crate::qmdb::sync::FetchResult {
                     proof,
                     operations,
-                    success_tx: commonware_utils::channel::oneshot::channel().0,
+                    success_tx: oneshot::channel().0,
                     pinned_nodes,
                 })
             }
@@ -573,6 +537,7 @@ macro_rules! impl_current_resolver {
                 start_loc: Location,
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
+                _cancel_rx: oneshot::Receiver<()>,
             ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
@@ -587,7 +552,7 @@ macro_rules! impl_current_resolver {
                 Ok(crate::qmdb::sync::FetchResult {
                     proof,
                     operations,
-                    success_tx: commonware_utils::channel::oneshot::channel().0,
+                    success_tx: oneshot::channel().0,
                     pinned_nodes,
                 })
             }

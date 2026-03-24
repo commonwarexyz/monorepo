@@ -1,3 +1,7 @@
+#[cfg(feature = "arbitrary")]
+use crate::merkle::Family as _;
+#[cfg(feature = "arbitrary")]
+use crate::mmr::Family;
 use crate::{
     mmr::Location,
     qmdb::sync::{self, error::EngineError},
@@ -51,10 +55,10 @@ where
     D: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        use crate::mmr::MAX_LOCATION;
         let root = u.arbitrary()?;
-        let lower = u.int_in_range(0..=*MAX_LOCATION - 1)?;
-        let upper = u.int_in_range(lower + 1..=*MAX_LOCATION)?;
+        let max_loc = Family::MAX_LEAVES;
+        let lower = u.int_in_range(0..=*max_loc - 1)?;
+        let upper = u.int_in_range(lower + 1..=*max_loc)?;
         Ok(Self {
             root,
             range: commonware_utils::non_empty_range!(Location::new(lower), Location::new(upper)),
@@ -78,9 +82,12 @@ where
         }));
     }
 
-    // Check if sync target moved backward
+    // Start must not decrease; end must strictly increase. Same end
+    // implies same tree size implies same root (the MMR is append-only),
+    // so retaining the old root under the old tree size in
+    // `retained_roots` requires a distinct end.
     if new_target.range.start() < old_target.range.start()
-        || new_target.range.end() < old_target.range.end()
+        || new_target.range.end() <= old_target.range.end()
     {
         return Err(sync::Error::Engine(EngineError::SyncTargetMovedBackward {
             old: old_target.clone(),
@@ -165,6 +172,19 @@ mod tests {
         target(sha256::Digest::from([0; 32]), 0, 100),
         target(sha256::Digest::from([1; 32]), 50, 200),
         Ok(())
+    )]
+    #[case::same_start(
+        target(sha256::Digest::from([0; 32]), 0, 100),
+        target(sha256::Digest::from([1; 32]), 0, 200),
+        Ok(())
+    )]
+    #[case::same_end(
+        target(sha256::Digest::from([0; 32]), 0, 100),
+        target(sha256::Digest::from([1; 32]), 50, 100),
+        Err(TestError::Engine(EngineError::SyncTargetMovedBackward {
+            old: target(sha256::Digest::from([0; 32]), 0, 100),
+            new: target(sha256::Digest::from([1; 32]), 50, 100),
+        }))
     )]
     #[case::moves_backward(
         target(sha256::Digest::from([0; 32]), 0, 100),

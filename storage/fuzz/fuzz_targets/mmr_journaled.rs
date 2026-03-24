@@ -3,10 +3,12 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
-use commonware_storage::mmr::{
-    journaled::{Config, Mmr, SyncConfig},
-    location::{Location, LocationRangeExt},
-    mem, Error, Position, StandardHasher as Standard,
+use commonware_storage::{
+    merkle::LocationRangeExt as _,
+    mmr::{
+        journaled::{Config, Mmr, SyncConfig},
+        mem, Error, Location, Position, StandardHasher as Standard,
+    },
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
@@ -137,8 +139,9 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     let size_before = mmr.size();
-                    let changeset = mmr
-                        .new_batch()
+                    let batch = mmr.new_batch();
+                    let loc = batch.leaves();
+                    let changeset = batch
                         .add(&hasher, limited_data)
                         .merkleize(&hasher)
                         .finalize();
@@ -146,6 +149,7 @@ fn fuzz(input: FuzzInput) {
                     leaves.push(limited_data.to_vec());
                     historical_sizes.push(mmr.leaves());
                     assert!(mmr.size() > size_before);
+                    assert_eq!(mmr.leaves() - 1, loc);
                 }
 
                 MmrJournaledOperation::AddBatched { items } => {
@@ -166,21 +170,24 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     let size_before = mmr.size();
-                    let leaves_before = mmr.leaves();
-                    let changeset = {
+                    let (locations, changeset) = {
                         let mut batch = mmr.new_batch();
+                        let mut locations = Vec::with_capacity(items.len());
                         for item in &items {
+                            locations.push(batch.leaves());
                             batch = batch.add(&hasher, item);
                         }
-                        batch.merkleize(&hasher).finalize()
+                        (locations, batch.merkleize(&hasher).finalize())
                     };
                     mmr.apply(changeset).unwrap();
                     assert!(mmr.size() > size_before);
 
-                    for (i, item) in items.iter().enumerate() {
+                    for (item, loc) in items.iter().zip(&locations) {
                         leaves.push(item.to_vec());
-                        historical_sizes.push(leaves_before + i as u64 + 1);
+                        // +1 for count.
+                        historical_sizes.push(*loc + 1);
                     }
+                    assert_eq!(mmr.leaves() - 1, *locations.last().unwrap());
                 }
 
                 MmrJournaledOperation::GetNode { pos } => {

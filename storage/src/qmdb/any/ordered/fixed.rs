@@ -9,7 +9,7 @@ use crate::{
     journal::contiguous::fixed::Journal,
     mmr::Location,
     qmdb::{
-        any::{init_fixed, ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
+        any::{ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
         Error,
     },
     translator::Translator,
@@ -47,7 +47,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
         known_inactivity_floor: Option<Location>,
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
-        init_fixed(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+        crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
             Index::new(ctx, t)
         })
         .await
@@ -66,7 +66,7 @@ pub mod partitioned {
         journal::contiguous::fixed::Journal,
         mmr::Location,
         qmdb::{
-            any::{init_fixed, FixedConfig as Config, FixedValue},
+            any::{FixedConfig as Config, FixedValue},
             Error,
         },
         translator::Translator,
@@ -119,7 +119,7 @@ pub mod partitioned {
             known_inactivity_floor: Option<Location>,
             callback: impl FnMut(bool, Option<Location>),
         ) -> Result<Self, Error> {
-            init_fixed(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+            crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
                 Index::new(ctx, t)
             })
             .await
@@ -1463,7 +1463,7 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            mmr::{iterator::nodes_to_pin, journaled::Mmr, Position},
+            mmr::{iterator::nodes_to_pin, journaled::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
@@ -1477,8 +1477,8 @@ pub(crate) mod test {
                 (self.log.mmr, self.log.journal)
             }
 
-            async fn pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
-                join_all(nodes_to_pin(pos).map(|p| self.log.mmr.get_node(p)))
+            async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
+                join_all(nodes_to_pin(loc).map(|p| self.log.mmr.get_node(p)))
                     .await
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())

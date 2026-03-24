@@ -12,17 +12,13 @@ use crate::{
         },
         Error as JError,
     },
+    merkle::{batch::ChainInfo, hasher::Hasher, storage::Storage},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         batch::{self, UnmerkleizedBatch},
-        hasher::Hasher,
         iterator::{nodes_to_pin, PeakIterator},
-        location::Location,
         mem::{Config as MemConfig, Mmr as MemMmr},
-        position::Position,
-        read::{BatchChainInfo, Readable},
-        storage::Storage,
-        verification, Error, Proof,
+        verification, Error, Family, Location, Position, Proof, Readable,
     },
 };
 use commonware_codec::DecodeExt;
@@ -49,7 +45,7 @@ struct Inner<D: Digest> {
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
-    pruned_to_pos: Position,
+    pruning_boundary: Position,
 }
 
 /// Configuration for a journal-backed MMR.
@@ -120,7 +116,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest> {
 const NODE_PREFIX: u8 = 0;
 
 /// Prefix used for the key storing the pruning boundary (as a leaf index) in the metadata.
-const PRUNED_TO_PREFIX: u8 = 1;
+const PRUNING_BOUNDARY_PREFIX: u8 = 1;
 
 impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
@@ -167,7 +163,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
                 error!(?pos, "node is missing from metadata and journal");
                 Err(Error::MissingNode(pos))
             }
-            Err(e) => Err(Error::JournalError(e)),
+            Err(e) => Err(Error::Journal(e)),
         }
     }
 
@@ -175,19 +171,19 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// count.
     pub fn bounds(&self) -> std::ops::Range<Location> {
         let inner = self.inner.read();
-        Location::try_from(inner.pruned_to_pos).expect("valid pruned_to_pos")
+        Location::try_from(inner.pruning_boundary).expect("valid pruning_boundary")
             ..inner.mem_mmr.leaves()
     }
 
-    /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
+    /// Adds the pinned nodes based on `prune_loc` to `mem_mmr`.
     async fn add_extra_pinned_nodes(
         mem_mmr: &mut MemMmr<D>,
         metadata: &Metadata<E, U64, Vec<u8>>,
         journal: &Journal<E, D>,
-        prune_pos: Position,
+        prune_loc: Location,
     ) -> Result<(), Error> {
         let mut pinned_nodes = BTreeMap::new();
-        for pos in nodes_to_pin(prune_pos) {
+        for pos in nodes_to_pin(prune_loc) {
             let digest = Self::get_from_metadata_or_journal(metadata, journal, pos).await?;
             pinned_nodes.insert(pos, digest);
         }
@@ -199,7 +195,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// Initialize a new `Mmr` instance.
     pub async fn init(
         context: E,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Family, Digest = D>,
         cfg: Config,
     ) -> Result<Self, Error> {
         let journal_cfg = JConfig {
@@ -223,7 +219,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             let mem_mmr = MemMmr::init(
                 MemConfig {
                     nodes: vec![],
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 hasher,
@@ -231,7 +227,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             return Ok(Self {
                 inner: RwLock::new(Inner {
                     mem_mmr,
-                    pruned_to_pos: Position::new(0),
+                    pruning_boundary: Position::new(0),
                 }),
                 journal,
                 metadata,
@@ -243,16 +239,16 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         // Make sure the journal's oldest retained node is as expected based on the last pruning
         // boundary stored in metadata. If they don't match, prune the journal to the appropriate
         // location.
-        let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
-        let metadata_pruned_to = Location::new(metadata.get(&key).map_or(0, |bytes| {
+        let key: U64 = U64::new(PRUNING_BOUNDARY_PREFIX, 0);
+        let metadata_pruning_boundary = Location::new(metadata.get(&key).map_or(0, |bytes| {
             u64::from_be_bytes(
                 bytes
                     .as_slice()
                     .try_into()
-                    .expect("metadata pruned_to is not 8 bytes"),
+                    .expect("metadata pruning_boundary is not 8 bytes"),
             )
         }));
-        let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
+        let metadata_prune_pos = Position::try_from(metadata_pruning_boundary)?;
         let journal_bounds_start = journal.reader().await.bounds().start;
         if *metadata_prune_pos > journal_bounds_start {
             // Metadata is ahead of journal (crashed before completing journal prune).
@@ -314,20 +310,22 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         }
 
         // Initialize the mem_mmr in the "prune_all" state.
+        let journal_leaves = Location::try_from(journal_size)?;
+        let effective_prune_loc = Location::try_from(effective_prune_pos)?;
         let mut pinned_nodes = Vec::new();
-        for pos in nodes_to_pin(journal_size) {
+        for pos in nodes_to_pin(journal_leaves) {
             let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
         let mut mem_mmr = MemMmr::init(
             MemConfig {
                 nodes: vec![],
-                pruned_to: Location::try_from(journal_size).map_err(Error::from)?,
+                pruning_boundary: journal_leaves,
                 pinned_nodes,
             },
             hasher,
         )?;
-        Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, effective_prune_pos)
+        Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, effective_prune_loc)
             .await?;
 
         if let Some(leaf) = orphaned_leaf {
@@ -353,7 +351,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
             // Prune mem_mmr and reinstate pinned nodes.
             let mut pn = BTreeMap::new();
-            for p in nodes_to_pin(effective_prune_pos) {
+            for p in nodes_to_pin(effective_prune_loc) {
                 let d = mem_mmr.get_node_unchecked(p);
                 pn.insert(p, *d);
             }
@@ -364,7 +362,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         Ok(Self {
             inner: RwLock::new(Inner {
                 mem_mmr,
-                pruned_to_pos: effective_prune_pos,
+                pruning_boundary: effective_prune_pos,
             }),
             journal,
             metadata,
@@ -390,7 +388,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     pub async fn init_sync(
         context: E,
         cfg: SyncConfig<D>,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Family, Digest = D>,
     ) -> Result<Self, crate::qmdb::Error> {
         let prune_pos = Position::try_from(cfg.range.start)?;
         let end_pos = Position::try_from(cfg.range.end)?;
@@ -437,20 +435,22 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
 
         // Write the pruning boundary.
-        let pruning_boundary_key = U64::new(PRUNED_TO_PREFIX, 0);
+        let pruning_boundary_key = U64::new(PRUNING_BOUNDARY_PREFIX, 0);
         metadata.put(
             pruning_boundary_key,
             cfg.range.start.as_u64().to_be_bytes().into(),
         );
 
         // Write the required pinned nodes to metadata.
+        let journal_leaves = Location::try_from(journal_size)?;
+        let prune_loc = cfg.range.start;
         if let Some(pinned_nodes) = cfg.pinned_nodes {
             // Use caller-provided pinned nodes.
-            let expected_pinned_nodes = nodes_to_pin(prune_pos).count();
+            let expected_pinned_nodes = nodes_to_pin(prune_loc).count();
             if pinned_nodes.len() != expected_pinned_nodes {
                 return Err(Error::InvalidPinnedNodes.into());
             }
-            let nodes_to_pin_persisted = nodes_to_pin(prune_pos);
+            let nodes_to_pin_persisted = nodes_to_pin(prune_loc);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
                 metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             }
@@ -459,7 +459,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         // Create the in-memory MMR with the pinned nodes required for its size. This must be
         // performed *before* pruning the journal to range.start to ensure all pinned nodes are
         // present.
-        let nodes_to_pin_mem = nodes_to_pin(journal_size);
+        let nodes_to_pin_mem = nodes_to_pin(journal_leaves);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
             let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
@@ -468,7 +468,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         let mut mem_mmr = MemMmr::init(
             MemConfig {
                 nodes: vec![],
-                pruned_to: Location::try_from(journal_size).map_err(Error::from)?,
+                pruning_boundary: journal_leaves,
                 pinned_nodes: mem_pinned_nodes,
             },
             hasher,
@@ -477,7 +477,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
         // This must also be done before pruning.
         if prune_pos < journal_size {
-            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_pos).await?;
+            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_loc).await?;
         }
 
         // Sync metadata before pruning so pinned nodes are persisted for crash recovery.
@@ -489,7 +489,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         Ok(Self {
             inner: RwLock::new(Inner {
                 mem_mmr,
-                pruned_to_pos: prune_pos,
+                pruning_boundary: prune_pos,
             }),
             journal,
             metadata,
@@ -502,31 +502,26 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// disk. Return the computed set of required nodes.
     async fn update_metadata(
         &mut self,
-        prune_to_pos: Position,
+        prune_to_loc: Location,
     ) -> Result<BTreeMap<Position, D>, Error> {
-        assert!(prune_to_pos >= self.inner.get_mut().pruned_to_pos);
+        let prune_to_pos = Position::try_from(prune_to_loc)?;
+        assert!(prune_to_pos >= self.inner.get_mut().pruning_boundary);
 
         let mut pinned_nodes = BTreeMap::new();
-        for pos in nodes_to_pin(prune_to_pos) {
+        for pos in nodes_to_pin(prune_to_loc) {
             let digest = self.get_node(pos).await?.expect(
-                "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
+                "pinned node should exist if prune_to_loc is no less than pruning_boundary_loc",
             );
             self.metadata
                 .put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             pinned_nodes.insert(pos, digest);
         }
 
-        let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
-        self.metadata.put(
-            key,
-            Location::try_from(prune_to_pos)
-                .map_err(Error::from)?
-                .as_u64()
-                .to_be_bytes()
-                .into(),
-        );
+        let key: U64 = U64::new(PRUNING_BOUNDARY_PREFIX, 0);
+        self.metadata
+            .put(key, prune_to_loc.as_u64().to_be_bytes().into());
 
-        self.metadata.sync().await.map_err(Error::MetadataError)?;
+        self.metadata.sync().await.map_err(Error::Metadata)?;
 
         Ok(pinned_nodes)
     }
@@ -542,7 +537,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         match self.journal.reader().await.read(*position).await {
             Ok(item) => Ok(Some(item)),
             Err(JError::ItemPruned(_)) => Ok(None),
-            Err(e) => Err(Error::JournalError(e)),
+            Err(e) => Err(Error::Journal(e)),
         }
     }
 
@@ -575,8 +570,10 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
             // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared
             // by pruning the mem_mmr.
+            let pruning_boundary_loc =
+                Location::try_from(inner.pruning_boundary).expect("valid pruning_boundary");
             let mut pinned_nodes = BTreeMap::new();
-            for pos in nodes_to_pin(inner.pruned_to_pos) {
+            for pos in nodes_to_pin(pruning_boundary_loc) {
                 let digest = inner.mem_mmr.get_node_unchecked(pos);
                 pinned_nodes.insert(pos, *digest);
             }
@@ -612,7 +609,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// This implementation ensures that no failure can leave the MMR in an unrecoverable state,
     /// requiring it sync the MMR to write any potential unsynced updates.
     ///
-    /// Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// Returns [Error::LocationOverflow] if `loc` exceeds [crate::merkle::Family::MAX_LEAVES].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         let pos = Position::try_from(loc)?;
@@ -621,7 +618,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             if loc > inner.mem_mmr.leaves() {
                 return Err(Error::LeafOutOfBounds(loc));
             }
-            if pos <= inner.pruned_to_pos {
+            if pos <= inner.pruning_boundary {
                 return Ok(());
             }
         }
@@ -631,12 +628,12 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
         // event of a pruning failure.
-        let pinned_nodes = self.update_metadata(pos).await?;
+        let pinned_nodes = self.update_metadata(loc).await?;
 
         self.journal.prune(*pos).await?;
         let inner = self.inner.get_mut();
         inner.mem_mmr.add_pinned_nodes(pinned_nodes);
-        inner.pruned_to_pos = pos;
+        inner.pruning_boundary = pos;
 
         Ok(())
     }
@@ -653,16 +650,16 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     ///
     /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if `loc`
     ///   is not provable at that historical size.
-    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
     ///   pruned.
     pub async fn historical_proof(
         &self,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Family, Digest = D>,
         leaves: Location,
         loc: Location,
     ) -> Result<Proof<D>, Error> {
-        if !loc.is_valid() {
+        if !loc.is_valid_index() {
             return Err(Error::LocationOverflow(loc));
         }
         // loc is valid so it won't overflow from + 1
@@ -678,13 +675,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// - Returns [Error::RangeOutOfBounds] if `leaves` is greater than `self.leaves()` or if `range`
     ///   is not provable at that historical size.
     /// - Returns [Error::LocationOverflow] if any location in `range` exceeds
-    ///   [crate::mmr::MAX_LOCATION].
+    ///   [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
     ///   pruned.
     /// - Returns [Error::Empty] if the range is empty.
     pub async fn historical_range_proof(
         &self,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Family, Digest = D>,
         leaves: Location,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
@@ -699,16 +696,16 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     ///
     /// # Errors
     ///
-    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::mmr::MAX_LOCATION].
+    /// - Returns [Error::LocationOverflow] if `loc` exceeds [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
     ///   pruned.
     /// - Returns [Error::Empty] if the range is empty.
     pub async fn proof(
         &self,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Family, Digest = D>,
         loc: Location,
     ) -> Result<Proof<D>, Error> {
-        if !loc.is_valid() {
+        if !loc.is_valid_index() {
             return Err(Error::LocationOverflow(loc));
         }
         // loc is valid so it won't overflow from + 1
@@ -722,13 +719,13 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// # Errors
     ///
     /// - Returns [Error::LocationOverflow] if any location in `range` exceeds
-    ///   [crate::mmr::MAX_LOCATION].
+    ///   [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [Error::ElementPruned] if some element needed to generate the proof has been
     ///   pruned.
     /// - Returns [Error::Empty] if the range is empty.
     pub async fn range_proof(
         &self,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Family, Digest = D>,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
         self.historical_range_proof(hasher, self.leaves(), range)
@@ -795,7 +792,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
         // event of a pruning failure.
-        self.update_metadata(prune_to_pos).await?;
+        self.update_metadata(prune_to).await?;
 
         // Don't actually prune the journal to simulate failure
         Ok(())
@@ -832,7 +829,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     pub(crate) async fn rewind(
         &mut self,
         leaves_to_remove: usize,
-        hasher: &impl Hasher<Digest = D>,
+        hasher: &impl Hasher<Family, Digest = D>,
     ) -> Result<(), Error> {
         if leaves_to_remove == 0 {
             return Ok(());
@@ -842,11 +839,11 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         let destination_leaf = match current_leaves.checked_sub(leaves_to_remove as u64) {
             Some(dest) => dest,
             None => {
-                let pruned_to_pos = self.inner.get_mut().pruned_to_pos;
-                return Err(if pruned_to_pos == 0 {
+                let pruning_boundary = self.inner.get_mut().pruning_boundary;
+                return Err(if pruning_boundary == 0 {
                     Error::Empty
                 } else {
-                    Error::ElementPruned(pruned_to_pos - 1)
+                    Error::ElementPruned(pruning_boundary - 1)
                 });
             }
         };
@@ -854,8 +851,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         let destination_loc = Location::new(destination_leaf);
         let new_size = Position::try_from(destination_loc).expect("valid leaf");
 
-        let pruned_to_pos = self.inner.get_mut().pruned_to_pos;
-        if new_size < pruned_to_pos {
+        let pruning_boundary = self.inner.get_mut().pruning_boundary;
+        if new_size < pruning_boundary {
             return Err(Error::ElementPruned(new_size));
         }
 
@@ -876,17 +873,19 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             inner.mem_mmr.truncate(new_size, hasher);
         } else {
             let mut pinned_nodes = Vec::new();
-            for pos in nodes_to_pin(new_size) {
+            for pos in nodes_to_pin(destination_loc) {
                 pinned_nodes.push(
                     Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?,
                 );
             }
             inner.mem_mmr = MemMmr::from_components(hasher, vec![], destination_loc, pinned_nodes)?;
+            let pruning_boundary_loc =
+                Location::try_from(inner.pruning_boundary).expect("valid pruning_boundary");
             Self::add_extra_pinned_nodes(
                 &mut inner.mem_mmr,
                 &self.metadata,
                 &self.journal,
-                inner.pruned_to_pos,
+                pruning_boundary_loc,
             )
             .await?;
         }
@@ -898,12 +897,14 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 /// The [`Readable`] implementation for the journaled MMR operates only on the in-memory
 /// portion of the MMR. After [`Mmr::sync`], nodes that have been flushed to the journal
 /// are no longer accessible through this interface. In particular, [`Readable::get_node`]
-/// returns `None` for flushed positions, and [`Readable::pruned_to_pos`] reflects the
+/// returns `None` for flushed positions, and [`Readable::pruning_boundary`] reflects the
 /// in-memory boundary (which may be tighter than the journal's prune boundary reported by
 /// [`Mmr::bounds`]). This means batch operations like `update_leaf` will correctly reject
 /// leaves that have been synced out of memory with [`Error::ElementPruned`].
 impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
+    type Family = Family;
     type Digest = D;
+    type Error = Error;
 
     fn size(&self) -> Position {
         self.size()
@@ -917,12 +918,47 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
         *self.inner.read().mem_mmr.root()
     }
 
-    fn pruned_to_pos(&self) -> Position {
-        self.inner.read().mem_mmr.pruned_to_pos()
+    fn pruning_boundary(&self) -> Location {
+        self.inner.read().mem_mmr.pruning_boundary()
+    }
+
+    fn proof(
+        &self,
+        hasher: &impl Hasher<Family, Digest = D>,
+        loc: Location,
+    ) -> Result<Proof<D>, Error> {
+        if !loc.is_valid_index() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        crate::merkle::proof::build_range_proof(
+            hasher,
+            self.leaves(),
+            loc..loc + 1,
+            |pos| <Self as Readable>::get_node(self, pos),
+            Error::ElementPruned,
+        )
+        .map_err(|e| match e {
+            Error::RangeOutOfBounds(_) => Error::LeafOutOfBounds(loc),
+            _ => e,
+        })
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &impl Hasher<Family, Digest = D>,
+        range: core::ops::Range<Location>,
+    ) -> Result<Proof<D>, Error> {
+        crate::merkle::proof::build_range_proof(
+            hasher,
+            self.leaves(),
+            range,
+            |pos| <Self as Readable>::get_node(self, pos),
+            Error::ElementPruned,
+        )
     }
 }
 
-impl<E: RStorage + Clock + Metrics, D: Digest> BatchChainInfo for Mmr<E, D> {
+impl<E: RStorage + Clock + Metrics, D: Digest> ChainInfo<Family> for Mmr<E, D> {
     type Digest = D;
 
     fn base_size(&self) -> Position {
@@ -932,7 +968,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> BatchChainInfo for Mmr<E, D> {
     fn collect_overwrites(&self, _into: &mut BTreeMap<Position, D>) {}
 }
 
-impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage for Mmr<E, D> {
+impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage<Family> for Mmr<E, D> {
     type Digest = D;
 
     async fn size(&self) -> Position {
@@ -947,9 +983,9 @@ impl<E: RStorage + Clock + Metrics + Sync, D: Digest> Storage for Mmr<E, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{
-        conformance::build_test_mmr, hasher::Hasher as _, location::LocationRangeExt as _, mem,
-        Location, StandardHasher as Standard,
+    use crate::{
+        merkle::{conformance::build_test_mmr, LocationRangeExt as _},
+        mmr::{mem, Location, StandardHasher as Standard},
     };
     use commonware_cryptography::{
         sha256::{self, Digest},
@@ -2064,16 +2100,16 @@ mod tests {
             let original_size = mmr.size();
             let original_leaves = mmr.leaves();
             let original_root = mmr.root();
-            let original_pruned_to = mmr.bounds().start;
-            let original_pruned_to_pos = Position::try_from(original_pruned_to).unwrap();
+            let original_pruning_boundary = mmr.bounds().start;
+            let original_pruning_pos = Position::try_from(original_pruning_boundary).unwrap();
 
             // Sync with boundaries that extend beyond existing data (partial overlap).
-            let lower_bound_loc = original_pruned_to;
+            let lower_bound_loc = original_pruning_boundary;
             let upper_bound_loc = original_leaves + 6; // Extend beyond existing data
 
             let mut expected_nodes = BTreeMap::new();
-            for pos in *original_pruned_to_pos..*original_size {
-                let pos = Position::new(pos);
+            for i in *original_pruning_pos..*original_size {
+                let pos = Position::new(i);
                 expected_nodes.insert(pos, mmr.get_node(pos).await.unwrap().unwrap());
             }
 
@@ -2098,8 +2134,8 @@ mod tests {
             assert_eq!(sync_mmr.root(), original_root);
 
             // Check that existing nodes are preserved in the overlapping range.
-            for pos in *original_pruned_to_pos..*original_size {
-                let pos = Position::new(pos);
+            for i in *original_pruning_pos..*original_size {
+                let pos = Position::new(i);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
                     expected_nodes.get(&pos).cloned()
@@ -2171,7 +2207,7 @@ mod tests {
                     .await
                     .unwrap();
             metadata.clear();
-            let key = U64::new(PRUNED_TO_PREFIX, 0);
+            let key = U64::new(PRUNING_BOUNDARY_PREFIX, 0);
             metadata.put(key, 0u64.to_be_bytes().to_vec());
             metadata.sync().await.unwrap();
             drop(metadata);
@@ -2441,7 +2477,7 @@ mod tests {
                 let inner = mmr.inner.read();
                 (
                     inner.mem_mmr.bounds().start,
-                    Location::try_from(inner.pruned_to_pos).unwrap(),
+                    Location::try_from(inner.pruning_boundary).unwrap(),
                 )
             };
             assert!(mem_start > journal_start);
@@ -2916,9 +2952,9 @@ mod tests {
             };
             ref_mmr.apply(changeset).unwrap();
             let expected_size = ref_mmr.size();
-            let prune_pos = Position::try_from(Location::new(100)).unwrap();
+            let prune_loc = Location::new(100);
             let mut pinned = Vec::new();
-            for pos in nodes_to_pin(prune_pos) {
+            for pos in nodes_to_pin(prune_loc) {
                 pinned.push(ref_mmr.get_node(pos).await.unwrap().unwrap());
             }
             ref_mmr.destroy().await.unwrap();
@@ -2989,7 +3025,7 @@ mod tests {
     }
 
     /// Regression: update_leaf on a synced-out leaf must return ElementPruned, not panic.
-    /// Before the fix, Readable::pruned_to_pos returned the journal's prune boundary
+    /// Before the fix, `Readable::pruning_boundary` returned the journal's prune boundary
     /// (which could be 0), so the batch accepted the update. During merkleize, get_node
     /// returned None for the synced-out sibling and hit an expect panic.
     #[test_traced]

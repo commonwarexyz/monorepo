@@ -4,7 +4,8 @@ use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
-    mmr::{Location, Proof},
+    journal::contiguous::variable::Config as VConfig,
+    mmr::{journaled::Config as MmrConfig, Location, Proof},
     qmdb::{
         self,
         immutable::{self, Config},
@@ -22,23 +23,29 @@ pub type Operation = immutable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
+    let page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
+        context,
+        NZU16!(2048),
+        NZUsize!(10),
+    );
     Config {
-        mmr_journal_partition: "mmr-journal".into(),
-        mmr_metadata_partition: "mmr-metadata".into(),
-        mmr_items_per_blob: NZU64!(4096),
-        mmr_write_buffer: NZUsize!(4096),
-        log_partition: "log".into(),
-        log_items_per_section: NZU64!(4096),
-        log_compression: None,
-        log_codec_config: (),
-        log_write_buffer: NZUsize!(4096),
+        mmr: MmrConfig {
+            journal_partition: "mmr-journal".into(),
+            metadata_partition: "mmr-metadata".into(),
+            items_per_blob: NZU64!(4096),
+            write_buffer: NZUsize!(4096),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        log: VConfig {
+            partition: "log".into(),
+            items_per_section: NZU64!(4096),
+            compression: None,
+            codec_config: (),
+            write_buffer: NZUsize!(4096),
+            page_cache,
+        },
         translator: commonware_storage::translator::EightCap,
-        thread_pool: None,
-        page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
-            context,
-            NZU16!(2048),
-            NZUsize!(10),
-        ),
     }
 }
 

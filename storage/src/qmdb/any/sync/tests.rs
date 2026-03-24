@@ -6,7 +6,7 @@
 
 use crate::{
     journal::contiguous::Contiguous,
-    mmr::{Location, Position},
+    mmr::Location,
     qmdb::{
         self,
         any::traits::DbAny,
@@ -22,8 +22,15 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
+use commonware_macros::select;
 use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
-use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, NZU64};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    non_empty_range,
+    sync::AsyncRwLock,
+    NZU64,
+};
+use futures::{pin_mut, FutureExt};
 use rand::RngCore as _;
 use std::{num::NonZeroU64, sync::Arc};
 
@@ -59,10 +66,10 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
     /// Get the MMR and journal from the database
     fn into_log_components(self) -> (Self::Mmr, Self::Journal);
 
-    /// Get the pinned nodes at a given position
+    /// Get the pinned nodes at a given location
     fn pinned_nodes_at(
         &self,
-        pos: Position,
+        loc: Location,
     ) -> impl std::future::Future<Output = Vec<Self::Digest>> + Send;
 }
 
@@ -127,6 +134,9 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
         };
 
         // Create the engine
@@ -168,6 +178,9 @@ where
             fetch_batch_size: NZU64!(2),
             db_config,
             update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
         };
 
         let result: Result<H::Db, _> = sync::sync(engine_config).await;
@@ -216,6 +229,9 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
         };
 
         // Perform sync
@@ -296,6 +312,9 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
         };
 
         let synced_db: H::Db = sync::sync(config).await.unwrap();
@@ -369,6 +388,9 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -469,6 +491,9 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -530,6 +555,9 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 1,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -596,6 +624,9 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 1,
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
@@ -676,6 +707,9 @@ where
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
 
             // Send target update with increased bounds
@@ -745,6 +779,9 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 10,
             update_rx: Some(update_receiver),
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 1,
         };
 
         // Complete the sync
@@ -767,6 +804,273 @@ where
 
         synced_db.destroy().await.unwrap();
 
+        Arc::try_unwrap(target_db)
+            .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+            .destroy()
+            .await
+            .unwrap();
+    });
+}
+
+/// Test that explicit finish control waits for a finish signal even after reaching target.
+pub(crate) fn test_sync_waits_for_explicit_finish<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let mut target_db = H::init_db(context.with_label("target")).await;
+        target_db = H::apply_ops(target_db, H::create_ops(10)).await;
+        let initial_target = Target {
+            root: H::sync_target_root(&target_db),
+            range: non_empty_range!(
+                target_db.inactivity_floor_loc().await,
+                target_db.bounds().await.end
+            ),
+        };
+
+        target_db = H::apply_ops(target_db, H::create_ops_seeded(5, 1)).await;
+        let updated_lower_bound = target_db.inactivity_floor_loc().await;
+        let updated_upper_bound = target_db.bounds().await.end;
+        let updated_target = Target {
+            root: H::sync_target_root(&target_db),
+            range: non_empty_range!(updated_lower_bound, updated_upper_bound),
+        };
+        let updated_verification_root = target_db.root();
+
+        let (update_sender, update_receiver) = mpsc::channel(1);
+        let (finish_sender, finish_receiver) = mpsc::channel(1);
+        let (reached_sender, mut reached_receiver) = mpsc::channel(1);
+        let target_db = Arc::new(target_db);
+        let config = Config {
+            context: context.with_label("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            fetch_batch_size: NZU64!(10),
+            target: initial_target.clone(),
+            resolver: target_db.clone(),
+            apply_batch_size: 1024,
+            max_outstanding_requests: 1,
+            update_rx: Some(update_receiver),
+            finish_rx: Some(finish_receiver),
+            reached_target_tx: Some(reached_sender),
+            max_retained_roots: 0,
+        };
+
+        let sync_handle = sync::sync(config);
+        pin_mut!(sync_handle);
+
+        select! {
+            _ = sync_handle.as_mut() => {
+                panic!("sync completed before explicit finish signal");
+            },
+            reached = reached_receiver.recv() => {
+                let reached = reached.expect("engine should report reached-target before finish");
+                assert_eq!(reached, initial_target);
+            }
+        }
+        assert!(
+            sync_handle.as_mut().now_or_never().is_none(),
+            "sync must wait for explicit finish signal after reaching target"
+        );
+
+        update_sender
+            .send(updated_target.clone())
+            .await
+            .expect("target update channel should be open");
+
+        select! {
+            _ = sync_handle.as_mut() => {
+                panic!("sync completed before explicit finish signal for updated target");
+            },
+            reached = reached_receiver.recv() => {
+                let reached = reached.expect("engine should report updated target before finish");
+                assert_eq!(reached, updated_target);
+            }
+        }
+        assert!(
+            sync_handle.as_mut().now_or_never().is_none(),
+            "sync must still wait for explicit finish signal after updated target is reached"
+        );
+
+        finish_sender
+            .send(())
+            .await
+            .expect("finish signal channel should be open");
+
+        let synced_db: H::Db = sync_handle
+            .await
+            .expect("sync should succeed after finish signal");
+        assert_eq!(synced_db.root(), updated_verification_root);
+        assert_eq!(synced_db.bounds().await.end, updated_upper_bound);
+        assert_eq!(synced_db.inactivity_floor_loc().await, updated_lower_bound);
+
+        synced_db.destroy().await.unwrap();
+        Arc::try_unwrap(target_db)
+            .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+            .destroy()
+            .await
+            .unwrap();
+    });
+}
+
+/// Test that a finish signal received before target completion still allows full sync.
+pub(crate) fn test_sync_handles_early_finish_signal<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let mut target_db = H::init_db(context.with_label("target")).await;
+        target_db = H::apply_ops(target_db, H::create_ops(30)).await;
+        let lower_bound = target_db.inactivity_floor_loc().await;
+        let upper_bound = target_db.bounds().await.end;
+        let target = Target {
+            root: H::sync_target_root(&target_db),
+            range: non_empty_range!(lower_bound, upper_bound),
+        };
+        let verification_root = target_db.root();
+
+        let (finish_sender, finish_receiver) = mpsc::channel(1);
+        let (reached_sender, mut reached_receiver) = mpsc::channel(1);
+        finish_sender
+            .send(())
+            .await
+            .expect("finish signal channel should be open");
+
+        let target_db = Arc::new(target_db);
+        let config = Config {
+            context: context.with_label("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            fetch_batch_size: NZU64!(3),
+            target: target.clone(),
+            resolver: target_db.clone(),
+            apply_batch_size: 1024,
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: Some(finish_receiver),
+            reached_target_tx: Some(reached_sender),
+            max_retained_roots: 1,
+        };
+
+        let synced_db: H::Db = sync::sync(config)
+            .await
+            .expect("sync should complete after early finish signal");
+        let reached = reached_receiver
+            .recv()
+            .await
+            .expect("engine should report reached-target");
+
+        assert_eq!(reached, target);
+        assert_eq!(synced_db.root(), verification_root);
+        assert_eq!(synced_db.bounds().await.end, upper_bound);
+        assert_eq!(synced_db.inactivity_floor_loc().await, lower_bound);
+
+        synced_db.destroy().await.unwrap();
+        Arc::try_unwrap(target_db)
+            .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+            .destroy()
+            .await
+            .unwrap();
+    });
+}
+
+/// Test that dropping finish sender without sending is treated as an error.
+pub(crate) fn test_sync_fails_when_finish_sender_dropped<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let mut target_db = H::init_db(context.with_label("target")).await;
+        target_db = H::apply_ops(target_db, H::create_ops(10)).await;
+        let lower_bound = target_db.inactivity_floor_loc().await;
+        let upper_bound = target_db.bounds().await.end;
+
+        let (finish_sender, finish_receiver) = mpsc::channel(1);
+        drop(finish_sender);
+
+        let target_db = Arc::new(target_db);
+        let config = Config {
+            context: context.with_label("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            fetch_batch_size: NZU64!(5),
+            target: Target {
+                root: H::sync_target_root(&target_db),
+                range: non_empty_range!(lower_bound, upper_bound),
+            },
+            resolver: target_db.clone(),
+            apply_batch_size: 1024,
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: Some(finish_receiver),
+            reached_target_tx: None,
+            max_retained_roots: 1,
+        };
+
+        let result: Result<H::Db, _> = sync::sync(config).await;
+        assert!(matches!(
+            result,
+            Err(sync::Error::Engine(sync::EngineError::FinishChannelClosed))
+        ));
+
+        Arc::try_unwrap(target_db)
+            .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+            .destroy()
+            .await
+            .unwrap();
+    });
+}
+
+/// Test that dropping reached-target receiver does not fail sync.
+pub(crate) fn test_sync_allows_dropped_reached_target_receiver<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let mut target_db = H::init_db(context.with_label("target")).await;
+        target_db = H::apply_ops(target_db, H::create_ops(10)).await;
+        let lower_bound = target_db.inactivity_floor_loc().await;
+        let upper_bound = target_db.bounds().await.end;
+        let verification_root = target_db.root();
+
+        let (reached_sender, reached_receiver) = mpsc::channel(1);
+        drop(reached_receiver);
+
+        let target_db = Arc::new(target_db);
+        let config = Config {
+            context: context.with_label("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            fetch_batch_size: NZU64!(5),
+            target: Target {
+                root: H::sync_target_root(&target_db),
+                range: non_empty_range!(lower_bound, upper_bound),
+            },
+            resolver: target_db.clone(),
+            apply_batch_size: 1024,
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: Some(reached_sender),
+            max_retained_roots: 1,
+        };
+
+        let synced_db: H::Db = sync::sync(config)
+            .await
+            .expect("sync should succeed when reached-target receiver is dropped");
+        assert_eq!(synced_db.root(), verification_root);
+        assert_eq!(synced_db.bounds().await.end, upper_bound);
+        assert_eq!(synced_db.inactivity_floor_loc().await, lower_bound);
+
+        synced_db.destroy().await.unwrap();
         Arc::try_unwrap(target_db)
             .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
             .destroy()
@@ -816,6 +1120,9 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 max_outstanding_requests: 10,
                 apply_batch_size: 1024,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
             let mut client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
             loop {
@@ -922,6 +1229,9 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -987,6 +1297,9 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
         };
         let synced_db: H::Db = sync::sync(config).await.unwrap();
 
@@ -1030,9 +1343,7 @@ where
         let target_db_op_count = bounds.end;
         let target_db_inactivity_floor_loc = db.inactivity_floor_loc().await;
 
-        let pinned_nodes = db
-            .pinned_nodes_at(Position::try_from(db.inactivity_floor_loc().await).unwrap())
-            .await;
+        let pinned_nodes = db.pinned_nodes_at(db.inactivity_floor_loc().await).await;
         let (_, journal) = db.into_log_components();
 
         let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
@@ -1106,9 +1417,7 @@ where
         let target_hash = target_db.root();
 
         // Get pinned nodes at the sync lower bound from the target db (which has all the data).
-        let pinned_nodes = target_db
-            .pinned_nodes_at(Position::try_from(sync_lower_bound).unwrap())
-            .await;
+        let pinned_nodes = target_db.pinned_nodes_at(sync_lower_bound).await;
 
         let (mmr, journal) = target_db.into_log_components();
 
@@ -1165,9 +1474,7 @@ where
         let upper_bound = source_db.bounds().await.end;
 
         // Get pinned nodes and target hash before deconstructing source_db
-        let pinned_nodes = source_db
-            .pinned_nodes_at(Position::try_from(lower_bound).unwrap())
-            .await;
+        let pinned_nodes = source_db.pinned_nodes_at(lower_bound).await;
         let target_hash = source_db.root();
         let target_op_count = source_db.bounds().await.end;
         let target_inactivity_floor = source_db.inactivity_floor_loc().await;
@@ -1269,10 +1576,17 @@ impl<R: Resolver<Digest = Digest>> Resolver for CorruptFirstPinnedNodesResolver<
         start_loc: Location,
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
+        cancel_rx: oneshot::Receiver<()>,
     ) -> Result<FetchResult<Self::Op, Self::Digest>, Self::Error> {
         let mut result = self
             .inner
-            .get_operations(op_count, start_loc, max_ops, include_pinned_nodes)
+            .get_operations(
+                op_count,
+                start_loc,
+                max_ops,
+                include_pinned_nodes,
+                cancel_rx,
+            )
             .await?;
         // Corrupt pinned nodes only on the first request that includes them.
         if result.pinned_nodes.is_some()
@@ -1332,6 +1646,9 @@ where
             apply_batch_size: 1024,
             max_outstanding_requests: 1,
             update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
         };
 
         // Sync should succeed on the second attempt after the first corrupted pinned nodes
@@ -1650,6 +1967,26 @@ macro_rules! sync_tests_for_harness {
             #[test_traced("WARN")]
             fn test_target_update_on_done_client() {
                 super::test_target_update_on_done_client::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_waits_for_explicit_finish() {
+                super::test_sync_waits_for_explicit_finish::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_handles_early_finish_signal() {
+                super::test_sync_handles_early_finish_signal::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_fails_when_finish_sender_dropped() {
+                super::test_sync_fails_when_finish_sender_dropped::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_allows_dropped_reached_target_receiver() {
+                super::test_sync_allows_dropped_reached_target_receiver::<$harness>();
             }
 
             #[rstest]
