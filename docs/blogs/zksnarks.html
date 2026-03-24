@@ -36,6 +36,9 @@
     
     <link rel="stylesheet" type="text/css" href="/style.css">
 
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.0/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body);"></script>
     </head>
 
 <body>
@@ -155,26 +158,31 @@ Vamsi Policharla</a></div>
         href="https://eprint.iacr.org/2024/1245">DMS24</a>), which was
         later improved in Glock (<a
         href="https://eprint.iacr.org/2025/1485">Eagen25</a>). We recall
-        the verification algorithm: 1. Parse the verification key <span
+        the verification algorithm:</p>
+        <ol type="1">
+        <li><p>Parse the verification key <span
         class="math inline">\(\textsf{ivk} = ((A,B), [\alpha]_1,
         [\beta]_1, [\delta_1]_2, [\delta_2]_2, [\tau]_2, [\delta_1
         \tau]_2)\)</span>, where <span class="math inline">\(A\)</span>
         and <span class="math inline">\(B\)</span> form the square R1CS
-        relation. 2. Parse the proof <span class="math inline">\(\pi =
-        (T, U, v_a, v_b) \in \mathbb{G}_1^2 \times
-        \mathbb{F}^2\)</span>. 3. Compute the challenge <span
-        class="math inline">\(r := H(\textsf{transcript})\)</span>. 4.
-        Compute <span class="math inline">\(x_A := A \cdot (x \|
+        relation.</p></li>
+        <li><p>Parse the proof <span class="math inline">\(\pi = (T, U,
+        v_a, v_b) \in \mathbb{G}_1^2 \times
+        \mathbb{F}^2\)</span>.</p></li>
+        <li><p>Compute the challenge <span class="math inline">\(r :=
+        H(\textsf{transcript})\)</span>.</p></li>
+        <li><p>Compute <span class="math inline">\(x_A := A \cdot (x \|
         0)\)</span> and <span class="math inline">\(x_B := B \cdot (x \|
         0)\)</span>, and interpolate over domain <span
         class="math inline">\(K\)</span> to obtain polynomials <span
         class="math inline">\(\hat{x}_A\)</span> and <span
-        class="math inline">\(\hat{x}_B\)</span>. 5. Compute the
-        quotient evaluation, where <span
+        class="math inline">\(\hat{x}_B\)</span>.</p></li>
+        <li><p>Compute the quotient evaluation, where <span
         class="math inline">\(z_K\)</span> is the vanishing polynomial
         on the domain <span class="math inline">\(K\)</span>:</p>
-        <pre><code>$$v_q := \frac{(v_a + \hat{x}_A(r))^2 - (v_b + \hat{x}_B(r))}{z_K(r)}$$</code></pre>
-        <ol start="6" type="1">
+        <p><span class="math display">\[v_q := \frac{(v_a +
+        \hat{x}_A(r))^2 - (v_b +
+        \hat{x}_B(r))}{z_K(r)}\]</span></p></li>
         <li><p>Check the pairing equation:</p>
         <p><span class="math display">\[e(T,\; [\delta_2]_2)
         \stackrel{?}{=} e(U,\; [\delta_1 \tau]_2 - r \cdot [\delta_1]_2)

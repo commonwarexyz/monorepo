@@ -8,6 +8,7 @@ author: "Guru Vamsi Policharla"
 author_twitter: "https://x.com/gvamsip"
 url: "https://commonware.xyz/blogs/zksnarks"
 image: "https://commonware.xyz/imgs/zksnarks.png"
+katex: true
 ---
 
 Blockchains are especially well-suited for two use cases: payments and trading. We’ve made real progress in scaling these systems with many chains supporting 10K–100K TPS. But what happens when we introduce privacy?
@@ -36,6 +37,7 @@ Giving up sub-linear verification might seem like we're going in the opposite di
 While it's true that we can't verify individual proofs any faster, verifying a *batch* of proofs can be much faster. Similar ideas can be traced back to the early days of pairing-based signatures and Groth-Sahai proofs (see [CHP07](https://eprint.iacr.org/2007/172), [FGHP09](https://eprint.iacr.org/2008/015.pdf), and [BFI+10](https://eprint.iacr.org/2010/040.pdf)). In fact, the ZCash team also [discussed](https://github.com/zcash/zcash/issues/2465#issuecomment-310745119) batch verification of Groth16 proofs in the context of private payments back in 2017.
 
 Our starting point is the Pari proof system ([DMS24](https://eprint.iacr.org/2024/1245)), which was later improved in Glock ([Eagen25](https://eprint.iacr.org/2025/1485)). We recall the verification algorithm:
+
 1. Parse the verification key $\textsf{ivk} = ((A,B), [\alpha]_1, [\beta]_1, [\delta_1]_2, [\delta_2]_2, [\tau]_2, [\delta_1 \tau]_2)$, where $A$ and $B$ form the square R1CS relation.
 2. Parse the proof $\pi = (T, U, v_a, v_b) \in \mathbb{G}_1^2 \times \mathbb{F}^2$.
 3. Compute the challenge $r := H(\textsf{transcript})$.
