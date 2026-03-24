@@ -72,11 +72,8 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        authenticated,
-        contiguous::{
-            fixed::{Config as FConfig, Journal as FJournal},
-            variable::{Config as VConfig, Journal as VJournal},
-        },
+        authenticated::Inner,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
     mmr::{journaled::Config as MmrConfig, Location},
     qmdb::{
@@ -86,7 +83,7 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{Codec, CodecFixedShared, Read};
+use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use tracing::warn;
@@ -102,91 +99,48 @@ pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;
 
-/// Configuration for an `Any` authenticated db with fixed-size values.
+/// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct FixedConfig<T: Translator> {
+pub struct Config<T: Translator, J> {
     /// Configuration for the MMR backing the authenticated journal.
-    pub mmr: MmrConfig,
+    pub mmr_config: MmrConfig,
 
-    /// Configuration for the fixed-size operations log journal.
-    pub log: FConfig,
+    /// Configuration for the operations log journal.
+    pub journal_config: J,
 
     /// The translator used by the compressed index.
     pub translator: T,
 }
+
+/// Configuration for an `Any` authenticated db with fixed-size values.
+pub type FixedConfig<T> = Config<T, FConfig>;
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
-#[derive(Clone)]
-pub struct VariableConfig<T: Translator, C> {
-    /// Configuration for the MMR backing the authenticated journal.
-    pub mmr: MmrConfig,
+pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
 
-    /// Configuration for the variable-size operations log journal.
-    pub log: VConfig<C>,
-
-    /// The translator used by the compressed index.
-    pub translator: T,
-}
-
-/// Shared initialization logic for fixed-sized value [db::Db].
-pub(super) async fn init_fixed<E, U, H, T, I, F, NewIndex>(
+/// Initialize an `Any` authenticated db from the given config.
+pub(super) async fn init<E, U, H, T, I, J, F, NewIndex>(
     context: E,
-    cfg: FixedConfig<T>,
+    cfg: Config<T, J::Config>,
     known_inactivity_floor: Option<Location>,
     callback: F,
     new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<U>>, I, H, U>, Error>
+) -> Result<db::Db<E, J, I, H, U>, Error>
 where
     E: Storage + Clock + Metrics,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
+    J: Inner<E, Item = Operation<U>>,
+    Operation<U>: Committable + CodecShared,
     F: FnMut(bool, Option<Location>),
     NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: CodecFixedShared + Committable,
 {
-    let mut log = authenticated::Journal::<_, FJournal<_, _>, _>::new(
+    let mut log = J::init(
         context.with_label("log"),
-        cfg.mmr,
-        cfg.log,
-        Operation::is_commit,
-    )
-    .await?;
-
-    if log.size().await == 0 {
-        warn!("Authenticated log is empty, initializing new db");
-        let commit_floor = Operation::CommitFloor(None, Location::new(0));
-        log.append(&commit_floor).await?;
-        log.sync().await?;
-    }
-
-    let index = new_index(context.with_label("index"), cfg.translator);
-    db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
-}
-
-/// Shared initialization logic for variable-sized value [db::Db].
-pub(super) async fn init_variable<E, U, H, T, I, F, NewIndex>(
-    context: E,
-    cfg: VariableConfig<T, <Operation<U> as Read>::Cfg>,
-    known_inactivity_floor: Option<Location>,
-    callback: F,
-    new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<U>>, I, H, U>, Error>
-where
-    E: Storage + Clock + Metrics,
-    U: Update + Send + Sync,
-    H: Hasher,
-    T: Translator,
-    I: UnorderedIndex<Value = Location>,
-    F: FnMut(bool, Option<Location>),
-    NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: Codec + Committable,
-{
-    let mut log = authenticated::Journal::<_, VJournal<_, _>, _>::new(
-        context.with_label("log"),
-        cfg.mmr,
-        cfg.log,
+        cfg.mmr_config,
+        cfg.journal_config,
         Operation::is_commit,
     )
     .await?;
@@ -224,7 +178,7 @@ pub(crate) mod test {
     ) -> FixedConfig<T> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            mmr: MmrConfig {
+            mmr_config: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -232,7 +186,7 @@ pub(crate) mod test {
                 thread_pool: None,
                 page_cache: page_cache.clone(),
             },
-            log: FConfig {
+            journal_config: FConfig {
                 partition: format!("log-journal-{suffix}"),
                 items_per_blob: NZU64!(7),
                 page_cache,
@@ -248,7 +202,7 @@ pub(crate) mod test {
     ) -> VariableConfig<T, ((), ())> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            mmr: MmrConfig {
+            mmr_config: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -256,7 +210,7 @@ pub(crate) mod test {
                 thread_pool: None,
                 page_cache: page_cache.clone(),
             },
-            log: VConfig {
+            journal_config: VConfig {
                 partition: format!("log-journal-{suffix}"),
                 items_per_section: NZU64!(7),
                 compression: None,

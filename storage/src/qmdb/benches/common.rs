@@ -173,8 +173,8 @@ fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfi
 pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyFixedConfig {
-        mmr: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
-        log: fix_log_cfg(PARTITION_FIX, page_cache),
+        mmr_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
         translator: EightCap,
     }
 }
@@ -182,8 +182,8 @@ pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<E
 pub fn cur_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> CurrentFixedConfig<EightCap> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentFixedConfig {
-        mmr: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
-        log: fix_log_cfg(PARTITION_FIX, page_cache),
+        mmr_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
         grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_FIX}"),
         translator: EightCap,
     }
@@ -194,8 +194,8 @@ pub fn any_var_digest_cfg(
 ) -> AnyVariableConfig<EightCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        mmr: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
-        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
+        mmr_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         translator: EightCap,
     }
 }
@@ -205,8 +205,8 @@ pub fn cur_var_digest_cfg(
 ) -> CurrentVariableConfig<EightCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        mmr: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
-        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
+        mmr_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
         translator: EightCap,
     }
@@ -217,8 +217,8 @@ pub fn any_var_vec_cfg(
 ) -> AnyVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        mmr: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
-        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
+        mmr_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         translator: EightCap,
     }
 }
@@ -228,8 +228,8 @@ pub fn cur_var_vec_cfg(
 ) -> CurrentVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        mmr: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
-        log: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
+        mmr_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
         translator: EightCap,
     }

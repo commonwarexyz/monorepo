@@ -9,7 +9,7 @@ use crate::{
     journal::contiguous::fixed::Journal,
     mmr::Location,
     qmdb::{
-        any::{init_fixed, ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
+        any::{ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
         Error,
     },
     translator::Translator,
@@ -47,7 +47,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
         known_inactivity_floor: Option<Location>,
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
-        init_fixed(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+        crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
             Index::new(ctx, t)
         })
         .await
@@ -66,7 +66,7 @@ pub mod partitioned {
         journal::contiguous::fixed::Journal,
         mmr::Location,
         qmdb::{
-            any::{init_fixed, FixedConfig as Config, FixedValue},
+            any::{FixedConfig as Config, FixedValue},
             Error,
         },
         translator::Translator,
@@ -119,7 +119,7 @@ pub mod partitioned {
             known_inactivity_floor: Option<Location>,
             callback: impl FnMut(bool, Option<Location>),
         ) -> Result<Self, Error> {
-            init_fixed(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+            crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
                 Index::new(ctx, t)
             })
             .await

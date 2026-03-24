@@ -71,19 +71,11 @@ use std::ops::Range;
 #[cfg(test)]
 pub(crate) mod tests;
 
-impl<T: Translator> Config for FixedConfig<T> {
-    type JournalConfig = fixed::Config;
+impl<T: Translator, J: Clone> Config for super::Config<T, J> {
+    type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
-        self.log.clone()
-    }
-}
-
-impl<T: Translator, C: Clone> Config for VariableConfig<T, C> {
-    type JournalConfig = variable::Config<C>;
-
-    fn journal_config(&self) -> Self::JournalConfig {
-        self.log.clone()
+        self.journal_config.clone()
     }
 }
 
@@ -257,9 +249,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = config.mmr.clone();
+        let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.mmr.thread_pool.clone();
+        let thread_pool = config.mmr_config.thread_pool.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, UnorderedFixedUpdate<K, V>, _, H, _, N>(
             context,
@@ -306,9 +298,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = config.mmr.clone();
+        let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.mmr.thread_pool.clone();
+        let thread_pool = config.mmr_config.thread_pool.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, UnorderedVariableUpdate<K, V>, _, H, _, N>(
             context,
@@ -354,9 +346,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = config.mmr.clone();
+        let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.mmr.thread_pool.clone();
+        let thread_pool = config.mmr_config.thread_pool.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, OrderedFixedUpdate<K, V>, _, H, _, N>(
             context,
@@ -403,9 +395,9 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = config.mmr.clone();
+        let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.mmr.thread_pool.clone();
+        let thread_pool = config.mmr_config.thread_pool.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, OrderedVariableUpdate<K, V>, _, H, _, N>(
             context,

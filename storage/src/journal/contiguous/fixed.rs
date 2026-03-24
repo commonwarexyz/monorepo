@@ -868,6 +868,31 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Persistable for Journal<
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
+impl<E: Clock + Storage + Metrics, A: CodecFixedShared> crate::journal::authenticated::Inner<E>
+    for Journal<E, A>
+{
+    type Config = Config;
+
+    async fn init<H: commonware_cryptography::Hasher>(
+        context: E,
+        mmr_cfg: crate::mmr::journaled::Config,
+        journal_cfg: Self::Config,
+        rewind_predicate: fn(&A) -> bool,
+    ) -> Result<
+        crate::journal::authenticated::Journal<E, Self, H>,
+        crate::journal::authenticated::Error,
+    > {
+        crate::journal::authenticated::Journal::<E, Self, H>::new(
+            context,
+            mmr_cfg,
+            journal_cfg,
+            rewind_predicate,
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
