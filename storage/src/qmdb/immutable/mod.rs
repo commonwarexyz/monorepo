@@ -65,7 +65,7 @@ use crate::{
     mmr::{
         iterator::nodes_to_pin,
         journaled::{Config as MmrConfig, Mmr},
-        Location, Position, Proof,
+        Location, Proof,
     },
     qmdb::{any::VariableValue, build_snapshot_from_log, Error},
     translator::Translator,
@@ -231,8 +231,10 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
 
     /// Return the pinned MMR nodes at the given location.
     pub async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<H::Digest>, Error> {
-        let pos = Position::try_from(loc)?;
-        let futs: Vec<_> = nodes_to_pin(pos)
+        if !loc.is_valid() {
+            return Err(crate::mmr::Error::LocationOverflow(loc).into());
+        }
+        let futs: Vec<_> = nodes_to_pin(loc)
             .map(|p| async move {
                 self.journal
                     .mmr

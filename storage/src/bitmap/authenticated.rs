@@ -326,17 +326,20 @@ impl<E: Context, D: Digest, const N: usize> MerkleizedBitMap<E, D, N> {
                 state: Merkleized { root: cached_root },
             });
         }
-        let mmr_size = Position::try_from(Location::new(pruned_chunks as u64))?;
+        let pruned_loc = Location::new(pruned_chunks as u64);
+        if !pruned_loc.is_valid() {
+            return Err(Error::DataCorrupted("pruned chunks exceeds MAX_LEAVES"));
+        }
 
         let mut pinned_nodes = Vec::new();
-        for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
+        for (index, pos) in nodes_to_pin(pruned_loc).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
-                error!(?mmr_size, ?pos, "missing pinned node");
+                error!(?pruned_loc, ?pos, "missing pinned node");
                 return Err(Error::MissingNode(pos));
             };
             let digest = D::decode(bytes.as_ref());
             let Ok(digest) = digest else {
-                error!(?mmr_size, ?pos, "could not convert node bytes to digest");
+                error!(?pruned_loc, ?pos, "could not convert node bytes to digest");
                 return Err(Error::MissingNode(pos));
             };
             pinned_nodes.push(digest);
@@ -345,7 +348,7 @@ impl<E: Context, D: Digest, const N: usize> MerkleizedBitMap<E, D, N> {
         let mmr = Mmr::init(
             Config {
                 nodes: Vec::new(),
-                pruned_to: Location::new(pruned_chunks as u64),
+                pruning_boundary: Location::new(pruned_chunks as u64),
                 pinned_nodes,
             },
             hasher,
@@ -381,9 +384,12 @@ impl<E: Context, D: Digest, const N: usize> MerkleizedBitMap<E, D, N> {
             .put(key, self.bitmap.pruned_chunks().to_be_bytes().to_vec());
 
         // Write the pinned nodes.
-        // This will never panic because pruned_chunks is always less than MAX_LEAVES.
-        let mmr_size = Position::try_from(Location::new(self.bitmap.pruned_chunks() as u64))?;
-        for (i, digest) in nodes_to_pin(mmr_size).enumerate() {
+        let pruned_loc = Location::new(self.bitmap.pruned_chunks() as u64);
+        assert!(
+            pruned_loc.is_valid(),
+            "expected valid location from pruned_chunks"
+        );
+        for (i, digest) in nodes_to_pin(pruned_loc).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
             self.metadata.put(key, digest.to_vec());

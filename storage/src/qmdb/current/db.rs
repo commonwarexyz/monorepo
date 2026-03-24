@@ -618,11 +618,11 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     // Build a base Mmr: either from pruned components or empty.
     let grafted_hasher = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
     let mut grafted_mmr = if pruned_chunks > 0 {
-        let grafted_pruned_to = Location::new(pruned_chunks as u64);
+        let grafted_pruning_boundary = Location::new(pruned_chunks as u64);
         mmr::mem::Mmr::from_components(
             &grafted_hasher,
             Vec::new(),
-            grafted_pruned_to,
+            grafted_pruning_boundary,
             pinned_nodes.to_vec(),
         )?
     } else {
@@ -681,9 +681,12 @@ pub(super) async fn init_metadata<E: Context, D: Digest>(
     // to determine how many peaks to read. (Multiplying pruned_chunks by chunk_size is a
     // left-shift, preserving popcount, so the peak count is the same in grafted or ops space.)
     let pinned_nodes = if pruned_chunks > 0 {
-        let mmr_size = Position::try_from(Location::new(pruned_chunks as u64))?;
+        let pruned_loc = Location::new(pruned_chunks as u64);
+        if !pruned_loc.is_valid() {
+            return Err(Error::DataCorrupted("pruned chunks exceeds MAX_LEAVES"));
+        }
         let mut pinned = Vec::new();
-        for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
+        for (index, pos) in nodes_to_pin(pruned_loc).enumerate() {
             let metadata_key = U64::new(NODE_PREFIX, index as u64);
             let Some(bytes) = metadata.get(&metadata_key) else {
                 return Err(mmr::Error::MissingNode(pos).into());

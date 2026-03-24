@@ -55,6 +55,13 @@
 //! appropriate mitigations (such as ensuring no attacker-controlled data is compressed
 //! alongside sensitive information).
 //!
+//! ## Batching
+//!
+//! Applications seeking higher performance should prefer batching messages
+//! above `p2p`. Larger application-level batches amortize per-message
+//! encryption overhead and, if the application also compresses its payloads,
+//! can improve compression ratio.
+//!
 //! ## Rate Limiting
 //!
 //! There are five primary rate limits:

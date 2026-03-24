@@ -18,10 +18,17 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::Metrics as _;
 use commonware_utils::{
-    channel::{fallible::OneshotExt as _, mpsc, oneshot},
+    channel::{
+        fallible::{AsyncFallibleExt, OneshotExt as _},
+        mpsc, oneshot,
+    },
     NZU64,
 };
-use futures::{future::Either, StreamExt};
+use futures::{
+    future::{pending, Either},
+    StreamExt,
+};
+use mpsc::error::TryRecvError;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     fmt::Debug,
@@ -49,6 +56,10 @@ enum Event<Op, D: Digest, E> {
     BatchReceived(IndexedFetchResult<Op, D, E>),
     /// The target update channel was closed
     UpdateChannelClosed,
+    /// A finish signal was received
+    FinishRequested,
+    /// The finish signal channel was closed
+    FinishChannelClosed,
 }
 
 /// Result from a fetch operation with its request ID and starting location.
@@ -62,23 +73,41 @@ pub(super) struct IndexedFetchResult<Op, D: Digest, E> {
     pub result: Result<FetchResult<Op, D>, E>,
 }
 
-/// Wait for the next synchronization event from either target updates or fetch results.
-/// Returns `None` if the sync is stalled (there are no outstanding requests).
+/// Wait for the next synchronization event.
+/// Returns `None` when there are no outstanding requests and no channels to wait on.
 async fn wait_for_event<Op, D: Digest, E>(
-    update_receiver: &mut Option<mpsc::Receiver<Target<D>>>,
+    update_rx: &mut Option<mpsc::Receiver<Target<D>>>,
+    finish_rx: &mut Option<mpsc::Receiver<()>>,
     outstanding_requests: &mut Requests<Op, D, E>,
 ) -> Option<Event<Op, D, E>> {
-    let target_update_fut = update_receiver.as_mut().map_or_else(
-        || Either::Right(futures::future::pending()),
+    if outstanding_requests.len() == 0 && update_rx.is_none() && finish_rx.is_none() {
+        return None;
+    }
+
+    let target_update_fut = update_rx.as_mut().map_or_else(
+        || Either::Right(pending()),
         |update_rx| Either::Left(update_rx.recv()),
     );
+    let finish_fut = finish_rx.as_mut().map_or_else(
+        || Either::Right(pending()),
+        |finish_rx| Either::Left(finish_rx.recv()),
+    );
+    let batch_result_fut = if outstanding_requests.len() == 0 {
+        Either::Right(pending())
+    } else {
+        Either::Left(outstanding_requests.futures_mut().next())
+    };
 
     select! {
+        finish = finish_fut => finish.map_or_else(
+            || Some(Event::FinishChannelClosed),
+            |_| Some(Event::FinishRequested)
+        ),
         target = target_update_fut => target.map_or_else(
             || Some(Event::UpdateChannelClosed),
             |target| Some(Event::TargetUpdate(target))
         ),
-        result = outstanding_requests.futures_mut().next() => {
+        result = batch_result_fut => {
             result.map(|fetch_result| Event::BatchReceived(fetch_result))
         },
     }
@@ -107,6 +136,17 @@ where
     pub db_config: DB::Config,
     /// Channel for receiving sync target updates
     pub update_rx: Option<mpsc::Receiver<Target<DB::Digest>>>,
+    /// Channel that requests sync completion once the current target is reached.
+    ///
+    /// When `None`, sync completes as soon as the target is reached.
+    pub finish_rx: Option<mpsc::Receiver<()>>,
+    /// Channel used to notify an observer once the current target is reached.
+    /// The engine sends at most one notification for each target.
+    ///
+    /// When `reached_target_tx` is `Some(...)`, this receiver must be actively
+    /// drained by the observer. The engine awaits send capacity on this channel before
+    /// proceeding, so backpressure can pause progress at target.
+    pub reached_target_tx: Option<mpsc::Sender<Target<DB::Digest>>>,
     /// Maximum number of previous roots to retain for verifying in-flight
     /// requests after target updates. Set to 0 to disable (all retained
     /// requests will be re-fetched).
@@ -174,7 +214,26 @@ where
     config: DB::Config,
 
     /// Optional receiver for target updates during sync
-    update_receiver: Option<mpsc::Receiver<Target<DB::Digest>>>,
+    update_rx: Option<mpsc::Receiver<Target<DB::Digest>>>,
+
+    /// Channel that requests sync completion once the current target is reached.
+    ///
+    /// When `None`, sync completes as soon as the target is reached.
+    finish_rx: Option<mpsc::Receiver<()>>,
+
+    /// Channel used to notify an observer once the current target is reached.
+    /// The engine sends at most one notification for each target.
+    ///
+    /// When `reached_target_tx` is `Some(...)`, this receiver must be actively
+    /// drained by the observer. The engine awaits send capacity on this channel before
+    /// proceeding, so backpressure can pause progress at target.
+    reached_target_tx: Option<mpsc::Sender<Target<DB::Digest>>>,
+
+    /// Whether explicit finish has been requested.
+    finish_requested: bool,
+
+    /// Tracks whether the current target has already been reported as reached.
+    reached_current_target_reported: bool,
 }
 
 #[cfg(test)]
@@ -228,7 +287,11 @@ where
             hasher: StandardHasher::<DB::Hasher>::new(),
             context: config.context,
             config: config.db_config,
-            update_receiver: config.update_rx,
+            update_rx: config.update_rx,
+            finish_rx: config.finish_rx,
+            reached_target_tx: config.reached_target_tx,
+            finish_requested: false,
+            reached_current_target_reported: false,
         };
         engine.schedule_requests().await?;
         Ok(engine)
@@ -357,7 +420,57 @@ where
         }
 
         self.target = new_target;
+        self.reached_current_target_reported = false;
         Ok(self)
+    }
+
+    /// Drain a pending explicit-finish signal without blocking.
+    ///
+    /// If a finish signal is present, the engine transitions into "finish requested"
+    /// mode via [`Self::accept_finish`]. If the finish channel is disconnected before
+    /// a finish request is observed, this returns [`EngineError::FinishChannelClosed`].
+    fn drain_finish_requests(&mut self) -> Result<(), Error<DB, R>> {
+        let Some(finish_rx) = self.finish_rx.as_mut() else {
+            return Ok(());
+        };
+        match finish_rx.try_recv() {
+            Ok(()) => {
+                self.accept_finish();
+                Ok(())
+            }
+            Err(TryRecvError::Empty) => Ok(()),
+            Err(TryRecvError::Disconnected) => {
+                Err(SyncError::Engine(EngineError::FinishChannelClosed))
+            }
+        }
+    }
+
+    /// Mark that explicit finish has been requested and stop listening for more signals.
+    ///
+    /// This is a one-way transition for the current engine instance. Once set, the
+    /// engine may complete as soon as it is at a target (or the next time it reaches one).
+    fn accept_finish(&mut self) {
+        self.finish_requested = true;
+        self.finish_rx = None;
+    }
+
+    /// Notify an observer that the current target has been reached. The notification is sent
+    /// at most once per target, guarded by `reached_current_target_reported`.
+    ///
+    /// This send awaits backpressure. When `reached_target_tx` is `Some(...)`,
+    /// the receiver is expected to consume notifications promptly so the engine
+    /// can keep making progress. If the receiver side is closed, we drop the
+    /// sender and continue syncing without further reached-target notifications.
+    async fn report_reached_target(&mut self) {
+        if self.reached_current_target_reported {
+            return;
+        }
+        if let Some(sender) = self.reached_target_tx.as_ref() {
+            if !sender.send_lossy(self.target.clone()).await {
+                self.reached_target_tx = None;
+            }
+        }
+        self.reached_current_target_reported = true;
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
@@ -434,7 +547,7 @@ where
     }
 
     /// Check if sync is complete based on the current journal size and target
-    pub async fn is_complete(&self) -> Result<bool, Error<DB, R>> {
+    pub async fn is_at_target(&self) -> Result<bool, Error<DB, R>> {
         let journal_size = self.journal.size().await;
         let target_journal_size = self.target.range.end();
 
@@ -542,6 +655,37 @@ where
         Ok(())
     }
 
+    /// Handle a sync event and return the next engine state.
+    async fn handle_event(
+        mut self,
+        event: Event<DB::Op, DB::Digest, R::Error>,
+    ) -> Result<NextStep<Self, DB>, Error<DB, R>> {
+        match event {
+            Event::TargetUpdate(new_target) => {
+                validate_update(&self.target, &new_target)?;
+
+                let mut updated_self = self.reset_for_target_update(new_target).await?;
+                updated_self.schedule_requests().await?;
+                Ok(NextStep::Continue(updated_self))
+            }
+            Event::UpdateChannelClosed => {
+                self.update_rx = None;
+                Ok(NextStep::Continue(self))
+            }
+            Event::FinishRequested => {
+                self.accept_finish();
+                Ok(NextStep::Continue(self))
+            }
+            Event::FinishChannelClosed => Err(SyncError::Engine(EngineError::FinishChannelClosed)),
+            Event::BatchReceived(fetch_result) => {
+                self.handle_fetch_result(fetch_result)?;
+                self.schedule_requests().await?;
+                self.apply_operations().await?;
+                Ok(NextStep::Continue(self))
+            }
+        }
+    }
+
     /// Execute one step of the synchronization process.
     ///
     /// This is the main coordination method that:
@@ -553,8 +697,23 @@ where
     /// Returns `StepResult::Complete(database)` when sync is finished, or
     /// `StepResult::Continue(self)` when more work remains.
     pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
+        self.drain_finish_requests()?;
+
         // Check if sync is complete
-        if self.is_complete().await? {
+        if self.is_at_target().await? {
+            self.report_reached_target().await;
+
+            if self.finish_rx.is_some() && !self.finish_requested {
+                let event = wait_for_event(
+                    &mut self.update_rx,
+                    &mut self.finish_rx,
+                    &mut self.outstanding_requests,
+                )
+                .await
+                .ok_or(SyncError::Engine(EngineError::SyncStalled))?;
+                return self.handle_event(event).await;
+            }
+
             self.journal.sync().await?;
 
             // Build the database from the completed sync
@@ -582,38 +741,14 @@ where
         }
 
         // Wait for the next synchronization event
-        let event = wait_for_event(&mut self.update_receiver, &mut self.outstanding_requests)
-            .await
-            .ok_or(SyncError::Engine(EngineError::SyncStalled))?;
-
-        match event {
-            Event::TargetUpdate(new_target) => {
-                // Validate and handle the target update
-                validate_update(&self.target, &new_target)?;
-
-                let mut updated_self = self.reset_for_target_update(new_target).await?;
-
-                // Schedule new requests for the updated target
-                updated_self.schedule_requests().await?;
-
-                return Ok(NextStep::Continue(updated_self));
-            }
-            Event::UpdateChannelClosed => {
-                self.update_receiver = None;
-            }
-            Event::BatchReceived(fetch_result) => {
-                // Process the fetch result
-                self.handle_fetch_result(fetch_result)?;
-
-                // Request operations in the sync range
-                self.schedule_requests().await?;
-
-                // Apply operations that are now contiguous with the current journal
-                self.apply_operations().await?;
-            }
-        }
-
-        Ok(NextStep::Continue(self))
+        let event = wait_for_event(
+            &mut self.update_rx,
+            &mut self.finish_rx,
+            &mut self.outstanding_requests,
+        )
+        .await
+        .ok_or(SyncError::Engine(EngineError::SyncStalled))?;
+        self.handle_event(event).await
     }
 
     /// Run sync to completion, returning the final database when done.
