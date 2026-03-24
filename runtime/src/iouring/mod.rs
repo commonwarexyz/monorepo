@@ -79,7 +79,7 @@
 //!
 //! When the operation channel closes, the event loop enters a drain phase:
 //! 1. Stops accepting new operations
-//! 2. Waits for all in-flight operations to complete
+//! 2. Waits for all in-flight operations to complete or be cancelled
 //! 3. If `shutdown_timeout` is configured, abandons remaining operations after the timeout
 //! 4. Cleans up and exits. Dropping the last submitter signals `eventfd` so shutdown is observed
 //!    promptly even if the loop is blocked.
@@ -662,26 +662,31 @@ impl IoUringLoop {
         // Route op/cancel completions through waiter state. Only terminal
         // transitions return a completed waiter to deliver to the caller.
         if let Some(completed) = self.waiters.on_completion(user_data, cqe.result()) {
-            let CompletedWaiter {
-                sender,
-                buffer,
-                mut result,
-                cancelled,
-                target_tick,
-            } = completed;
-
-            // Remove active deadline tracking when this waiter completes.
-            if let Some(target_tick) = target_tick {
-                self.timeout_wheel.remove(target_tick);
-            }
-
-            // Surface timeout as ETIMEDOUT when cancellation succeeded.
-            if cancelled && result == -libc::ECANCELED {
-                result = -libc::ETIMEDOUT;
-            }
-
-            let _ = sender.send((result, buffer));
+            self.deliver_completion(completed);
         }
+    }
+
+    /// Deliver a completed waiter to its caller and clean up timeout state.
+    fn deliver_completion(&mut self, completed: CompletedWaiter) {
+        let CompletedWaiter {
+            sender,
+            buffer,
+            mut result,
+            cancelled,
+            target_tick,
+        } = completed;
+
+        // Remove active deadline tracking when this waiter completes.
+        if let Some(target_tick) = target_tick {
+            self.timeout_wheel.remove(target_tick);
+        }
+
+        // Surface timeout as ETIMEDOUT when cancellation succeeded.
+        if cancelled && result == -libc::ECANCELED {
+            result = -libc::ETIMEDOUT;
+        }
+
+        let _ = sender.send((result, buffer));
     }
 
     /// Advance the timeout wheel and enqueue cancellations for newly expired waiters.
@@ -719,31 +724,51 @@ impl IoUringLoop {
     /// Keeps draining CQEs until all waiters complete or shutdown budget is
     /// exhausted.
     ///
-    /// If `shutdown_timeout` is `None`, this waits until all waiters complete.
+    /// If `shutdown_timeout` is `None`, this waits until all waiters complete or are cancelled.
     /// If `shutdown_timeout` is `Some`, this waits until completion or timeout,
     /// then abandons any remaining waiters.
-    ///
-    /// This path does not advance timeout deadlines or stage new cancellation
-    /// SQEs after shutdown starts.
     fn drain(&mut self, ring: &mut IoUring) {
         let mut remaining = self.cfg.shutdown_timeout;
 
         // Keep driving completions until all in-flight waiters finish or the
         // shutdown budget is exhausted.
-        while !self.waiters.is_empty() {
+        loop {
+            // Always drain CQEs first, even after a timed wait: completions can
+            // race with timeout expiry and still be pending in the queue.
+            for cqe in ring.completion() {
+                self.handle_cqe(cqe);
+            }
+
+            // CQE draining can finish the last waiter, so stop before another
+            // submit-and-wait cycle.
+            if self.waiters.is_empty() {
+                break;
+            }
+
+            // Once shutdown budget is exhausted, abandon any remaining waiters
+            // immediately instead of advancing more deadlines or staging new cancels.
             if remaining.is_some_and(|t| t.is_zero()) {
                 break;
             }
 
-            let start = Instant::now();
-            self.submit_and_wait(ring, 1, remaining)
-                .expect("unable to submit to ring");
-
-            // Always drain CQEs, even after timeout: completions can race with
-            // timeout expiry and still be pending in the queue
-            for cqe in ring.completion() {
-                self.handle_cqe(cqe);
+            // Keep userspace deadline processing alive during shutdown so
+            // in-flight timed operations preserve their ETIMEDOUT semantics.
+            self.advance_timeouts();
+            {
+                let mut submission_queue = ring.submission();
+                self.stage_cancellations(&mut submission_queue);
             }
+            let timeout = match (remaining, self.timeout_wheel.next_deadline()) {
+                (Some(remaining), Some(deadline)) => Some(remaining.min(deadline)),
+                (Some(remaining), None) => Some(remaining),
+                (None, Some(deadline)) => Some(deadline),
+                (None, None) => None,
+            };
+
+            // Wait for at least one completion or timeout.
+            let start = Instant::now();
+            self.submit_and_wait(ring, 1, timeout)
+                .expect("unable to submit to ring");
 
             // Charge elapsed wall time against the shutdown budget.
             if let Some(remaining) = remaining.as_mut() {
@@ -1093,20 +1118,7 @@ mod tests {
             .waiters
             .on_completion(old_slot.user_data(), 0)
             .expect("missing waiter completion");
-        let CompletedWaiter {
-            sender,
-            buffer,
-            mut result,
-            cancelled,
-            target_tick,
-        } = completed;
-        if let Some(target_tick) = target_tick {
-            iouring.timeout_wheel.remove(target_tick);
-        }
-        if cancelled && result == -libc::ECANCELED {
-            result = -libc::ETIMEDOUT;
-        }
-        let _ = sender.send((result, buffer));
+        iouring.deliver_completion(completed);
 
         // Reuse the same slot for a new waiter with a later timeout.
         let (tx, _rx) = oneshot::channel();
@@ -1147,20 +1159,7 @@ mod tests {
             .waiters
             .on_completion(slot_index.user_data(), 123)
             .expect("missing completion");
-        let CompletedWaiter {
-            sender,
-            buffer,
-            mut result,
-            cancelled,
-            target_tick,
-        } = completed;
-        if let Some(target_tick) = target_tick {
-            iouring.timeout_wheel.remove(target_tick);
-        }
-        if cancelled && result == -libc::ECANCELED {
-            result = -libc::ETIMEDOUT;
-        }
-        let _ = sender.send((result, buffer));
+        iouring.deliver_completion(completed);
         let completed = iouring
             .waiters
             .on_completion(slot_index.cancel_user_data(), -libc::ECANCELED);
@@ -1322,6 +1321,43 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shutdown_no_timeout_continues_deadline_processing() {
+        let cfg = Config {
+            max_op_timeout: Duration::from_millis(250),
+            timeout_wheel_tick: Duration::from_millis(5),
+            shutdown_timeout: None,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        let timeout = Timespec::new().sec(5_000);
+        let timeout = opcode::Timeout::new(&timeout).build();
+        let (tx, rx) = oneshot::channel();
+        submitter
+            .send(Op {
+                work: timeout,
+                sender: tx,
+                buffer: None,
+                fd: None,
+                iovecs: None,
+                deadline: Some(Instant::now() + Duration::from_millis(50)),
+            })
+            .await
+            .unwrap();
+
+        drop(submitter);
+
+        let (result, _) = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("deadline completion timed out")
+            .expect("missing deadline completion");
+        assert_eq!(result, -libc::ETIMEDOUT);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_shutdown_timeout() {
         // Create an io_uring instance with shutdown timeout enabled
         let cfg = Config {
@@ -1357,6 +1393,82 @@ mod tests {
         // The event loop should shut down before the `timeout` fires,
         // dropping `tx` and causing `rx` to return RecvError.
         let err = rx.await.unwrap_err();
+        assert!(matches!(err, RecvError { .. }));
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shutdown_timeout_preserves_deadline_result() {
+        let cfg = Config {
+            max_op_timeout: Duration::from_millis(250),
+            timeout_wheel_tick: Duration::from_millis(5),
+            shutdown_timeout: Some(Duration::from_millis(500)),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        let timeout = Timespec::new().sec(5_000);
+        let timeout = opcode::Timeout::new(&timeout).build();
+        let (tx, rx) = oneshot::channel();
+        submitter
+            .send(Op {
+                work: timeout,
+                sender: tx,
+                buffer: None,
+                fd: None,
+                iovecs: None,
+                deadline: Some(Instant::now() + Duration::from_millis(50)),
+            })
+            .await
+            .unwrap();
+
+        drop(submitter);
+
+        let (result, _) = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("deadline completion timed out")
+            .expect("missing deadline completion");
+        assert_eq!(result, -libc::ETIMEDOUT);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shutdown_timeout_abandons_timed_op_after_cutoff() {
+        let cfg = Config {
+            max_op_timeout: Duration::from_millis(750),
+            timeout_wheel_tick: Duration::from_millis(5),
+            shutdown_timeout: Some(Duration::from_millis(50)),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        let timeout = Timespec::new().sec(5_000);
+        let timeout = opcode::Timeout::new(&timeout).build();
+        let (tx, rx) = oneshot::channel();
+        submitter
+            .send(Op {
+                work: timeout,
+                sender: tx,
+                buffer: None,
+                fd: None,
+                iovecs: None,
+                deadline: Some(Instant::now() + Duration::from_millis(500)),
+            })
+            .await
+            .unwrap();
+
+        // Give the loop a chance to submit the long-running op before shutdown.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        drop(submitter);
+
+        let err = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("shutdown abandonment timed out")
+            .unwrap_err();
         assert!(matches!(err, RecvError { .. }));
         handle.join().unwrap();
     }
