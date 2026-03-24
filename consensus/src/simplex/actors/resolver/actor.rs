@@ -273,3 +273,244 @@ impl<
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        simplex::{
+            scheme::ed25519,
+            types::{
+                Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal,
+            },
+        },
+        types::Round,
+    };
+    use commonware_cryptography::{
+        certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest,
+    };
+    use commonware_macros::test_async;
+    use commonware_parallel::Sequential;
+    use commonware_resolver::Resolver;
+    use commonware_runtime::{deterministic, Runner};
+    use commonware_utils::NZU64;
+
+    const NAMESPACE: &[u8] = b"resolver-actor";
+    const EPOCH: Epoch = Epoch::new(9);
+
+    type TestScheme = ed25519::Scheme;
+    type TestActor =
+        Actor<deterministic::Context, TestScheme, NoopBlocker, Sha256Digest, Sequential>;
+
+    #[derive(Clone, Default)]
+    struct NoopBlocker;
+
+    impl Blocker for NoopBlocker {
+        type PublicKey = PublicKey;
+
+        async fn block(&mut self, _peer: Self::PublicKey) {}
+    }
+
+    #[derive(Clone, Default)]
+    struct NoopResolver;
+
+    impl Resolver for NoopResolver {
+        type Key = U64;
+        type PublicKey = PublicKey;
+
+        async fn fetch(&mut self, _key: U64) {}
+
+        async fn fetch_all(&mut self, _keys: Vec<U64>) {}
+
+        async fn fetch_targeted(
+            &mut self,
+            _key: U64,
+            _targets: commonware_utils::vec::NonEmptyVec<PublicKey>,
+        ) {
+        }
+
+        async fn fetch_all_targeted(
+            &mut self,
+            _requests: Vec<(U64, commonware_utils::vec::NonEmptyVec<PublicKey>)>,
+        ) {
+        }
+
+        async fn cancel(&mut self, _key: U64) {}
+
+        async fn clear(&mut self) {}
+
+        async fn retain(&mut self, _predicate: impl Fn(&Self::Key) -> bool + Send + 'static) {}
+    }
+
+    fn build_actor(context: deterministic::Context, scheme: TestScheme) -> TestActor {
+        let (actor, _) = Actor::new(
+            context,
+            Config {
+                scheme,
+                blocker: NoopBlocker,
+                strategy: Sequential,
+                epoch: EPOCH,
+                mailbox_size: 8,
+                fetch_concurrent: 4,
+                fetch_timeout: Duration::from_secs(1),
+                term_length: NZU64!(5),
+            },
+        );
+        actor
+    }
+
+    fn build_nullification(
+        schemes: &[TestScheme],
+        verifier: &TestScheme,
+        epoch: Epoch,
+        view: View,
+    ) -> Nullification<TestScheme> {
+        let round = Round::new(epoch, view);
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).unwrap())
+            .collect();
+        Nullification::from_nullifies(verifier, &votes, &Sequential).expect("nullification quorum")
+    }
+
+    fn build_notarization(
+        schemes: &[TestScheme],
+        verifier: &TestScheme,
+        epoch: Epoch,
+        view: View,
+    ) -> Notarization<TestScheme, Sha256Digest> {
+        let proposal = Proposal::new(
+            Round::new(epoch, view),
+            view.previous().unwrap_or(View::zero()),
+            Sha256Digest::from([view.get() as u8; 32]),
+        );
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        Notarization::from_notarizes(verifier, &votes, &Sequential).expect("notarization quorum")
+    }
+
+    fn build_finalization(
+        schemes: &[TestScheme],
+        verifier: &TestScheme,
+        epoch: Epoch,
+        view: View,
+    ) -> Finalization<TestScheme, Sha256Digest> {
+        let proposal = Proposal::new(
+            Round::new(epoch, view),
+            view.previous().unwrap_or(View::zero()),
+            Sha256Digest::from([view.get() as u8; 32]),
+        );
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        Finalization::from_finalizes(verifier, &votes, &Sequential).expect("finalization quorum")
+    }
+
+    #[test_async]
+    async fn validate_accepts_nullification_covering_requested_view_in_term() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
+            assert!(View::new(6).same_term(View::new(10), NZU64!(5)));
+            let mut actor = build_actor(context, verifier);
+
+            let validated = actor.validate(
+                View::new(10),
+                Certificate::<TestScheme, Sha256Digest>::Nullification(nullification.clone())
+                    .encode(),
+            );
+
+            assert!(matches!(
+                validated,
+                Some(Certificate::Nullification(parsed)) if parsed.view() == nullification.view()
+            ));
+        });
+    }
+
+    #[test_async]
+    async fn validate_rejects_nullification_from_different_term() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone());
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(10));
+
+            let validated = actor.validate(
+                View::new(11),
+                Certificate::<TestScheme, Sha256Digest>::Nullification(nullification).encode(),
+            );
+
+            assert!(validated.is_none());
+        });
+    }
+
+    #[test_async]
+    async fn validate_rejects_nullification_above_requested_view() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone());
+            let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(9));
+
+            let validated = actor.validate(
+                View::new(8),
+                Certificate::<TestScheme, Sha256Digest>::Nullification(nullification).encode(),
+            );
+
+            assert!(validated.is_none());
+        });
+    }
+
+    #[test_async]
+    async fn validate_rejects_notarization_for_failed_view() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone());
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(7));
+            actor
+                .state
+                .handle_certified(View::new(7), false, &mut NoopResolver)
+                .await;
+
+            let validated = actor.validate(
+                View::new(7),
+                Certificate::Notarization(notarization).encode(),
+            );
+
+            assert!(validated.is_none());
+        });
+    }
+
+    #[test_async]
+    async fn validate_rejects_finalization_from_different_epoch() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone());
+            let finalization =
+                build_finalization(&schemes, &verifier, Epoch::new(10), View::new(7));
+
+            let validated = actor.validate(
+                View::new(7),
+                Certificate::Finalization(finalization).encode(),
+            );
+
+            assert!(validated.is_none());
+        });
+    }
+}

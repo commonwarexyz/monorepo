@@ -114,6 +114,8 @@ where
 
     /// Amount of time to wait for certification progress in a view
     /// before attempting to skip the view.
+    ///
+    /// This timeout must be greater than the leader timeout.
     pub certification_timeout: Duration,
 
     /// Amount of time to wait before retrying a nullify broadcast if
@@ -126,6 +128,8 @@ where
 
     /// Move to nullify immediately if the selected leader has been inactive
     /// for at least this long.
+    ///
+    /// This timeout must be greater than the certification timeout and timeout retry.
     pub skip_timeout: Duration,
 
     /// Timeout to wait for a peer to respond to a request.
@@ -177,16 +181,20 @@ impl<
             "leader timeout must be less than or equal to certification timeout"
         );
         assert!(
+            self.skip_timeout > self.certification_timeout,
+            "skip timeout must be greater than certification timeout"
+        );
+        assert!(
+            self.skip_timeout > self.timeout_retry,
+            "skip timeout must be greater than timeout retry"
+        );
+        assert!(
             self.timeout_retry > Duration::default(),
             "timeout retry broadcast must be greater than zero"
         );
         assert!(
             !self.activity_timeout.is_zero(),
             "activity timeout must be greater than zero"
-        );
-        assert!(
-            self.skip_timeout > Duration::default(),
-            "skip timeout must be greater than zero"
         );
         assert!(
             self.fetch_timeout > Duration::default(),

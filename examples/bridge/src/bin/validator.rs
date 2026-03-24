@@ -258,7 +258,7 @@ fn main() {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                skip_timeout: Duration::from_secs(5),
+                skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: 32,
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
