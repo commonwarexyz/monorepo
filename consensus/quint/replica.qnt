@@ -24,6 +24,8 @@ module replica {
     // The keys of the replicas, normally, one unique key per replica.
     // For modeling byzantine behaviour via twin replicas use the same keys.
     const REPLICA_KEYS: ReplicaId -> ReplicaKey
+    // Ordered list of replicas for round-robin leader election.
+    const REPLICA_LIST: List[ReplicaId]
 
     // Produce replica's signature
     pure def sig_of(id: ReplicaId): ReplicaKey = REPLICA_KEYS.get(id)
@@ -401,8 +403,11 @@ module replica {
     }
 
     action init = {
-        // Non-deterministically choose any total leader function (View -> ReplicaId)
-        nondet l = VIEWS.setOfMaps(Replicas).oneOf()
+        // Round-robin leader election with a nondeterministic offset,
+        // matching the Rust implementation's deterministic rotation.
+        // This gives N initial states instead of |Replicas|^|VIEWS|.
+        nondet offset = (0).to(N - 1).oneOf()
+        val l = VIEWS.mapBy(v => REPLICA_LIST[(v + offset) % N])
         initWithLeader(l)
     }
 

@@ -11,6 +11,7 @@ module twins {
   import replica(
     CORRECT = Set("n0", "n1", "n2", "n3_1", "n3_2"),
     REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3_1"->"n3", "n3_2"->"n3"),
+    REPLICA_LIST = ["n0", "n1", "n2", "n3_1", "n3_2"],
     // Faulty set must be empty in this case
     BYZANTINE = Set(),
     N = 4,
