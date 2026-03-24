@@ -1332,6 +1332,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
                 ((*dealer).clone(), log, seed)
             })
             .collect();
+
         // This uses signature batch verification only for a particular dealer's
         // signatures. We could batch across all dealers, but in practice this starts
         // performing worse than just using parallelism with at least 4 threads,
@@ -1390,6 +1391,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
             }
         }
 
+        // Verify the batch and update the known valid dealers.
         let pending_results =
             Self::check_dealers::<B>(rng, &self.info, strategy, &transcript, &pending);
         let mut all_pending_valid = true;
@@ -1397,7 +1399,6 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
             self.known.insert(dealer, is_valid);
             all_pending_valid &= is_valid;
         }
-
         if all_pending_valid {
             return;
         }
