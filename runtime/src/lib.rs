@@ -842,7 +842,7 @@ mod tests {
         str::FromStr,
         sync::{
             atomic::{AtomicU32, Ordering},
-            mpsc as std_mpsc, Arc, Barrier,
+            Arc,
         },
         task::{Context as TContext, Poll, Waker},
     };
@@ -930,15 +930,70 @@ mod tests {
         });
     }
 
-    struct BlockOnDrop {
-        dropped: Option<std_mpsc::Sender<()>>,
-        release: Arc<Barrier>,
-    }
+    fn test_root_exit_waits_for_direct_child_cleanup<R>(runner: R, should_panic: bool)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner,
+    {
+        // Hold child cleanup in `Drop` so the test can observe whether root
+        // shutdown returns or unwinds before the child has fully exited.
+        struct BlockOnDrop {
+            dropped: Option<oneshot::Sender<()>>,
+            release: Option<oneshot::Receiver<()>>,
+        }
 
-    impl Drop for BlockOnDrop {
-        fn drop(&mut self) {
-            let _ = self.dropped.take().unwrap().send(());
-            self.release.wait();
+        impl Drop for BlockOnDrop {
+            fn drop(&mut self) {
+                let _ = self.dropped.take().unwrap().send(());
+                self.release.take().unwrap().blocking_recv().unwrap();
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+
+        // Run the root task on a separate thread so the test can observe
+        // shutdown progress while `runner.start(...)` is still blocked.
+        let thread = std::thread::spawn(move || {
+            runner.start(move |context| async move {
+                let (started_tx, started_rx) = oneshot::channel();
+                context.dedicated().spawn(move |_| async move {
+                    let _dropped = BlockOnDrop {
+                        dropped: Some(dropped_tx),
+                        release: Some(release_rx),
+                    };
+                    started_tx.send(()).unwrap();
+                    pending::<()>().await;
+                });
+
+                started_rx.await.unwrap();
+                if should_panic {
+                    panic!("root panic");
+                }
+            });
+        });
+
+        // Once child cleanup starts, the root task must still be blocked until
+        // that cleanup is released.
+        dropped_rx
+            .blocking_recv()
+            .expect("root shutdown should start direct child cleanup");
+
+        let finished = thread.is_finished();
+        assert!(
+            !finished,
+            "root shutdown should wait for direct child cleanup",
+        );
+
+        // Let child cleanup finish and then observe whether the root returns
+        // normally or resumes unwinding.
+        release_tx.send(()).unwrap();
+        let result = thread.join();
+
+        if should_panic {
+            assert!(result.is_err(), "root should have panicked");
+        } else {
+            result.unwrap();
         }
     }
 
@@ -947,36 +1002,7 @@ mod tests {
         R: Runner + Send + 'static,
         R::Context: Spawner,
     {
-        let (dropped_tx, dropped_rx) = std_mpsc::channel();
-        let release = Arc::new(Barrier::new(2));
-        let release2 = release.clone();
-        let thread = std::thread::spawn(move || {
-            runner.start(move |context| async move {
-                let (started_tx, started_rx) = oneshot::channel();
-                context.dedicated().spawn(move |_| async move {
-                    let _dropped = BlockOnDrop {
-                        dropped: Some(dropped_tx),
-                        release: release2,
-                    };
-                    started_tx.send(()).unwrap();
-                    pending::<()>().await;
-                });
-
-                started_rx.await.unwrap();
-            });
-        });
-
-        dropped_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("root completion should start direct child cleanup");
-        let finished = thread.is_finished();
-        release.wait();
-        let result = thread.join();
-        assert!(
-            !finished,
-            "root completion should wait for direct child cleanup",
-        );
-        result.unwrap();
+        test_root_exit_waits_for_direct_child_cleanup(runner, false);
     }
 
     fn test_root_panic_waits_for_direct_child_cleanup_before_unwind<R>(runner: R)
@@ -984,37 +1010,7 @@ mod tests {
         R: Runner + Send + 'static,
         R::Context: Spawner,
     {
-        let (dropped_tx, dropped_rx) = std_mpsc::channel();
-        let release = Arc::new(Barrier::new(2));
-        let release2 = release.clone();
-        let thread = std::thread::spawn(move || {
-            runner.start(move |context| async move {
-                let (started_tx, started_rx) = oneshot::channel();
-                context.dedicated().spawn(move |_| async move {
-                    let _dropped = BlockOnDrop {
-                        dropped: Some(dropped_tx),
-                        release: release2,
-                    };
-                    started_tx.send(()).unwrap();
-                    pending::<()>().await;
-                });
-
-                started_rx.await.unwrap();
-                panic!("root panic");
-            });
-        });
-
-        dropped_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("root panic should start direct child cleanup");
-        let finished = thread.is_finished();
-        release.wait();
-        let result = thread.join();
-        assert!(
-            !finished,
-            "root panic should clean up direct children before unwinding",
-        );
-        assert!(result.is_err(), "root should have panicked");
+        test_root_exit_waits_for_direct_child_cleanup(runner, true);
     }
 
     fn test_spawn_after_abort<R>(runner: R)
