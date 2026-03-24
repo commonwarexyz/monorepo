@@ -2,7 +2,7 @@ use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::{
     merkle::LocationRangeExt as _,
-    mmr::{batch::UnmerkleizedBatch, mem::Mmr, Location, StandardHasher},
+    mmr::{mem::Mmr, Location, StandardHasher},
 };
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
@@ -25,7 +25,7 @@ fn bench_prove_many_elements(c: &mut Criterion) {
 
         block_on(async {
             let changeset = {
-                let mut batch = UnmerkleizedBatch::new(&mmr);
+                let mut batch = mmr.new_batch();
                 for _ in 0..n {
                     let element = sha256::Digest::random(&mut sampler);
                     batch = batch.add(&hasher, &element);

@@ -8,7 +8,10 @@ use crate::{
     journal::contiguous::{Contiguous, Reader as _},
     merkle::{hasher::Hasher as _, storage::Storage},
     mmr::{self, verification, Location, Proof},
-    qmdb::{current::grafting, Error},
+    qmdb::{
+        current::{batch::BitmapRead, grafting},
+        Error,
+    },
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
@@ -40,7 +43,7 @@ impl<D: Digest> RangeProof<D> {
         const N: usize,
     >(
         hasher: &mut H,
-        status: &BitMap<N>,
+        status: &impl BitmapRead<N>,
         storage: &S,
         range: Range<Location>,
         ops_root: D,
@@ -52,7 +55,7 @@ impl<D: Digest> RangeProof<D> {
         let partial_chunk_digest = if next_bit != BitMap::<N>::CHUNK_SIZE_BITS {
             // Last chunk is incomplete, meaning it's not yet in the MMR and needs to be included
             // in the proof.
-            hasher.update(last_chunk);
+            hasher.update(&last_chunk);
             Some(hasher.finalize())
         } else {
             None
@@ -81,7 +84,7 @@ impl<D: Digest> RangeProof<D> {
         const N: usize,
     >(
         hasher: &mut H,
-        status: &BitMap<N>,
+        status: &impl BitmapRead<N>,
         storage: &S,
         log: &C,
         start_loc: Location,
@@ -122,7 +125,7 @@ impl<D: Digest> RangeProof<D> {
         let end = (*end_loc - 1) / chunk_bits; // chunk that contains the last bit
         let mut chunks = Vec::with_capacity((end - start + 1) as usize);
         for i in start..=end {
-            chunks.push(*status.get_chunk(i as usize));
+            chunks.push(status.get_chunk(i as usize));
         }
 
         Ok((proof, ops, chunks))
@@ -247,7 +250,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<mmr::Family, Digest = D>>(
         hasher: &mut H,
-        status: &BitMap<N>,
+        status: &impl BitmapRead<N>,
         storage: &S,
         loc: Location,
         ops_root: D,
@@ -257,7 +260,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
             return Err(Error::OperationPruned(loc));
         }
         let range_proof = RangeProof::new(hasher, status, storage, loc..loc + 1, ops_root).await?;
-        let chunk = *status.get_chunk_containing(*loc);
+        let chunk = status.get_chunk(BitMap::<N>::to_chunk_index(*loc));
         Ok(Self {
             loc,
             chunk,

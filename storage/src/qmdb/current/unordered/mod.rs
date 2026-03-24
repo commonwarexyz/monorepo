@@ -29,7 +29,9 @@ pub mod tests {
                 unordered::Operation,
                 ValueEncoding,
             },
-            current::{proof::RangeProof, tests::apply_random_ops, BitmapPrunedBits},
+            current::{
+                batch::BitmapRead, proof::RangeProof, tests::apply_random_ops, BitmapPrunedBits,
+            },
             store::tests::{TestKey, TestValue},
             Error,
         },
@@ -82,7 +84,7 @@ pub mod tests {
             let finalized = db
                 .new_batch()
                 .write(k1, Some(v1.clone()))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -106,7 +108,7 @@ pub mod tests {
             let finalized = db
                 .new_batch()
                 .write(k1, None)
-                .merkleize(Some(metadata.clone()))
+                .merkleize(Some(metadata.clone()), &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -117,7 +119,12 @@ pub mod tests {
 
             // Repeated delete of same key should fail (key already deleted).
             assert!(db.get(&k1).await.unwrap().is_none());
-            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            let finalized = db
+                .new_batch()
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             db.sync().await.unwrap();
             let root3 = db.root();
@@ -141,7 +148,7 @@ pub mod tests {
             let finalized = db
                 .new_batch()
                 .write(k1, Some(v1))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -177,7 +184,7 @@ pub mod tests {
             let finalized = db
                 .new_batch()
                 .write(k, Some(v1))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -210,7 +217,7 @@ pub mod tests {
             let finalized = db
                 .new_batch()
                 .write(k, Some(v2))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -361,7 +368,12 @@ pub mod tests {
             let mut db = apply_random_ops::<TestDb<C, V>>(200, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            let finalized = db
+                .new_batch()
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
@@ -426,7 +438,12 @@ pub mod tests {
             let mut db = apply_random_ops::<TestDb<C, V>>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+            let finalized = db
+                .new_batch()
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             let root = db.root();
 
@@ -521,7 +538,7 @@ pub mod tests {
                 let finalized = db
                     .new_batch()
                     .write(k, Some(v))
-                    .merkleize(None)
+                    .merkleize(None, &db)
                     .await
                     .unwrap()
                     .finalize();
