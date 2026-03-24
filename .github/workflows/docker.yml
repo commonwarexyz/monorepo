@@ -42,8 +42,15 @@ jobs:
           if [[ -z $TARGET ]]; then
               export TARGET="${GIT_REF_NAME%/*}"
           fi
-          echo "Target: "${INPUT_TARGET}"
-          echo "target=$TARGET" >> $GITHUB_OUTPUT
+          case "$TARGET" in
+            riscv-unknown-elf-toolchain|rust-riscv32imac-cross|rust-riscv64imac-cross) ;;
+            *)
+              echo "invalid target: $TARGET" >&2
+              exit 1
+              ;;
+          esac
+          echo "Target: ${TARGET}"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
       - name: Create matrix
         id: platforms
         run: |
