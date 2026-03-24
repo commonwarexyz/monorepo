@@ -172,13 +172,11 @@ where
         // We must panic if we don't get a response; We cannot override the decision
         // of the application based on the availabilitiy of the actor.
         self.sender
-            .request(
-                |response| Message::Verify {
-                    context,
-                    ancestry,
-                    response,
-                },
-            )
+            .request(|response| Message::Verify {
+                context,
+                ancestry,
+                response,
+            })
             .await
             .expect("stateful actor dropped during verify")
     }

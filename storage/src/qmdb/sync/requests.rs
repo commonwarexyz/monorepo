@@ -21,7 +21,8 @@ pub(super) struct Id(u64);
 pub(super) struct Requests<Op, D: Digest, E> {
     /// Futures that will resolve to fetch results.
     #[allow(clippy::type_complexity)]
-    futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send + Sync>>>,
+    futures:
+        FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send + Sync>>>,
 
     /// Counter for assigning unique request IDs.
     next_id: u64,
@@ -107,8 +108,9 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
     #[allow(clippy::type_complexity)]
     pub fn futures_mut(
         &mut self,
-    ) -> &mut FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send + Sync>>>
-    {
+    ) -> &mut FuturesUnordered<
+        Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send + Sync>>,
+    > {
         &mut self.futures
     }
 

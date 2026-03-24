@@ -221,9 +221,7 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
                     .await
                     .expect("marshal must respond with processed height after one-block repair");
 
-                application
-                    .sync_complete(databases, sync_anchor)
-                    .await;
+                application.sync_complete(databases, sync_anchor).await;
             }
         }
 
@@ -279,9 +277,7 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
         .await
         .expect("must persist state sync completion metadata");
 
-    application
-        .sync_complete(databases, last_processed)
-        .await;
+    application.sync_complete(databases, last_processed).await;
 }
 
 /// Reconciles marshal's processed frontier with committed database state.
@@ -328,7 +324,7 @@ where
     let mut search_height = processed_height;
     loop {
         let (anchor_targets, anchor_digest) = if search_height.is_zero() {
-            (A::sync_targets(genesis), genesis_digest.clone())
+            (A::sync_targets(genesis), genesis_digest)
         } else {
             let Some(block) = marshal
                 .get_block(Identifier::Height(search_height))
