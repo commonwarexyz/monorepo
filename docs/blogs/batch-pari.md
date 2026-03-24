@@ -6,8 +6,8 @@ published-time: "2026-03-24T00:00:00Z"
 modified-time: "2026-03-24T00:00:00Z"
 author: "Guru Vamsi Policharla"
 author_twitter: "https://x.com/gvamsip"
-url: "https://commonware.xyz/blogs/zksnarks"
-image: "https://commonware.xyz/imgs/zksnarks.png"
+url: "https://commonware.xyz/blogs/batch-pari"
+image: "https://commonware.xyz/imgs/batch-pari.png"
 katex: true
 ---
 
