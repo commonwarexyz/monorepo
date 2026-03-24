@@ -678,7 +678,10 @@ mod test {
     fn test_send_many_flushes_at_network_pool_item_max() -> Result<(), Error> {
         let executor = deterministic::Runner::new(
             deterministic::Config::new().with_network_buffer_pool_config(
-                BufferPoolConfig::for_network().with_max_size(NZUsize!(256)),
+                BufferPoolConfig::for_network()
+                    .with_pool_min_size(256)
+                    .with_min_size(NZUsize!(256))
+                    .with_max_size(NZUsize!(256)),
             ),
         );
         executor.start(|context| async move {
