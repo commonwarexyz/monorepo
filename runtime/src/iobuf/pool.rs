@@ -142,6 +142,13 @@ pub(crate) enum BufferPoolThreadCacheConfig {
     ForParallelism(NonZeroUsize),
 }
 
+impl BufferPoolThreadCacheConfig {
+    /// Returns true if thread-local caching is enabled for this config.
+    pub const fn is_enabled(&self) -> bool {
+        matches!(self, Self::Fixed(_) | Self::ForParallelism(_))
+    }
+}
+
 /// Configuration for a buffer pool.
 #[derive(Debug, Clone)]
 pub struct BufferPoolConfig {
