@@ -22,24 +22,21 @@ use core::{
 };
 use rand_core::CryptoRngCore;
 
-/// Size in bytes of both a serialized scalar and a compressed point.
-const ELEMENT_LENGTH: usize = 32;
-
 /// A scalar in the Bandersnatch scalar field.
 #[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct F(Fr);
 
 impl F {
-    fn to_bytes(&self) -> [u8; <Self as FixedSize>::SIZE] {
-        let mut bytes = [0u8; <Self as FixedSize>::SIZE];
+    fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut bytes = [0u8; Self::SIZE];
         self.0
             .serialize_compressed(&mut bytes[..])
             .expect("serialization into fixed buffer succeeds");
         bytes
     }
 
-    fn from_bytes(bytes: &[u8; <Self as FixedSize>::SIZE]) -> Result<Self, CodecError> {
+    fn from_bytes(bytes: &[u8; Self::SIZE]) -> Result<Self, CodecError> {
         let fr = Fr::deserialize_with_mode(&bytes[..], Compress::Yes, Validate::Yes)
             .map_err(|_| CodecError::Invalid("bandersnatch::F", "invalid"))?;
         Ok(Self(fr))
@@ -146,13 +143,13 @@ impl Read for F {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let bytes = <[u8; ELEMENT_LENGTH]>::read(buf)?;
+        let bytes = <[u8; Self::SIZE]>::read(buf)?;
         Self::from_bytes(&bytes)
     }
 }
 
 impl FixedSize for F {
-    const SIZE: usize = ELEMENT_LENGTH;
+    const SIZE: usize = 32;
 }
 
 #[cfg(any(test, feature = "arbitrary"))]
@@ -177,16 +174,16 @@ impl G {
         Self(p)
     }
 
-    fn to_bytes(&self) -> [u8; <Self as FixedSize>::SIZE] {
+    fn to_bytes(&self) -> [u8; Self::SIZE] {
         let affine = self.0.into_affine();
-        let mut bytes = [0u8; <Self as FixedSize>::SIZE];
+        let mut bytes = [0u8; Self::SIZE];
         affine
             .serialize_compressed(&mut bytes[..])
             .expect("serialization into fixed buffer succeeds");
         bytes
     }
 
-    fn from_bytes(bytes: &[u8; <Self as FixedSize>::SIZE]) -> Result<Self, CodecError> {
+    fn from_bytes(bytes: &[u8; Self::SIZE]) -> Result<Self, CodecError> {
         let affine = EdwardsAffine::deserialize_with_mode(&bytes[..], Compress::Yes, Validate::Yes)
             .map_err(|_| CodecError::Invalid("bandersnatch::G", "invalid"))?;
         Ok(Self(affine.into()))
@@ -298,13 +295,13 @@ impl Read for G {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let bytes = <[u8; ELEMENT_LENGTH]>::read(buf)?;
+        let bytes = <[u8; Self::SIZE]>::read(buf)?;
         Self::from_bytes(&bytes)
     }
 }
 
 impl FixedSize for G {
-    const SIZE: usize = ELEMENT_LENGTH;
+    const SIZE: usize = 32;
 }
 
 #[cfg(any(test, feature = "arbitrary"))]
