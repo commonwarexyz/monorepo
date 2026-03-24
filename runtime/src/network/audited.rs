@@ -196,10 +196,8 @@ mod tests {
         Error, IoBuf, IoBufs, Listener as _, Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::test_group;
-    use std::{
-        net::SocketAddr,
-        sync::{Arc, Mutex},
-    };
+    use commonware_utils::sync::Mutex;
+    use std::{net::SocketAddr, sync::Arc};
 
     #[derive(Clone)]
     struct RecordingSink {
@@ -208,10 +206,7 @@ mod tests {
 
     impl crate::Sink for RecordingSink {
         async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-            self.chunk_counts
-                .lock()
-                .unwrap()
-                .push(bufs.into().chunk_count());
+            self.chunk_counts.lock().push(bufs.into().chunk_count());
             Ok(())
         }
     }
@@ -223,7 +218,7 @@ mod tests {
 
     impl crate::Stream for RecordingStream {
         async fn recv(&mut self, _len: usize) -> Result<IoBufs, Error> {
-            Ok(self.bufs.lock().unwrap().take().unwrap())
+            Ok(self.bufs.lock().take().unwrap())
         }
 
         fn peek(&self, _max_len: usize) -> &[u8] {
@@ -363,7 +358,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(*chunk_counts.lock().unwrap(), vec![4]);
+        assert_eq!(*chunk_counts.lock(), vec![4]);
     }
 
     #[tokio::test]

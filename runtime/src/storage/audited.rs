@@ -142,7 +142,8 @@ mod tests {
         },
         Blob as _, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufs, IoBufsMut, Storage as _,
     };
-    use std::sync::{Arc, Mutex};
+    use commonware_utils::sync::Mutex;
+    use std::sync::Arc;
 
     fn test_pool() -> BufferPool {
         BufferPool::new(
@@ -291,10 +292,7 @@ mod tests {
             _offset: u64,
             bufs: impl Into<IoBufs> + Send,
         ) -> Result<(), Error> {
-            self.chunk_counts
-                .lock()
-                .unwrap()
-                .push(bufs.into().chunk_count());
+            self.chunk_counts.lock().push(bufs.into().chunk_count());
             Ok(())
         }
 
@@ -331,6 +329,6 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(*chunk_counts.lock().unwrap(), vec![4]);
+        assert_eq!(*chunk_counts.lock(), vec![4]);
     }
 }
