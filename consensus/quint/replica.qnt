@@ -961,6 +961,7 @@ module replica {
                             not(can_certify(id, cert_block_val)),
                             parent_conflicted,
                         },
+                        self.view == cert_view_num,
                         // NOTE: Model simplification: suppress nullify retries (single-shot nullify per view).
                         // Real implementation may rebroadcast nullify for liveness.
                         not(has_sent_nullify(id, cert_view_num)),
@@ -989,8 +990,8 @@ module replica {
                             sent_vote' = sent_vote.union(Set(nullify(cert_view_num, id))),
                             replica_state' = replica_state.set(id, {
                                 ...self,
-                                nullified: if (self.view == cert_view_num) true else self.nullified,
-                                advance_timeout_cancelled: if (self.view == cert_view_num) true else self.advance_timeout_cancelled,
+                                nullified: true,
+                                advance_timeout_cancelled: true,
                                 ghost_last_seen_notarization: seen_notarization,
                                 ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(NullifyKind))
                             }),

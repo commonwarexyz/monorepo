@@ -308,6 +308,62 @@ module tests {
     action replica_receives_nullify_quorum(id: ReplicaId, view: ViewNumber, srcs: Set[ReplicaId]): bool =
         on_vote_nullify(id, view, srcs.map(src => nullify(view, src)))
 
+    // Receiving a notarization for a past view where certification fails must NOT
+    // trigger a backfilled nullify vote. The Rust implementation restricts nullify
+    // to the current view only (trigger_timeout and construct_nullify both reject
+    // non-current views).
+    run noBackfillNullifyForPastViewTest = {
+        val proposal = {
+            block: "val_b3_part",
+            view: FIRST_VIEW,
+            view_parent: GENESIS_VIEW,
+            block_parent: GENESIS_BLOCK,
+            sig: sig_of("n3")
+        }
+
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n1", 1 -> "n2", 2 -> "n3", 3 -> "n0", 4 -> "n1", 5 -> "n2", 6 -> "n3"),
+            CERTIFY_FAIL_INV_B3
+        )
+            // View 2: n3 is leader; inject proposal for val_b3_part.
+            .then(inject_proposal(proposal))
+            .then(on_proposal("n0", proposal))
+            .then(on_proposal("n1", proposal))
+            .then(on_proposal("n2", proposal))
+
+            // n0, n1, n2 form notarization; certification fails -> all send nullify(2).
+            .then(replica_receives_notarize_quorum("n0", "val_b3_part", FIRST_VIEW, Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_quorum("n1", "val_b3_part", FIRST_VIEW, Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_quorum("n2", "val_b3_part", FIRST_VIEW, Set("n0", "n1", "n2")))
+
+            // n3 (the leader) receives nullify quorum -> nullification cert -> view 3.
+            // leader_nullify_trigger does not fire since n3 IS the leader; n3 sends no nullify.
+            .then(replica_receives_nullify_quorum("n3", FIRST_VIEW, Set("n0", "n1", "n2")))
+            .then(all {
+                assert(replica_state.get("n3").view == 3),
+                assert(not(sent_vote.exists(v =>
+                    vote_sig(v) == "n3" and vote_view(v) == FIRST_VIEW and is_nullify(v)))),
+                unchanged_all,
+            })
+
+            // n3 (now in view 3) receives the notarization cert for view 2.
+            // Certification of val_b3_part fails, but n3 must NOT backfill
+            // nullify(2) because view 2 is no longer n3's current view.
+            .then(on_certificate("n3", notarization(FIRST_VIEW, "val_b3_part", Set("n0", "n1", "n2"), "n0")))
+            .then(all {
+                // n3 stored the notarization for view 2...
+                assert(store_certificate.get("n3").exists(c =>
+                    is_notarization_cert(c) and cert_view(c) == FIRST_VIEW
+                    and cert_block(c) == Some("val_b3_part"))),
+                // ...but did NOT send nullify for the past view.
+                assert(not(sent_vote.exists(v =>
+                    vote_sig(v) == "n3" and vote_view(v) == FIRST_VIEW and is_nullify(v)))),
+                assert(replica_state.get("n3").view == 3),
+                unchanged_all,
+            })
+            .expect(all_invariants)
+    }
+
     // All correct replicas finalize two consecutive blocks.
     run allCorrectReplicasFinalizeTwoBlocksTest = {
         val proposal1 = {
