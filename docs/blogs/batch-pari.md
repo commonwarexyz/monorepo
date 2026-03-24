@@ -88,4 +88,4 @@ Even at just 32 proofs, we see an order-of-magnitude speedup in verification tim
 
 Any project currently using Groth16 proofs can use Pari/Glock as a **drop-in replacement**. In fact, you don't even have to rewrite circuits as the Pari proof system can be extended to support standard R1CS circuits (see Remark 2.3 in [DMS24](https://eprint.iacr.org/2024/1245)) by increasing the proof size to 2 $\mathbb{G}_1$ elements and 3 $\mathbb{F}$ elements.
 
-Stay tuned for follow-up posts on scaling timelock encryption and batched threshold encryption for encrypted mempools!
+Stay tuned for our upcoming posts on scaling timelock encryption and batched threshold encryption for encrypted mempools!
