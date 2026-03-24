@@ -1,6 +1,6 @@
 ---
-title: "TBD"
-description: "TBD"
+title: "The Proof Is in the Pairing"
+description: "Blockchains are especially well-suited for two use cases: payments and trading. We’ve made real progress in scaling these systems with many chains supporting 10K–100K TPS. But what happens when we introduce privacy?"
 date: "March 24th, 2026"
 published-time: "2026-03-24T00:00:00Z"
 modified-time: "2026-03-24T00:00:00Z"
