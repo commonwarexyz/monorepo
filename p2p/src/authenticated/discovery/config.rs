@@ -1,8 +1,12 @@
 use crate::Ingress;
 use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
-use commonware_utils::NZU32;
-use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
+use commonware_utils::{NZUsize, NZU32};
+use std::{
+    net::SocketAddr,
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 
 /// Known peer and its accompanying ingress address that will be dialed on startup.
 pub type Bootstrapper<P> = (P, Ingress);
@@ -11,7 +15,8 @@ pub type Bootstrapper<P> = (P, Ingress);
 ///
 /// # Warning
 /// It is recommended to synchronize this configuration across peers in the network (with the
-/// exception of `crypto`, `listen`, `bootstrappers`, `allow_private_ips`, and `mailbox_size`).
+/// exception of `crypto`, `listen`, `bootstrappers`, `allow_private_ips`, `mailbox_size`, and
+/// `send_batch_size`).
 /// If this is not synchronized, connections could be unnecessarily dropped, messages could be parsed incorrectly,
 /// and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
@@ -51,6 +56,11 @@ pub struct Config<C: Signer> {
     /// When there are more messages in the mailbox than this value, any actor
     /// sending a message will be blocked until the mailbox is processed.
     pub mailbox_size: usize,
+
+    /// Maximum number of already-queued outbound messages to combine into one connection write.
+    ///
+    /// Set this to `1` to disable batching.
+    pub send_batch_size: NonZeroUsize,
 
     /// Time into the future that a timestamp can be and still be considered valid.
     pub synchrony_bound: Duration,
@@ -142,6 +152,7 @@ impl<C: Signer> Config<C> {
             allow_private_ips: false,
             max_message_size,
             mailbox_size: 1_000,
+            send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
@@ -184,6 +195,7 @@ impl<C: Signer> Config<C> {
             allow_private_ips: true,
             max_message_size,
             mailbox_size: 1_000,
+            send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),
@@ -219,6 +231,7 @@ impl<C: Signer> Config<C> {
             allow_private_ips: true,
             max_message_size,
             mailbox_size: 1_000,
+            send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(5),

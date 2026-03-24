@@ -630,7 +630,7 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            mmr::{iterator::nodes_to_pin, journaled::Mmr, Position},
+            mmr::{iterator::nodes_to_pin, journaled::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
@@ -644,8 +644,8 @@ pub(crate) mod test {
                 (self.log.mmr, self.log.journal)
             }
 
-            async fn pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
-                join_all(nodes_to_pin(pos).map(|p| self.log.mmr.get_node(p)))
+            async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
+                join_all(nodes_to_pin(loc).map(|p| self.log.mmr.get_node(p)))
                     .await
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())

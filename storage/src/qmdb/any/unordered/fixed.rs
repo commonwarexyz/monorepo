@@ -135,7 +135,7 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        mmr::{Location, Position, StandardHasher},
+        mmr::{Location, StandardHasher},
         qmdb::{
             any::{
                 test::fixed_db_config,
@@ -698,8 +698,8 @@ pub(crate) mod test {
                 (self.log.mmr, self.log.journal)
             }
 
-            async fn pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
-                join_all(nodes_to_pin(pos).map(|p| self.log.mmr.get_node(p)))
+            async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
+                join_all(nodes_to_pin(loc).map(|p| self.log.mmr.get_node(p)))
                     .await
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())

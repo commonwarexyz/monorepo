@@ -121,7 +121,6 @@ mod tests {
 
         let root = *mmb.root();
         let prune_loc = Location::new(9);
-        let prune_pos = Position::try_from(prune_loc).unwrap();
         mmb.prune(prune_loc).unwrap();
 
         assert_eq!(mmb.bounds().start, prune_loc);
@@ -141,8 +140,8 @@ mod tests {
         let mmb_copy = Mmb::init(
             Config {
                 nodes: mmb.nodes.iter().copied().collect(),
-                pruned_to: prune_loc,
-                pinned_nodes: mmb.node_digests_to_pin(prune_pos),
+                pruning_boundary: prune_loc,
+                pinned_nodes: mmb.node_digests_to_pin(prune_loc),
             },
             &hasher,
         )
@@ -162,7 +161,7 @@ mod tests {
         assert!(Mmb::<D>::init(
             Config {
                 nodes: vec![],
-                pruned_to: Location::new(0),
+                pruning_boundary: Location::new(0),
                 pinned_nodes: vec![],
             },
             &hasher,
@@ -173,7 +172,7 @@ mod tests {
             Mmb::init(
                 Config {
                     nodes: vec![hasher.digest(b"node1"), hasher.digest(b"node2")],
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 &hasher,
@@ -188,7 +187,7 @@ mod tests {
                     hasher.digest(b"leaf2"),
                     hasher.digest(b"parent"),
                 ],
-                pruned_to: Location::new(0),
+                pruning_boundary: Location::new(0),
                 pinned_nodes: vec![],
             },
             &hasher,
@@ -202,7 +201,7 @@ mod tests {
         assert!(Mmb::init(
             Config {
                 nodes,
-                pruned_to: Location::new(0),
+                pruning_boundary: Location::new(0),
                 pinned_nodes: vec![],
             },
             &hasher,
@@ -214,12 +213,12 @@ mod tests {
         let nodes: Vec<_> = (6..*mmb.size())
             .map(|i| *mmb.get_node_unchecked(Position::new(i)))
             .collect();
-        let pinned_nodes = mmb.node_digests_to_pin(Position::new(6));
+        let pinned_nodes = mmb.node_digests_to_pin(Location::new(4));
 
         assert!(Mmb::init(
             Config {
                 nodes: nodes.clone(),
-                pruned_to: Location::new(4),
+                pruning_boundary: Location::new(4),
                 pinned_nodes: pinned_nodes.clone(),
             },
             &hasher,
@@ -230,7 +229,7 @@ mod tests {
             Mmb::init(
                 Config {
                     nodes,
-                    pruned_to: Location::new(2),
+                    pruning_boundary: Location::new(2),
                     pinned_nodes,
                 },
                 &hasher,

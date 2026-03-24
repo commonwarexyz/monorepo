@@ -1,9 +1,9 @@
 use commonware_cryptography::{
     bls12381::{
-        dkg::{deal, Dealer, DealerLog, Info, Player},
+        dkg::{deal, Dealer, Info, Logs, Player},
         primitives::variant::MinSig,
     },
-    ed25519::{PrivateKey, PublicKey},
+    ed25519::{Batch, PrivateKey, PublicKey},
     Signer as _,
 };
 use commonware_math::algebra::Random;
@@ -19,7 +19,7 @@ type V = MinSig;
 struct Bench {
     info: Info<V, PublicKey>,
     me: PrivateKey,
-    logs: BTreeMap<PublicKey, DealerLog<V, PublicKey>>,
+    logs: Logs<V, PublicKey, N3f1>,
 }
 
 impl Bench {
@@ -68,7 +68,7 @@ impl Bench {
             })
             .collect::<BTreeMap<_, _>>();
 
-        let mut logs = BTreeMap::new();
+        let mut logs = Logs::<V, PublicKey, N3f1>::new(info.clone());
         for sk in private_keys {
             let pk = sk.public_key();
             let (mut dealer, pub_msg, priv_msgs) = Dealer::start::<N3f1>(
@@ -90,18 +90,13 @@ impl Bench {
                     }
                 }
             }
-            logs.insert(pk, dealer.finalize::<N3f1>().check(&info).unwrap().1);
+            logs.record(pk, dealer.finalize::<N3f1>().check(&info).unwrap().1);
         }
 
         Self { info, me, logs }
     }
 
-    fn pre_finalize(
-        &self,
-    ) -> (
-        Player<V, PrivateKey>,
-        BTreeMap<PublicKey, DealerLog<V, PublicKey>>,
-    ) {
+    fn pre_finalize(&self) -> (Player<V, PrivateKey>, Logs<V, PublicKey, N3f1>) {
         (
             Player::<MinSig, PrivateKey>::new(self.info.clone(), self.me.clone()).unwrap(),
             self.logs.clone(),
@@ -145,10 +140,23 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
                     b.iter_batched(
                         || bench.pre_finalize(),
                         |(player, logs)| {
+                            let mut finalize_rng = StdRng::seed_from_u64(0);
                             if concurrency > 1 {
-                                black_box(player.finalize::<N3f1>(logs, &strategy).unwrap());
+                                black_box(
+                                    player
+                                        .finalize::<N3f1, Batch>(&mut finalize_rng, logs, &strategy)
+                                        .unwrap(),
+                                );
                             } else {
-                                black_box(player.finalize::<N3f1>(logs, &Sequential).unwrap());
+                                black_box(
+                                    player
+                                        .finalize::<N3f1, Batch>(
+                                            &mut finalize_rng,
+                                            logs,
+                                            &Sequential,
+                                        )
+                                        .unwrap(),
+                                );
                             }
                         },
                         BatchSize::SmallInput,

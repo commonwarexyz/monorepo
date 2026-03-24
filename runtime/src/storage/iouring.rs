@@ -299,6 +299,7 @@ impl Blob {
                     buffer: Some(OpBuffer::Write(buf)),
                     fd: Some(OpFd::File(self.file.clone())),
                     iovecs: None,
+                    deadline: None,
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
@@ -381,6 +382,7 @@ impl Blob {
                     buffer: Some(OpBuffer::WriteVectored(bufs)),
                     fd: Some(OpFd::File(self.file.clone())),
                     iovecs: Some(iovecs),
+                    deadline: None,
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?;
@@ -464,6 +466,7 @@ impl crate::Blob for Blob {
                     buffer: Some(OpBuffer::Read(io_buf)),
                     fd: Some(OpFd::File(self.file.clone())),
                     iovecs: None,
+                    deadline: None,
                 })
                 .await
                 .map_err(|_| Error::ReadFailed)?;
@@ -535,6 +538,7 @@ impl crate::Blob for Blob {
                     buffer: None,
                     fd: Some(OpFd::File(self.file.clone())),
                     iovecs: None,
+                    deadline: None,
                 })
                 .await
                 .map_err(|_| {

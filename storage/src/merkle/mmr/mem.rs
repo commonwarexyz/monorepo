@@ -61,7 +61,7 @@ mod tests {
             // Test parent_heights on the final MMR. Since there's a height gap between the
             // highest peak (14) and the next, only the lower two peaks (17, 18) would merge,
             // producing 2 parents at heights 1 and 2.
-            let heights: Vec<u32> = crate::merkle::Family::parent_heights(mmr.size()).collect();
+            let heights: Vec<u32> = crate::merkle::Family::parent_heights(mmr.leaves()).collect();
             assert_eq!(heights, vec![1, 2], "parent_heights not as expected");
 
             // verify leaf digests
@@ -140,12 +140,11 @@ mod tests {
 
             // Test that we can initialize a new MMR from another's elements.
             let oldest_loc = mmr.bounds().start;
-            let oldest_pos = Position::try_from(oldest_loc).unwrap();
-            let digests = mmr.node_digests_to_pin(oldest_pos);
+            let digests = mmr.node_digests_to_pin(oldest_loc);
             let mmr_copy = Mmr::init(
                 Config {
                     nodes: mmr.nodes.iter().copied().collect(),
-                    pruned_to: oldest_loc,
+                    pruning_boundary: oldest_loc,
                     pinned_nodes: digests,
                 },
                 &hasher,
@@ -209,7 +208,7 @@ mod tests {
             let mut mmr = Mmr::init(
                 Config {
                     nodes: vec![],
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 &hasher,
@@ -241,7 +240,7 @@ mod tests {
             assert!(Mmr::init(
                 Config::<sha256::Digest> {
                     nodes: vec![],
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 &hasher,
@@ -252,7 +251,7 @@ mod tests {
                 Mmr::init(
                     Config {
                         nodes: vec![Sha256::hash(b"node1"), Sha256::hash(b"node2")],
-                        pruned_to: Location::new(0),
+                        pruning_boundary: Location::new(0),
                         pinned_nodes: vec![],
                     },
                     &hasher,
@@ -267,7 +266,7 @@ mod tests {
                         Sha256::hash(b"leaf2"),
                         Sha256::hash(b"parent"),
                     ],
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 &hasher,
@@ -290,7 +289,7 @@ mod tests {
             assert!(Mmr::init(
                 Config {
                     nodes,
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 &hasher,
@@ -310,11 +309,11 @@ mod tests {
             let nodes: Vec<_> = (7..*mmr.size())
                 .map(|i| *mmr.get_node_unchecked(Position::new(i)))
                 .collect();
-            let pinned_nodes = mmr.node_digests_to_pin(Position::new(7));
+            let pinned_nodes = mmr.node_digests_to_pin(Location::new(4));
             assert!(Mmr::init(
                 Config {
                     nodes: nodes.clone(),
-                    pruned_to: Location::new(4),
+                    pruning_boundary: Location::new(4),
                     pinned_nodes: pinned_nodes.clone(),
                 },
                 &hasher,
@@ -325,7 +324,7 @@ mod tests {
                 Mmr::init(
                     Config {
                         nodes,
-                        pruned_to: Location::new(5),
+                        pruning_boundary: Location::new(5),
                         pinned_nodes,
                     },
                     &hasher,
