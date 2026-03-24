@@ -1490,7 +1490,12 @@ pub mod tests {
             .await;
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert!(db.pruned_bits() > 0);
+            let pruned_bits = db.pruned_bits();
+            assert!(
+                pruned_bits > *first_range.start,
+                "expected bitmap pruning boundary above rewind target: pruned_bits={pruned_bits}, target={:?}",
+                first_range.start
+            );
 
             let oldest_retained = db.bounds().await.start;
             let boundary_err = db.rewind(oldest_retained).await.unwrap_err();
@@ -1502,9 +1507,14 @@ pub mod tests {
                 "unexpected rewind error at retained boundary: {boundary_err:?}"
             );
 
+            let expected_pruned_loc = *first_range.start - 1;
             let err = db.rewind(first_range.start).await.unwrap_err();
             assert!(
-                matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+                matches!(
+                    err,
+                    Error::Journal(crate::journal::Error::ItemPruned(loc))
+                    if loc == expected_pruned_loc
+                ),
                 "unexpected rewind error: {err:?}"
             );
 
