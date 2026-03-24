@@ -98,15 +98,17 @@ where
             );
             None
         },
-        result = block_rx => result.map_or_else(|_| {
+        result = block_rx => {
+            if result.is_err() {
                 debug!(
                     stage,
                     ?digest,
                     reason = "failed to fetch block",
                     "skipping block wait"
                 );
-                None
-            }, Some),
+            }
+            result.ok()
+        },
     }
 }
 

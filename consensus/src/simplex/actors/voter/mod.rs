@@ -6238,7 +6238,7 @@ mod tests {
                             }
                         }
                         _ => {}
-                    }
+                    },
                 }
             };
             assert!(!reached_view2, "view advanced before finalize for view 1");
@@ -6261,7 +6261,7 @@ mod tests {
                             }
                         }
                         _ => {}
-                    }
+                    },
                 }
             };
             assert!(reached_view2, "expected progress to view 2 from view 1");
