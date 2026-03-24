@@ -188,6 +188,15 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Return the sync target for this database's current committed state.
     fn sync_target(&self) -> impl Future<Output = Self::SyncTarget> + Send;
+
+    /// Rewind committed state to `target`.
+    ///
+    /// Implementations must ensure rewind effects are durable before returning
+    /// `Ok(())` (for example by committing after rewind).
+    fn rewind_to_target(
+        &mut self,
+        target: Self::SyncTarget,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
 /// A collection of individually locked [`ManagedDb`] instances.
@@ -238,6 +247,11 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Return sync targets for the set's current committed state.
     fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
+
+    /// Rewind the set to the provided per-database targets.
+    ///
+    /// Rewind failures are fatal for startup recovery and therefore panic.
+    fn rewind_to_targets(&self, targets: Self::SyncTargets) -> impl Future<Output = ()> + Send;
 }
 
 /// Parameters for a one-time state-sync pass.
@@ -344,6 +358,11 @@ impl<E: Clone + Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<A
     async fn committed_targets(&self) -> Self::SyncTargets {
         let database = self.read().await;
         T::sync_target(&*database).await
+    }
+
+    async fn rewind_to_targets(&self, target: Self::SyncTargets) {
+        let mut database = self.write().await;
+        rewind_or_panic(&mut *database, target, None).await;
     }
 }
 
@@ -474,6 +493,15 @@ macro_rules! impl_database_set {
                         $T::sync_target(&*database).await
                     },
                 )+)
+            }
+
+            async fn rewind_to_targets(&self, targets: Self::SyncTargets) {
+                join!($(
+                    async {
+                        let mut database = self.$idx.write().await;
+                        rewind_or_panic(&mut *database, targets.$idx, Some($idx)).await;
+                    },
+                )+);
             }
         }
     };
@@ -888,6 +916,27 @@ async fn finalize_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
+async fn rewind_or_panic<E, T: ManagedDb<E>>(
+    database: &mut T,
+    target: T::SyncTarget,
+    index: Option<usize>,
+) {
+    // Mutable rewind failures are fatal by design because the database handle
+    // may be internally diverged after a failed rewind.
+    if let Err(err) = database.rewind_to_target(target).await {
+        match index {
+            Some(index) => panic!(
+                "database rewind failed (index {index}, type {}): {err:?}",
+                core::any::type_name::<T>(),
+            ),
+            None => panic!(
+                "database rewind failed (type {}): {err:?}",
+                core::any::type_name::<T>(),
+            ),
+        }
+    }
+}
+
 /// A resolver that can attach a database at runtime.
 ///
 /// Implementations receive a database handle after startup so they can
@@ -1049,6 +1098,10 @@ mod tests {
         }
 
         async fn sync_target(&self) -> Self::SyncTarget {}
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     struct BlockingFinalizeDb {
@@ -1121,6 +1174,10 @@ mod tests {
         }
 
         async fn sync_target(&self) -> Self::SyncTarget {}
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     impl<E: Send> ManagedDb<E> for BlockingFinalizeDb {
@@ -1149,6 +1206,10 @@ mod tests {
         }
 
         async fn sync_target(&self) -> Self::SyncTarget {}
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     impl<E: Send> ManagedDb<E> for SlowSyncDb {
@@ -1172,6 +1233,10 @@ mod tests {
 
         async fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
+        }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
         }
     }
 
@@ -1197,6 +1262,10 @@ mod tests {
         async fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     impl<E: Send> ManagedDb<E> for FailingStateSyncDb {
@@ -1220,6 +1289,10 @@ mod tests {
 
         async fn sync_target(&self) -> Self::SyncTarget {
             0
+        }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
         }
     }
 
@@ -1245,6 +1318,10 @@ mod tests {
         async fn sync_target(&self) -> Self::SyncTarget {
             0
         }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     impl<E: Send> ManagedDb<E> for ObservedSlowSyncDb {
@@ -1269,6 +1346,10 @@ mod tests {
         async fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     impl<E: Send> ManagedDb<E> for ObservedFastSyncDb {
@@ -1292,6 +1373,10 @@ mod tests {
 
         async fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
+        }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
         }
     }
 

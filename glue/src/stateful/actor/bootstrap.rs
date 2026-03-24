@@ -12,12 +12,15 @@
 //! ## Already synced (`sync_done = true`, [`Mode::MarshalSync`])
 //!
 //! A previous run already completed state sync. The databases are opened from
-//! their existing on-disk state and reconciled with marshal:
+//! their existing on-disk state and reconciled with marshal's processed block:
 //!
-//! - Normal case: the current processed digest is fetched from marshal and the
-//!   actor transitions to processing mode via [`ApplicationMailbox::sync_complete`].
-//! - Recovery case: if no exact anchor match exists, bootstrap runs a one-block
-//!   repair state sync to targets derived from marshal height `processed + 1`.
+//! - Bootstrap loads sync targets for marshal's processed block and compares
+//!   them with the databases' committed targets.
+//! - If they differ, bootstrap rewinds every database in the set to those
+//!   processed-block targets.
+//! - Any rewind failure is fatal and causes a panic.
+//! - Bootstrap then transitions to processing mode via
+//!   [`ApplicationMailbox::sync_complete`] at marshal's processed anchor.
 //!
 //! ## Fresh start (`sync_done = false`, [`Mode::MarshalSync`])
 //!
@@ -58,7 +61,7 @@ use commonware_consensus::{
     types::Height,
     Application as ConsensusApplication, Heightable,
 };
-use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
+use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{Config as MetadataConfig, Metadata};
 use commonware_utils::{channel::mpsc, sequence::U64};
@@ -116,11 +119,6 @@ where
     pub(super) mode: Mode<E, A>,
 }
 
-enum AnchorResolution<T, D: Digest> {
-    Matched(Anchor<D>),
-    RepairToNext { anchor: Anchor<D>, targets: T },
-}
-
 /// Initialize databases and transition the actor into processing mode.
 ///
 /// See the [module documentation](self) for the full procedure.
@@ -147,6 +145,10 @@ enum AnchorResolution<T, D: Digest> {
 ///   moved backward or stalled), and resolver errors that the engine could
 ///   not recover from internally. The sync engine already retries individual
 ///   fetch failures; errors that propagate here are terminal.
+/// - Rewind to marshal-processed targets fails. Bootstrap recovery rewinds all
+///   databases to marshal's processed block targets. Rewind errors indicate
+///   unrecoverable local history loss/corruption (for example pruned rewind
+///   boundaries or invalid commit targets), so startup must stop.
 /// - Marshal unreachable after `set_floor`. After state sync the marshal
 ///   floor must be raised so that the node does not attempt to re-process
 ///   blocks below the synced height. If the marshal does not respond, or
@@ -191,40 +193,18 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
         let genesis = application.genesis().await;
         let databases = A::Databases::init(context.clone(), db_config.clone()).await;
         let db_targets = databases.committed_targets().await;
-        let anchor_resolution =
-            reconcile_anchor::<E, A, S, V>(&marshal, db_targets, &genesis).await;
-
-        match anchor_resolution {
-            AnchorResolution::Matched(anchor) => {
-                application.sync_complete(databases, anchor).await;
-            }
-            AnchorResolution::RepairToNext { anchor, targets } => {
-                drop(databases);
-                let (tip_updates_tx, tip_updates_rx) = mpsc::channel(1);
-                drop(tip_updates_tx);
-
-                let (databases, sync_anchor) = A::Databases::sync(
-                    context.clone(),
-                    db_config,
-                    resolvers,
-                    anchor,
-                    targets,
-                    tip_updates_rx,
-                    sync_config,
-                )
-                .await
-                .unwrap_or_else(|err| panic!("state sync repair to processed+1 failed: {err:?}"));
-
-                marshal.set_floor(sync_anchor.height, false).await;
-                marshal
-                    .get_processed_height()
-                    .await
-                    .expect("marshal must respond with processed height after one-block repair");
-
-                application.sync_complete(databases, sync_anchor).await;
-            }
+        let (processed_anchor, processed_targets) =
+            processed_anchor_targets::<E, A, S, V>(&marshal, &genesis).await;
+        if db_targets != processed_targets {
+            databases.rewind_to_targets(processed_targets.clone()).await;
+            let rewound_targets = databases.committed_targets().await;
+            assert!(
+                rewound_targets == processed_targets,
+                "database targets must match marshal processed targets after rewind",
+            );
         }
 
+        application.sync_complete(databases, processed_anchor).await;
         return;
     }
 
@@ -280,35 +260,16 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
     application.sync_complete(databases, last_processed).await;
 }
 
-/// Reconciles marshal's processed frontier with committed database state.
-///
-/// The restart path treats the database as the source of truth for what was
-/// durably committed and then finds the earliest marshal height that matches it.
-///
-/// 1. Read the database's committed sync targets.
-/// 2. Read marshal's current processed height.
-/// 3. Walk forward by height starting at that processed height.
-///    - At height `0`, compare against the application's genesis sync targets.
-///    - At height `> 0`, fetch the marshal block for that height and derive
-///      sync targets from that block.
-/// 4. When targets match:
-///    - If the match is exactly at marshal's processed height, return it.
-///    - If the match is ahead, raise marshal's floor to that height so marshal
-///      and the database resume from the same anchor.
-/// 5. If no matching anchor is found before marshal stops returning blocks:
-///    - Require marshal block `processed + 1`.
-///    - Return a one-block repair target derived from that block's sync targets.
+/// Load marshal's current processed anchor and derived sync targets.
 ///
 /// # Panics
 ///
 /// - Marshal does not return its processed height.
 /// - Marshal does not have the block at its own processed height.
-/// - No matching anchor is found and marshal does not have block `processed + 1`.
-async fn reconcile_anchor<E, A, S, V>(
+async fn processed_anchor_targets<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
-    db_targets: SyncTargets<A, E>,
     genesis: &A::Block,
-) -> AnchorResolution<SyncTargets<A, E>, BlockDigest<A, E>>
+) -> (Anchor<BlockDigest<A, E>>, SyncTargets<A, E>)
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -319,63 +280,32 @@ where
         .get_processed_height()
         .await
         .expect("state sync bootstrap must fetch marshal processed height");
-    let genesis_digest = genesis.digest();
-
-    let mut search_height = processed_height;
-    loop {
-        let (anchor_targets, anchor_digest) = if search_height.is_zero() {
-            (A::sync_targets(genesis), genesis_digest)
-        } else {
-            let Some(block) = marshal
-                .get_block(Identifier::Height(search_height))
-                .await
-                .map(V::into_inner)
-            else {
-                if search_height == processed_height {
-                    panic!(
-                        "state sync bootstrap missing processed block at height {}",
-                        processed_height.get()
-                    );
-                }
-
-                let repair_height = processed_height.next();
-                let repair_block = marshal
-                    .get_block(Identifier::Height(repair_height))
-                    .await
-                    .map(V::into_inner)
-                    .unwrap_or_else(|| panic!(
-                        "database state does not match marshal processed block at height {}; no matching block found before height {}; expected block at height {} for one-block repair",
-                        processed_height.get(),
-                        search_height.get(),
-                        repair_height.get(),
-                    ));
-
-                return AnchorResolution::RepairToNext {
-                    anchor: Anchor {
-                        height: repair_height,
-                        digest: repair_block.digest(),
-                    },
-                    targets: A::sync_targets(&repair_block),
-                };
-            };
-
-            (A::sync_targets(&block), block.digest())
-        };
-
-        if anchor_targets == db_targets {
-            if search_height != processed_height {
-                marshal.set_floor(search_height, false).await;
-                marshal
-                    .get_processed_height()
-                    .await
-                    .expect("marshal must respond with processed height");
-            }
-            return AnchorResolution::Matched(Anchor {
-                height: search_height,
-                digest: anchor_digest,
-            });
-        }
-
-        search_height = search_height.next();
+    if processed_height.is_zero() {
+        return (
+            Anchor {
+                height: Height::zero(),
+                digest: genesis.digest(),
+            },
+            A::sync_targets(genesis),
+        );
     }
+
+    let block = marshal
+        .get_block(Identifier::Height(processed_height))
+        .await
+        .map(V::into_inner)
+        .unwrap_or_else(|| {
+            panic!(
+                "state sync bootstrap missing processed block at height {}",
+                processed_height.get()
+            )
+        });
+
+    (
+        Anchor {
+            height: processed_height,
+            digest: block.digest(),
+        },
+        A::sync_targets(&block),
+    )
 }
