@@ -167,11 +167,15 @@
 //! - Byzantine threshold is parameterized by `f`, with quorum threshold `Q` according to `utils/src/faults.rs`.
 //! - `activity_timeout` controls how many views behind `last_finalized` are retained locally.
 //!   Rounds with view `< last_finalized - activity_timeout` may be discarded.
-//! - `skip_timeout` is the number of recent locally tracked rounds checked for leader
-//!   inactivity; activity is evaluated over the replica's most recently tracked rounds,
-//!   which may be non-contiguous after view jumps. Must satisfy
-//!   `skip_timeout <= activity_timeout`.
+//! - `skip_timeout` is the maximum inbound-message silence window tolerated for a
+//!   leader before fast timeout. Replica `r` considers leader `l` inactive at local
+//!   view `v` once `v - r.latest_seen[l] >= skip_timeout`, after `r` has tracked at
+//!   least `skip_timeout` views locally. Any inbound vote or certificate from `l`
+//!   for view `u` updates `r.latest_seen[l] = max(r.latest_seen[l], u)`. Must
+//!   satisfy `skip_timeout <= activity_timeout`.
 //! - `T` is the retry period used by the retry timer.
+//! - `forwarding_policy` is an optional liveness policy used when entering a new view:
+//!   `Disabled | Silent | NextLeader`.
 //!
 //! ## 3. Quorums and Certificates
 //!
@@ -212,8 +216,11 @@
 //!   - `broadcast_nullification`: `bool`, whether `nullification(v)` has been broadcast, initially `false`.
 //!   - `broadcast_finalize`: `bool`, whether `finalize(c, v)` has been broadcast, initially `false`.
 //!   - `broadcast_finalization`: `bool`, whether `finalization(c, v)` has been broadcast, initially `false`.
+//!     Receiving a certificate does not change `broadcast_notarize` or `broadcast_finalize`.
 //!   - `proposal`: `Option<c>`, the container for this view, initially `None`.
 //!   - `proposal_status`: `None | Unverified | Verified | Equivocated`, initially `None`.
+//!     A proposal recovered from a certificate is authenticated but remains `Unverified`
+//!     until local `verify(c)` succeeds.
 //!   - `certified`: `Option<bool>`, where `None` means certification is pending,
 //!     `Some(true)` means certified, and `Some(false)` means rejected.
 //!   - `t_l`: leader proposal timeout.
@@ -221,6 +228,8 @@
 //!   - `t_r`: retry timeout.
 //! - `messages` is a map `View -> (Replica -> Set<Message>)` storing received vote messages
 //!   (`notarize`, `nullify`, `finalize`) grouped by view then sender.
+//! - `latest_seen` is a map `Replica -> View` recording the highest view number seen in
+//!   any inbound vote or certificate from that replica, initially `0` for every replica.
 //!
 //! Pruning: entries in `round` and `messages` with view `< min_active(r)` may be discarded.
 //! Incoming messages for views that are not `interesting` are dropped on arrival.
@@ -283,6 +292,50 @@
 //!         return Some(c);
 //!     }
 //!     return None;
+//! }
+//!
+//! fn can_finalize(r, v) -> Option<c> {
+//!     if r.round[v].broadcast_nullify or r.round[v].broadcast_finalize {
+//!         return None;
+//!     }
+//!     if r.round[v].proposal_status == Equivocated {
+//!         return None;
+//!     }
+//!     if r.round[v].notarization != notarization(c, v) {
+//!         return None;
+//!     }
+//!     if r.round[v].certified != Some(true) {
+//!         return None;
+//!     }
+//!     if r.round[v].proposal != Some(c) {
+//!         return None;
+//!     }
+//!     return Some(c);
+//! }
+//!
+//! fn forwardable_proposal(r, v) -> Option<c> {
+//!     if r.round[v].proposal = Some(c) and is_certified(r, v) = Some(c) {
+//!         return Some(c);
+//!     }
+//!     return None;
+//! }
+//!
+//! fn forwarding_targets(r, v_entered, c_prev) -> Set<replica> {
+//!     if forwarding_policy = Disabled {
+//!         return {};
+//!     }
+//!     if forwarding_policy = Silent {
+//!         return { r' : r' did not send `notarize(c_prev, v_entered - 1)` and
+//!                         r' did not send `finalize(c_prev, v_entered - 1)` };
+//!     }
+//!     if forwarding_policy = NextLeader {
+//!         let l = leader(v_entered);
+//!         if l did not send `notarize(c_prev, v_entered - 1)` and
+//!            l did not send `finalize(c_prev, v_entered - 1)` {
+//!             return { l };
+//!         }
+//!         return {};
+//!     }
 //! }
 //!
 //! fn parent_certificate(r, v) -> Option<certificate> {
@@ -349,6 +402,17 @@
 //!     return false;
 //! }
 //!
+//! fn record_activity(r, r', v) {
+//!     r.latest_seen[r'] = max(r.latest_seen[r'], v);
+//! }
+//!
+//! fn is_active(r, r') -> bool {
+//!     if size(r.round) < skip_timeout {
+//!         return true;
+//!     }
+//!     return r.view - r.latest_seen[r'] < skip_timeout;
+//! }
+//!
 //! // Records container `c` for view `v`. If a different container already exists,
 //! // marks the proposal as equivocated. Returns the equivocating leader if detected.
 //! // `recovered` indicates whether `c` came from a certificate (true) or a vote (false).
@@ -358,11 +422,10 @@
 //!     }
 //!     if r.round[v].proposal == None {
 //!         r.round[v].proposal = Some(c);
-//!         r.round[v].proposal_status = if recovered { Verified } else { Unverified };
+//!         r.round[v].proposal_status = Unverified;
 //!         return None;
 //!     }
 //!     if r.round[v].proposal == Some(c) {
-//!         if recovered { r.round[v].proposal_status = Verified; }
 //!         return None;
 //!     }
 //!     // Equivocation: only overwrite with certificate-backed proposals.
@@ -389,7 +452,7 @@
 //!     r.round[next].t_r = None;
 //!     r.round[next].t_a = now + 3Δ;
 //!     let leader = r.round[next].leader;
-//!     if leader != None and r != leader and leader has not been active in the last skip_timeout locally tracked rounds {
+//!     if leader != None and r != leader and !is_active(r, leader) {
 //!         r.round[next].t_l = 0;
 //!         r.round[next].t_a = 0;
 //!     }
@@ -421,13 +484,17 @@
 //!
 //! 1. At startup, after initializing replica state with genesis (view `0`) implicitly finalized,
 //!    call `set_leader(r, 1)` and `enter_view(r, 1)` exactly once.
+//! 1. On receiving any interesting inbound vote or certificate message `m` from replica `r'`,
+//!    call `record_activity(r, r', m.v)` before processing `m`.
 //!
 //! ### 7.1. View Entry
 //!
 //! 1. On entering view `v`:
 //!    1. Let `l = r.round[v].leader`.
-//!    1. If `r != l` and `l` has not been active in the last `skip_timeout` locally tracked rounds,
+//!    1. If `r != l` and `!is_active(r, l)`,
 //!       set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
+//!    1. Let `c_prev = forwardable_proposal(r, v - 1)`.
+//!    1. If `c_prev != None`, forward `c_prev` to every replica in `forwarding_targets(r, v, c_prev)`.
 //!    1. If `r == l`, attempt to propose:
 //!       1. Let `parent = find_parent(r, v)`.
 //!       1. If `parent = Err(_)`, return.
@@ -463,12 +530,13 @@
 //!    1. Call `set_leader(r, v + 1)`.
 //!    1. Call `record_proposal(r, v, c, true)`.
 //!    1. If `!r.round[v].broadcast_notarization`, set `r.round[v].broadcast_notarization = true` and broadcast `notarization(c, v)`.
+//!    1. Do not modify `r.round[v].broadcast_notarize`.
 //!    1. Attempt `certify(c)`:
 //!       1. On success:
 //!          1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
 //!          1. Set `r.round[v].certified = Some(true)`.
+//!          1. If `can_finalize(r, v) = Some(c)`, set `r.round[v].broadcast_finalize = true` and broadcast `finalize(c, v)`.
 //!          1. Call `enter_view(r, v + 1)`.
-//!          1. If `!r.round[v].broadcast_nullify` and `!r.round[v].broadcast_finalize` and `r.round[v].proposal_status != Equivocated`, set `r.round[v].broadcast_finalize = true` and broadcast `finalize(c, v)`.
 //!       1. On failure:
 //!          1. Set `r.round[v].certified = Some(false)`.
 //!          1. If `v == r.view` and `r.round[v].t_l != 0` and `r.round[v].t_a != 0`, set `r.round[v].t_l = 0` and `r.round[v].t_a = 0`.
@@ -486,7 +554,6 @@
 //!    1. Set `r.round[v].nullification = nullification(v)`.
 //!    1. Set `r.round[v].t_l = None` and `r.round[v].t_a = None`.
 //!    1. If `r == leader(v)` and `parent_certificate(r, v) != None`, broadcast `parent_certificate(r, v)`.
-//!    1. If `!r.round[v].broadcast_nullify` and `!r.round[v].broadcast_finalize`, set `r.round[v].broadcast_nullify = true` and broadcast `nullify(v)`.
 //!    1. If `!r.round[v].broadcast_nullification`, set `r.round[v].broadcast_nullification = true` and broadcast `nullification(v)`.
 //!
 //! ### 7.5. Finalization Path
@@ -496,6 +563,7 @@
 //! 1. On observing `≥ Q` `finalize(c, v)` votes:
 //!    1. Assemble `finalization(c, v)`.
 //! 1. On constructing or receiving the first `finalization(c, v)`:
+//!    1. Do not modify `r.round[v].broadcast_finalize`.
 //!    1. if `v > r.last_finalized` set `r.last_finalized = v`.
 //!    1. Call `set_leader(r, v + 1)` and `enter_view(r, v + 1)`.
 //!    1. Set `r.round[v].finalization = finalization(c, v)`.
@@ -506,6 +574,7 @@
 //!
 //! ### 7.6. Timeout Behavior
 //!
+//! 1. `nullify(v)` may be broadcast only when `v = r.view`.
 //! 1. On `r.round[v].t_l` or `r.round[v].t_a` firing:
 //!    1. If `!r.round[v].broadcast_finalize`:
 //!       1. Set `r.round[v].broadcast_nullify = true`.
