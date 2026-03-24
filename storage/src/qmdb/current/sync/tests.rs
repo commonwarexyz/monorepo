@@ -442,6 +442,30 @@ macro_rules! current_sync_tests_for_harness {
                 crate::qmdb::any::sync::tests::test_target_update_on_done_client::<$harness>();
             }
 
+            #[test_traced]
+            fn test_sync_waits_for_explicit_finish() {
+                crate::qmdb::any::sync::tests::test_sync_waits_for_explicit_finish::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_handles_early_finish_signal() {
+                crate::qmdb::any::sync::tests::test_sync_handles_early_finish_signal::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_fails_when_finish_sender_dropped() {
+                crate::qmdb::any::sync::tests::test_sync_fails_when_finish_sender_dropped::<
+                    $harness,
+                >();
+            }
+
+            #[test_traced]
+            fn test_sync_allows_dropped_reached_target_receiver() {
+                crate::qmdb::any::sync::tests::test_sync_allows_dropped_reached_target_receiver::<
+                    $harness,
+                >();
+            }
+
             #[rstest]
             #[case(1, 1)]
             #[case(1, 2)]

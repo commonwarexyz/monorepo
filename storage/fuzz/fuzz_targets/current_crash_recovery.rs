@@ -98,7 +98,7 @@ fn make_config(
 ) -> VariableConfig<TwoCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     VariableConfig {
-        mmr: MmrConfig {
+        mmr_config: MmrConfig {
             journal_partition: format!("crash-mmr-journal-{suffix}"),
             metadata_partition: format!("crash-mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(mmr_items_per_blob),
@@ -106,7 +106,7 @@ fn make_config(
             thread_pool: None,
             page_cache: page_cache.clone(),
         },
-        log: VConfig {
+        journal_config: VConfig {
             partition: format!("crash-log-{suffix}"),
             items_per_section: NZU64!(log_items_per_blob),
             write_buffer,

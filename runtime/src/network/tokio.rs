@@ -155,9 +155,16 @@ pub struct Config {
     /// reclaim socket resources immediately when closing connections to
     /// misbehaving peers.
     so_linger: Option<Duration>,
-    /// Read timeout for connections, after which the connection will be closed
+    /// Read timeout for connections, after which the connection will be closed.
+    ///
+    /// This bounds the entire `Stream::recv` call, not each underlying socket
+    /// read attempt.
     read_timeout: Duration,
-    /// Write timeout for connections, after which the connection will be closed
+    /// Write timeout for connections, after which the connection will be closed.
+    ///
+    /// This bounds the entire `Sink::send` call, not each underlying socket
+    /// write attempt. If callers batch more bytes into one send, slow links may
+    /// require a larger timeout.
     write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
     ///

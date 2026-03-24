@@ -819,6 +819,47 @@ mod tests {
     }
 
     #[test]
+    fn test_first_index() {
+        let mut map = RMap::new();
+        assert_eq!(map.first_index(), None);
+
+        map.insert(5);
+        map.insert(6); // [5, 6]
+        assert_eq!(map.first_index(), Some(5));
+
+        map.insert(1); // [1, 1], [5, 6]
+        assert_eq!(map.first_index(), Some(1));
+
+        map.remove(0, 4); // [5, 6]
+        assert_eq!(map.first_index(), Some(5));
+
+        map.remove(5, 6); // empty
+        assert_eq!(map.first_index(), None);
+    }
+
+    #[test]
+    fn test_last_index() {
+        let mut map = RMap::new();
+        assert_eq!(map.last_index(), None);
+
+        map.insert(1);
+        map.insert(2); // [1, 2]
+        assert_eq!(map.last_index(), Some(2));
+
+        map.insert(5); // [1, 2], [5, 5]
+        assert_eq!(map.last_index(), Some(5));
+
+        map.insert(6); // [1, 2], [5, 6]
+        assert_eq!(map.last_index(), Some(6));
+
+        map.remove(5, 10); // [1, 2]
+        assert_eq!(map.last_index(), Some(2));
+
+        map.remove(0, 2); // empty
+        assert_eq!(map.last_index(), None);
+    }
+
+    #[test]
     fn test_next_gap_empty() {
         let map = RMap::new();
         assert_eq!(map.next_gap(5), (None, None));
@@ -1034,6 +1075,18 @@ mod tests {
 
         // Starting at MAX (no gaps possible)
         assert_eq!(map.missing_items(u64::MAX, 5), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn test_missing_items_range_ending_at_max() {
+        let mut map = RMap::new();
+        map.insert(u64::MAX - 2);
+        map.insert(u64::MAX - 1);
+        map.insert(u64::MAX); // [MAX-2, MAX]
+
+        assert_eq!(map.missing_items(u64::MAX - 2, 3), Vec::<u64>::new());
+        assert_eq!(map.missing_items(u64::MAX - 1, 3), Vec::<u64>::new());
+        assert_eq!(map.missing_items(u64::MAX, 3), Vec::<u64>::new());
     }
 
     #[test]

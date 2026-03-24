@@ -72,7 +72,7 @@ fn fuzz(data: FuzzInput) {
     runner.start(|context| async move {
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = Config::<EightCap> {
-            mmr: MmrConfig {
+            mmr_config: MmrConfig {
                 journal_partition: "test-qmdb-mmr-journal".into(),
                 metadata_partition: "test-qmdb-mmr-metadata".into(),
                 items_per_blob: NZU64!(500000),
@@ -80,7 +80,7 @@ fn fuzz(data: FuzzInput) {
                 thread_pool: None,
                 page_cache: page_cache.clone(),
             },
-            log: FConfig {
+            journal_config: FConfig {
                 partition: "test-qmdb-log-journal".into(),
                 items_per_blob: NZU64!(500000),
                 write_buffer: NZUsize!(1024),

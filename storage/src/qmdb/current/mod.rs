@@ -233,26 +233,26 @@
 
 use crate::{
     index::Unordered as UnorderedIndex,
-    journal::contiguous::{
-        fixed::{Config as FConfig, Journal as FJournal},
-        variable::{Config as VConfig, Journal as VJournal},
+    journal::{
+        authenticated::Inner,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
     mmr::{journaled::Config as MmrConfig, Location, StandardHasher},
     qmdb::{
         any::{
             self,
             operation::{Operation, Update},
-            FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
+            Config as AnyConfig,
         },
-        operation::{Committable, Key},
+        operation::Committable,
         Error,
     },
     translator::Translator,
 };
-use commonware_codec::{Codec, CodecFixedShared, FixedSize, Read};
+use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
+use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
 use std::sync::Arc;
 
 pub mod batch;
@@ -263,14 +263,14 @@ pub mod proof;
 pub(crate) mod sync;
 pub mod unordered;
 
-/// Configuration for a `Current` authenticated db with fixed-size values.
+/// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
-pub struct FixedConfig<T: Translator> {
+pub struct Config<T: Translator, J> {
     /// Configuration for the MMR backing the authenticated journal.
-    pub mmr: MmrConfig,
+    pub mmr_config: MmrConfig,
 
-    /// Configuration for the fixed-size operations log journal.
-    pub log: FConfig,
+    /// Configuration for the operations log journal.
+    pub journal_config: J,
 
     /// The name of the storage partition used for the grafted MMR metadata.
     pub grafted_mmr_metadata_partition: String,
@@ -279,57 +279,37 @@ pub struct FixedConfig<T: Translator> {
     pub translator: T,
 }
 
-impl<T: Translator> From<FixedConfig<T>> for AnyFixedConfig<T> {
-    fn from(cfg: FixedConfig<T>) -> Self {
+impl<T: Translator, J> From<Config<T, J>> for AnyConfig<T, J> {
+    fn from(cfg: Config<T, J>) -> Self {
         Self {
-            mmr: cfg.mmr,
-            log: cfg.log,
+            mmr_config: cfg.mmr_config,
+            journal_config: cfg.journal_config,
             translator: cfg.translator,
         }
     }
 }
+
+/// Configuration for a `Current` authenticated db with fixed-size values.
+pub type FixedConfig<T> = Config<T, FConfig>;
 
 /// Configuration for a `Current` authenticated db with variable-sized values.
-#[derive(Clone)]
-pub struct VariableConfig<T: Translator, C> {
-    /// Configuration for the MMR backing the authenticated journal.
-    pub mmr: MmrConfig,
+pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
 
-    /// Configuration for the variable-size operations log journal.
-    pub log: VConfig<C>,
-
-    /// The name of the storage partition used for the grafted MMR metadata.
-    pub grafted_mmr_metadata_partition: String,
-
-    /// The translator used by the compressed index.
-    pub translator: T,
-}
-
-impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
-    fn from(cfg: VariableConfig<T, C>) -> Self {
-        Self {
-            mmr: cfg.mmr,
-            log: cfg.log,
-            translator: cfg.translator,
-        }
-    }
-}
-
-/// Shared initialization logic for fixed-sized value Current [db::Db].
-pub(super) async fn init_fixed<E, U, H, T, I, const N: usize, NewIndex>(
+/// Initialize a `Current` authenticated db from the given config.
+pub(super) async fn init<E, U, H, T, I, J, const N: usize, NewIndex>(
     context: E,
-    config: FixedConfig<T>,
+    config: Config<T, J::Config>,
     new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<U>>, I, H, U, N>, Error>
+) -> Result<db::Db<E, J, I, H, U, N>, Error>
 where
     E: Storage + Clock + Metrics,
     U: Update + Send + Sync,
-    U::Key: Array,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
+    J: Inner<E, Item = Operation<U>>,
+    Operation<U>: Committable + CodecShared,
     NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: CodecFixedShared + Committable,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
@@ -345,7 +325,7 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
-    let thread_pool = config.mmr.thread_pool.clone();
+    let thread_pool = config.mmr_config.thread_pool.clone();
     let metadata_partition = config.grafted_mmr_metadata_partition.clone();
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for grafted MMR).
@@ -358,7 +338,7 @@ where
 
     // Initialize the anydb with a callback that populates the status bitmap.
     let last_known_inactivity_floor = Location::new(status.len());
-    let any = any::init_fixed(
+    let any = any::init(
         context.with_label("any"),
         config.into(),
         Some(last_known_inactivity_floor),
@@ -395,85 +375,6 @@ where
         grafted_mmr: crate::mmr::batch::MerkleizedBatch::Base(grafted_mmr),
         metadata: AsyncMutex::new(metadata),
         thread_pool,
-        root,
-    })
-}
-
-/// Shared initialization logic for variable-sized value Current [db::Db].
-pub(super) async fn init_variable<E, U, H, T, I, const N: usize, NewIndex>(
-    context: E,
-    config: VariableConfig<T, <Operation<U> as Read>::Cfg>,
-    new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<U>>, I, H, U, N>, Error>
-where
-    E: Storage + Clock + Metrics,
-    U: Update + Send + Sync,
-    U::Key: Key,
-    H: Hasher,
-    T: Translator,
-    I: UnorderedIndex<Value = Location>,
-    NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: Codec + Committable,
-{
-    // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-    const {
-        // A compile-time assertion that the chunk size is some multiple of digest size. A multiple
-        // of 1 is optimal with respect to proof size, but a higher multiple allows for a smaller
-        // (RAM resident) merkle tree over the structure.
-        assert!(
-            N.is_multiple_of(H::Digest::SIZE),
-            "chunk size must be some multiple of the digest size",
-        );
-        // A compile-time assertion that chunk size is a power of 2, which is necessary to allow
-        // the status bitmap tree to be aligned with the underlying operations MMR.
-        assert!(N.is_power_of_two(), "chunk size must be a power of 2");
-    }
-
-    let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-    let pool = config.mmr.thread_pool.clone();
-
-    // Load bitmap metadata (pruned_chunks + pinned nodes for grafted MMR).
-    let (metadata, pruned_chunks, pinned_nodes) =
-        db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
-
-    // Initialize the activity status bitmap.
-    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| Error::DataCorrupted("pruned chunks overflow"))?;
-
-    // Initialize the anydb with a callback that populates the activity status bitmap.
-    let last_known_inactivity_floor = Location::new(status.len());
-    let any = any::init_variable(
-        context.with_label("any"),
-        config.into(),
-        Some(last_known_inactivity_floor),
-        |append: bool, loc: Option<Location>| {
-            status.push(append);
-            if let Some(loc) = loc {
-                status.set_bit(*loc, false);
-            }
-        },
-        new_index,
-    )
-    .await?;
-
-    // Build the grafted MMR from the bitmap and ops MMR.
-    let hasher = StandardHasher::<H>::new();
-    let grafted_mmr =
-        db::build_grafted_mmr::<H, N>(&hasher, &status, &pinned_nodes, &any.log.mmr, pool.as_ref())
-            .await?;
-
-    // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
-    let partial_chunk = db::partial_chunk(&status);
-    let ops_root = any.log.root();
-    let root = db::compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
-
-    Ok(db::Db {
-        any,
-        status: batch::BitmapBatch::Base(Arc::new(status)),
-        grafted_mmr: crate::mmr::batch::MerkleizedBatch::Base(grafted_mmr),
-        metadata: AsyncMutex::new(metadata),
-        thread_pool: pool,
         root,
     })
 }
@@ -527,7 +428,7 @@ pub mod tests {
     ) -> FixedConfig<T> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            mmr: MmrConfig {
+            mmr_config: MmrConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
@@ -535,7 +436,7 @@ pub mod tests {
                 thread_pool: None,
                 page_cache: page_cache.clone(),
             },
-            log: FConfig {
+            journal_config: FConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
                 items_per_blob: NZU64!(7),
                 page_cache,
@@ -555,7 +456,7 @@ pub mod tests {
     ) -> VariableConfig<T, ((), ())> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            mmr: MmrConfig {
+            mmr_config: MmrConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 items_per_blob: NZU64!(11),
@@ -563,7 +464,7 @@ pub mod tests {
                 thread_pool: None,
                 page_cache: page_cache.clone(),
             },
-            log: VConfig {
+            journal_config: VConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
                 items_per_section: NZU64!(7),
                 compression: None,

@@ -65,18 +65,22 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     /// [`Hasher::root`](crate::merkle::hasher::Hasher::root)).
     fn peaks(size: Position<Self>) -> impl Iterator<Item = (Position<Self>, u32)>;
 
-    /// Compute positions of nodes that must be pinned when pruning to `prune_pos`
-    /// in a structure of the given `size`.
-    fn nodes_to_pin(size: Position<Self>, prune_pos: Position<Self>) -> Vec<Position<Self>>;
+    /// Compute positions of nodes that must be pinned when pruning to `prune_loc`
+    /// in a structure with the given leaf count.
+    ///
+    /// # Panics
+    ///
+    /// Panics if leaves or prune_loc are invalid.
+    fn nodes_to_pin(leaves: Location<Self>, prune_loc: Location<Self>) -> Vec<Position<Self>>;
 
     /// Return the positions of the left and right children of the node at `pos` with the
     /// given `height`. The caller guarantees `height > 0` (leaves have no children).
     fn children(pos: Position<Self>, height: u32) -> (Position<Self>, Position<Self>);
 
     /// Return the heights of the internal nodes that lie between `size_for(N)` and
-    /// `size_for(N+1)`, where `N` is the leaf count for the given `size`. These are
-    /// the nodes created when the `N`-th leaf is appended.
-    fn parent_heights(size: Position<Self>) -> impl Iterator<Item = u32>;
+    /// `size_for(N+1)`, where `N` is the given leaf count. These are the nodes created
+    /// when the `N`-th leaf is appended.
+    fn parent_heights(leaves: Location<Self>) -> impl Iterator<Item = u32>;
 }
 
 /// Errors that can occur when interacting with a Merkle-family data structure.

@@ -188,7 +188,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
 
     /// Add a pre-computed leaf digest.
     pub fn add_leaf_digest(mut self, digest: D) -> Self {
-        let heights = F::parent_heights(self.size());
+        let heights = F::parent_heights(self.leaves());
         self.appended.push(digest);
 
         for height in heights {
@@ -222,10 +222,10 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         if loc >= leaves {
             return Err(Error::LeafOutOfBounds(loc));
         }
-        let pos = Position::try_from(loc)?;
-        if pos < self.parent.pruned_to_pos() {
-            return Err(Error::ElementPruned(pos));
+        if loc < self.parent.pruning_boundary() {
+            return Err(Error::ElementPruned(Position::try_from(loc)?));
         }
+        let pos = Position::try_from(loc)?;
         let digest = hasher.leaf_digest(pos, element);
         self.store_node(pos, digest);
         self.mark_dirty(loc);
@@ -239,10 +239,10 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         if loc >= leaves {
             return Err(Error::LeafOutOfBounds(loc));
         }
-        let pos = Position::try_from(loc)?;
-        if pos < self.parent.pruned_to_pos() {
-            return Err(Error::ElementPruned(pos));
+        if loc < self.parent.pruning_boundary() {
+            return Err(Error::ElementPruned(Position::try_from(loc)?));
         }
+        let pos = Position::try_from(loc)?;
         if F::position_to_location(pos).is_none() {
             return Err(Error::NonLeaf(pos));
         }
@@ -255,14 +255,13 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     #[cfg(any(feature = "std", test))]
     pub fn update_leaf_batched(mut self, updates: &[(Location<F>, D)]) -> Result<Self, Error<F>> {
         let leaves = self.leaves();
-        let prune_boundary = self.parent.pruned_to_pos();
+        let prune_boundary = self.parent.pruning_boundary();
         for (loc, _) in updates {
             if *loc >= leaves {
                 return Err(Error::LeafOutOfBounds(*loc));
             }
-            let pos = Position::try_from(*loc)?;
-            if pos < prune_boundary {
-                return Err(Error::ElementPruned(pos));
+            if *loc < prune_boundary {
+                return Err(Error::ElementPruned(Position::try_from(*loc)?));
             }
         }
         for (loc, digest) in updates {
@@ -476,12 +475,12 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         }
     }
 
-    /// Items before this position have been pruned.
-    pub fn pruned_to_pos(&self) -> Position<F> {
+    /// Items before this location have been pruned.
+    pub fn pruning_boundary(&self) -> Location<F> {
         match self {
-            Self::Base(mem) => Readable::pruned_to_pos(mem),
-            Self::Layer(layer) => layer.parent.pruned_to_pos(),
-            Self::Checkpoint { inner, .. } => inner.pruned_to_pos(),
+            Self::Base(mem) => Readable::pruning_boundary(mem),
+            Self::Layer(layer) => layer.parent.pruning_boundary(),
+            Self::Checkpoint { inner, .. } => inner.pruning_boundary(),
         }
     }
 
@@ -590,11 +589,13 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         }
         let root = self.root();
         let size = self.size();
-        let pruned_to_pos = self.pruned_to_pos();
+        let leaves = self.leaves();
+        let pruning_boundary = self.pruning_boundary();
+        let pruning_pos = Position::try_from(pruning_boundary).expect("valid pruning_boundary");
 
         // Collect pinned nodes (peaks at the prune boundary).
         let mut pinned_nodes = BTreeMap::new();
-        for pos in F::nodes_to_pin(size, pruned_to_pos) {
+        for pos in F::nodes_to_pin(leaves, pruning_boundary) {
             let d = self
                 .get_node(pos)
                 .expect("pinned node must exist in batch chain");
@@ -602,14 +603,14 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         }
 
         // Collect retained nodes above the prune boundary.
-        let mut retained = Vec::with_capacity((*size - *pruned_to_pos) as usize);
-        for p in *pruned_to_pos..*size {
+        let mut retained = Vec::with_capacity((*size - *pruning_pos) as usize);
+        for p in *pruning_pos..*size {
             retained.push(self.get_node(Position::new(p)).expect("node in range"));
         }
 
         *self = Self::Base(Mem::from_pruned_with_retained(
             root,
-            pruned_to_pos,
+            pruning_pos,
             pinned_nodes,
             retained,
         ));
@@ -654,8 +655,8 @@ impl<F: Family, D: Digest> Readable for MerkleizedBatch<F, D> {
         Self::root(self)
     }
 
-    fn pruned_to_pos(&self) -> Position<F> {
-        Self::pruned_to_pos(self)
+    fn pruning_boundary(&self) -> Location<F> {
+        Self::pruning_boundary(self)
     }
 
     fn proof(

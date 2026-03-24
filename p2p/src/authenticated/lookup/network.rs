@@ -145,6 +145,7 @@ impl<
             self.context.with_label("spawner"),
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
+                send_batch_size: self.cfg.send_batch_size,
                 ping_frequency: self.cfg.ping_frequency,
             },
         );

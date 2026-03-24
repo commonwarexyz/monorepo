@@ -1,51 +1,109 @@
-//! Manages outstanding fetch requests
+//! Manages outstanding fetch requests with monotonically increasing request IDs.
+//!
+//! Each request is assigned a unique ID when added. This prevents stale futures
+//! from colliding with fresh requests at the same location after a target update.
 
 use crate::{mmr::Location, qmdb::sync::engine::IndexedFetchResult};
 use commonware_cryptography::Digest;
+use commonware_utils::channel::oneshot;
 use futures::stream::FuturesUnordered;
-use std::{collections::BTreeSet, future::Future, pin::Pin};
+use std::{
+    collections::{BTreeMap, HashMap},
+    future::Future,
+    pin::Pin,
+};
 
-/// Manages outstanding fetch requests
+/// Unique identifier for a fetch request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct Id(u64);
+
+/// Manages outstanding fetch requests.
 pub(super) struct Requests<Op, D: Digest, E> {
-    /// Futures that will resolve to batches of operations
+    /// Futures that will resolve to fetch results.
     #[allow(clippy::type_complexity)]
     futures: FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>>,
-    /// Start locations of outstanding requests
-    /// Each element corresponds to an element in `futures` and vice versa
-    locations: BTreeSet<Location>,
+
+    /// Counter for assigning unique request IDs.
+    next_id: u64,
+
+    /// Active requests keyed by ID. Removing an entry drops the cancel sender,
+    /// causing the resolver's `cancel_rx.await` to return `Err`.
+    tracked: HashMap<Id, (Location, oneshot::Sender<()>)>,
+
+    /// Reverse index from location to request ID, for gap detection.
+    by_location: BTreeMap<Location, Id>,
 }
 
 impl<Op, D: Digest, E> Requests<Op, D, E> {
-    /// Create a new empty set of outstanding requests
     pub fn new() -> Self {
         Self {
             futures: FuturesUnordered::new(),
-            locations: BTreeSet::new(),
+            next_id: 0,
+            tracked: HashMap::new(),
+            by_location: BTreeMap::new(),
         }
     }
 
-    /// Add a new outstanding request
-    pub fn add(
+    /// Allocate the next request ID. Use with [`Self::insert`] after building
+    /// the future that embeds this ID.
+    pub const fn next_id(&mut self) -> Id {
+        let id = Id(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
+    /// Register a request with a previously allocated ID. If a request already
+    /// exists at `start_loc`, the old one is superseded (its cancel sender is
+    /// dropped and its future will be discarded when it completes).
+    pub fn insert(
         &mut self,
+        id: Id,
         start_loc: Location,
+        cancel_tx: oneshot::Sender<()>,
         future: Pin<Box<dyn Future<Output = IndexedFetchResult<Op, D, E>> + Send>>,
     ) {
-        self.locations.insert(start_loc);
+        if let Some(old_id) = self.by_location.insert(start_loc, id) {
+            self.tracked.remove(&old_id);
+        }
+        self.tracked.insert(id, (start_loc, cancel_tx));
         self.futures.push(future);
     }
 
-    /// Remove a request from `self.locations` by its starting location.
-    /// Doesn't remove from `self.futures` as it would be expensive.
-    pub fn remove(&mut self, start_loc: Location) {
-        self.locations.remove(&start_loc);
+    /// Complete a request by ID. Returns `true` if it was tracked.
+    pub fn remove(&mut self, id: Id) -> bool {
+        if let Some((loc, _cancel_tx)) = self.tracked.remove(&id) {
+            // Only remove from by_location if it still points to this ID.
+            // A newer request may have superseded this location.
+            if self.by_location.get(&loc) == Some(&id) {
+                self.by_location.remove(&loc);
+            }
+            true
+        } else {
+            false
+        }
     }
 
-    /// Get the set of outstanding request locations
-    pub const fn locations(&self) -> &BTreeSet<Location> {
-        &self.locations
+    /// Remove all requests at locations before `loc`. Dropped cancel senders
+    /// signal resolvers to abort.
+    pub fn remove_before(&mut self, loc: Location) {
+        let keep = self.by_location.split_off(&loc);
+        for id in self.by_location.values() {
+            self.tracked.remove(id);
+        }
+        self.by_location = keep;
     }
 
-    /// Get a mutable reference to the futures stream
+    /// Iterate over outstanding request locations in ascending order.
+    pub fn locations(&self) -> impl Iterator<Item = &Location> {
+        self.by_location.keys()
+    }
+
+    /// Check if a location has an outstanding request.
+    pub fn contains(&self, loc: &Location) -> bool {
+        self.by_location.contains_key(loc)
+    }
+
+    /// Get a mutable reference to the futures stream.
     #[allow(clippy::type_complexity)]
     pub fn futures_mut(
         &mut self,
@@ -56,7 +114,7 @@ impl<Op, D: Digest, E> Requests<Op, D, E> {
 
     /// Get the number of outstanding requests
     pub fn len(&self) -> usize {
-        self.locations.len()
+        self.tracked.len()
     }
 }
 

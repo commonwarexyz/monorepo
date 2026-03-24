@@ -12,15 +12,16 @@ use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, W
 use commonware_consensus::types::{Epoch, EpochPhase, Epocher, FixedEpocher};
 use commonware_cryptography::{
     bls12381::{
-        dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Output, PlayerAck},
+        dkg::{observe, DealerPrivMsg, DealerPubMsg, Info, Logs, Output, PlayerAck},
         primitives::{
             group::Share,
             sharing::{Mode, ModeVersion},
             variant::Variant,
         },
     },
+    ed25519::Batch,
     transcript::Summary,
-    Hasher, PublicKey, Signer,
+    BatchVerifier, Hasher, PublicKey, Signer,
 };
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
@@ -144,6 +145,7 @@ where
     P: Manager<PublicKey = C::PublicKey>,
     H: Hasher,
     C: Signer,
+    Batch: BatchVerifier<PublicKey = C::PublicKey>,
     V: Variant,
 {
     /// Create a new DKG [Actor] and its associated [Mailbox].
@@ -514,10 +516,19 @@ where
                         }
 
                         // Finalize the round before acknowledging
-                        let logs = storage.logs(epoch);
+                        //
+                        // TODO(#3453): Minimize end-of-epoch processing via pre-verify
+                        let mut logs = Logs::<_, _, N3f1>::new(round.clone());
+                        for (dealer, log) in storage.logs(epoch) {
+                            logs.record(dealer, log);
+                        }
                         let (success, next_round, next_output, next_share) =
                             if let Some(ps) = player_state.take() {
-                                match ps.finalize::<N3f1>(logs, &Sequential) {
+                                match ps.finalize::<N3f1, Batch>(
+                                    &mut self.context,
+                                    logs,
+                                    &Sequential,
+                                ) {
                                     Ok((new_output, new_share)) => (
                                         true,
                                         epoch_state.round + 1,
@@ -532,7 +543,11 @@ where
                                     ),
                                 }
                             } else {
-                                match observe::<_, _, N3f1>(round.clone(), logs, &Sequential) {
+                                match observe::<_, _, N3f1, Batch>(
+                                    &mut self.context,
+                                    logs,
+                                    &Sequential,
+                                ) {
                                     Ok(output) => (true, epoch_state.round + 1, Some(output), None),
                                     Err(_) => (
                                         false,

@@ -81,7 +81,7 @@ struct Inner<D: Digest> {
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
-    pruned_to_pos: Position,
+    pruning_boundary: Position,
 }
 
 impl<D: Digest> Inner<D> {
@@ -158,7 +158,7 @@ pub struct Mmr<E: RStorage + Clock + Metrics, D: Digest> {
 const NODE_PREFIX: u8 = 0;
 
 /// Prefix used for the key storing the pruning boundary (as a leaf index) in the metadata.
-const PRUNED_TO_PREFIX: u8 = 1;
+const PRUNING_BOUNDARY_PREFIX: u8 = 1;
 
 impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
@@ -213,18 +213,18 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// count.
     pub fn bounds(&self) -> std::ops::Range<Location> {
         let inner = self.inner.read();
-        Location::try_from(inner.pruned_to_pos).expect("valid pruned_to_pos")..inner.leaves()
+        Location::try_from(inner.pruning_boundary).expect("valid pruning_boundary")..inner.leaves()
     }
 
-    /// Adds the pinned nodes based on `prune_pos` to `mem_mmr`.
+    /// Adds the pinned nodes based on `prune_loc` to `mem_mmr`.
     async fn add_extra_pinned_nodes(
         mem_mmr: &mut MemMmr<D>,
         metadata: &Metadata<E, U64, Vec<u8>>,
         journal: &Journal<E, D>,
-        prune_pos: Position,
+        prune_loc: Location,
     ) -> Result<(), Error> {
         let mut pinned_nodes = BTreeMap::new();
-        for pos in nodes_to_pin(prune_pos) {
+        for pos in nodes_to_pin(prune_loc) {
             let digest = Self::get_from_metadata_or_journal(metadata, journal, pos).await?;
             pinned_nodes.insert(pos, digest);
         }
@@ -260,7 +260,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             let mem_mmr = MemMmr::init(
                 MemConfig {
                     nodes: vec![],
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 hasher,
@@ -268,7 +268,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             return Ok(Self {
                 inner: RwLock::new(Inner {
                     state: MerkleizedBatch::Base(mem_mmr),
-                    pruned_to_pos: Position::new(0),
+                    pruning_boundary: Position::new(0),
                 }),
                 journal,
                 metadata,
@@ -280,16 +280,16 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         // Make sure the journal's oldest retained node is as expected based on the last pruning
         // boundary stored in metadata. If they don't match, prune the journal to the appropriate
         // location.
-        let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
-        let metadata_pruned_to = Location::new(metadata.get(&key).map_or(0, |bytes| {
+        let key: U64 = U64::new(PRUNING_BOUNDARY_PREFIX, 0);
+        let metadata_pruning_boundary = Location::new(metadata.get(&key).map_or(0, |bytes| {
             u64::from_be_bytes(
                 bytes
                     .as_slice()
                     .try_into()
-                    .expect("metadata pruned_to is not 8 bytes"),
+                    .expect("metadata pruning_boundary is not 8 bytes"),
             )
         }));
-        let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
+        let metadata_prune_pos = Position::try_from(metadata_pruning_boundary)?;
         let journal_bounds_start = journal.reader().await.bounds().start;
         if *metadata_prune_pos > journal_bounds_start {
             // Metadata is ahead of journal (crashed before completing journal prune).
@@ -351,20 +351,22 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         }
 
         // Initialize the mem_mmr in the "prune_all" state.
+        let journal_leaves = Location::try_from(journal_size)?;
+        let effective_prune_loc = Location::try_from(effective_prune_pos)?;
         let mut pinned_nodes = Vec::new();
-        for pos in nodes_to_pin(journal_size) {
+        for pos in nodes_to_pin(journal_leaves) {
             let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
         let mut mem_mmr = MemMmr::init(
             MemConfig {
                 nodes: vec![],
-                pruned_to: Location::try_from(journal_size)?,
+                pruning_boundary: journal_leaves,
                 pinned_nodes,
             },
             hasher,
         )?;
-        Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, effective_prune_pos)
+        Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, effective_prune_loc)
             .await?;
 
         if let Some(leaf) = orphaned_leaf {
@@ -390,7 +392,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
             // Prune mem_mmr and reinstate pinned nodes.
             let mut pn = BTreeMap::new();
-            for p in nodes_to_pin(effective_prune_pos) {
+            for p in nodes_to_pin(effective_prune_loc) {
                 let d = mem_mmr.get_node_unchecked(p);
                 pn.insert(p, *d);
             }
@@ -401,7 +403,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         Ok(Self {
             inner: RwLock::new(Inner {
                 state: MerkleizedBatch::Base(mem_mmr),
-                pruned_to_pos: effective_prune_pos,
+                pruning_boundary: effective_prune_pos,
             }),
             journal,
             metadata,
@@ -474,20 +476,22 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         let mut metadata = Metadata::init(context.with_label("mmr_metadata"), metadata_cfg).await?;
 
         // Write the pruning boundary.
-        let pruning_boundary_key = U64::new(PRUNED_TO_PREFIX, 0);
+        let pruning_boundary_key = U64::new(PRUNING_BOUNDARY_PREFIX, 0);
         metadata.put(
             pruning_boundary_key,
             cfg.range.start.as_u64().to_be_bytes().into(),
         );
 
         // Write the required pinned nodes to metadata.
+        let journal_leaves = Location::try_from(journal_size)?;
+        let prune_loc = cfg.range.start;
         if let Some(pinned_nodes) = cfg.pinned_nodes {
             // Use caller-provided pinned nodes.
-            let expected_pinned_nodes = nodes_to_pin(prune_pos).count();
+            let expected_pinned_nodes = nodes_to_pin(prune_loc).count();
             if pinned_nodes.len() != expected_pinned_nodes {
                 return Err(Error::InvalidPinnedNodes.into());
             }
-            let nodes_to_pin_persisted = nodes_to_pin(prune_pos);
+            let nodes_to_pin_persisted = nodes_to_pin(prune_loc);
             for (pos, digest) in nodes_to_pin_persisted.zip(pinned_nodes.iter()) {
                 metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             }
@@ -496,7 +500,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         // Create the in-memory MMR with the pinned nodes required for its size. This must be
         // performed *before* pruning the journal to range.start to ensure all pinned nodes are
         // present.
-        let nodes_to_pin_mem = nodes_to_pin(journal_size);
+        let nodes_to_pin_mem = nodes_to_pin(journal_leaves);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
             let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
@@ -505,7 +509,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         let mut mem_mmr = MemMmr::init(
             MemConfig {
                 nodes: vec![],
-                pruned_to: Location::try_from(journal_size)?,
+                pruning_boundary: journal_leaves,
                 pinned_nodes: mem_pinned_nodes,
             },
             hasher,
@@ -514,7 +518,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
         // This must also be done before pruning.
         if prune_pos < journal_size {
-            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_pos).await?;
+            Self::add_extra_pinned_nodes(&mut mem_mmr, &metadata, &journal, prune_loc).await?;
         }
 
         // Sync metadata before pruning so pinned nodes are persisted for crash recovery.
@@ -526,7 +530,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         Ok(Self {
             inner: RwLock::new(Inner {
                 state: MerkleizedBatch::Base(mem_mmr),
-                pruned_to_pos: prune_pos,
+                pruning_boundary: prune_pos,
             }),
             journal,
             metadata,
@@ -539,28 +543,24 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
     /// disk. Return the computed set of required nodes.
     async fn update_metadata(
         &mut self,
-        prune_to_pos: Position,
+        prune_to_loc: Location,
     ) -> Result<BTreeMap<Position, D>, Error> {
-        assert!(prune_to_pos >= self.inner.get_mut().pruned_to_pos);
+        let prune_to_pos = Position::try_from(prune_to_loc)?;
+        assert!(prune_to_pos >= self.inner.get_mut().pruning_boundary);
 
         let mut pinned_nodes = BTreeMap::new();
-        for pos in nodes_to_pin(prune_to_pos) {
+        for pos in nodes_to_pin(prune_to_loc) {
             let digest = self.get_node(pos).await?.expect(
-                "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
+                "pinned node should exist if prune_to_loc is no less than pruning_boundary_loc",
             );
             self.metadata
                 .put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             pinned_nodes.insert(pos, digest);
         }
 
-        let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
-        self.metadata.put(
-            key,
-            Location::try_from(prune_to_pos)?
-                .as_u64()
-                .to_be_bytes()
-                .into(),
-        );
+        let key: U64 = U64::new(PRUNING_BOUNDARY_PREFIX, 0);
+        self.metadata
+            .put(key, prune_to_loc.as_u64().to_be_bytes().into());
 
         self.metadata.sync().await.map_err(Error::Metadata)?;
 
@@ -614,7 +614,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             // Recompute pinned nodes for the journal's pruning boundary, since we'll
             // rebuild the state after flushing.
             let mut pinned_nodes = BTreeMap::new();
-            for pos in nodes_to_pin(inner.pruned_to_pos) {
+            let pruning_boundary_loc =
+                Location::try_from(inner.pruning_boundary).expect("valid pruning_boundary");
+            for pos in nodes_to_pin(pruning_boundary_loc) {
                 let digest = inner.state.get_node(pos).expect("pinned node in state");
                 pinned_nodes.insert(pos, digest);
             }
@@ -642,7 +644,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             let root = inner.state.root();
 
             // Add peaks at the sync target position (needed for batch merkleize).
-            for pos in nodes_to_pin(sync_target_size) {
+            let sync_target_loc = Location::try_from(sync_target_size).expect("valid size");
+            for pos in nodes_to_pin(sync_target_loc) {
                 pinned_nodes.entry(pos).or_insert_with(|| {
                     inner
                         .state
@@ -672,7 +675,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
             if loc > inner.leaves() {
                 return Err(Error::LeafOutOfBounds(loc));
             }
-            if pos <= inner.pruned_to_pos {
+            if pos <= inner.pruning_boundary {
                 return Ok(());
             }
         }
@@ -682,7 +685,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
         // event of a pruning failure.
-        let pinned_nodes = self.update_metadata(pos).await?;
+        let pinned_nodes = self.update_metadata(loc).await?;
 
         self.journal.prune(*pos).await?;
         let inner = self.inner.get_mut();
@@ -692,7 +695,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         let prune_loc = Location::try_from(pos)?;
         mmr.prune(prune_loc).expect("prune boundary is in bounds");
         mmr.add_pinned_nodes(pinned_nodes);
-        inner.pruned_to_pos = pos;
+        inner.pruning_boundary = pos;
         Ok(())
     }
 
@@ -860,7 +863,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
         // event of a pruning failure.
-        self.update_metadata(prune_to_pos).await?;
+        self.update_metadata(prune_to).await?;
 
         // Don't actually prune the journal to simulate failure
         Ok(())
@@ -945,11 +948,11 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         let destination_leaf = match current_leaves.checked_sub(leaves_to_remove as u64) {
             Some(dest) => dest,
             None => {
-                let pruned_to_pos = self.inner.get_mut().pruned_to_pos;
-                return Err(if pruned_to_pos == 0 {
+                let pruning_boundary = self.inner.get_mut().pruning_boundary;
+                return Err(if pruning_boundary == 0 {
                     Error::Empty
                 } else {
-                    Error::ElementPruned(pruned_to_pos - 1)
+                    Error::ElementPruned(pruning_boundary - 1)
                 });
             }
         };
@@ -957,8 +960,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         let destination_loc = Location::new(destination_leaf);
         let new_size = Position::try_from(destination_loc).expect("valid leaf");
 
-        let pruned_to_pos = self.inner.get_mut().pruned_to_pos;
-        if new_size < pruned_to_pos {
+        let pruning_boundary = self.inner.get_mut().pruning_boundary;
+        if new_size < pruning_boundary {
             return Err(Error::ElementPruned(new_size));
         }
 
@@ -977,7 +980,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         // Rebuild the state from journal/metadata at the target size.
         let inner = self.inner.get_mut();
         let mut pinned_nodes = Vec::new();
-        for pos in nodes_to_pin(new_size) {
+        let new_size_loc = Location::try_from(new_size).expect("valid size");
+        for pos in nodes_to_pin(new_size_loc) {
             pinned_nodes.push(
                 Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?,
             );
@@ -991,7 +995,9 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
         let MerkleizedBatch::Base(mmr) = &mut inner.state else {
             unreachable!("state should be Base after assignment");
         };
-        Self::add_extra_pinned_nodes(mmr, &self.metadata, &self.journal, inner.pruned_to_pos)
+        let pruning_boundary_loc =
+            Location::try_from(inner.pruning_boundary).expect("valid pruning_boundary");
+        Self::add_extra_pinned_nodes(mmr, &self.metadata, &self.journal, pruning_boundary_loc)
             .await?;
 
         Ok(())
@@ -1000,7 +1006,7 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Mmr<E, D> {
 
 /// The [`Readable`] implementation delegates to the in-memory state. After [`Mmr::sync`],
 /// only pinned peaks remain in memory, so [`Readable::get_node`] returns `None` for most
-/// positions. [`Readable::pruned_to_pos`] returns the journal prune boundary (set by
+/// positions. [`Readable::pruning_boundary`] returns the journal prune boundary (set by
 /// [`Mmr::prune`]), not the in-memory boundary.
 impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
     type Family = Family;
@@ -1019,8 +1025,8 @@ impl<E: RStorage + Clock + Metrics, D: Digest> Readable for Mmr<E, D> {
         self.inner.read().state.root()
     }
 
-    fn pruned_to_pos(&self) -> Position {
-        self.inner.read().pruned_to_pos
+    fn pruning_boundary(&self) -> Location {
+        Location::try_from(self.inner.read().pruning_boundary).expect("valid pruning_boundary")
     }
 
     fn proof(
@@ -2191,16 +2197,16 @@ mod tests {
             let original_size = mmr.size();
             let original_leaves = mmr.leaves();
             let original_root = mmr.root();
-            let original_pruned_to = mmr.bounds().start;
-            let original_pruned_to_pos = Position::try_from(original_pruned_to).unwrap();
+            let original_pruning_boundary = mmr.bounds().start;
+            let original_pruning_pos = Position::try_from(original_pruning_boundary).unwrap();
 
             // Sync with boundaries that extend beyond existing data (partial overlap).
-            let lower_bound_loc = original_pruned_to;
+            let lower_bound_loc = original_pruning_boundary;
             let upper_bound_loc = original_leaves + 6; // Extend beyond existing data
 
             let mut expected_nodes = BTreeMap::new();
-            for pos in *original_pruned_to_pos..*original_size {
-                let pos = Position::new(pos);
+            for i in *original_pruning_pos..*original_size {
+                let pos = Position::new(i);
                 expected_nodes.insert(pos, mmr.get_node(pos).await.unwrap().unwrap());
             }
 
@@ -2225,8 +2231,8 @@ mod tests {
             assert_eq!(sync_mmr.root(), original_root);
 
             // Check that existing nodes are preserved in the overlapping range.
-            for pos in *original_pruned_to_pos..*original_size {
-                let pos = Position::new(pos);
+            for i in *original_pruning_pos..*original_size {
+                let pos = Position::new(i);
                 assert_eq!(
                     sync_mmr.get_node(pos).await.unwrap(),
                     expected_nodes.get(&pos).cloned()
@@ -2298,7 +2304,7 @@ mod tests {
                     .await
                     .unwrap();
             metadata.clear();
-            let key = U64::new(PRUNED_TO_PREFIX, 0);
+            let key = U64::new(PRUNING_BOUNDARY_PREFIX, 0);
             metadata.put(key, 0u64.to_be_bytes().to_vec());
             metadata.sync().await.unwrap();
             drop(metadata);
@@ -3032,9 +3038,9 @@ mod tests {
             };
             ref_mmr.apply(changeset).unwrap();
             let expected_size = ref_mmr.size();
-            let prune_pos = Position::try_from(Location::new(100)).unwrap();
+            let prune_loc = Location::new(100);
             let mut pinned = Vec::new();
-            for pos in nodes_to_pin(prune_pos) {
+            for pos in nodes_to_pin(prune_loc) {
                 pinned.push(ref_mmr.get_node(pos).await.unwrap().unwrap());
             }
             ref_mmr.destroy().await.unwrap();
@@ -3105,7 +3111,7 @@ mod tests {
     }
 
     /// Regression: update_leaf on a synced-out leaf must return ElementPruned, not panic.
-    /// Before the fix, Readable::pruned_to_pos returned the journal's prune boundary
+    /// Before the fix, `Readable::pruning_boundary` returned the journal's prune boundary
     /// (which could be 0), so the batch accepted the update. During merkleize, get_node
     /// returned None for the synced-out sibling and hit an expect panic.
     #[test_traced]

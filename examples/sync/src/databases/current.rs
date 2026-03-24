@@ -45,7 +45,7 @@ pub type Operation = FixedOperation<Key, Value>;
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
     let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
     Config {
-        mmr: MmrConfig {
+        mmr_config: MmrConfig {
             journal_partition: "mmr-journal".into(),
             metadata_partition: "mmr-metadata".into(),
             items_per_blob: NZU64!(4096),
@@ -53,7 +53,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
             thread_pool: None,
             page_cache: page_cache.clone(),
         },
-        log: FConfig {
+        journal_config: FConfig {
             partition: "log-journal".into(),
             items_per_blob: NZU64!(4096),
             write_buffer: NZUsize!(4096),

@@ -28,7 +28,7 @@ pub struct Config<F: Family, D: Digest> {
     pub nodes: Vec<D>,
 
     /// The leaf location up to which pruning has been performed, or 0 if never pruned.
-    pub pruned_to: Location<F>,
+    pub pruning_boundary: Location<F>,
 
     /// The pinned nodes, in the order expected by [`Family::nodes_to_pin`].
     pub pinned_nodes: Vec<D>,
@@ -40,7 +40,7 @@ pub struct Config<F: Family, D: Digest> {
 /// `Arc::make_mut`, which is in-place when the refcount is 1 and COW-copies otherwise.
 #[derive(Clone, Debug)]
 struct MemInner<F: Family, D: Digest> {
-    /// The retained nodes, starting at `pruned_to_pos`.
+    /// The retained nodes, starting at `pruning_boundary`.
     nodes: VecDeque<D>,
 
     /// The highest position for which pruning has been performed, or 0 if never pruned.
@@ -48,7 +48,7 @@ struct MemInner<F: Family, D: Digest> {
     /// # Invariant
     ///
     /// This is always leaf-aligned (the position corresponding to some `Location`).
-    pruned_to_pos: Position<F>,
+    pruning_boundary: Position<F>,
 
     /// Auxiliary map from node position to the digest of any pinned node.
     pinned_nodes: BTreeMap<Position<F>, D>,
@@ -59,14 +59,14 @@ struct MemInner<F: Family, D: Digest> {
 
 impl<F: Family, D: Digest> MemInner<F, D> {
     fn pos_to_index(&self, pos: Position<F>) -> usize {
-        *pos.checked_sub(*self.pruned_to_pos).unwrap() as usize
+        *pos.checked_sub(*self.pruning_boundary).unwrap() as usize
     }
 }
 
 /// A basic, `no_std`-compatible Merkle structure where all nodes are stored in-memory.
 ///
 /// Nodes are either _retained_, _pruned_, or _pinned_. Retained nodes are stored in the main
-/// deque. Pruned nodes precede `pruned_to_pos` and are no longer stored unless they are still
+/// deque. Pruned nodes precede `pruning_boundary` and are no longer stored unless they are still
 /// required for root computation or proof generation, in which case they are kept in
 /// `pinned_nodes`.
 ///
@@ -86,7 +86,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
         Self {
             inner: Arc::new(MemInner {
                 nodes: VecDeque::new(),
-                pruned_to_pos: Position::new(0),
+                pruning_boundary: Position::new(0),
                 pinned_nodes: BTreeMap::new(),
                 root,
             }),
@@ -98,23 +98,24 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// # Errors
     ///
     /// Returns [`Error::InvalidPinnedNodes`] if the number of pinned nodes doesn't match the
-    /// expected count for `config.pruned_to`.
+    /// expected count for `config.pruning_boundary`.
     ///
     /// Returns [`Error::InvalidSize`] if the resulting size is invalid.
     pub fn init(
         config: Config<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Result<Self, Error<F>> {
-        let pruned_to_pos = Position::try_from(config.pruned_to)?;
+        let pruning_boundary = Position::try_from(config.pruning_boundary)?;
 
-        let Some(size) = pruned_to_pos.checked_add(config.nodes.len() as u64) else {
+        let Some(size) = pruning_boundary.checked_add(config.nodes.len() as u64) else {
             return Err(Error::InvalidSize(u64::MAX));
         };
         if !size.is_valid_size() {
             return Err(Error::InvalidSize(*size));
         }
 
-        let expected_pinned_positions = F::nodes_to_pin(size, pruned_to_pos);
+        let leaves = Location::try_from(size).expect("valid size");
+        let expected_pinned_positions = F::nodes_to_pin(leaves, config.pruning_boundary);
         if config.pinned_nodes.len() != expected_pinned_positions.len() {
             return Err(Error::InvalidPinnedNodes);
         }
@@ -124,12 +125,12 @@ impl<F: Family, D: Digest> Mem<F, D> {
             .zip(config.pinned_nodes)
             .collect();
         let nodes = VecDeque::from(config.nodes);
-        let root = Self::compute_root(hasher, &nodes, &pinned_nodes, pruned_to_pos);
+        let root = Self::compute_root(hasher, &nodes, &pinned_nodes, pruning_boundary);
 
         Ok(Self {
             inner: Arc::new(MemInner {
                 nodes,
-                pruned_to_pos,
+                pruning_boundary,
                 pinned_nodes,
                 root,
             }),
@@ -143,17 +144,17 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// Returns [`Error::InvalidPinnedNodes`] if the provided pinned node count is invalid for the
     /// given state.
     ///
-    /// Returns [`Error::LocationOverflow`] if `pruned_to` exceeds [`Family::MAX_LEAVES`].
+    /// Returns [`Error::LocationOverflow`] if `pruning_boundary` exceeds [`Family::MAX_LEAVES`].
     pub fn from_components(
         hasher: &impl Hasher<F, Digest = D>,
         nodes: Vec<D>,
-        pruned_to: Location<F>,
+        pruning_boundary: Location<F>,
         pinned_nodes: Vec<D>,
     ) -> Result<Self, Error<F>> {
         Self::init(
             Config {
                 nodes,
-                pruned_to,
+                pruning_boundary,
                 pinned_nodes,
             },
             hasher,
@@ -167,13 +168,13 @@ impl<F: Family, D: Digest> Mem<F, D> {
     #[cfg(feature = "std")]
     pub(crate) fn from_pruned(
         root: D,
-        pruned_to_pos: Position<F>,
+        pruning_boundary: Position<F>,
         pinned_nodes: BTreeMap<Position<F>, D>,
     ) -> Self {
         Self {
             inner: Arc::new(MemInner {
                 nodes: VecDeque::new(),
-                pruned_to_pos,
+                pruning_boundary,
                 pinned_nodes,
                 root,
             }),
@@ -187,14 +188,14 @@ impl<F: Family, D: Digest> Mem<F, D> {
     #[cfg(feature = "std")]
     pub(crate) fn from_pruned_with_retained(
         root: D,
-        pruned_to_pos: Position<F>,
+        pruning_boundary: Position<F>,
         pinned_nodes: BTreeMap<Position<F>, D>,
         retained_nodes: Vec<D>,
     ) -> Self {
         Self {
             inner: Arc::new(MemInner {
                 nodes: VecDeque::from(retained_nodes),
-                pruned_to_pos,
+                pruning_boundary,
                 pinned_nodes,
                 root,
             }),
@@ -206,17 +207,17 @@ impl<F: Family, D: Digest> Mem<F, D> {
         hasher: &impl Hasher<F, Digest = D>,
         nodes: &VecDeque<D>,
         pinned_nodes: &BTreeMap<Position<F>, D>,
-        pruned_to_pos: Position<F>,
+        pruning_boundary: Position<F>,
     ) -> D {
-        let size = Position::new(nodes.len() as u64 + *pruned_to_pos);
+        let size = Position::new(nodes.len() as u64 + *pruning_boundary);
         let leaves = Location::try_from(size).expect("invalid merkle size");
         let get_node = |pos: Position<F>| -> &D {
-            if pos < pruned_to_pos {
+            if pos < pruning_boundary {
                 return pinned_nodes
                     .get(&pos)
                     .expect("requested node is pruned and not pinned");
             }
-            let index = (*pos - *pruned_to_pos) as usize;
+            let index = (*pos - *pruning_boundary) as usize;
             &nodes[index]
         };
         let peaks = F::peaks(size).map(|(p, _)| get_node(p));
@@ -225,7 +226,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
     /// Return the total number of nodes, irrespective of any pruning.
     pub fn size(&self) -> Position<F> {
-        Position::new(self.inner.nodes.len() as u64 + *self.inner.pruned_to_pos)
+        Position::new(self.inner.nodes.len() as u64 + *self.inner.pruning_boundary)
     }
 
     /// Return the total number of leaves.
@@ -236,7 +237,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// Returns `[start, end)` where `start` is the oldest retained leaf and `end` is the total
     /// leaf count.
     pub fn bounds(&self) -> Range<Location<F>> {
-        Location::try_from(self.inner.pruned_to_pos).expect("valid pruned_to_pos")..self.leaves()
+        Location::try_from(self.inner.pruning_boundary).expect("valid pruning_boundary")
+            ..self.leaves()
     }
 
     /// Return a new iterator over the peaks.
@@ -256,7 +258,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ///
     /// Panics if the requested node does not exist.
     pub(crate) fn get_node_unchecked(&self, pos: Position<F>) -> &D {
-        if pos < self.inner.pruned_to_pos {
+        if pos < self.inner.pruning_boundary {
             return self
                 .inner
                 .pinned_nodes
@@ -274,7 +276,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// Panics if `pos` precedes the oldest retained position.
     fn pos_to_index(&self, pos: Position<F>) -> usize {
         assert!(
-            pos >= self.inner.pruned_to_pos,
+            pos >= self.inner.pruning_boundary,
             "pos precedes oldest retained position"
         );
         self.inner.pos_to_index(pos)
@@ -282,16 +284,16 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
     /// Return the requested node or `None` if it is not stored.
     pub fn get_node(&self, pos: Position<F>) -> Option<D> {
-        if pos < self.inner.pruned_to_pos {
+        if pos < self.inner.pruning_boundary {
             return self.inner.pinned_nodes.get(&pos).copied();
         }
 
         self.inner.nodes.get(self.pos_to_index(pos)).copied()
     }
 
-    /// Get the nodes (position + digest) that need to be pinned when pruned to `prune_pos`.
-    pub(crate) fn nodes_to_pin(&self, prune_pos: Position<F>) -> BTreeMap<Position<F>, D> {
-        F::nodes_to_pin(self.size(), prune_pos)
+    /// Get the nodes (position + digest) that need to be pinned when pruned to `prune_loc`.
+    pub(crate) fn nodes_to_pin(&self, prune_loc: Location<F>) -> BTreeMap<Position<F>, D> {
+        F::nodes_to_pin(self.leaves(), prune_loc)
             .into_iter()
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
@@ -310,30 +312,30 @@ impl<F: Family, D: Digest> Mem<F, D> {
         }
 
         let pos = Position::try_from(loc)?;
-        if pos <= self.inner.pruned_to_pos {
+        if pos <= self.inner.pruning_boundary {
             return Ok(());
         }
 
-        self.prune_to_pos(pos);
+        self.prune_to_loc(loc);
         Ok(())
     }
 
     /// Prune all retained nodes.
     pub fn prune_all(&mut self) {
         if !self.inner.nodes.is_empty() {
-            let pos = self.size();
-            self.prune_to_pos(pos);
+            self.prune_to_loc(self.leaves());
         }
     }
 
-    /// Position-based pruning. Assumes `pos` is leaf-aligned.
-    fn prune_to_pos(&mut self, pos: Position<F>) {
-        let pinned = self.nodes_to_pin(pos);
+    /// Location-based pruning.
+    fn prune_to_loc(&mut self, loc: Location<F>) {
+        let pinned = self.nodes_to_pin(loc);
+        let pos = Position::try_from(loc).expect("valid location");
         let retained_nodes = self.pos_to_index(pos);
         let inner = Arc::make_mut(&mut self.inner);
         inner.pinned_nodes = pinned;
         inner.nodes.drain(0..retained_nodes);
-        inner.pruned_to_pos = pos;
+        inner.pruning_boundary = pos;
     }
 
     /// Return an inclusion proof for the element at location `loc`.
@@ -381,8 +383,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
     /// Get the digests of nodes that need to be pinned at the provided pruning boundary.
     #[cfg(test)]
-    pub(crate) fn node_digests_to_pin(&self, prune_pos: Position<F>) -> Vec<D> {
-        F::nodes_to_pin(self.size(), prune_pos)
+    pub(crate) fn node_digests_to_pin(&self, prune_loc: Location<F>) -> Vec<D> {
+        F::nodes_to_pin(self.leaves(), prune_loc)
             .into_iter()
             .map(|pos| *self.get_node_unchecked(pos))
             .collect()
@@ -403,15 +405,15 @@ impl<F: Family, D: Digest> Mem<F, D> {
     #[allow(dead_code)]
     pub(crate) fn truncate(&mut self, new_size: Position<F>, hasher: &impl Hasher<F, Digest = D>) {
         debug_assert!(new_size.is_valid_size());
-        debug_assert!(new_size >= self.inner.pruned_to_pos);
-        let keep = (*new_size - *self.inner.pruned_to_pos) as usize;
+        debug_assert!(new_size >= self.inner.pruning_boundary);
+        let keep = (*new_size - *self.inner.pruning_boundary) as usize;
         let inner = Arc::make_mut(&mut self.inner);
         inner.nodes.truncate(keep);
         inner.root = Self::compute_root(
             hasher,
             &inner.nodes,
             &inner.pinned_nodes,
-            inner.pruned_to_pos,
+            inner.pruning_boundary,
         );
     }
 
@@ -481,8 +483,8 @@ impl<F: Family, D: Digest> Readable for Mem<F, D> {
         *self.root()
     }
 
-    fn pruned_to_pos(&self) -> Position<F> {
-        self.inner.pruned_to_pos
+    fn pruning_boundary(&self) -> Location<F> {
+        Location::try_from(self.inner.pruning_boundary).expect("valid pruning_boundary")
     }
 
     fn proof(
@@ -638,7 +640,7 @@ mod tests {
             assert!(Mem::<F, D>::init(
                 Config {
                     nodes: vec![],
-                    pruned_to: Location::new(0),
+                    pruning_boundary: Location::new(0),
                     pinned_nodes: vec![],
                 },
                 &hasher,
@@ -649,7 +651,7 @@ mod tests {
                 Mem::<F, D>::init(
                     Config {
                         nodes: vec![],
-                        pruned_to: Location::new(8),
+                        pruning_boundary: Location::new(8),
                         pinned_nodes: vec![],
                     },
                     &hasher,
@@ -661,7 +663,7 @@ mod tests {
                 Mem::<F, D>::init(
                     Config {
                         nodes: vec![],
-                        pruned_to: Location::new(0),
+                        pruning_boundary: Location::new(0),
                         pinned_nodes: vec![hasher.digest(b"dummy")],
                     },
                     &hasher,
@@ -671,12 +673,11 @@ mod tests {
 
             let mem = build::<F>(&hasher, 50);
             let prune_loc = Location::<F>::new(25);
-            let prune_pos = Position::try_from(prune_loc).unwrap();
-            let pinned_nodes = mem.node_digests_to_pin(prune_pos);
+            let pinned_nodes = mem.node_digests_to_pin(prune_loc);
             assert!(Mem::<F, D>::init(
                 Config {
                     nodes: vec![],
-                    pruned_to: prune_loc,
+                    pruning_boundary: prune_loc,
                     pinned_nodes,
                 },
                 &hasher,

@@ -163,17 +163,16 @@ impl merkle::Family for Family {
         iterator::PeakIterator::new(size)
     }
 
-    fn nodes_to_pin(_size: Position, prune_pos: Position) -> alloc::vec::Vec<Position> {
-        iterator::nodes_to_pin(prune_pos).collect()
+    fn nodes_to_pin(_leaves: Location, prune_loc: Location) -> alloc::vec::Vec<Position> {
+        iterator::nodes_to_pin(prune_loc).collect()
     }
 
     fn children(pos: Position, height: u32) -> (Position, Position) {
         (pos - (1 << height), pos - 1)
     }
 
-    fn parent_heights(size: Position) -> impl Iterator<Item = u32> {
-        let leaves = Location::try_from(size).expect("invalid mmr size");
-        let count = leaves.as_u64().trailing_ones();
+    fn parent_heights(leaves: Location) -> impl Iterator<Item = u32> {
+        let count = (*leaves).trailing_ones();
         1..=count
     }
 
