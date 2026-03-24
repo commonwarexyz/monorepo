@@ -36,18 +36,9 @@ pub async fn recv_prioritized<C, D>(
     low: &mut mpsc::Receiver<D>,
 ) -> Prioritized<C, D> {
     select! {
-        msg = control.recv() => match msg {
-            Some(msg) => Prioritized::Control(msg),
-            None => Prioritized::Closed,
-        },
-        msg = high.recv() => match msg {
-            Some(msg) => Prioritized::Data(msg),
-            None => Prioritized::Closed,
-        },
-        msg = low.recv() => match msg {
-            Some(msg) => Prioritized::Data(msg),
-            None => Prioritized::Closed,
-        },
+        msg = control.recv() => msg.map_or(Prioritized::Closed, Prioritized::Control),
+        msg = high.recv() => msg.map_or(Prioritized::Closed, Prioritized::Data),
+        msg = low.recv() => msg.map_or(Prioritized::Closed, Prioritized::Data),
     }
 }
 

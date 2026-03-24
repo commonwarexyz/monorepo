@@ -77,6 +77,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
     /// Priority order: control > high > low. Only consumes messages that are
     /// already ready (via `try_recv`), so this reduces runtime write calls
     /// without introducing a per-connection timer or extra buffering latency.
+    #[allow(clippy::too_many_arguments)]
     fn extend_send_many<V>(
         peer: &C,
         batch_size: usize,
