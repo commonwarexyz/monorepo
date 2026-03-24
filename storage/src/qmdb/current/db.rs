@@ -389,7 +389,7 @@ where
             .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
             .ok_or_else(|| Error::DataCorrupted("pruned ops leaves overflow"))?;
         if rewind_size < pruned_bits {
-            return Err(Error::Journal(JournalError::ItemPruned(rewind_size)));
+            return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
         }
 
         // Ensure the target commit's logical range is fully representable with the current

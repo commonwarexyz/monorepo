@@ -21,6 +21,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::NonZeroU64;
+use std::collections::HashMap;
 
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<E, C, H> = authenticated::Journal<E, C, H>;
@@ -40,38 +41,6 @@ enum SnapshotUndo<K> {
         key: K,
         new_loc: Location,
     },
-}
-
-/// Find the state of `key` immediately before `before_loc`.
-///
-/// Returns:
-/// - `Some(loc)` if the key's prior state was an active update at `loc`
-/// - `None` if the key's prior state was deleted or absent
-async fn find_previous_update_loc<U, C>(
-    reader: &C,
-    lower_bound: Location,
-    before_loc: Location,
-    key: &U::Key,
-) -> Result<Option<Location>, Error>
-where
-    U: Update,
-    C: Reader<Item = Operation<U>>,
-{
-    let mut loc = *before_loc;
-    while loc > *lower_bound {
-        loc -= 1;
-        match reader.read(loc).await? {
-            Operation::Update(update) if update.key() == key => {
-                return Ok(Some(Location::new(loc)));
-            }
-            Operation::Delete(deleted_key) if &deleted_key == key => {
-                return Ok(None);
-            }
-            _ => {}
-        }
-    }
-
-    Ok(None)
 }
 
 /// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
@@ -290,47 +259,58 @@ where
                 return Err(Error::Journal(JournalError::ItemPruned(*rewind_floor)));
             }
 
-            let mut removed_ops = Vec::with_capacity((current_size - rewind_size) as usize);
-            for loc in rewind_size..current_size {
-                removed_ops.push((Location::new(loc), reader.read(loc).await?));
-            }
-
-            let mut undos = Vec::with_capacity(removed_ops.len());
+            let mut undos = Vec::with_capacity((current_size - rewind_size) as usize);
             let mut active_keys_delta = 0isize;
-            for (loc, op) in removed_ops.into_iter().rev() {
+            let mut prior_state_by_key: HashMap<U::Key, Option<Location>> = HashMap::new();
+
+            // Reconstruct key state once in a single pass from the rewind floor.
+            for loc in *rewind_floor..current_size {
+                let op = reader.read(loc).await?;
+                let op_loc = Location::new(loc);
                 match op {
                     Operation::CommitFloor(_, _) => {}
                     Operation::Update(update) => {
                         let key = update.key().clone();
-                        let previous_loc =
-                            find_previous_update_loc::<U, _>(&reader, rewind_floor, loc, &key)
-                                .await?;
-                        if let Some(previous_loc) = previous_loc {
-                            undos.push(SnapshotUndo::Replace {
-                                key,
-                                old_loc: loc,
-                                new_loc: previous_loc,
-                            });
-                            continue;
+                        let previous_loc = prior_state_by_key.get(&key).copied().flatten();
+
+                        if loc >= rewind_size {
+                            if let Some(previous_loc) = previous_loc {
+                                undos.push(SnapshotUndo::Replace {
+                                    key: key.clone(),
+                                    old_loc: op_loc,
+                                    new_loc: previous_loc,
+                                });
+                            } else {
+                                active_keys_delta -= 1;
+                                undos.push(SnapshotUndo::Remove {
+                                    key: key.clone(),
+                                    old_loc: op_loc,
+                                });
+                            }
                         }
 
-                        active_keys_delta -= 1;
-                        undos.push(SnapshotUndo::Remove { key, old_loc: loc });
+                        prior_state_by_key.insert(key, Some(op_loc));
                     }
                     Operation::Delete(key) => {
-                        let previous_loc =
-                            find_previous_update_loc::<U, _>(&reader, rewind_floor, loc, &key)
-                                .await?;
-                        if let Some(previous_loc) = previous_loc {
-                            active_keys_delta += 1;
-                            undos.push(SnapshotUndo::Insert {
-                                key,
-                                new_loc: previous_loc,
-                            });
+                        let previous_loc = prior_state_by_key.get(&key).copied().flatten();
+
+                        if loc >= rewind_size {
+                            if let Some(previous_loc) = previous_loc {
+                                active_keys_delta += 1;
+                                undos.push(SnapshotUndo::Insert {
+                                    key: key.clone(),
+                                    new_loc: previous_loc,
+                                });
+                            }
                         }
+
+                        prior_state_by_key.insert(key, None);
                     }
                 }
             }
+
+            // Undo operations must run from newest to oldest removed operation.
+            undos.reverse();
 
             (rewind_floor, undos, active_keys_delta)
         };
