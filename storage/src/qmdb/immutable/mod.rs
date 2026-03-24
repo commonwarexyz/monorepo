@@ -432,10 +432,12 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
         self.journal.apply_batch(batch.journal_finalized).await?;
 
         // Apply snapshot diffs.
+        let bounds = self.journal.reader().await.bounds();
         for diff in batch.snapshot_diffs {
             match diff {
                 batch::SnapshotDiff::Insert { key, new_loc } => {
-                    self.snapshot.insert(&key, new_loc);
+                    self.snapshot
+                        .insert_and_prune(&key, new_loc, |v| *v < bounds.start);
                 }
             }
         }

@@ -1248,6 +1248,10 @@ pub mod tests {
                 UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
                     .await
                     .unwrap();
+            let initial_size = db.bounds().await.end;
+            let initial_root = db.root();
+            let initial_ops_root = db.ops_root();
+            let initial_floor = db.inactivity_floor_loc();
 
             let metadata_a = val(900);
             let first_range = commit_writes_with_metadata(
@@ -1256,6 +1260,7 @@ pub mod tests {
                 Some(metadata_a),
             )
             .await;
+            assert_eq!(first_range.start, initial_size);
             let size_before = db.bounds().await.end;
             let root_before = db.root();
             let ops_root_before = db.ops_root();
@@ -1308,7 +1313,36 @@ pub mod tests {
             assert_eq!(reopened.get(&key(1)).await.unwrap(), Some(val(1)));
             assert_eq!(reopened.get(&key(2)).await.unwrap(), None);
 
-            reopened.destroy().await.unwrap();
+            let mut reopened = reopened;
+            reopened.rewind(initial_size).await.unwrap();
+            assert_eq!(reopened.bounds().await.end, initial_size);
+            assert_eq!(reopened.root(), initial_root);
+            assert_eq!(reopened.ops_root(), initial_ops_root);
+            assert_eq!(reopened.inactivity_floor_loc(), initial_floor);
+            assert_eq!(reopened.get_metadata().await.unwrap(), None);
+            assert_eq!(reopened.get(&key(0)).await.unwrap(), None);
+            assert_eq!(reopened.get(&key(1)).await.unwrap(), None);
+            assert_eq!(reopened.get(&key(2)).await.unwrap(), None);
+
+            reopened.commit().await.unwrap();
+            drop(reopened);
+
+            let reopened_initial: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen_initial"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened_initial.bounds().await.end, initial_size);
+            assert_eq!(reopened_initial.root(), initial_root);
+            assert_eq!(reopened_initial.ops_root(), initial_ops_root);
+            assert_eq!(reopened_initial.inactivity_floor_loc(), initial_floor);
+            assert_eq!(reopened_initial.get_metadata().await.unwrap(), None);
+            assert_eq!(reopened_initial.get(&key(0)).await.unwrap(), None);
+            assert_eq!(reopened_initial.get(&key(1)).await.unwrap(), None);
+            assert_eq!(reopened_initial.get(&key(2)).await.unwrap(), None);
+
+            reopened_initial.destroy().await.unwrap();
         });
     }
 
@@ -1377,7 +1411,7 @@ pub mod tests {
             db.commit().await.unwrap();
             drop(db);
 
-            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+            let mut reopened: UnorderedVariableDb = UnorderedVariableDb::init(
                 context.with_label("reopen_pruned_recovery"),
                 variable_config::<OneCap>(partition, &context),
             )
@@ -1388,7 +1422,44 @@ pub mod tests {
             assert_eq!(reopened.bounds().await.end, target_size);
             assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_value));
 
-            reopened.destroy().await.unwrap();
+            let metadata_after_rewind = val(30_000);
+            let new_key = key(1);
+            let new_value = val(30_001);
+            let expected_end = commit_writes_with_metadata(
+                &mut reopened,
+                [(new_key, Some(new_value))],
+                Some(metadata_after_rewind),
+            )
+            .await
+            .end;
+            let root_after_new_write = reopened.root();
+            let ops_root_after_new_write = reopened.ops_root();
+            assert_eq!(reopened.bounds().await.end, expected_end);
+            assert_eq!(reopened.get_metadata().await.unwrap(), Some(metadata_after_rewind));
+            assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_value));
+            assert_eq!(reopened.get(&new_key).await.unwrap(), Some(new_value));
+
+            drop(reopened);
+            let reopened_after_new_write: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen_pruned_after_new_write"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened_after_new_write.root(), root_after_new_write);
+            assert_eq!(reopened_after_new_write.ops_root(), ops_root_after_new_write);
+            assert_eq!(reopened_after_new_write.bounds().await.end, expected_end);
+            assert_eq!(
+                reopened_after_new_write.get_metadata().await.unwrap(),
+                Some(metadata_after_rewind)
+            );
+            assert_eq!(reopened_after_new_write.get(&key0).await.unwrap(), Some(target_value));
+            assert_eq!(
+                reopened_after_new_write.get(&new_key).await.unwrap(),
+                Some(new_value)
+            );
+
+            reopened_after_new_write.destroy().await.unwrap();
         });
     }
 
