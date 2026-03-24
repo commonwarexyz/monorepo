@@ -1390,7 +1390,7 @@ pub mod tests {
                 .find_map(|(idx, (size, floor, root, ops_root, value))| {
                     let removed_commits = history.len() - idx - 1;
                     if removed_commits >= 3 && *size > bounds.start && *floor >= pruned_bits {
-                        Some((*size, root.clone(), ops_root.clone(), value.clone()))
+                        Some((*size, *root, *ops_root, *value))
                     } else {
                         None
                     }
