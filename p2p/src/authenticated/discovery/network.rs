@@ -151,6 +151,7 @@ impl<
             self.context.with_label("spawner"),
             spawner::Config {
                 mailbox_size: self.cfg.mailbox_size,
+                send_batch_size: self.cfg.send_batch_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
                 max_peer_set_size: self.cfg.max_peer_set_size,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
