@@ -5,7 +5,8 @@ use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
-    mmr::Location,
+    journal::contiguous::variable::Config as VConfig,
+    mmr::{journaled::Config as MmrConfig, Location},
     qmdb::{
         immutable::{Config, Immutable},
         verify_proof,
@@ -91,19 +92,42 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
 }
 
 fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, (RangeCfg<usize>, ())> {
+    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
-        mmr_journal_partition: format!("journal-{suffix}"),
-        mmr_metadata_partition: format!("metadata-{suffix}"),
-        mmr_items_per_blob: NZU64!(ITEMS_PER_BLOB),
-        mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("log-{suffix}"),
-        log_items_per_section: NZU64!(ITEMS_PER_SECTION),
-        log_compression: None,
-        log_codec_config: ((0..=10000).into(), ()),
-        log_write_buffer: NZUsize!(1024),
+        mmr: MmrConfig {
+            journal_partition: format!("journal-{suffix}"),
+            metadata_partition: format!("metadata-{suffix}"),
+            items_per_blob: NZU64!(ITEMS_PER_BLOB),
+            write_buffer: NZUsize!(1024),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        log: VConfig {
+            partition: format!("log-{suffix}"),
+            items_per_section: NZU64!(ITEMS_PER_SECTION),
+            compression: None,
+            codec_config: ((0..=10000).into(), ()),
+            write_buffer: NZUsize!(1024),
+            page_cache,
+        },
         translator: TwoCap,
-        thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+    }
+}
+
+/// Assign locations to pending keys based on sorted order (matching BTreeMap
+/// iteration in `merkleize()`).
+fn assign_pending_locations(
+    pending: &[(Digest, Vec<u8>)],
+    base: Location,
+    keys_set: &mut Vec<(Digest, Location)>,
+    set_locations: &mut Vec<(Digest, Location)>,
+) {
+    let mut sorted_keys: Vec<Digest> = pending.iter().map(|(k, _)| *k).collect();
+    sorted_keys.sort();
+    for (i, key) in sorted_keys.iter().enumerate() {
+        let loc = Location::new(base.as_u64() + i as u64);
+        keys_set.push((*key, loc));
+        set_locations.push((*key, loc));
     }
 }
 
@@ -116,14 +140,13 @@ fn fuzz(input: FuzzInput) {
         let cfg = db_config("fuzz-partition", &context);
         let mut db = Immutable::<_, Digest, Vec<u8>, Sha256, TwoCap>::init(context, cfg)
             .await
-            .unwrap()
-            .into_mutable();
+            .unwrap();
 
-        let mut hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
+        let hasher = commonware_storage::mmr::StandardHasher::<Sha256>::new();
         let mut keys_set = Vec::new();
         let mut set_locations = Vec::new(); // Track locations that contain Set operations
         let mut last_commit_loc = None;
-        let mut uncommitted_ops = Vec::new();
+        let mut pending_sets: Vec<(Digest, Vec<u8>)> = Vec::new();
 
         for op in input.operations {
             match op {
@@ -134,13 +157,10 @@ fn fuzz(input: FuzzInput) {
                     let key = generate_key(&mut rng, key_seed);
                     let value = generate_value(&mut rng, value_size);
 
-                    if !keys_set.iter().any(|(k, _)| k == &key) {
-                        let loc = db.bounds().await.end;
-                        if let Ok(()) = db.set(key, value.clone()).await {
-                            keys_set.push((key, loc));
-                            set_locations.push((key, loc));
-                            uncommitted_ops.push((key, loc));
-                        }
+                    if !keys_set.iter().any(|(k, _): &(Digest, _)| k == &key)
+                        && !pending_sets.iter().any(|(k, _): &(Digest, _)| k == &key)
+                    {
+                        pending_sets.push((key, value));
                     }
                 }
 
@@ -159,25 +179,48 @@ fn fuzz(input: FuzzInput) {
                         None
                     };
 
-                    let (durable_db, _) = db.commit(metadata).await.unwrap();
-                    last_commit_loc = Some(durable_db.bounds().await.end - 1);
-                    uncommitted_ops.clear();
-                    db = durable_db.into_mutable();
+                    assign_pending_locations(
+                        &pending_sets,
+                        db.bounds().await.end,
+                        &mut keys_set,
+                        &mut set_locations,
+                    );
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_sets.drain(..) {
+                            batch = batch.set(k, v);
+                        }
+                        batch.merkleize(metadata).finalize()
+                    };
+                    db.apply_batch(finalized).await.unwrap();
+                    db.commit().await.unwrap();
+                    last_commit_loc = Some(db.bounds().await.end - 1);
                 }
 
                 ImmutableOperation::Prune { loc } => {
                     if let Some(commit_loc) = last_commit_loc {
                         let safe_loc = loc % (commit_loc + 1).as_u64();
                         let safe_loc = Location::new(safe_loc);
-                        let mut merkleized_db = db.into_merkleized();
-                        merkleized_db
-                            .prune(safe_loc)
-                            .await
-                            .expect("prune should not fail");
-                        let oldest = merkleized_db.bounds().await.start;
-                        set_locations.retain(|(_, l)| *l >= oldest);
-                        keys_set.retain(|(_, l)| *l >= oldest);
-                        db = merkleized_db.into_mutable();
+                        assign_pending_locations(
+                            &pending_sets,
+                            db.bounds().await.end,
+                            &mut keys_set,
+                            &mut set_locations,
+                        );
+                        let finalized = {
+                            let mut batch = db.new_batch();
+                            for (k, v) in pending_sets.drain(..) {
+                                batch = batch.set(k, v);
+                            }
+                            batch.merkleize(None).finalize()
+                        };
+                        db.apply_batch(finalized).await.unwrap();
+                        db.commit().await.unwrap();
+                        last_commit_loc = Some(db.bounds().await.end - 1);
+                        db.prune(safe_loc).await.expect("prune should not fail");
+                        let oldest = db.bounds().await.start;
+                        set_locations.retain(|(_, l): &(_, Location)| *l >= oldest);
+                        keys_set.retain(|(_, l): &(_, Location)| *l >= oldest);
                     }
                 }
 
@@ -191,17 +234,26 @@ fn fuzz(input: FuzzInput) {
                         let safe_start = Location::new(safe_start);
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
-                        let (durable_db, _) = db.commit(None).await.unwrap();
-                        last_commit_loc = Some(durable_db.bounds().await.end - 1);
-                        uncommitted_ops.clear();
-                        let merkleized_db = durable_db.into_merkleized();
-                        if let Ok((proof, ops)) =
-                            merkleized_db.proof(safe_start, safe_max_ops).await
-                        {
-                            let root = merkleized_db.root();
-                            let _ = verify_proof(&mut hasher, &proof, safe_start, &ops, &root);
+                        assign_pending_locations(
+                            &pending_sets,
+                            db.bounds().await.end,
+                            &mut keys_set,
+                            &mut set_locations,
+                        );
+                        let finalized = {
+                            let mut batch = db.new_batch();
+                            for (k, v) in pending_sets.drain(..) {
+                                batch = batch.set(k, v);
+                            }
+                            batch.merkleize(None).finalize()
+                        };
+                        db.apply_batch(finalized).await.unwrap();
+                        db.commit().await.unwrap();
+                        last_commit_loc = Some(db.bounds().await.end - 1);
+                        if let Ok((proof, ops)) = db.proof(safe_start, safe_max_ops).await {
+                            let root = db.root();
+                            let _ = verify_proof(&hasher, &proof, safe_start, &ops, &root);
                         }
-                        db = merkleized_db.into_mutable();
                     }
                 }
 
@@ -211,7 +263,7 @@ fn fuzz(input: FuzzInput) {
                     max_ops,
                 } => {
                     let op_count = db.bounds().await.end;
-                    if op_count > 0 && uncommitted_ops.is_empty() {
+                    if op_count > 0 && pending_sets.is_empty() {
                         let safe_size = (size % op_count.as_u64()).max(1);
                         let safe_size = Location::new(safe_size);
                         let safe_start = start_loc % safe_size.as_u64();
@@ -219,13 +271,15 @@ fn fuzz(input: FuzzInput) {
                         let safe_max_ops =
                             NonZeroU64::new((max_ops % MAX_PROOF_OPS).max(1)).unwrap();
 
-                        let merkleized_db = db.into_merkleized();
-                        if safe_start >= merkleized_db.bounds().await.start {
-                            let _ = merkleized_db
+                        let finalized = db.new_batch().merkleize(None).finalize();
+                        db.apply_batch(finalized).await.unwrap();
+                        db.commit().await.unwrap();
+                        last_commit_loc = Some(db.bounds().await.end - 1);
+                        if safe_start >= db.bounds().await.start {
+                            let _ = db
                                 .historical_proof(safe_size, safe_start, safe_max_ops)
                                 .await;
                         }
-                        db = merkleized_db.into_mutable();
                     }
                 }
 
@@ -242,19 +296,42 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 ImmutableOperation::Root => {
-                    let (durable_db, _) = db.commit(None).await.unwrap();
-                    last_commit_loc = Some(durable_db.bounds().await.end - 1);
-                    uncommitted_ops.clear();
-                    let clean_db = durable_db.into_merkleized();
-                    let _ = clean_db.root();
-                    db = clean_db.into_mutable();
+                    assign_pending_locations(
+                        &pending_sets,
+                        db.bounds().await.end,
+                        &mut keys_set,
+                        &mut set_locations,
+                    );
+                    let finalized = {
+                        let mut batch = db.new_batch();
+                        for (k, v) in pending_sets.drain(..) {
+                            batch = batch.set(k, v);
+                        }
+                        batch.merkleize(None).finalize()
+                    };
+                    db.apply_batch(finalized).await.unwrap();
+                    db.commit().await.unwrap();
+                    last_commit_loc = Some(db.bounds().await.end - 1);
+                    let _ = db.root();
                 }
             }
         }
 
-        let (durable_db, _) = db.commit(None).await.unwrap();
-        let clean_db = durable_db.into_merkleized();
-        clean_db.destroy().await.unwrap();
+        assign_pending_locations(
+            &pending_sets,
+            db.bounds().await.end,
+            &mut keys_set,
+            &mut set_locations,
+        );
+        let finalized = {
+            let mut batch = db.new_batch();
+            for (k, v) in pending_sets.drain(..) {
+                batch = batch.set(k, v);
+            }
+            batch.merkleize(None).finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
+        db.destroy().await.unwrap();
     });
 }
 

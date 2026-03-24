@@ -38,20 +38,17 @@
 //! bitmap chunk with the ops subtree root: `hash(chunk || ops_subtree_root)`. Nodes above the
 //! grafting height (position 14) use standard MMR hashing with ops-space positions.
 //!
-//! The grafted MMR is incrementally maintained via [GraftedHasher] + `DirtyMmr::merkleize` when
-//! grafted leaves change.
+//! The grafted MMR is incrementally maintained via [GraftedHasher] when grafted leaves
+//! change.
 
-use crate::mmr::{
-    hasher::Hasher as HasherTrait, iterator::pos_to_height, mem::CleanMmr,
-    storage::Storage as StorageTrait, Error, Location, Position, StandardHasher,
+use crate::{
+    merkle::{hasher::Hasher as HasherTrait, storage::Storage as StorageTrait},
+    mmr::{self, iterator::pos_to_height, Error, Location, Position, Readable, StandardHasher},
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::bitmap::BitMap;
-use core::cmp::Ordering;
+use core::{cmp::Ordering, marker::PhantomData};
 use tracing::debug;
-
-/// Minimum number of items before switching from serial to parallel computation.
-pub(super) const MIN_TO_PARALLELIZE: usize = 20;
 
 /// Get the grafting height for a bitmap with chunk size determined by N.
 pub(crate) const fn height<const N: usize>() -> u32 {
@@ -152,12 +149,13 @@ pub(super) fn grafted_to_ops_pos(grafted_pos: Position, grafting_height: u32) ->
 /// generated against the grafted MMR are compatible with the ops MMR. This adapter
 /// intercepts [HasherTrait::node_digest] to perform the conversion via [grafted_to_ops_pos];
 /// all other methods delegate unchanged.
-pub(super) struct GraftedHasher<H: HasherTrait> {
+#[derive(Clone)]
+pub(super) struct GraftedHasher<H: HasherTrait<mmr::Family>> {
     inner: H,
     grafting_height: u32,
 }
 
-impl<H: HasherTrait> GraftedHasher<H> {
+impl<H: HasherTrait<mmr::Family>> GraftedHasher<H> {
     pub(super) const fn new(inner: H, grafting_height: u32) -> Self {
         Self {
             inner,
@@ -166,45 +164,21 @@ impl<H: HasherTrait> GraftedHasher<H> {
     }
 }
 
-impl<H: HasherTrait> HasherTrait for GraftedHasher<H> {
+impl<H: HasherTrait<mmr::Family>> HasherTrait<mmr::Family> for GraftedHasher<H> {
     type Digest = H::Digest;
-    type Inner = H::Inner;
 
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> Self::Digest {
-        self.inner.leaf_digest(pos, element)
+    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+        self.inner.hash(parts)
     }
 
     fn node_digest(
-        &mut self,
+        &self,
         pos: Position,
         left: &Self::Digest,
         right: &Self::Digest,
     ) -> Self::Digest {
         let ops_pos = grafted_to_ops_pos(pos, self.grafting_height);
         self.inner.node_digest(ops_pos, left, right)
-    }
-
-    fn root<'a>(
-        &mut self,
-        leaves: Location,
-        peak_digests: impl Iterator<Item = &'a Self::Digest>,
-    ) -> Self::Digest {
-        self.inner.root(leaves, peak_digests)
-    }
-
-    fn digest(&mut self, data: &[u8]) -> Self::Digest {
-        self.inner.digest(data)
-    }
-
-    fn inner(&mut self) -> &mut Self::Inner {
-        self.inner.inner()
-    }
-
-    fn fork(&self) -> impl HasherTrait<Digest = Self::Digest> {
-        GraftedHasher {
-            inner: self.inner.fork(),
-            grafting_height: self.grafting_height,
-        }
     }
 }
 
@@ -218,6 +192,7 @@ impl<H: HasherTrait> HasherTrait for GraftedHasher<H> {
 /// - **Below or above**: standard MMR hash using ops-space positions.
 /// - **At**: the children form an ops subtree root, which is combined with a bitmap chunk element
 ///   to reconstruct the grafted leaf digest.
+#[derive(Clone)]
 pub(super) struct Verifier<'a, H: CHasher> {
     hasher: StandardHasher<H>,
     grafting_height: u32,
@@ -233,7 +208,11 @@ impl<'a, H: CHasher> Verifier<'a, H> {
     /// Create a new Verifier.
     ///
     /// `start_chunk_index` is the chunk index corresponding to `chunks[0]`.
-    pub(super) fn new(grafting_height: u32, start_chunk_index: u64, chunks: Vec<&'a [u8]>) -> Self {
+    pub(super) const fn new(
+        grafting_height: u32,
+        start_chunk_index: u64,
+        chunks: Vec<&'a [u8]>,
+    ) -> Self {
         Self {
             hasher: StandardHasher::new(),
             grafting_height,
@@ -243,25 +222,15 @@ impl<'a, H: CHasher> Verifier<'a, H> {
     }
 }
 
-impl<H: CHasher> HasherTrait for Verifier<'_, H> {
+impl<H: CHasher> HasherTrait<mmr::Family> for Verifier<'_, H> {
     type Digest = H::Digest;
-    type Inner = H;
 
-    fn leaf_digest(&mut self, pos: Position, element: &[u8]) -> H::Digest {
-        self.hasher.leaf_digest(pos, element)
-    }
-
-    fn fork(&self) -> impl HasherTrait<Digest = H::Digest> {
-        Verifier::<H> {
-            hasher: StandardHasher::new(),
-            grafting_height: self.grafting_height,
-            chunks: self.chunks.clone(),
-            start_chunk_index: self.start_chunk_index,
-        }
+    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
+        self.hasher.hash(parts)
     }
 
     fn node_digest(
-        &mut self,
+        &self,
         pos: Position,
         left_digest: &H::Digest,
         right_digest: &H::Digest,
@@ -291,59 +260,57 @@ impl<H: CHasher> HasherTrait for Verifier<'_, H> {
                 if chunk.iter().all(|&b| b == 0) {
                     ops_subtree_root
                 } else {
-                    self.hasher.inner().update(chunk);
-                    self.hasher.inner().update(&ops_subtree_root);
-                    self.hasher.inner().finalize()
+                    self.hash([chunk, ops_subtree_root.as_ref()])
                 }
             }
         }
     }
-
-    fn root<'a>(
-        &mut self,
-        leaves: Location,
-        peak_digests: impl Iterator<Item = &'a H::Digest>,
-    ) -> H::Digest {
-        self.hasher.root(leaves, peak_digests)
-    }
-
-    fn digest(&mut self, data: &[u8]) -> H::Digest {
-        self.hasher.digest(data)
-    }
-
-    fn inner(&mut self) -> &mut H {
-        self.hasher.inner()
-    }
 }
 
-/// A virtual [StorageTrait] that presents a grafted [CleanMmr] and ops MMR as a single combined
+/// A virtual [StorageTrait] that presents a grafted MMR and ops MMR as a single combined
 /// MMR.
 ///
 /// Nodes below the grafting height are served from the ops MMR. Nodes at or above the grafting
 /// height are served from the grafted MMR (with ops-to-grafted position conversion). This allows
 /// standard MMR proof generation to work transparently over the combined structure.
-pub(super) struct Storage<'a, D: Digest, S: StorageTrait<D>> {
-    grafted_mmr: &'a CleanMmr<D>,
+pub(super) struct Storage<
+    'a,
+    D: Digest,
+    G: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
+    S: StorageTrait<mmr::Family, Digest = D>,
+> {
+    grafted_mmr: &'a G,
     grafting_height: u32,
     ops_mmr: &'a S,
+    _digest: PhantomData<D>,
 }
 
-impl<'a, D: Digest, S: StorageTrait<D>> Storage<'a, D, S> {
+impl<
+        'a,
+        D: Digest,
+        G: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
+        S: StorageTrait<mmr::Family, Digest = D>,
+    > Storage<'a, D, G, S>
+{
     /// Creates a new [Storage] instance.
-    pub(super) const fn new(
-        grafted_mmr: &'a CleanMmr<D>,
-        grafting_height: u32,
-        ops_mmr: &'a S,
-    ) -> Self {
+    pub(super) const fn new(grafted_mmr: &'a G, grafting_height: u32, ops_mmr: &'a S) -> Self {
         Self {
             grafted_mmr,
             grafting_height,
             ops_mmr,
+            _digest: PhantomData,
         }
     }
 }
 
-impl<D: Digest, S: StorageTrait<D>> StorageTrait<D> for Storage<'_, D, S> {
+impl<
+        D: Digest,
+        G: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
+        S: StorageTrait<mmr::Family, Digest = D>,
+    > StorageTrait<mmr::Family> for Storage<'_, D, G, S>
+{
+    type Digest = D;
+
     async fn size(&self) -> Position {
         self.ops_mmr.size().await
     }
@@ -360,38 +327,44 @@ impl<D: Digest, S: StorageTrait<D>> StorageTrait<D> for Storage<'_, D, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{
-        conformance::build_test_mmr,
-        iterator::PeakIterator,
-        mem::{CleanMmr, DirtyMmr},
-        verification, Position, StandardHasher,
-    };
+    use crate::merkle::conformance::build_test_mmr;
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
+    use mmr::{iterator::PeakIterator, mem::Mmr, verification, Location, Position, StandardHasher};
 
-    /// Precompute grafted leaf digests and return a [CleanMmr] in grafted-space.
+    /// Precompute grafted leaf digests and return a [Mmr] in grafted-space.
     ///
     /// Each grafted leaf is `hash(chunk || ops_subtree_root)` where `ops_subtree_root` is the ops
     /// MMR node at the mapped position.
     fn build_test_grafted_mmr(
-        standard: &mut StandardHasher<Sha256>,
-        ops_mmr: &CleanMmr<sha256::Digest>,
+        standard: &StandardHasher<Sha256>,
+        ops_mmr: &Mmr<sha256::Digest>,
         chunks: &[sha256::Digest],
         grafting_height: u32,
-    ) -> CleanMmr<sha256::Digest> {
-        let mut dirty = DirtyMmr::new();
-        for (i, chunk) in chunks.iter().enumerate() {
-            let ops_pos = chunk_idx_to_ops_pos(i as u64, grafting_height);
-            let ops_subtree_root = ops_mmr
-                .get_node(ops_pos)
-                .expect("ops MMR missing node at mapped position");
-            standard.inner().update(chunk);
-            standard.inner().update(&ops_subtree_root);
-            dirty.add_leaf_digest(standard.inner().finalize());
+    ) -> Mmr<sha256::Digest> {
+        let grafted_hasher = GraftedHasher::new(standard.clone(), grafting_height);
+        let mut grafted_mmr = Mmr::new(&grafted_hasher);
+        if !chunks.is_empty() {
+            // Use a separate hasher for leaf digest computation to avoid borrow conflict
+            // with grafted_hasher (which borrows standard via fork()).
+            let leaf_hasher = StandardHasher::<Sha256>::new();
+            let changeset = {
+                let mut batch = grafted_mmr.new_batch();
+                for (i, chunk) in chunks.iter().enumerate() {
+                    let ops_pos = chunk_idx_to_ops_pos(i as u64, grafting_height);
+                    let ops_subtree_root = ops_mmr
+                        .get_node(ops_pos)
+                        .expect("ops MMR missing node at mapped position");
+                    batch = batch.add_leaf_digest(
+                        leaf_hasher.hash([chunk.as_ref(), ops_subtree_root.as_ref()]),
+                    );
+                }
+                batch.merkleize(&grafted_hasher).finalize()
+            };
+            grafted_mmr.apply(changeset).unwrap();
         }
-        let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
-        dirty.merkleize(&mut grafted_hasher, None)
+        grafted_mmr
     }
 
     #[test_traced]
@@ -485,16 +458,13 @@ mod tests {
         executor.start(|_| async move {
             const NUM_ELEMENTS: u64 = 200;
 
-            let mut standard: StandardHasher<Sha256> = StandardHasher::new();
-            let mmr = CleanMmr::new(&mut standard);
-            let ops_mmr = build_test_mmr(&mut standard, mmr, NUM_ELEMENTS);
+            let standard: StandardHasher<Sha256> = StandardHasher::new();
+            let mmr = Mmr::new(&standard);
+            let ops_mmr = build_test_mmr(&standard, mmr, NUM_ELEMENTS);
 
             // Generate the elements that build_test_mmr uses: sha256(i.to_be_bytes()).
             let elements: Vec<_> = (0..NUM_ELEMENTS)
-                .map(|i| {
-                    standard.inner().update(&i.to_be_bytes());
-                    standard.inner().finalize()
-                })
+                .map(|i| standard.digest(&i.to_be_bytes()))
                 .collect();
 
             // Height 0 grafting (1:1 mapping).
@@ -502,13 +472,13 @@ mod tests {
                 assert_eq!(chunk_idx_to_ops_pos(0, 0), Position::new(0));
                 assert_eq!(chunk_idx_to_ops_pos(1, 0), Position::new(1));
 
-                let grafted = build_test_grafted_mmr(&mut standard, &ops_mmr, &elements, 0);
+                let grafted = build_test_grafted_mmr(&standard, &ops_mmr, &elements, 0);
                 let gp = ops_to_grafted_pos(chunk_idx_to_ops_pos(0, 0), 0);
                 assert!(grafted.get_node(gp).is_some());
             }
 
             // Height 1 grafting (each grafted leaf covers 2 ops leaves).
-            let ops_mmr = build_test_mmr(&mut standard, ops_mmr, NUM_ELEMENTS);
+            let ops_mmr = build_test_mmr(&standard, ops_mmr, NUM_ELEMENTS);
             {
                 // Confirm chunk_idx_to_ops_pos mappings at height 1.
                 assert_eq!(chunk_idx_to_ops_pos(0, 1), Position::new(2));
@@ -517,7 +487,7 @@ mod tests {
                 assert_eq!(chunk_idx_to_ops_pos(3, 1), Position::new(12));
                 assert_eq!(chunk_idx_to_ops_pos(4, 1), Position::new(17));
 
-                let grafted = build_test_grafted_mmr(&mut standard, &ops_mmr, &elements, 1);
+                let grafted = build_test_grafted_mmr(&standard, &ops_mmr, &elements, 1);
                 let gp = ops_to_grafted_pos(chunk_idx_to_ops_pos(0, 1), 1);
                 assert!(grafted.get_node(gp).is_some());
             }
@@ -531,36 +501,43 @@ mod tests {
 
     #[test_traced]
     fn test_merkleize_grafted() {
-        let mut standard: StandardHasher<Sha256> = StandardHasher::new();
+        let standard: StandardHasher<Sha256> = StandardHasher::new();
         let grafting_height = 1u32;
 
         // Build ops MMR with 4 leaves.
-        let mut ops_mmr = DirtyMmr::new();
-        for i in 0u8..4 {
-            ops_mmr.add(&mut standard, &Sha256::fill(i));
-        }
-        let ops_mmr = ops_mmr.merkleize(&mut standard, None);
+        let mut ops_mmr = Mmr::new(&standard);
+        let changeset = {
+            let mut batch = ops_mmr.new_batch();
+            for i in 0u8..4 {
+                batch = batch.add(&standard, &Sha256::fill(i));
+            }
+            batch.merkleize(&standard).finalize()
+        };
+        ops_mmr.apply(changeset).unwrap();
 
         let c1 = Sha256::fill(0xF1);
         let c2 = Sha256::fill(0xF2);
 
-        // Build grafted MMR with 2 leaves via DirtyMmr + GraftedHasher.
-        let mut dirty = DirtyMmr::new();
+        // Build grafted MMR with 2 leaves.
+        let grafted_hasher = GraftedHasher::new(standard, grafting_height);
+        let mut grafted = Mmr::new(&grafted_hasher);
         let pos0 = chunk_idx_to_ops_pos(0, grafting_height);
         let pos1 = chunk_idx_to_ops_pos(1, grafting_height);
 
-        let sub0 = ops_mmr.get_node(pos0).unwrap();
-        standard.inner().update(&c1);
-        standard.inner().update(&sub0);
-        dirty.add_leaf_digest(standard.inner().finalize());
+        let changeset = {
+            let leaf_hasher = StandardHasher::<Sha256>::new();
+            let sub0 = ops_mmr.get_node(pos0).unwrap();
+            let batch = grafted
+                .new_batch()
+                .add_leaf_digest(leaf_hasher.hash([c1.as_ref(), sub0.as_ref()]));
 
-        let sub1 = ops_mmr.get_node(pos1).unwrap();
-        standard.inner().update(&c2);
-        standard.inner().update(&sub1);
-        dirty.add_leaf_digest(standard.inner().finalize());
-
-        let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
-        let grafted = dirty.merkleize(&mut grafted_hasher, None);
+            let sub1 = ops_mmr.get_node(pos1).unwrap();
+            batch
+                .add_leaf_digest(leaf_hasher.hash([c2.as_ref(), sub1.as_ref()]))
+                .merkleize(&grafted_hasher)
+                .finalize()
+        };
+        grafted.apply(changeset).unwrap();
 
         // With 4 ops leaves and grafting height 1, the grafted tree has 2 leaves and 1 root.
         // All 3 nodes should be retrievable (via grafted-space positions).
@@ -582,15 +559,20 @@ mod tests {
             let b2 = Sha256::fill(0x02);
             let b3 = Sha256::fill(0x03);
             let b4 = Sha256::fill(0x04);
-            let mut standard: StandardHasher<Sha256> = StandardHasher::new();
+            let hasher: StandardHasher<Sha256> = StandardHasher::new();
 
             // Build an ops MMR with 4 leaves.
-            let mut ops_mmr = DirtyMmr::new();
-            ops_mmr.add(&mut standard, &b1);
-            ops_mmr.add(&mut standard, &b2);
-            ops_mmr.add(&mut standard, &b3);
-            ops_mmr.add(&mut standard, &b4);
-            let ops_mmr = ops_mmr.merkleize(&mut standard, None);
+            let mut ops_mmr = Mmr::new(&hasher);
+            let changeset = {
+                let mut batch = ops_mmr.new_batch();
+                batch = batch.add(&hasher, &b1);
+                batch = batch.add(&hasher, &b2);
+                batch = batch.add(&hasher, &b3);
+                batch = batch.add(&hasher, &b4);
+                batch.merkleize(&hasher).finalize()
+            };
+
+            ops_mmr.apply(changeset).unwrap();
 
             // Bitmap chunk elements (one per grafted leaf).
             let c1 = Sha256::fill(0xF1);
@@ -598,8 +580,7 @@ mod tests {
 
             // With grafting height 1, each grafted leaf covers 2 ops leaves, so 4 ops leaves
             // yield 2 grafted leaves.
-            let grafted =
-                build_test_grafted_mmr(&mut standard, &ops_mmr, &[c1, c2], GRAFTING_HEIGHT);
+            let grafted = build_test_grafted_mmr(&hasher, &ops_mmr, &[c1, c2], GRAFTING_HEIGHT);
 
             let ops_root = *ops_mmr.root();
 
@@ -620,106 +601,94 @@ mod tests {
                             peaks.push(combined.get_node(peak_pos).await.unwrap().unwrap());
                         }
                     }
-                    standard.root(ops_leaves, peaks.iter())
+                    hasher.root(ops_leaves, peaks.iter())
                 };
                 assert_ne!(grafted_root, ops_root);
 
                 // Verify inclusion proofs for each of the 4 ops leaves.
                 {
                     let loc = Location::new(0);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&hasher, &combined, loc..loc + 1)
                         .await
                         .unwrap();
 
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
-                    assert!(proof.verify_element_inclusion(&mut verifier, &b1, loc, &grafted_root));
+                    let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
+                    assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
 
                     let loc = Location::new(1);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&hasher, &combined, loc..loc + 1)
                         .await
                         .unwrap();
-                    assert!(proof.verify_element_inclusion(&mut verifier, &b2, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(&verifier, &b2, loc, &grafted_root));
 
                     let loc = Location::new(2);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&hasher, &combined, loc..loc + 1)
                         .await
                         .unwrap();
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
-                    assert!(proof.verify_element_inclusion(&mut verifier, &b3, loc, &grafted_root));
+                    let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
+                    assert!(proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
 
                     let loc = Location::new(3);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&hasher, &combined, loc..loc + 1)
                         .await
                         .unwrap();
-                    assert!(proof.verify_element_inclusion(&mut verifier, &b4, loc, &grafted_root));
+                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
                 }
 
                 // Verify that manipulated inputs cause proof verification to fail.
                 {
                     let loc = Location::new(3);
-                    let proof = verification::range_proof(&combined, loc..loc + 1)
+                    let proof = verification::range_proof(&hasher, &combined, loc..loc + 1)
                         .await
                         .unwrap();
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
-                    assert!(proof.verify_element_inclusion(&mut verifier, &b4, loc, &grafted_root));
+                    let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 1, vec![&c2]);
+                    assert!(proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
 
                     // Wrong leaf element.
-                    assert!(!proof.verify_element_inclusion(
-                        &mut verifier,
-                        &b3,
-                        loc,
-                        &grafted_root
-                    ));
+                    assert!(!proof.verify_element_inclusion(&verifier, &b3, loc, &grafted_root));
 
                     // Wrong root.
-                    assert!(!proof.verify_element_inclusion(&mut verifier, &b4, loc, &ops_root));
+                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &ops_root));
 
                     // Wrong position.
                     assert!(!proof.verify_element_inclusion(
-                        &mut verifier,
+                        &verifier,
                         &b4,
                         loc + 1,
                         &grafted_root
                     ));
 
                     // Wrong chunk element in the verifier.
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
-                    assert!(!proof.verify_element_inclusion(
-                        &mut verifier,
-                        &b4,
-                        loc,
-                        &grafted_root
-                    ));
+                    let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
+                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
 
                     // Wrong chunk index in the verifier.
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 2, vec![&c2]);
-                    assert!(!proof.verify_element_inclusion(
-                        &mut verifier,
-                        &b4,
-                        loc,
-                        &grafted_root
-                    ));
+                    let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 2, vec![&c2]);
+                    assert!(!proof.verify_element_inclusion(&verifier, &b4, loc, &grafted_root));
                 }
 
                 // Verify range proofs.
                 {
-                    let proof =
-                        verification::range_proof(&combined, Location::new(0)..Location::new(4))
-                            .await
-                            .unwrap();
+                    let proof = verification::range_proof(
+                        &hasher,
+                        &combined,
+                        Location::new(0)..Location::new(4),
+                    )
+                    .await
+                    .unwrap();
                     let range = vec![&b1, &b2, &b3, &b4];
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1, &c2]);
+                    let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1, &c2]);
                     assert!(proof.verify_range_inclusion(
-                        &mut verifier,
+                        &verifier,
                         &range,
                         Location::new(0),
                         &grafted_root
                     ));
 
                     // Fails with incomplete chunk elements.
-                    let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
+                    let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
                     assert!(!proof.verify_range_inclusion(
-                        &mut verifier,
+                        &verifier,
                         &range,
                         Location::new(0),
                         &grafted_root
@@ -730,9 +699,13 @@ mod tests {
             // Add a 5th ops leaf that has no corresponding grafted leaf (it falls below
             // the grafting height boundary since there's no complete chunk for it yet).
             let b5 = Sha256::fill(0x05);
-            let mut ops_mmr = ops_mmr.into_dirty();
-            ops_mmr.add(&mut standard, &b5);
-            let ops_mmr = ops_mmr.merkleize(&mut standard, None);
+            let changeset = {
+                let mut batch = ops_mmr.new_batch();
+                batch = batch.add(&hasher, &b5);
+                batch.merkleize(&hasher).finalize()
+            };
+
+            ops_mmr.apply(changeset).unwrap();
 
             let combined = Storage::new(&grafted, GRAFTING_HEIGHT, &ops_mmr);
             assert_eq!(combined.size().await, ops_mmr.size());
@@ -750,24 +723,24 @@ mod tests {
                         peaks.push(combined.get_node(peak_pos).await.unwrap().unwrap());
                     }
                 }
-                standard.root(ops_leaves, peaks.iter())
+                hasher.root(ops_leaves, peaks.iter())
             };
 
             // Verify inclusion proofs still work for both covered and uncovered ops leaves.
             let loc = Location::new(0);
-            let proof = verification::range_proof(&combined, loc..loc + 1)
+            let proof = verification::range_proof(&hasher, &combined, loc..loc + 1)
                 .await
                 .unwrap();
 
-            let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
-            assert!(proof.verify_element_inclusion(&mut verifier, &b1, loc, &grafted_root));
+            let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![&c1]);
+            assert!(proof.verify_element_inclusion(&verifier, &b1, loc, &grafted_root));
 
-            let mut verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![]);
+            let verifier = Verifier::<Sha256>::new(GRAFTING_HEIGHT, 0, vec![]);
             let loc = Location::new(4);
-            let proof = verification::range_proof(&combined, loc..loc + 1)
+            let proof = verification::range_proof(&hasher, &combined, loc..loc + 1)
                 .await
                 .unwrap();
-            assert!(proof.verify_element_inclusion(&mut verifier, &b5, loc, &grafted_root));
+            assert!(proof.verify_element_inclusion(&verifier, &b5, loc, &grafted_root));
         });
     }
 
@@ -776,14 +749,18 @@ mod tests {
         let grafting_height = 1u32;
         let standard: StandardHasher<Sha256> = StandardHasher::new();
 
-        // Build a grafted MMR with 2 leaves via DirtyMmr + GraftedHasher.
-        let mut dirty = DirtyMmr::new();
+        // Build a grafted MMR with 2 leaves.
         let d0 = Sha256::fill(0x01);
         let d1 = Sha256::fill(0x02);
-        dirty.add_leaf_digest(d0);
-        dirty.add_leaf_digest(d1);
-        let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
-        let grafted = dirty.merkleize(&mut grafted_hasher, None);
+        let grafted_hasher = GraftedHasher::new(standard, grafting_height);
+        let mut grafted = Mmr::new(&grafted_hasher);
+        let changeset = grafted
+            .new_batch()
+            .add_leaf_digest(d0)
+            .add_leaf_digest(d1)
+            .merkleize(&grafted_hasher)
+            .finalize();
+        grafted.apply(changeset).unwrap();
 
         // Check that grafted leaves are retrievable via grafted-space positions.
         let ops_pos_0 = chunk_idx_to_ops_pos(0, grafting_height);
@@ -810,16 +787,25 @@ mod tests {
         // Simulate pruning 4 chunks. The pruned sub-MMR has 4 grafted leaves,
         // mmr_size(4) = 7, with one peak at grafted position 6.
         let pinned_digest = Sha256::fill(0xAA);
-        let grafted_pruned_to_pos = Position::try_from(Location::new(4)).unwrap();
-        assert_eq!(*grafted_pruned_to_pos, 7);
+        let grafted_pruning_boundary = Location::new(4);
+        assert_eq!(*Position::try_from(grafted_pruning_boundary).unwrap(), 7);
 
         // Build a grafted MMR from pruned components + one new leaf.
         let d4 = Sha256::fill(0xBB);
-        let mut dirty =
-            DirtyMmr::from_components(Vec::new(), grafted_pruned_to_pos, vec![pinned_digest]);
-        dirty.add_leaf_digest(d4);
-        let mut grafted_hasher = GraftedHasher::new(standard.fork(), grafting_height);
-        let grafted = dirty.merkleize(&mut grafted_hasher, None);
+        let grafted_hasher = GraftedHasher::new(standard, grafting_height);
+        let mut grafted = Mmr::from_components(
+            &grafted_hasher,
+            Vec::new(),
+            grafted_pruning_boundary,
+            vec![pinned_digest],
+        )
+        .unwrap();
+        let changeset = grafted
+            .new_batch()
+            .add_leaf_digest(d4)
+            .merkleize(&grafted_hasher)
+            .finalize();
+        grafted.apply(changeset).unwrap();
 
         // The pinned peak should be at grafted position 6.
         assert_eq!(grafted.get_node(Position::new(6)), Some(pinned_digest));

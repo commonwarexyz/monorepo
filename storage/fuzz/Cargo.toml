@@ -55,8 +55,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "mmr_operations"
-path = "fuzz_targets/mmr_operations.rs"
+name = "merkle_family_operations"
+path = "fuzz_targets/merkle_family_operations.rs"
 test = false
 doc = false
 bench = false
@@ -197,13 +197,6 @@ bench = false
 [[bin]]
 name = "range_proof"
 path = "fuzz_targets/range_proof.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "extract_pinned_nodes"
-path = "fuzz_targets/extract_pinned_nodes.rs"
 test = false
 doc = false
 bench = false

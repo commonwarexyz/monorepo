@@ -1,6 +1,6 @@
 //! A shared, generic implementation of the _Current_ QMDB.
 //!
-//! The impl blocks in this file defines shared functionality across all Current QMDB variants.
+//! The impl blocks in this file define shared functionality across all Current QMDB variants.
 
 use crate::{
     index::Unordered as UnorderedIndex,
@@ -8,27 +8,23 @@ use crate::{
         contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
+    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher as _, storage::Storage as MerkleStorage},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         self,
-        hasher::Hasher as _,
         iterator::{nodes_to_pin, PeakIterator},
-        storage::Storage as _,
-        Location, Position, Proof, StandardHasher,
+        Location, Position, StandardHasher,
     },
     qmdb::{
         any::{
             self,
             operation::{update::Update, Operation},
-            ValueEncoding,
         },
         current::{
             grafting,
             proof::{OperationProof, RangeProof},
         },
-        operation::Key,
-        store::{self, LogStore, MerkleizedStore, PrunableStore},
-        DurabilityState, Durable, Error, MerkleizationState, NonDurable,
+        Error,
     },
     Persistable,
 };
@@ -40,7 +36,6 @@ use commonware_utils::{bitmap::Prunable as BitMap, sequence::prefixed_u64::U64, 
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use rayon::prelude::*;
-use std::collections::HashSet;
 use tracing::{error, warn};
 
 /// Prefix used for the metadata key for grafted MMR pinned nodes.
@@ -48,42 +43,6 @@ const NODE_PREFIX: u8 = 0;
 
 /// Prefix used for the metadata key for the number of pruned bitmap chunks.
 const PRUNED_CHUNKS_PREFIX: u8 = 1;
-
-mod private {
-    pub trait Sealed {}
-}
-
-/// Trait for valid [Db] type states.
-pub trait State<D: Digest>: private::Sealed + Sized + Send + Sync {
-    /// The merkleization type state for the inner `any::db::Db`.
-    type MerkleizationState: MerkleizationState<D>;
-}
-
-/// Merkleized state: the database has been merkleized and its root is cached.
-pub struct Merkleized<D: Digest> {
-    /// The cached canonical root.
-    /// See the [Root structure](super) section in the module documentation.
-    pub(super) root: D,
-}
-
-impl<D: Digest> private::Sealed for Merkleized<D> {}
-impl<D: Digest> State<D> for Merkleized<D> {
-    type MerkleizationState = mmr::mem::Clean<D>;
-}
-
-/// Unmerkleized state: the database has pending changes not yet merkleized.
-pub struct Unmerkleized {
-    /// Bitmap chunks modified since the last merkleization. Only contains chunks that were
-    /// complete at last merkleization (index < old_grafted_leaves). Chunks completed or created
-    /// since then are covered by the `old_grafted_leaves..new_grafted_leaves` range in
-    /// `into_merkleized`.
-    pub(super) dirty_chunks: HashSet<usize>,
-}
-
-impl private::Sealed for Unmerkleized {}
-impl<D: Digest> State<D> for Unmerkleized {
-    type MerkleizationState = mmr::mem::Dirty;
-}
 
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 pub struct Db<
@@ -93,12 +52,10 @@ pub struct Db<
     H: Hasher,
     U: Send + Sync,
     const N: usize,
-    S: State<DigestOf<H>> = Merkleized<DigestOf<H>>,
-    D: DurabilityState = Durable,
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub(super) any: any::db::Db<E, C, I, H, U, S::MerkleizationState, D>,
+    pub(super) any: any::db::Db<E, C, I, H, U>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
@@ -109,7 +66,7 @@ pub struct Db<
     ///
     /// Internal nodes are hashed using their position in the ops MMR rather than their
     /// grafted position.
-    pub(super) grafted_mmr: mmr::mem::CleanMmr<H::Digest>,
+    pub(super) grafted_mmr: mmr::mem::Mmr<H::Digest>,
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
@@ -119,23 +76,20 @@ pub struct Db<
     /// Optional thread pool for parallelizing grafted leaf computation.
     pub(super) thread_pool: Option<ThreadPool>,
 
-    /// Type state based on whether the database is [Merkleized] or [Unmerkleized].
-    pub(super) state: S,
+    /// The cached canonical root.
+    /// See the [Root structure](super) section in the module documentation.
+    pub(super) root: DigestOf<H>,
 }
 
-// Functionality shared across all DB states, such as most non-mutating operations.
-impl<E, K, V, C, I, H, U, const N: usize, S, D> Db<E, C, I, H, U, N, S, D>
+// Shared read-only functionality.
+impl<E, C, I, H, U, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    S: State<DigestOf<H>>,
-    D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
@@ -149,8 +103,14 @@ where
     }
 
     /// Get the metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<U::Value>, Error> {
         self.any.get_metadata().await
+    }
+
+    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
+    /// retained operations respectively.
+    pub async fn bounds(&self) -> std::ops::Range<Location> {
+        self.any.bounds().await
     }
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
@@ -159,7 +119,7 @@ where
         hasher: &mut H,
         proof: &RangeProof<H::Digest>,
         start_loc: Location,
-        ops: &[Operation<K, V, U>],
+        ops: &[Operation<U>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
@@ -167,58 +127,68 @@ where
     }
 }
 
-// Functionality shared across Merkleized states with non-mutable journal.
-impl<E, K, V, U, C, I, H, D, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
+// Functionality requiring non-mutable journal.
+impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
-    /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR.
-    /// For positions at or above the grafting height, returns grafted MMR node.
-    /// For positions below the grafting height, the ops MMR is used.
-    fn grafted_storage(&self) -> impl mmr::storage::Storage<H::Digest> + '_ {
+    /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR. For positions at or
+    /// above the grafting height, returns grafted MMR node. For positions below the grafting
+    /// height, the ops MMR is used.
+    fn grafted_storage(&self) -> impl MerkleStorage<mmr::Family, Digest = H::Digest> + '_ {
         grafting::Storage::new(
             &self.grafted_mmr,
             grafting::height::<N>(),
             &self.any.log.mmr,
         )
     }
-}
 
-// Root and proof functionality for Clean state with non-mutable journal.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
     /// Returns the canonical root.
     /// See the [Root structure](super) section in the module documentation.
     pub const fn root(&self) -> H::Digest {
-        self.state.root
+        self.root
     }
 
     /// Returns the ops MMR root.
     ///
-    /// This is the root of the raw operations log, without the activity bitmap.
-    /// It is used as the sync target because the sync engine verifies batches
-    /// against the ops MMR, not the canonical root.
+    /// This is the root of the raw operations log, without the activity bitmap. It is used as the
+    /// sync target because the sync engine verifies batches against the ops MMR, not the canonical
+    /// root.
     ///
     /// See the [Root structure](super) section in the module documentation.
     pub fn ops_root(&self) -> H::Digest {
         self.any.log.root()
+    }
+
+    /// Create a new speculative batch of operations with this database as its parent.
+    #[allow(clippy::type_complexity)]
+    pub fn new_batch(
+        &self,
+    ) -> super::batch::UnmerkleizedBatch<
+        '_,
+        E,
+        C,
+        I,
+        H,
+        U,
+        mmr::journaled::Mmr<E, H::Digest>,
+        mmr::mem::Mmr<H::Digest>,
+        BitMap<N>,
+        N,
+    > {
+        super::batch::UnmerkleizedBatch::new(
+            self.any.new_batch(),
+            self,
+            Vec::new(),
+            Vec::new(),
+            &self.grafted_mmr,
+            &self.status,
+        )
     }
 
     /// Returns a proof for the operation at `loc`.
@@ -240,14 +210,14 @@ where
     /// # Errors
     ///
     /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk.
-    /// Returns [mmr::Error::LocationOverflow] if `start_loc` > [mmr::MAX_LOCATION].
+    /// Returns [mmr::Error::LocationOverflow] if `start_loc` > [crate::merkle::Family::MAX_LEAVES].
     /// Returns [mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     pub async fn range_proof(
         &self,
         hasher: &mut H,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<K, V, U>>, Vec<[u8; N]>), Error> {
+    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<U>>, Vec<[u8; N]>), Error> {
         let storage = self.grafted_storage();
         let ops_root = self.any.log.root();
         RangeProof::new_with_ops(
@@ -263,33 +233,34 @@ where
     }
 }
 
-// Functionality shared across Merkleized states with mutable journal.
-impl<E, K, V, U, C, I, H, D, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
+// Functionality requiring mutable journal.
+impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Mutable<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     /// Returns an ops-level historical proof for the specified range.
     ///
-    /// Unlike [`range_proof`](Self::range_proof) which returns grafted proofs
-    /// incorporating the activity bitmap, this returns standard MMR proofs
-    /// suitable for state sync.
+    /// Unlike [`range_proof`](Self::range_proof) which returns grafted proofs incorporating the
+    /// activity bitmap, this returns standard MMR proofs suitable for state sync.
     pub async fn ops_historical_proof(
         &self,
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(mmr::Proof<H::Digest>, Vec<Operation<K, V, U>>), Error> {
+    ) -> Result<(mmr::Proof<H::Digest>, Vec<Operation<U>>), Error> {
         self.any
             .historical_proof(historical_size, start_loc, max_ops)
             .await
+    }
+
+    /// Return the pinned MMR nodes for a lower operation boundary of `loc`.
+    pub async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<H::Digest>, Error> {
+        self.any.pinned_nodes_at(loc).await
     }
 
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -298,7 +269,7 @@ where
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [mmr::Error::LocationOverflow] if `prune_loc` > [mmr::MAX_LOCATION].
+    /// - Returns [mmr::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         // Persist grafted MMR pruning state before pruning the ops log. If the subsequent
         // `any.prune` fails, the metadata is ahead of the log, which is safe: on recovery,
@@ -339,24 +310,28 @@ where
             metadata.put(key, digest.to_vec());
         }
 
-        metadata.sync().await.map_err(mmr::Error::MetadataError)?;
+        metadata.sync().await.map_err(mmr::Error::Metadata)?;
 
         Ok(())
     }
 }
 
-// Functionality specific to (Merkleized, Durable) state, such as ability to persist the database.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
+// Functionality requiring mutable + persistable journal.
+impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
+    U: Update,
+    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
+    /// Durably commit the journal state published by prior [`Db::apply_batch`]
+    /// calls.
+    pub async fn commit(&self) -> Result<(), Error> {
+        self.any.commit().await
+    }
+
     /// Sync all database state to disk.
     pub async fn sync(&self) -> Result<(), Error> {
         self.any.sync().await?;
@@ -374,280 +349,82 @@ where
         // Clean up Any components (MMR and log).
         self.any.destroy().await
     }
-
-    /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
-        Db {
-            any: self.any.into_mutable(),
-            status: self.status,
-            grafted_mmr: self.grafted_mmr,
-            metadata: self.metadata,
-            thread_pool: self.thread_pool,
-            state: Unmerkleized {
-                dirty_chunks: HashSet::new(),
-            },
-        }
-    }
 }
 
-// Functionality shared across Unmerkleized states.
-impl<E, K, V, U, C, I, H, const N: usize, D> Db<E, C, I, H, U, N, Unmerkleized, D>
+impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
+    U: Update + 'static,
+    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    D: DurabilityState,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
-    /// Merkleize the database and transition to the provable state.
-    pub async fn into_merkleized(
-        self,
-    ) -> Result<Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>, Error> {
-        let Self {
-            any,
-            mut status,
-            grafted_mmr,
-            metadata,
-            thread_pool: pool,
-            state,
-        } = self;
-
-        // Merkleize the any db
-        let mut any = any.into_merkleized();
-
-        // Number of grafted leaves (i.e. complete bitmap chunks) at last merkleization.
-        let old_grafted_leaves = *grafted_mmr.leaves() as usize;
-        // Number of grafted leaves (i.e. complete bitmap chunks) now.
-        let new_grafted_leaves = status.complete_chunks();
-
-        // Compute grafted leaves for new complete bitmap chunks and modified existing chunks.
-        // dirty_chunks is guaranteed to only contain indices < old_grafted_leaves, so no
-        // filtering or deduplication is needed.
-        let chunks_to_update = (old_grafted_leaves..new_grafted_leaves)
-            .chain(state.dirty_chunks.iter().copied())
-            .map(|chunk_idx| (chunk_idx, *status.get_chunk(chunk_idx)));
-        let grafted_leaves = compute_grafted_leaves::<H, N>(
-            &mut any.log.hasher,
-            &any.log.mmr,
-            chunks_to_update,
-            pool.as_ref(),
-        )
-        .await?;
-
-        // Update the grafted MMR with new/dirty leaves and re-merkleize.
-        let grafting_height = grafting::height::<N>();
-        let mut dirty = grafted_mmr.into_dirty();
-        for &(ops_pos, digest) in &grafted_leaves {
-            let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
-            if grafted_pos < dirty.size() {
-                let loc = Location::try_from(grafted_pos).expect("grafted_pos overflow");
-                dirty
-                    .update_leaf_digest(loc, digest)
-                    .expect("update_leaf_digest failed");
-            } else {
-                dirty.add_leaf_digest(digest);
-            }
-        }
-        let mut grafted_mmr = {
-            let mut grafted_hasher =
-                grafting::GraftedHasher::new(any.log.hasher.fork(), grafting_height);
-            dirty.merkleize(&mut grafted_hasher, pool.clone())
-        };
-
-        // Prune bitmap chunks that are fully below the inactivity floor. All their bits are
-        // guaranteed to be 0, so we can discard them.
-        status.prune_to_bit(*any.inactivity_floor_loc);
-
-        // Prune the grafted MMR to match: nodes for pruned bitmap chunks are no longer needed
-        // in memory. `prune_to_pos` pins the O(log n) peak digests covering the pruned region,
-        // which remain accessible via `get_node` for root computation and metadata persistence.
-        let pruned_chunks = status.pruned_chunks() as u64;
-        if pruned_chunks > 0 {
-            let new_grafted_mmr_prune_pos = Position::try_from(Location::new(pruned_chunks))?;
-            if new_grafted_mmr_prune_pos > grafted_mmr.bounds().start {
-                grafted_mmr.prune_to_pos(new_grafted_mmr_prune_pos);
-            }
-        }
-
-        // Compute and cache the root.
-        let storage = grafting::Storage::new(&grafted_mmr, grafting_height, &any.log.mmr);
-        let partial_chunk = partial_chunk(&status);
-        let ops_root = any.log.root();
-        let root = compute_db_root(&mut any.log.hasher, &storage, partial_chunk, &ops_root).await?;
-
-        Ok(Db {
-            any,
-            status,
-            grafted_mmr,
-            metadata,
-            thread_pool: pool,
-            state: Merkleized { root },
-        })
-    }
-}
-
-// Functionality specific to (Unmerkleized,Durable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Unmerkleized, Durable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
-    /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
-        Db {
-            any: self.any.into_mutable(),
-            status: self.status,
-            grafted_mmr: self.grafted_mmr,
-            metadata: self.metadata,
-            thread_pool: self.thread_pool,
-            state: Unmerkleized {
-                dirty_chunks: self.state.dirty_chunks,
-            },
-        }
-    }
-}
-
-// Functionality specific to (Unmerkleized, NonDurable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Unmerkleized, NonDurable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
-    /// Raises the activity floor according to policy followed by appending a commit operation with
-    /// the provided `metadata` and the new inactivity floor value. Returns the `[start_loc,
-    /// end_loc)` location range of committed operations.
-    async fn apply_commit_op(
+    /// Apply a changeset to the database, returning the range of written operations.
+    ///
+    /// A changeset is only valid if the database has not been modified since the batch that
+    /// produced it was created. Multiple batches can be forked from the same parent for speculative
+    /// execution, but only one may be applied. Applying a stale changeset returns
+    /// [`Error::StaleChangeset`].
+    ///
+    /// This publishes the batch to the in-memory Current view and appends it to the underlying
+    /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
+    /// durability.
+    pub async fn apply_batch(
         &mut self,
-        metadata: Option<V::Value>,
+        batch: super::batch::Changeset<U::Key, H::Digest, Operation<U>, N>,
     ) -> Result<Range<Location>, Error> {
-        let start_loc = self.any.last_commit_loc + 1;
-        let old_grafted_leaves = *self.grafted_mmr.leaves() as usize;
+        // 1. Apply inner any batch (writes ops, updates snapshot).
+        let range = self.any.apply_batch(batch.inner).await?;
 
-        // Inactivate the current commit operation.
-        self.status.set_bit(*self.any.last_commit_loc, false);
-        let chunk = BitMap::<N>::to_chunk_index(*self.any.last_commit_loc);
-        if chunk < old_grafted_leaves {
-            self.state.dirty_chunks.insert(chunk);
+        // 2. Push new bits FIRST. Must happen before clears because for chained batches, some
+        //    clears target locations within the push range (ancestor-segment superseded ops that
+        //    were pushed as active by an ancestor and then superseded by a descendant).
+        for &bit in &batch.bitmap_pushes {
+            self.status.push(bit);
         }
 
-        // Raise the inactivity floor by taking `self.steps` steps, plus 1 to account for the
-        // previous commit becoming inactive.
-        let dirty_chunks = &mut self.state.dirty_chunks;
-        let inactivity_floor_loc = self
-            .any
-            .raise_floor_with_bitmap(&mut self.status, &mut |old_loc, _new_loc| {
-                let chunk = BitMap::<N>::to_chunk_index(*old_loc);
-                if chunk < old_grafted_leaves {
-                    dirty_chunks.insert(chunk);
-                }
-            })
-            .await?;
+        // 3. Clear superseded locations: previous commit inactivation, diff base_old_locs, and
+        //    ancestor-segment superseded locations (chaining).
+        for loc in &batch.bitmap_clears {
+            self.status.set_bit(**loc, false);
+        }
 
-        // Append the commit operation with the new floor and tag it as active in the bitmap.
-        self.status.push(true);
-        let commit_op = Operation::CommitFloor(metadata, inactivity_floor_loc);
+        // 4. Apply precomputed grafted MMR changeset from merkleize().
+        self.grafted_mmr.apply(batch.grafted_changeset)?;
 
-        self.any.apply_commit_op(commit_op).await?;
+        // 5. Prune bitmap chunks fully below the inactivity floor.
+        self.status.prune_to_bit(*self.any.inactivity_floor_loc);
 
-        Ok(start_loc..self.any.log.size().await)
-    }
+        // 6. Prune the grafted MMR to match.
+        let pruned_chunks = self.status.pruned_chunks() as u64;
+        if pruned_chunks > 0 {
+            let prune_loc = Location::new(pruned_chunks);
+            if prune_loc > self.grafted_mmr.bounds().start {
+                self.grafted_mmr.prune(prune_loc)?;
+            }
+        }
 
-    /// Commit any pending operations to the database, ensuring their durability upon return.
-    /// This transitions to the Durable state without merkleizing. Returns the committed database
-    /// and the `[start_loc, end_loc)` range of committed operations.
-    pub async fn commit(
-        mut self,
-        metadata: Option<V::Value>,
-    ) -> Result<(Db<E, C, I, H, U, N, Unmerkleized, Durable>, Range<Location>), Error> {
-        let range = self.apply_commit_op(metadata).await?;
+        // 7. Use precomputed canonical root from merkleize().
+        self.root = batch.canonical_root;
 
-        // Transition to Durable state without merkleizing
-        let any = any::db::Db {
-            log: self.any.log,
-            inactivity_floor_loc: self.any.inactivity_floor_loc,
-            last_commit_loc: self.any.last_commit_loc,
-            snapshot: self.any.snapshot,
-            durable_state: store::Durable,
-            active_keys: self.any.active_keys,
-            _update: core::marker::PhantomData,
-        };
-
-        Ok((
-            Db {
-                any,
-                status: self.status,
-                grafted_mmr: self.grafted_mmr,
-                metadata: self.metadata,
-                thread_pool: self.thread_pool,
-                state: Unmerkleized {
-                    dirty_chunks: self.state.dirty_chunks,
-                },
-            },
-            range,
-        ))
+        Ok(range)
     }
 }
 
-// Functionality specific to (Merkleized, NonDurable) state.
-impl<E, K, V, U, C, I, H, const N: usize> Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, NonDurable>
+impl<E, U, C, I, H, const N: usize> Persistable for Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
+    U: Update,
+    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<K, V, U>: Codec,
-{
-    /// Convert this database into a mutable state.
-    pub fn into_mutable(self) -> Db<E, C, I, H, U, N, Unmerkleized, NonDurable> {
-        Db {
-            any: self.any.into_mutable(),
-            status: self.status,
-            grafted_mmr: self.grafted_mmr,
-            metadata: self.metadata,
-            thread_pool: self.thread_pool,
-            state: Unmerkleized {
-                dirty_chunks: HashSet::new(),
-            },
-        }
-    }
-}
-
-impl<E, K, V, U, C, I, H, const N: usize> Persistable
-    for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
+    Operation<U>: Codec,
 {
     type Error = Error;
 
     async fn commit(&self) -> Result<(), Error> {
-        // No-op, DB already in recoverable state.
-        Ok(())
+        Self::commit(self).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
@@ -659,90 +436,11 @@ where
     }
 }
 
-// MerkleizedStore for Clean state.
-// TODO(https://github.com/commonwarexyz/monorepo/issues/2560): This is broken -- it's computing
-// proofs only over the any db mmr not the grafted mmr, so they won't validate against the grafted
-// root.
-impl<E, K, V, U, C, I, H, const N: usize> MerkleizedStore
-    for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, Durable>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<K, V, U>: Codec,
-{
-    type Digest = H::Digest;
-    type Operation = Operation<K, V, U>;
-
-    fn root(&self) -> H::Digest {
-        self.root()
-    }
-
-    async fn historical_proof(
-        &self,
-        historical_size: Location,
-        start_loc: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<Self::Digest>, Vec<Self::Operation>), Error> {
-        self.any
-            .historical_proof(historical_size, start_loc, max_ops)
-            .await
-    }
-}
-
-impl<E, K, V, U, C, I, H, const N: usize, S, D> LogStore for Db<E, C, I, H, U, N, S, D>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Contiguous<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    S: State<DigestOf<H>>,
-    D: DurabilityState,
-    Operation<K, V, U>: Codec,
-{
-    type Value = V::Value;
-
-    async fn bounds(&self) -> std::ops::Range<Location> {
-        self.any.bounds().await
-    }
-
-    async fn get_metadata(&self) -> Result<Option<V::Value>, Error> {
-        self.get_metadata().await
-    }
-}
-
-impl<E, K, V, U, C, I, H, D, const N: usize> PrunableStore
-    for Db<E, C, I, H, U, N, Merkleized<DigestOf<H>>, D>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    U: Update<K, V>,
-    C: Mutable<Item = Operation<K, V, U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    D: DurabilityState,
-    Operation<K, V, U>: Codec,
-{
-    async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
-        self.prune(prune_loc).await
-    }
-
-    async fn inactivity_floor_loc(&self) -> Location {
-        self.inactivity_floor_loc()
-    }
-}
-
 /// Returns `Some((last_chunk, next_bit))` if the bitmap has an incomplete trailing chunk, or
 /// `None` if all bits fall on complete chunk boundaries.
-pub(super) fn partial_chunk<const N: usize>(bitmap: &BitMap<N>) -> Option<(&[u8; N], u64)> {
+pub(super) fn partial_chunk<B: super::batch::BitmapRead<N>, const N: usize>(
+    bitmap: &B,
+) -> Option<([u8; N], u64)> {
     let (last_chunk, next_bit) = bitmap.last_chunk();
     if next_bit == BitMap::<N>::CHUNK_SIZE_BITS {
         None
@@ -755,18 +453,23 @@ pub(super) fn partial_chunk<const N: usize>(bitmap: &BitMap<N>) -> Option<(&[u8;
 ///
 /// See the [Root structure](super) section in the module documentation.
 pub(super) fn combine_roots<H: Hasher>(
-    hasher: &mut StandardHasher<H>,
+    hasher: &StandardHasher<H>,
     ops_root: &H::Digest,
     grafted_mmr_root: &H::Digest,
     partial: Option<(u64, &H::Digest)>,
 ) -> H::Digest {
-    hasher.inner().update(ops_root);
-    hasher.inner().update(grafted_mmr_root);
-    if let Some((next_bit, last_chunk_digest)) = partial {
-        hasher.inner().update(&next_bit.to_be_bytes());
-        hasher.inner().update(last_chunk_digest);
+    match partial {
+        Some((next_bit, last_chunk_digest)) => {
+            let next_bit = next_bit.to_be_bytes();
+            hasher.hash([
+                ops_root.as_ref(),
+                grafted_mmr_root.as_ref(),
+                next_bit.as_slice(),
+                last_chunk_digest.as_ref(),
+            ])
+        }
+        None => hasher.hash([ops_root.as_ref(), grafted_mmr_root.as_ref()]),
     }
-    hasher.inner().finalize()
 }
 
 /// Compute the canonical root digest of a [Db].
@@ -774,17 +477,18 @@ pub(super) fn combine_roots<H: Hasher>(
 /// See the [Root structure](super) section in the module documentation.
 pub(super) async fn compute_db_root<
     H: Hasher,
-    S: mmr::storage::Storage<H::Digest>,
+    G: mmr::Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+    S: MerkleStorage<mmr::Family, Digest = H::Digest>,
     const N: usize,
 >(
-    hasher: &mut StandardHasher<H>,
-    storage: &grafting::Storage<'_, H::Digest, S>,
-    partial_chunk: Option<(&[u8; N], u64)>,
+    hasher: &StandardHasher<H>,
+    storage: &grafting::Storage<'_, H::Digest, G, S>,
+    partial_chunk: Option<([u8; N], u64)>,
     ops_root: &H::Digest,
 ) -> Result<H::Digest, Error> {
     let grafted_mmr_root = compute_grafted_mmr_root(hasher, storage).await?;
     let partial = partial_chunk.map(|(chunk, next_bit)| {
-        let digest = hasher.digest(chunk);
+        let digest = hasher.digest(&chunk);
         (next_bit, digest)
     });
     Ok(combine_roots(
@@ -798,12 +502,16 @@ pub(super) async fn compute_db_root<
 /// Compute the root of the grafted MMR.
 ///
 /// `storage` is the grafted storage over the grafted MMR and the ops MMR.
-pub(super) async fn compute_grafted_mmr_root<H: Hasher, S: mmr::storage::Storage<H::Digest>>(
-    hasher: &mut StandardHasher<H>,
-    storage: &grafting::Storage<'_, H::Digest, S>,
+pub(super) async fn compute_grafted_mmr_root<
+    H: Hasher,
+    G: mmr::Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+    S: MerkleStorage<mmr::Family, Digest = H::Digest>,
+>(
+    hasher: &StandardHasher<H>,
+    storage: &grafting::Storage<'_, H::Digest, G, S>,
 ) -> Result<H::Digest, Error> {
     let size = storage.size().await;
-    let leaves = Location::try_from(size).map_err(mmr::Error::from)?;
+    let leaves = Location::try_from(size)?;
 
     // Collect peak digests from the grafted storage, which transparently dispatches
     // to the grafted MMR or the ops MMR based on height.
@@ -825,9 +533,9 @@ pub(super) async fn compute_grafted_mmr_root<H: Hasher, S: mmr::storage::Storage
 /// the grafted leaf equals the ops subtree root directly (zero-chunk identity).
 ///
 /// When a thread pool is provided and there are enough chunks, hashing is parallelized.
-async fn compute_grafted_leaves<H: Hasher, const N: usize>(
-    hasher: &mut StandardHasher<H>,
-    ops_mmr: &impl mmr::storage::Storage<H::Digest>,
+pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
+    hasher: &StandardHasher<H>,
+    ops_mmr: &impl MerkleStorage<mmr::Family, Digest = H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     pool: Option<&ThreadPool>,
 ) -> Result<Vec<(Position, H::Digest)>, Error> {
@@ -849,42 +557,39 @@ async fn compute_grafted_leaves<H: Hasher, const N: usize>(
 
     // Compute grafted leaf for each chunk.
     let zero_chunk = [0u8; N];
-    Ok(
-        match pool.filter(|_| inputs.len() >= grafting::MIN_TO_PARALLELIZE) {
-            Some(pool) => pool.install(|| {
-                inputs
-                    .into_par_iter()
-                    .map_init(
-                        || hasher.fork(),
-                        |h, (ops_pos, ops_digest, chunk)| {
-                            if chunk == zero_chunk {
-                                (ops_pos, ops_digest)
-                            } else {
-                                h.inner().update(&chunk);
-                                h.inner().update(&ops_digest);
-                                (ops_pos, h.inner().finalize())
-                            }
-                        },
+    Ok(match pool.filter(|_| inputs.len() >= MIN_TO_PARALLELIZE) {
+        Some(pool) => pool.install(|| {
+            inputs
+                .into_par_iter()
+                .map_init(
+                    || hasher.clone(),
+                    |h, (ops_pos, ops_digest, chunk)| {
+                        if chunk == zero_chunk {
+                            (ops_pos, ops_digest)
+                        } else {
+                            (ops_pos, h.hash([chunk.as_slice(), ops_digest.as_ref()]))
+                        }
+                    },
+                )
+                .collect()
+        }),
+        None => inputs
+            .into_iter()
+            .map(|(ops_pos, ops_digest, chunk)| {
+                if chunk == zero_chunk {
+                    (ops_pos, ops_digest)
+                } else {
+                    (
+                        ops_pos,
+                        hasher.hash([chunk.as_slice(), ops_digest.as_ref()]),
                     )
-                    .collect()
-            }),
-            None => inputs
-                .into_iter()
-                .map(|(ops_pos, ops_digest, chunk)| {
-                    if chunk == zero_chunk {
-                        (ops_pos, ops_digest)
-                    } else {
-                        hasher.inner().update(&chunk);
-                        hasher.inner().update(&ops_digest);
-                        (ops_pos, hasher.inner().finalize())
-                    }
-                })
-                .collect(),
-        },
-    )
+                }
+            })
+            .collect(),
+    })
 }
 
-/// Build a grafted [mmr::mem::CleanMmr] from scratch using bitmap chunks and the ops MMR.
+/// Build a grafted [mmr::mem::Mmr] from scratch using bitmap chunks and the ops MMR.
 ///
 /// For each non-pruned complete chunk (index in `pruned_chunks..complete_chunks`), reads the
 /// ops MMR node at the grafting height to compute the grafted leaf (see the
@@ -892,12 +597,12 @@ async fn compute_grafted_leaves<H: Hasher, const N: usize>(
 /// ops MMR nodes for chunks >= `bitmap.pruned_chunks()` are still accessible in the ops MMR
 /// (i.e., not pruned from the journal).
 pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
-    hasher: &mut StandardHasher<H>,
+    hasher: &StandardHasher<H>,
     bitmap: &BitMap<N>,
     pinned_nodes: &[H::Digest],
-    ops_mmr: &impl mmr::storage::Storage<H::Digest>,
+    ops_mmr: &impl MerkleStorage<mmr::Family, Digest = H::Digest>,
     pool: Option<&ThreadPool>,
-) -> Result<mmr::mem::CleanMmr<H::Digest>, Error> {
+) -> Result<mmr::mem::Mmr<H::Digest>, Error> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
@@ -911,28 +616,31 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     )
     .await?;
 
-    // Build a DirtyMmr: either from pruned components or empty.
-    let mut dirty = if pruned_chunks > 0 {
-        let grafted_pruned_to_pos = Position::try_from(Location::new(pruned_chunks as u64))
-            .expect("pruned_chunks overflow");
-        mmr::mem::DirtyMmr::from_components(
+    // Build a base Mmr: either from pruned components or empty.
+    let grafted_hasher = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
+    let mut grafted_mmr = if pruned_chunks > 0 {
+        let grafted_pruning_boundary = Location::new(pruned_chunks as u64);
+        mmr::mem::Mmr::from_components(
+            &grafted_hasher,
             Vec::new(),
-            grafted_pruned_to_pos,
+            grafted_pruning_boundary,
             pinned_nodes.to_vec(),
-        )
+        )?
     } else {
-        mmr::mem::DirtyMmr::default()
+        mmr::mem::Mmr::new(&grafted_hasher)
     };
 
-    // Add each grafted leaf digest. Leaves arrive in chunk-index order (ascending),
-    // which is the same as grafted leaf location order.
-    for &(_ops_pos, digest) in &leaves {
-        dirty.add_leaf_digest(digest);
+    // Add each grafted leaf digest.
+    if !leaves.is_empty() {
+        let changeset = {
+            let mut batch = grafted_mmr.new_batch().with_pool(pool.cloned());
+            for &(_ops_pos, digest) in &leaves {
+                batch = batch.add_leaf_digest(digest);
+            }
+            batch.merkleize(&grafted_hasher).finalize()
+        };
+        grafted_mmr.apply(changeset)?;
     }
-
-    // Merkleize with the GraftedHasher to produce ops-space positions in hash pre-images.
-    let mut grafted_hasher = grafting::GraftedHasher::new(hasher.fork(), grafting_height);
-    let grafted_mmr = dirty.merkleize(&mut grafted_hasher, pool.cloned());
 
     Ok(grafted_mmr)
 }
@@ -974,9 +682,12 @@ pub(super) async fn init_metadata<E: Storage + Clock + Metrics, D: Digest>(
     // to determine how many peaks to read. (Multiplying pruned_chunks by chunk_size is a
     // left-shift, preserving popcount, so the peak count is the same in grafted or ops space.)
     let pinned_nodes = if pruned_chunks > 0 {
-        let mmr_size = Position::try_from(Location::new(pruned_chunks as u64))?;
+        let pruned_loc = Location::new(pruned_chunks as u64);
+        if !pruned_loc.is_valid() {
+            return Err(Error::DataCorrupted("pruned chunks exceeds MAX_LEAVES"));
+        }
         let mut pinned = Vec::new();
-        for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
+        for (index, pos) in nodes_to_pin(pruned_loc).enumerate() {
             let metadata_key = U64::new(NODE_PREFIX, index as u64);
             let Some(bytes) = metadata.get(&metadata_key) else {
                 return Err(mmr::Error::MissingNode(pos).into());
@@ -990,4 +701,84 @@ pub(super) async fn init_metadata<E: Storage + Clock + Metrics, D: Digest>(
     };
 
     Ok((metadata, pruned_chunks, pinned_nodes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_codec::FixedSize;
+    use commonware_cryptography::{sha256, Sha256};
+    use commonware_utils::bitmap::Prunable as PrunableBitMap;
+
+    const N: usize = sha256::Digest::SIZE;
+
+    #[test]
+    fn partial_chunk_single_bit() {
+        let mut bm = PrunableBitMap::<N>::new();
+        bm.push(true);
+        let result = partial_chunk::<PrunableBitMap<N>, N>(&bm);
+        assert!(result.is_some());
+        let (chunk, next_bit) = result.unwrap();
+        assert_eq!(next_bit, 1);
+        assert_eq!(chunk[0], 1); // bit 0 set
+    }
+
+    #[test]
+    fn partial_chunk_aligned() {
+        let mut bm = PrunableBitMap::<N>::new();
+        for _ in 0..PrunableBitMap::<N>::CHUNK_SIZE_BITS {
+            bm.push(true);
+        }
+        let result = partial_chunk::<PrunableBitMap<N>, N>(&bm);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn partial_chunk_partial() {
+        let mut bm = PrunableBitMap::<N>::new();
+        for _ in 0..(PrunableBitMap::<N>::CHUNK_SIZE_BITS + 5) {
+            bm.push(true);
+        }
+        let result = partial_chunk::<PrunableBitMap<N>, N>(&bm);
+        assert!(result.is_some());
+        let (_chunk, next_bit) = result.unwrap();
+        assert_eq!(next_bit, 5);
+    }
+
+    #[test]
+    fn combine_roots_deterministic() {
+        let h1 = StandardHasher::<Sha256>::new();
+        let h2 = StandardHasher::<Sha256>::new();
+        let ops = Sha256::hash(b"ops");
+        let grafted = Sha256::hash(b"grafted");
+        let r1 = combine_roots(&h1, &ops, &grafted, None);
+        let r2 = combine_roots(&h2, &ops, &grafted, None);
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn combine_roots_with_partial_differs() {
+        let h1 = StandardHasher::<Sha256>::new();
+        let h2 = StandardHasher::<Sha256>::new();
+        let ops = Sha256::hash(b"ops");
+        let grafted = Sha256::hash(b"grafted");
+        let partial_digest = Sha256::hash(b"partial");
+
+        let without = combine_roots(&h1, &ops, &grafted, None);
+        let with = combine_roots(&h2, &ops, &grafted, Some((5, &partial_digest)));
+        assert_ne!(without, with);
+    }
+
+    #[test]
+    fn combine_roots_different_ops_root() {
+        let h1 = StandardHasher::<Sha256>::new();
+        let h2 = StandardHasher::<Sha256>::new();
+        let ops_a = Sha256::hash(b"ops_a");
+        let ops_b = Sha256::hash(b"ops_b");
+        let grafted = Sha256::hash(b"grafted");
+
+        let r1 = combine_roots(&h1, &ops_a, &grafted, None);
+        let r2 = combine_roots(&h2, &ops_b, &grafted, None);
+        assert_ne!(r1, r2);
+    }
 }

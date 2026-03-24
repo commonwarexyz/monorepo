@@ -441,7 +441,6 @@ impl<V: Variant> Read for Sharing<V> {
 mod tests {
     use super::*;
     use commonware_invariants::minifuzz;
-    use commonware_macros::test_group;
     use commonware_utils::ordered::Map;
     use rand::{rngs::StdRng, SeedableRng};
 
@@ -464,7 +463,6 @@ mod tests {
             .expect_err("roots mode must be rejected when max mode is counter");
     }
 
-    #[test_group("slow")]
     #[test]
     fn test_all_scalars_matches_scalar() {
         minifuzz::test(|u| {
@@ -486,7 +484,6 @@ mod tests {
         });
     }
 
-    #[test_group("slow")]
     #[test]
     fn test_subset_interpolation_recovers_constant() {
         minifuzz::test(|u| {

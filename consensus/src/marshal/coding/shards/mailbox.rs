@@ -50,9 +50,17 @@ where
         /// The response channel.
         response: oneshot::Sender<Option<Arc<CodedBlock<B, C, H>>>>,
     },
-    /// A request to open a subscription for the receipt of our valid shard from
-    /// the leader.
-    SubscribeShard {
+    /// A request to open a subscription for assigned shard verification.
+    ///
+    /// For participants, this resolves once the leader-delivered shard for
+    /// the local participant index has been verified. Reconstructing the full
+    /// block from gossiped shards does not resolve this subscription: that
+    /// block may still be used for later certification, but it is not enough
+    /// to claim the participant received the shard it is expected to echo.
+    ///
+    /// For proposers, this resolves immediately after the locally built block
+    /// is cached because they trivially have all shards.
+    SubscribeAssignedShardVerified {
         /// The block's commitment.
         commitment: Commitment,
         /// The response channel.
@@ -145,10 +153,22 @@ where
             .flatten()
     }
 
-    /// Subscribe to the receipt of our valid shard from the leader.
-    pub async fn subscribe_shard(&self, commitment: Commitment) -> oneshot::Receiver<()> {
+    /// Subscribe to assigned shard verification for a commitment.
+    ///
+    /// For participants, this resolves once the leader-delivered shard for
+    /// the local participant index has been verified. Reconstructing the full
+    /// block from gossiped shards does not resolve this subscription: that
+    /// block may still be used for later certification, but it is not enough
+    /// to claim the participant received the shard it is expected to echo.
+    ///
+    /// For proposers, this resolves immediately after the locally built block
+    /// is cached because they trivially have all shards.
+    pub async fn subscribe_assigned_shard_verified(
+        &self,
+        commitment: Commitment,
+    ) -> oneshot::Receiver<()> {
         let (responder, receiver) = oneshot::channel();
-        let msg = Message::SubscribeShard {
+        let msg = Message::SubscribeAssignedShardVerified {
             commitment,
             response: responder,
         };

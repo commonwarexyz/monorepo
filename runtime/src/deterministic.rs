@@ -237,12 +237,16 @@ impl Config {
             if #[cfg(miri)] {
                 // Reduce max_per_class to avoid slow atomics under Miri
                 let network_buffer_pool_cfg = BufferPoolConfig::for_network()
-                    .with_max_per_class(commonware_utils::NZUsize!(32));
+                    .with_max_per_class(commonware_utils::NZUsize!(32))
+                    .with_thread_cache_disabled();
                 let storage_buffer_pool_cfg = BufferPoolConfig::for_storage()
-                    .with_max_per_class(commonware_utils::NZUsize!(32));
+                    .with_max_per_class(commonware_utils::NZUsize!(32))
+                    .with_thread_cache_disabled();
             } else {
-                let network_buffer_pool_cfg = BufferPoolConfig::for_network();
-                let storage_buffer_pool_cfg = BufferPoolConfig::for_storage();
+                let network_buffer_pool_cfg =
+                    BufferPoolConfig::for_network().with_thread_cache_disabled();
+                let storage_buffer_pool_cfg =
+                    BufferPoolConfig::for_storage().with_thread_cache_disabled();
             }
         }
 
@@ -350,6 +354,10 @@ impl Config {
         assert!(
             self.cycle >= SYSTEM_TIME_PRECISION,
             "cycle duration must be greater than or equal to system time precision"
+        );
+        assert!(
+            self.start_time >= UNIX_EPOCH,
+            "start time must be greater than or equal to unix epoch"
         );
     }
 }
@@ -1985,6 +1993,13 @@ mod tests {
             // Check that the time matches the custom start time
             assert_eq!(context.current(), start_time);
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "start time must be greater than or equal to unix epoch")]
+    fn test_bad_start_time() {
+        let cfg = Config::default().with_start_time(UNIX_EPOCH - Duration::from_secs(1));
+        deterministic::Runner::new(cfg);
     }
 
     #[cfg(not(feature = "external"))]

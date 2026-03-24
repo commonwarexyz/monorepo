@@ -4,10 +4,10 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
-    mmr::{Location, Proof, StandardHasher as Standard},
+    journal::contiguous::fixed::Config as FConfig,
+    mmr::{journaled::Config as MmrConfig, Location, Proof, StandardHasher as Standard},
     qmdb::{
-        any::{ordered::fixed::Db, FixedConfig as Config},
-        store::LogStore as _,
+        any::{ordered::fixed::Db as AnyDb, FixedConfig as Config},
         verify_proof,
     },
     translator::EightCap,
@@ -23,6 +23,7 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
+type Db = AnyDb<deterministic::Context, Key, Value, Sha256, EightCap>;
 
 const MAX_OPS: usize = 25;
 
@@ -64,36 +65,69 @@ struct FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(555);
 const PAGE_CACHE_SIZE: usize = 100;
 
+async fn commit_pending(
+    db: &mut Db,
+    pending_writes: &mut Vec<(Key, Option<Value>)>,
+    committed_state: &mut HashMap<RawKey, RawValue>,
+    pending_inserts: &mut HashMap<RawKey, RawValue>,
+    pending_deletes: &mut HashSet<RawKey>,
+) {
+    let finalized = {
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch = batch.write(k, v);
+        }
+        batch.merkleize(None).await.unwrap().finalize()
+    };
+    db.apply_batch(finalized)
+        .await
+        .expect("commit should not fail");
+    db.commit().await.expect("commit fsync should not fail");
+    for key in pending_deletes.drain() {
+        committed_state.remove(&key);
+    }
+    committed_state.extend(pending_inserts.drain());
+}
+
 fn fuzz(data: FuzzInput) {
-    let mut hasher = Standard::<Sha256>::new();
+    let hasher = Standard::<Sha256>::new();
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
+        let page_cache = CacheRef::from_pooler(
+            &context,
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        );
         let cfg = Config::<EightCap> {
-            mmr_journal_partition: "test-qmdb-mmr-journal".into(),
-            mmr_items_per_blob: NZU64!(500000),
-            mmr_write_buffer: NZUsize!(1024),
-            mmr_metadata_partition: "test-qmdb-mmr-metadata".into(),
-            log_journal_partition: "test-qmdb-log-journal".into(),
-            log_items_per_blob: NZU64!(500000),
-            log_write_buffer: NZUsize!(1024),
+            mmr_config: MmrConfig {
+                journal_partition: "test-qmdb-mmr-journal".into(),
+                metadata_partition: "test-qmdb-mmr-metadata".into(),
+                items_per_blob: NZU64!(500000),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: FConfig {
+                partition: "test-qmdb-log-journal".into(),
+                items_per_blob: NZU64!(500000),
+                write_buffer: NZUsize!(1024),
+                page_cache,
+            },
             translator: EightCap,
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(
-                &context,
-                PAGE_SIZE,
-                NZUsize!(PAGE_CACHE_SIZE),
-            ),
         };
 
-        let mut db = Db::<_, Key, Value, Sha256, EightCap>::init(context.clone(), cfg.clone())
+        let mut db = Db::init(context.clone(), cfg.clone())
             .await
-            .expect("init qmdb").into_mutable();
+            .expect("init qmdb");
 
-        let mut expected_state: HashMap<RawKey, RawValue> = HashMap::new();
+        // committed_state tracks state after apply_batch. pending_expected tracks
+        // uncommitted mutations that haven't been applied yet.
+        let mut committed_state: HashMap<RawKey, RawValue> = HashMap::new();
+        let mut pending_inserts: HashMap<RawKey, RawValue> = HashMap::new();
+        let mut pending_deletes: HashSet<RawKey> = HashSet::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
-        let mut uncommitted_ops = 0;
-        let mut last_known_op_count = Location::new(1);
+        let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
         for op in data.operations.iter().take(MAX_OPS) {
             match op {
@@ -101,80 +135,56 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
-                    let empty = db.is_empty();
-                    db.write_batch([(k, Some(v))]).await.expect("update should not fail");
-                    let result = expected_state.insert(*key, *value);
+                    pending_writes.push((k, Some(v)));
+                    pending_deletes.remove(key);
+                    pending_inserts.insert(*key, *value);
                     all_keys.insert(*key);
-                    uncommitted_ops += 1;
-                    if !empty && result.is_none() {
-                        // Account for the previous key update
-                        uncommitted_ops += 1;
-                    }
-                    let actual_count = db.bounds().await.end;
-                    let expected_count = last_known_op_count + uncommitted_ops;
-                    assert_eq!(actual_count, expected_count,
-                        "Operation count mismatch: expected {expected_count} (last_known={last_known_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
                 }
 
                 QmdbOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    db.write_batch([(k, None)]).await.expect("delete should not fail");
-                    if expected_state.remove(key).is_some() {
-                        uncommitted_ops += 1;
-                        if expected_state.keys().len() != 0 {
-                            uncommitted_ops += 1;
-                        }
-                    }
+                    pending_writes.push((k, None));
+                    pending_inserts.remove(key);
+                    pending_deletes.insert(*key);
                 }
 
                 QmdbOperation::OpCount => {
-                    let actual_count = db.bounds().await.end;
-                    // The count should have increased by the number of uncommitted operations
-                    let expected_count = last_known_op_count + uncommitted_ops;
-                    assert_eq!(actual_count, expected_count,
-                        "Operation count mismatch: expected {expected_count} (last_known={last_known_op_count} + uncommitted={uncommitted_ops}), got {actual_count}");
+                    let _ = db.bounds().await.end;
                 }
 
                 QmdbOperation::Commit => {
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    // After commit, update our last known count since commit may add more operations
-                    last_known_op_count = durable_db.bounds().await.end;
-                    uncommitted_ops = 0; // Reset uncommitted operations counter
-                    db = durable_db.into_mutable();
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
                 }
 
                 QmdbOperation::Root => {
-                    // root requires commit + merkleization
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    last_known_op_count = durable_db.bounds().await.end;
-                    uncommitted_ops = 0;
-                    let clean_db = durable_db.into_merkleized();
-                    clean_db.root();
-                    db = clean_db.into_mutable();
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
+                    db.root();
                 }
 
                 QmdbOperation::Proof { start_loc, max_ops } => {
-                    // proof requires commit + merkleization
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    last_known_op_count = durable_db.bounds().await.end;
-                    uncommitted_ops = 0;
-                    let clean_db = durable_db.into_merkleized();
-                    let actual_op_count = clean_db.bounds().await.end;
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
+                    let actual_op_count = db.bounds().await.end;
 
-                    // Only generate proof if QMDB has operations and valid parameters
                     if actual_op_count > 0 {
-                        let current_root = clean_db.root();
-                        // Adjust start_loc to be within valid range
-                        // Locations are 0-indexed (first operation is at location 0)
+                        let current_root = db.root();
                         let adjusted_start = Location::new(*start_loc % *actual_op_count);
-                        let (proof, log) = clean_db
+                        let (proof, log) = db
                             .proof(adjusted_start, *max_ops)
                             .await
                             .expect("proof should not fail");
 
                         assert!(
                             verify_proof(
-                                &mut hasher,
+                                &hasher,
                                 &proof,
                                 adjusted_start,
                                 &log,
@@ -183,32 +193,29 @@ fn fuzz(data: FuzzInput) {
                             "Proof verification failed for start_loc={adjusted_start}, max_ops={max_ops}",
                         );
                     }
-                    db = clean_db.into_mutable();
                 }
 
                 QmdbOperation::ArbitraryProof { start_loc, max_ops , proof_leaves, digests} => {
-                    // proof requires commit + merkleization
-                    let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-                    last_known_op_count = durable_db.bounds().await.end;
-                    uncommitted_ops = 0;
-                    let clean_db = durable_db.into_merkleized();
-                    let actual_op_count = clean_db.bounds().await.end;
+                    commit_pending(
+                        &mut db, &mut pending_writes, &mut committed_state,
+                        &mut pending_inserts, &mut pending_deletes,
+                    ).await;
+                    let actual_op_count = db.bounds().await.end;
 
                     let proof = Proof {
                         leaves: *proof_leaves,
                         digests: digests.iter().map(|d| Digest::from(*d)).collect(),
                     };
 
-                    // Only generate proof if QMDB has operations and valid parameters
                     if actual_op_count > 0 {
-                        let current_root = clean_db.root();
+                        let current_root = db.root();
                         let adjusted_start = Location::new(*start_loc % *actual_op_count);
 
-                        if let Ok(res) = clean_db
+                        if let Ok(res) = db
                             .proof(adjusted_start, *max_ops)
                             .await {
                                 let _ = verify_proof(
-                                    &mut hasher,
+                                    &hasher,
                                     &proof,
                                     adjusted_start,
                                     &res.1,
@@ -217,17 +224,15 @@ fn fuzz(data: FuzzInput) {
 
                         }
                     }
-                    db = clean_db.into_mutable();
                 }
 
                 QmdbOperation::Get { key } => {
                     let k = Key::new(*key);
                     let result = db.get(&k).await.expect("get should not fail");
 
-                    // Verify against expected state
-                    match expected_state.get(key) {
+                    // Verify against committed state only.
+                    match committed_state.get(key) {
                         Some(expected_value) => {
-                            // Key should exist with this value
                             let v = result.expect("get should not fail");
                             let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
                             assert_eq!(v_bytes, expected_value, "Value mismatch for key {key:?}");
@@ -239,7 +244,6 @@ fn fuzz(data: FuzzInput) {
                             );
                         }
                     }
-                    // Track that we accessed this key
                     all_keys.insert(*key);
                 }
 
@@ -251,18 +255,20 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        // Final commit to ensure all operations are persisted
-        if uncommitted_ops > 0 {
-            let (durable_db, _) = db.commit(None).await.expect("final commit should not fail");
-            db = durable_db.into_mutable();
+        // Final commit to ensure all operations are persisted.
+        if !pending_writes.is_empty() {
+            commit_pending(
+                &mut db, &mut pending_writes, &mut committed_state,
+                &mut pending_inserts, &mut pending_deletes,
+            ).await;
         }
 
-        // Comprehensive final verification - check ALL keys ever touched
+        // Comprehensive final verification - check ALL keys ever touched.
         for key in &all_keys {
             let k = Key::new(*key);
             let result = db.get(&k).await.expect("final get should not fail");
 
-            match expected_state.get(key) {
+            match committed_state.get(key) {
                 Some(expected_value) => {
                     let v = result.expect("get should not fail");
                     let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
@@ -280,10 +286,14 @@ fn fuzz(data: FuzzInput) {
             }
         }
 
-        let (durable_db, _) = db.commit(None).await.expect("final commit should not fail");
-        durable_db.into_merkleized().destroy().await.expect("destroy should not fail");
-        expected_state.clear();
-        all_keys.clear();
+        let finalized = db.new_batch().merkleize(None).await.unwrap().finalize();
+        db.apply_batch(finalized)
+            .await
+            .expect("final commit should not fail");
+        db.commit()
+            .await
+            .expect("final commit fsync should not fail");
+        db.destroy().await.expect("destroy should not fail");
     });
 }
 

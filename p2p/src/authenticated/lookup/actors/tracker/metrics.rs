@@ -15,7 +15,10 @@ pub struct Metrics {
     /// The total number of outstanding reservations.
     pub reserved: Gauge,
 
-    /// A count of the number of rate-limited connection events for each peer.
+    /// Unix timestamp in milliseconds when each connected peer became active.
+    pub connected: Family<metrics::Peer, Gauge>,
+
+    /// A count of the number of rate-limited reservation events for each peer.
     pub limits: Family<metrics::Peer, Counter>,
 
     /// A count of the number of updates for each peer.
@@ -42,8 +45,13 @@ impl Metrics {
             metrics.reserved.clone(),
         );
         context.register(
+            "connected",
+            "Unix timestamp in milliseconds when each connected peer became active",
+            metrics.connected.clone(),
+        );
+        context.register(
             "limits",
-            "Count of the number of rate-limited connection events for each peer",
+            "Count of the number of rate-limited reservation events for each peer",
             metrics.limits.clone(),
         );
         context.register(

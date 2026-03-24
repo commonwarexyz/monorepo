@@ -5,6 +5,7 @@ no_std_packages=(
   commonware-codec
   commonware-utils
   commonware-cryptography
+  commonware-math
   commonware-storage
   commonware-parallel
 )

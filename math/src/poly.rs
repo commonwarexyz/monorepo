@@ -1,6 +1,8 @@
-use crate::algebra::{msm_naive, Additive, CryptoGroup, Field, Object, Random, Ring, Space};
+use crate::algebra::{
+    msm_naive, powers, Additive, CryptoGroup, Field, Object, Random, Ring, Space,
+};
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::{borrow::Cow, vec, vec::Vec};
 use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{non_empty_vec, ordered::Map, vec::NonEmptyVec, TryCollect};
@@ -11,6 +13,8 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
+#[cfg(feature = "std")]
+use std::borrow::Cow;
 
 // SECTION: Performance knobs.
 const MIN_POINTS_FOR_MSM: usize = 2;
@@ -131,14 +135,40 @@ impl<K> Poly<K> {
         K: Space<R>,
     {
         // Contains 1, r, r^2, ...
+        let weights = powers(R::one(), r)
+            .take(self.len_usize())
+            .collect::<Vec<_>>();
+        K::msm(&self.coeffs, &weights, strategy)
+    }
+
+    /// Compute `sum_i a_i * self(b_i)`.
+    ///
+    /// This is more efficient than several calls to `eval_msm`, but produces the
+    /// same result.
+    ///
+    /// This returns `0` if the iterator is empty.
+    pub fn lin_comb_eval<'a, R: Ring + 'a>(
+        &self,
+        into_iter: impl IntoIterator<Item = (R, Cow<'a, R>)>,
+        strategy: &impl Strategy,
+    ) -> K
+    where
+        K: Space<R>,
+    {
+        // Contains a0 + a1 + ..., a0 b0 + a1 b1 + ..., a0 b0^2 + a1 b1^2 + ...
         let weights = {
+            let mut iter = into_iter.into_iter();
+            let Some((a0, b0)) = iter.next() else {
+                return K::zero();
+            };
+
             let len = self.len_usize();
-            let mut out = Vec::with_capacity(len);
-            out.push(R::one());
-            let mut acc = R::one();
-            for _ in 1..len {
-                acc *= r;
-                out.push(acc.clone());
+            let mut out: Vec<_> = powers(a0, b0.as_ref()).take(len).collect();
+            for (ai, bi) in iter {
+                powers(ai, bi.as_ref())
+                    .take(len)
+                    .zip(out.iter_mut())
+                    .for_each(|(c_j, o_j)| *o_j += &c_j);
             }
             out
         };
@@ -516,7 +546,7 @@ impl<I: Clone + Ord, F: crate::algebra::FieldNTT> Interpolator<I, F> {
 
         let points: Vec<(I, u32)> = points.into_iter().filter(|(_, k)| *k < total_u32).collect();
         let max_k = points.iter().map(|(_, k)| *k).max().unwrap_or(0) as usize;
-        let powers: Vec<_> = powers(&w, max_k + 1).collect();
+        let powers: Vec<_> = powers(F::one(), &w).take(max_k + 1).collect();
 
         let eval_points = points
             .into_iter()
@@ -564,6 +594,7 @@ pub mod fuzz {
         EvalScale(Poly<F>, F, F),
         EvalZero(Poly<F>),
         EvalMsm(Poly<F>, F),
+        LinCombEval(Poly<F>, Vec<(F, F)>),
         Interpolate(Poly<F>),
         InterpolateWithZeroPoint(Poly<F>),
         InterpolateWithZeroPointMiddle(Poly<F>),
@@ -595,6 +626,17 @@ pub mod fuzz {
                 }
                 Self::EvalMsm(f, x) => {
                     assert_eq!(f.eval(&x), f.eval_msm(&x, &Sequential));
+                }
+                Self::LinCombEval(f, pairs) => {
+                    let naive_eval = pairs.iter().fold(F::zero(), |mut acc, (a, b)| {
+                        acc += &(*a * &f.eval(b));
+                        acc
+                    });
+                    let lin_comb = f.lin_comb_eval(
+                        pairs.iter().map(|(a, b)| (*a, Cow::Borrowed(b))),
+                        &Sequential,
+                    );
+                    assert_eq!(naive_eval, lin_comb);
                 }
                 Self::Interpolate(f) => {
                     if f == Poly::zero() || f.required().get() >= F::MAX as u32 {
@@ -676,7 +718,6 @@ pub mod fuzz {
         }
     }
 
-    #[commonware_macros::test_group("slow")]
     #[test]
     fn test_fuzz() {
         commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
@@ -684,8 +725,9 @@ pub mod fuzz {
 }
 #[cfg(test)]
 mod test {
-    use super::*;
+    use super::{fuzz::Plan, *};
     use crate::test::F;
+    use arbitrary::Unstructured;
 
     #[test]
     fn test_eq() {
@@ -704,6 +746,34 @@ mod test {
         assert!(eq(&[1, 2, 0, 0], &[1, 2]));
         assert!(!eq(&[1, 2, 0], &[2, 3]));
         assert!(!eq(&[2, 3], &[1, 2, 0]));
+    }
+
+    #[test]
+    fn lin_comb_eval_edge_cases() {
+        fn poly(coeffs: &[u8]) -> Poly<F> {
+            Poly {
+                coeffs: coeffs.iter().copied().map(F::from).try_collect().unwrap(),
+            }
+        }
+
+        fn pairs(values: &[(u8, u8)]) -> Vec<(F, F)> {
+            values
+                .iter()
+                .map(|(a, b)| (F::from(*a), F::from(*b)))
+                .collect()
+        }
+
+        let cases = [
+            Plan::LinCombEval(poly(&[3, 5, 7]), vec![]),
+            Plan::LinCombEval(poly(&[11]), pairs(&[(2, 0), (3, 1), (5, 8)])),
+            Plan::LinCombEval(poly(&[4, 6, 8]), pairs(&[(2, 5), (7, 5), (3, 5)])),
+            Plan::LinCombEval(poly(&[9, 2, 3, 4]), pairs(&[(6, 0), (1, 0), (5, 7)])),
+            Plan::LinCombEval(poly(&[1, 2, 4, 8]), pairs(&[(3, 1), (7, 1), (2, 6)])),
+        ];
+        let mut u = Unstructured::new(&[]);
+        for case in cases {
+            case.run(&mut u).unwrap();
+        }
     }
 
     #[cfg(feature = "arbitrary")]

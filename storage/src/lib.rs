@@ -13,7 +13,9 @@
 commonware_macros::stability_scope!(ALPHA {
     extern crate alloc;
 
-    pub mod mmr;
+    pub mod merkle;
+    pub use merkle::mmr;
+    pub use merkle::mmb;
 });
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     mod bitmap;
@@ -28,7 +30,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod freezer;
     pub mod index;
     pub mod journal;
-    pub mod kv;
     pub mod metadata;
     pub mod ordinal;
     pub mod rmap;

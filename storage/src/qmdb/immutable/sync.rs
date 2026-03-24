@@ -4,16 +4,13 @@ use crate::{
         authenticated,
         contiguous::{variable, Reader as _},
     },
-    mmr::{
-        journaled::{Config as MmrConfig, Mmr},
-        Location, Position, StandardHasher,
-    },
+    mmr::{journaled::Mmr, Location, StandardHasher},
     qmdb::{
         any::VariableValue,
         build_snapshot_from_log,
         immutable::{self, Operation},
         sync::{self},
-        Error, Merkleized,
+        Error,
     },
     translator::Translator,
 };
@@ -60,28 +57,21 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, Error> {
-        let mut hasher = StandardHasher::new();
+        let hasher = StandardHasher::new();
 
         // Initialize MMR for sync
         let mmr = Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
-                config: MmrConfig {
-                    journal_partition: db_config.mmr_journal_partition.clone(),
-                    metadata_partition: db_config.mmr_metadata_partition.clone(),
-                    items_per_blob: db_config.mmr_items_per_blob,
-                    write_buffer: db_config.mmr_write_buffer,
-                    thread_pool: db_config.thread_pool.clone(),
-                    page_cache: db_config.page_cache.clone(),
-                },
-                range: Position::try_from(range.start)?..Position::try_from(range.end)?,
+                config: db_config.mmr.clone(),
+                range,
                 pinned_nodes,
             },
-            &mut hasher,
+            &hasher,
         )
         .await?;
 
-        let journal = authenticated::Journal::<_, _, _, Merkleized<H>>::from_components(
+        let journal = authenticated::Journal::<_, _, _>::from_components(
             mmr,
             log,
             hasher,
@@ -109,11 +99,10 @@ where
             )
         };
 
-        let mut db = Self {
+        let db = Self {
             journal,
             snapshot,
             last_commit_loc,
-            _durable: core::marker::PhantomData,
         };
 
         db.sync().await?;
@@ -146,7 +135,9 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
     };
-    use commonware_utils::{channel::mpsc, test_rng_seeded, NZUsize, NZU16, NZU64};
+    use commonware_utils::{
+        channel::mpsc, non_empty_range, test_rng_seeded, NZUsize, NZU16, NZU64,
+    };
     use rand::RngCore as _;
     use rstest::rstest;
     use std::{
@@ -155,24 +146,13 @@ mod tests {
         sync::Arc,
     };
 
-    /// Type alias for sync tests with simple codec config (Merkleized, Durable)
+    /// Type alias for sync tests with simple codec config
     type ImmutableSyncTest = immutable::Immutable<
         deterministic::Context,
         sha256::Digest,
         sha256::Digest,
         Sha256,
         crate::translator::TwoCap,
-    >;
-
-    /// Type alias for mutable state (Unmerkleized, NonDurable)
-    type ImmutableSyncTestMutable = immutable::Immutable<
-        deterministic::Context,
-        sha256::Digest,
-        sha256::Digest,
-        Sha256,
-        crate::translator::TwoCap,
-        immutable::Unmerkleized,
-        immutable::NonDurable,
     >;
 
     /// Create a simple config for sync tests
@@ -184,19 +164,25 @@ mod tests {
         const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            mmr_journal_partition: format!("journal-{suffix}"),
-            mmr_metadata_partition: format!("metadata-{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log-{suffix}"),
-            log_items_per_section: ITEMS_PER_SECTION,
-            log_compression: None,
-            log_codec_config: (),
-            log_write_buffer: NZUsize!(1024),
+            mmr: crate::mmr::journaled::Config {
+                journal_partition: format!("journal-{suffix}"),
+                metadata_partition: format!("metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            log: crate::journal::contiguous::variable::Config {
+                partition: format!("log-{suffix}"),
+                items_per_section: ITEMS_PER_SECTION,
+                compression: None,
+                codec_config: (),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
             translator: TwoCap,
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -229,22 +215,27 @@ mod tests {
         ops
     }
 
-    /// Applies the given operations to the database.
+    /// Applies the given operations and commits the database.
     async fn apply_ops(
-        db: &mut ImmutableSyncTestMutable,
+        db: &mut ImmutableSyncTest,
         ops: Vec<Operation<sha256::Digest, sha256::Digest>>,
+        metadata: Option<sha256::Digest>,
     ) {
-        for op in ops {
-            match op {
-                Operation::Set(key, value) => {
-                    db.set(key, value).await.unwrap();
-                }
-                Operation::Commit(_metadata) => {
-                    // Commit causes a state change, so it is not supported here.
-                    panic!("Commit operation not supported in apply_ops");
+        let finalized = {
+            let mut batch = db.new_batch();
+            for op in ops {
+                match op {
+                    Operation::Set(key, value) => {
+                        batch = batch.set(key, value);
+                    }
+                    Operation::Commit(_metadata) => {
+                        panic!("Commit operation not supported in apply_ops");
+                    }
                 }
             }
-        }
+            batch.merkleize(metadata).finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
     }
 
     #[rstest]
@@ -259,14 +250,9 @@ mod tests {
     fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: NonZeroU64) {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let mut target_db = create_test_db(context.with_label("target"))
-                .await
-                .into_mutable();
+            let mut target_db = create_test_db(context.with_label("target")).await;
             let target_db_ops = create_test_ops(target_db_ops);
-            apply_ops(&mut target_db, target_db_ops.clone()).await;
-            let metadata = Some(Sha256::fill(1));
-            let (durable_db, _) = target_db.commit(metadata).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, target_db_ops.clone(), Some(Sha256::fill(1))).await;
             let bounds = target_db.bounds().await;
             let target_op_count = bounds.end;
             let target_oldest_retained_loc = bounds.start;
@@ -289,13 +275,16 @@ mod tests {
                 fetch_batch_size,
                 target: Target {
                     root: target_root,
-                    range: target_oldest_retained_loc..target_op_count,
+                    range: non_empty_range!(target_oldest_retained_loc, target_op_count),
                 },
                 context: context.with_label("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -325,13 +314,11 @@ mod tests {
             }
 
             // Apply new operations to both databases.
-            let mut got_db = got_db.into_mutable();
-            apply_ops(&mut got_db, new_ops.clone()).await;
-            let mut target_db = Arc::try_unwrap(target_db).map_or_else(
-                |_| panic!("target_db should have no other references"),
-                |db| db.into_mutable(),
-            );
-            apply_ops(&mut target_db, new_ops.clone()).await;
+            let mut got_db = got_db;
+            apply_ops(&mut got_db, new_ops.clone(), None).await;
+            let mut target_db = Arc::try_unwrap(target_db)
+                .unwrap_or_else(|_| panic!("target_db should have no other references"));
+            apply_ops(&mut target_db, new_ops.clone(), None).await;
 
             // Verify both databases have the new values
             for (key, expected_value) in &new_kvs {
@@ -341,10 +328,8 @@ mod tests {
                 assert_eq!(target_value, Some(*expected_value));
             }
 
-            let (got_durable, _) = got_db.commit(None).await.unwrap();
-            got_durable.into_merkleized().destroy().await.unwrap();
-            let (target_durable, _) = target_db.commit(None).await.unwrap();
-            target_durable.into_merkleized().destroy().await.unwrap();
+            got_db.destroy().await.unwrap();
+            target_db.destroy().await.unwrap();
         });
     }
 
@@ -354,10 +339,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create an empty target database
-            let target_db = create_test_db(context.with_label("target")).await;
-            let target_db = target_db.into_mutable();
-            let (durable_db, _) = target_db.commit(Some(Sha256::fill(1))).await.unwrap(); // Commit to establish a valid root
-            let target_db = durable_db.into_merkleized();
+            let mut target_db = create_test_db(context.with_label("target")).await;
+            // Commit to establish a valid root
+            apply_ops(&mut target_db, vec![], Some(Sha256::fill(1))).await;
 
             let bounds = target_db.bounds().await;
             let target_op_count = bounds.end;
@@ -372,13 +356,16 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
-                    range: target_oldest_retained_loc..target_op_count,
+                    range: non_empty_range!(target_oldest_retained_loc, target_op_count),
                 },
                 context: context.with_label("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -402,12 +389,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create and populate a simple target database
-            let target_db = create_test_db(context.with_label("target")).await;
-            let mut target_db = target_db.into_mutable();
+            let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(10);
-            apply_ops(&mut target_db, target_ops.clone()).await;
-            let (durable_db, _) = target_db.commit(Some(Sha256::fill(0))).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, target_ops.clone(), Some(Sha256::fill(0))).await;
 
             // Capture target state
             let target_root = target_db.root();
@@ -424,15 +408,18 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: target_root,
-                    range: lower_bound..op_count,
+                    range: non_empty_range!(lower_bound, op_count),
                 },
                 context: client_context.clone(),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
-            let mut synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
+            let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
             // Verify initial sync worked
             assert_eq!(synced_db.root(), target_root);
@@ -477,12 +464,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate initial target database
-            let target_db = create_test_db(context.with_label("target")).await;
-            let mut target_db = target_db.into_mutable();
+            let mut target_db = create_test_db(context.with_label("target")).await;
             let initial_ops = create_test_ops(50);
-            apply_ops(&mut target_db, initial_ops.clone()).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, initial_ops.clone(), None).await;
 
             // Capture the state after first commit
             let bounds = target_db.bounds().await;
@@ -492,11 +476,8 @@ mod tests {
 
             // Add more operations to create the extended target
             // (use different seed to avoid key collisions)
-            let mut target_db = target_db.into_mutable();
             let additional_ops = create_test_ops_seeded(25, 1);
-            apply_ops(&mut target_db, additional_ops.clone()).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, additional_ops.clone(), None).await;
             let final_upper_bound = target_db.bounds().await.end;
             let final_root = target_db.root();
 
@@ -514,13 +495,16 @@ mod tests {
                     ),
                     target: Target {
                         root: initial_root,
-                        range: initial_lower_bound..initial_upper_bound,
+                        range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                     },
                     resolver: target_db.clone(),
                     fetch_batch_size: NZU64!(2), // Very small batch size to ensure multiple batches needed
                     max_outstanding_requests: 10,
                     apply_batch_size: 1024,
                     update_rx: Some(update_receiver),
+                    finish_rx: None,
+                    reached_target_tx: None,
+                    max_retained_roots: 1,
                 };
                 let mut client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
                 loop {
@@ -541,7 +525,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: final_root,
-                    range: initial_lower_bound..final_upper_bound,
+                    range: non_empty_range!(initial_lower_bound, final_upper_bound),
                 })
                 .await
                 .unwrap();
@@ -577,54 +561,16 @@ mod tests {
         });
     }
 
-    /// Test that invalid bounds are rejected
-    #[test]
-    fn test_sync_invalid_bounds() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            let target_db = create_test_db(context.with_label("target")).await;
-            let db_config =
-                create_sync_config(&format!("invalid_bounds_{}", context.next_u64()), &context);
-            let config = Config {
-                db_config,
-                fetch_batch_size: NZU64!(10),
-                target: Target {
-                    root: sha256::Digest::from([1u8; 32]),
-                    range: Location::new(31)..Location::new(31),
-                },
-                context: context.with_label("client"),
-                resolver: Arc::new(target_db),
-                apply_batch_size: 1024,
-                max_outstanding_requests: 1,
-                update_rx: None,
-            };
-            let result: Result<ImmutableSyncTest, _> = sync::sync(config).await;
-            match result {
-                Err(sync::Error::Engine(sync::EngineError::InvalidTarget {
-                    lower_bound_pos,
-                    upper_bound_pos,
-                })) => {
-                    assert_eq!(lower_bound_pos, Location::new(31));
-                    assert_eq!(upper_bound_pos, Location::new(31));
-                }
-                _ => panic!("Expected InvalidTarget error"),
-            }
-        });
-    }
-
     /// Test that sync works when target database has operations beyond the requested range
     /// of operations to sync.
     #[test]
     fn test_sync_subset_of_target_database() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            let target_db = create_test_db(context.with_label("target")).await;
-            let mut target_db = target_db.into_mutable();
+            let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(30);
             // Apply all but the last operation
-            apply_ops(&mut target_db, target_ops[..29].to_vec()).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, target_ops[..29].to_vec(), None).await;
 
             let target_root = target_db.root();
             let bounds = target_db.bounds().await;
@@ -632,10 +578,7 @@ mod tests {
             let op_count = bounds.end;
 
             // Add final op after capturing the range
-            let mut target_db = target_db.into_mutable();
-            apply_ops(&mut target_db, target_ops[29..].to_vec()).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, target_ops[29..].to_vec(), None).await;
 
             let target_db = Arc::new(target_db);
             let config = Config {
@@ -643,13 +586,16 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root: target_root,
-                    range: lower_bound..op_count,
+                    range: non_empty_range!(lower_bound, op_count),
                 },
                 context: context.with_label("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -673,34 +619,25 @@ mod tests {
             let original_ops = create_test_ops(50);
 
             // Create two databases
-            let target_db = create_test_db(context.with_label("target")).await;
-            let mut target_db = target_db.into_mutable();
+            let mut target_db = create_test_db(context.with_label("target")).await;
             let sync_db_config =
                 create_sync_config(&format!("partial_{}", context.next_u64()), &context);
             let client_context = context.with_label("client");
-            let sync_db: ImmutableSyncTest =
+            let mut sync_db: ImmutableSyncTest =
                 immutable::Immutable::init(client_context.clone(), sync_db_config.clone())
                     .await
                     .unwrap();
-            let mut sync_db = sync_db.into_mutable();
 
             // Apply the same operations to both databases
-            apply_ops(&mut target_db, original_ops.clone()).await;
-            apply_ops(&mut sync_db, original_ops.clone()).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
-            let (durable_db, _) = sync_db.commit(None).await.unwrap();
-            let sync_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, original_ops.clone(), None).await;
+            apply_ops(&mut sync_db, original_ops.clone(), None).await;
 
             drop(sync_db);
 
             // Add one more operation and commit the target database
             // (use different seed to avoid key collisions)
-            let mut target_db = target_db.into_mutable();
             let last_op = create_test_ops_seeded(1, 1);
-            apply_ops(&mut target_db, last_op.clone()).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, last_op.clone(), None).await;
             let root = target_db.root();
             let bounds = target_db.bounds().await;
             let lower_bound = bounds.start;
@@ -713,13 +650,16 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root,
-                    range: lower_bound..upper_bound,
+                    range: non_empty_range!(lower_bound, upper_bound),
                 },
                 context: context.with_label("sync"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -742,24 +682,18 @@ mod tests {
             let target_ops = create_test_ops(40);
 
             // Create two databases
-            let target_db = create_test_db(context.with_label("target")).await;
-            let mut target_db = target_db.into_mutable();
+            let mut target_db = create_test_db(context.with_label("target")).await;
             let sync_config =
                 create_sync_config(&format!("exact_{}", context.next_u64()), &context);
             let client_context = context.with_label("client");
-            let sync_db: ImmutableSyncTest =
+            let mut sync_db: ImmutableSyncTest =
                 immutable::Immutable::init(client_context.clone(), sync_config.clone())
                     .await
                     .unwrap();
-            let mut sync_db = sync_db.into_mutable();
 
             // Apply the same operations to both databases
-            apply_ops(&mut target_db, target_ops.clone()).await;
-            apply_ops(&mut sync_db, target_ops.clone()).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
-            let (durable_db, _) = sync_db.commit(None).await.unwrap();
-            let sync_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, target_ops.clone(), None).await;
+            apply_ops(&mut sync_db, target_ops.clone(), None).await;
 
             drop(sync_db);
 
@@ -776,13 +710,16 @@ mod tests {
                 fetch_batch_size: NZU64!(10),
                 target: Target {
                     root,
-                    range: lower_bound..upper_bound,
+                    range: non_empty_range!(lower_bound, upper_bound),
                 },
                 context: context.with_label("sync"),
                 resolver: resolver.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -802,12 +739,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let target_db = create_test_db(context.with_label("target")).await;
-            let mut target_db = target_db.into_mutable();
+            let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(100);
-            apply_ops(&mut target_db, target_ops).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let mut target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, target_ops, None).await;
 
             target_db.prune(Location::new(10)).await.unwrap();
 
@@ -826,12 +760,15 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    range: initial_lower_bound..initial_upper_bound,
+                    range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
             let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
 
@@ -839,7 +776,10 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    range: initial_lower_bound.checked_sub(1).unwrap()..initial_upper_bound,
+                    range: non_empty_range!(
+                        initial_lower_bound.checked_sub(1).unwrap(),
+                        initial_upper_bound
+                    ),
                 })
                 .await
                 .unwrap();
@@ -864,12 +804,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let target_db = create_test_db(context.with_label("target")).await;
-            let mut target_db = target_db.into_mutable();
+            let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(50);
-            apply_ops(&mut target_db, target_ops).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, target_ops, None).await;
 
             // Capture initial target state
             let bounds = target_db.bounds().await;
@@ -886,12 +823,15 @@ mod tests {
                 fetch_batch_size: NZU64!(5),
                 target: Target {
                     root: initial_root,
-                    range: initial_lower_bound..initial_upper_bound,
+                    range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
             let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
 
@@ -899,7 +839,7 @@ mod tests {
             update_sender
                 .send(Target {
                     root: initial_root,
-                    range: initial_lower_bound..(initial_upper_bound - 1),
+                    range: non_empty_range!(initial_lower_bound, initial_upper_bound - 1),
                 })
                 .await
                 .unwrap();
@@ -924,12 +864,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let target_db = create_test_db(context.with_label("target")).await;
-            let mut target_db = target_db.into_mutable();
+            let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(100);
-            apply_ops(&mut target_db, target_ops.clone()).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, target_ops.clone(), None).await;
 
             // Capture initial target state
             let bounds = target_db.bounds().await;
@@ -939,16 +876,11 @@ mod tests {
 
             // Apply more operations to the target database
             // (use different seed to avoid key collisions)
-            let mut target_db = target_db.into_mutable();
             let more_ops = create_test_ops_seeded(5, 1);
-            apply_ops(&mut target_db, more_ops).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let mut target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, more_ops, None).await;
 
             target_db.prune(Location::new(10)).await.unwrap();
-            let target_db = target_db.into_mutable();
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, vec![], None).await;
 
             // Capture final target state
             let bounds = target_db.bounds().await;
@@ -972,19 +904,22 @@ mod tests {
                 fetch_batch_size: NZU64!(1),
                 target: Target {
                     root: initial_root,
-                    range: initial_lower_bound..initial_upper_bound,
+                    range: non_empty_range!(initial_lower_bound, initial_upper_bound),
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 1,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
 
             // Send target update with increased upper bound
             update_sender
                 .send(Target {
                     root: final_root,
-                    range: final_lower_bound..final_upper_bound,
+                    range: non_empty_range!(final_lower_bound, final_upper_bound),
                 })
                 .await
                 .unwrap();
@@ -1005,79 +940,15 @@ mod tests {
         });
     }
 
-    /// Test that the client fails to sync with invalid bounds (lower > upper)
-    #[test_traced("WARN")]
-    fn test_target_update_invalid_bounds() {
-        let executor = deterministic::Runner::default();
-        executor.start(|mut context| async move {
-            // Create and populate target database
-            let target_db = create_test_db(context.with_label("target")).await;
-            let mut target_db = target_db.into_mutable();
-            let target_ops = create_test_ops(25);
-            apply_ops(&mut target_db, target_ops).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
-
-            // Capture initial target state
-            let bounds = target_db.bounds().await;
-            let initial_lower_bound = bounds.start;
-            let initial_upper_bound = bounds.end;
-            let initial_root = target_db.root();
-
-            // Create client with initial target
-            let (update_sender, update_receiver) = mpsc::channel(1);
-            let target_db = Arc::new(target_db);
-            let config = Config {
-                context: context.with_label("client"),
-                db_config: create_sync_config(
-                    &format!("invalid_update_{}", context.next_u64()),
-                    &context,
-                ),
-                fetch_batch_size: NZU64!(5),
-                target: Target {
-                    root: initial_root,
-                    range: initial_lower_bound..initial_upper_bound,
-                },
-                resolver: target_db.clone(),
-                apply_batch_size: 1024,
-                max_outstanding_requests: 10,
-                update_rx: Some(update_receiver),
-            };
-            let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
-
-            // Send target update with invalid bounds (lower > upper)
-            update_sender
-                .send(Target {
-                    root: initial_root,
-                    range: initial_upper_bound..initial_lower_bound,
-                })
-                .await
-                .unwrap();
-
-            let result = client.step().await;
-            assert!(matches!(
-                result,
-                Err(sync::Error::Engine(sync::EngineError::InvalidTarget { .. }))
-            ));
-
-            let target_db =
-                Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-            target_db.destroy().await.unwrap();
-        });
-    }
-
     /// Test that target updates can be sent even after the client is done
     #[test_traced("WARN")]
     fn test_target_update_on_done_client() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             // Create and populate target database
-            let target_db = create_test_db(context.with_label("target")).await;
-            let mut target_db = target_db.into_mutable();
+            let mut target_db = create_test_db(context.with_label("target")).await;
             let target_ops = create_test_ops(10);
-            apply_ops(&mut target_db, target_ops).await;
-            let (durable_db, _) = target_db.commit(None).await.unwrap();
-            let target_db = durable_db.into_merkleized();
+            apply_ops(&mut target_db, target_ops, None).await;
 
             // Capture target state
             let bounds = target_db.bounds().await;
@@ -1094,12 +965,15 @@ mod tests {
                 fetch_batch_size: NZU64!(20),
                 target: Target {
                     root,
-                    range: lower_bound..upper_bound,
+                    range: non_empty_range!(lower_bound, upper_bound),
                 },
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,
                 max_outstanding_requests: 10,
                 update_rx: Some(update_receiver),
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 1,
             };
 
             // Complete the sync
@@ -1109,7 +983,7 @@ mod tests {
             let _ = update_sender
                 .send(Target {
                     root: sha256::Digest::from([2u8; 32]),
-                    range: lower_bound + 1..upper_bound + 1,
+                    range: non_empty_range!(lower_bound + 1, upper_bound + 1),
                 })
                 .await;
 

@@ -7,6 +7,7 @@
 use commonware_parallel::Strategy as ParStrategy;
 use core::{
     fmt::Debug,
+    iter,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
@@ -59,13 +60,11 @@ fn monoid_exp<T: Clone>(
     acc
 }
 
-/// Return `[1, base, base^2, ..., base^(len - 1)]`.
-pub fn powers<R: Ring>(base: &R, len: usize) -> impl Iterator<Item = R> + '_ {
-    (0..len).scan(R::one(), move |state, _| {
-        let out = state.clone();
-        *state *= base;
-        Some(out)
-    })
+/// Return `shift, shift * base, shift * base^2, ...`.
+///
+/// Use `powers(R::one(), base)` if you just want the standard powers.
+pub fn powers<R: Ring>(shift: R, base: &R) -> impl Iterator<Item = R> + '_ {
+    iter::successors(Some(shift), move |state: &R| Some(state.clone() * base))
 }
 
 /// A basic trait we expect algebraic data structures to implement.
@@ -94,6 +93,17 @@ pub trait Object: Clone + Debug + PartialEq + Eq + Send + Sync {}
 /// There are other combinations of borrowing that could be chosen, but these
 /// should be efficiently implementable, even for a "heavier" struct, e.g.
 /// a vector of values.
+///
+/// # Properties
+///
+/// Implementations are expected to form a commutative group under addition:
+///
+/// - `+=` and `-=` agree with `+` and `-`,
+/// - addition satisfies `a + b = b + a` and `(a + b) + c = a + (b + c)`,
+/// - [`Additive::zero`] satisfies `0 + a = a`,
+/// - negation satisfies `a + (-a) = 0` and `a - b = a + (-b)`,
+/// - [`Additive::scale`] satisfies `a.scale(&[]) = 0`,
+///   `a.scale(&[1]) = a`, and `a.scale(m + n) = a.scale(m) + a.scale(n)`.
 ///
 /// # Usage
 ///
@@ -154,6 +164,14 @@ pub trait Additive:
 /// As with [`Additive`], the borrowing scheme is chosen to keep implementations
 /// efficient even for heavier structures.
 ///
+/// # Properties
+///
+/// Implementations are expected to have a commutative, associative
+/// multiplication:
+///
+/// - `*=` agrees with `*`,
+/// - multiplication satisfies `a * b = b * a` and `(a * b) * c = a * (b * c)`.
+///
 /// # Usage
 ///
 /// ```
@@ -185,6 +203,16 @@ pub trait Multiplicative:
 /// The following operations must be supported (in addition to [`Additive`]):
 /// 1. `T *= &R`,
 /// 2. `T * &R`
+///
+/// # Properties
+///
+/// Implementations are expected to behave like a right `R`-module action:
+///
+/// - `*=` agrees with `*`,
+/// - scalar multiplication satisfies `(a + b) * x = a * x + b * x`,
+/// - [`Space::msm`] satisfies `msm(points, scalars) = sum_i points[i] * scalars[i]`,
+/// - when `R: Multiplicative`, `((a * x) * y) = a * (x * y)`,
+/// - when `R: Ring`, `a * 1 = a` and `a * 0 = 0`.
 ///
 ///
 /// # Usage
@@ -236,6 +264,16 @@ impl<R: Additive + Multiplicative> Space<R> for R {}
 ///
 /// This combines [`Additive`] and [`Multiplicative`], and introduces a
 /// neutral element for multiplication, [`Ring::one`].
+///
+/// # Properties
+///
+/// Implementations are expected to be commutative rings:
+///
+/// - [`Additive`] and [`Multiplicative`] laws both hold,
+/// - [`Ring::one`] satisfies `1 * a = a`,
+/// - multiplication satisfies `(a + b) * c = a * c + b * c`,
+/// - [`Ring::exp`] satisfies `a.exp(&[]) = 1`,
+///   `a.exp(&[1]) = a`, and `a.exp(m + n) = a.exp(m) * a.exp(n)`.
 pub trait Ring: Additive + Multiplicative {
     /// The neutral element for multiplication.
     ///
@@ -258,6 +296,14 @@ pub trait Ring: Additive + Multiplicative {
 ///
 /// This inherits from [`Ring`], and requires the existence of multiplicative
 /// inverses as well.
+///
+/// # Properties
+///
+/// Implementations are expected to satisfy the usual field inverse laws:
+///
+/// - all [`Ring`] laws hold,
+/// - `0.inv() = 0`,
+/// - for any nonzero `a`, `a * a.inv() = 1`.
 pub trait Field: Ring {
     /// The multiplicative inverse of an element.
     ///
@@ -273,6 +319,16 @@ pub trait Field: Ring {
 /// Fields implementing this trait must have characteristic not equal to 2
 /// (so that 2 is invertible), and must have a multiplicative group with
 /// sufficiently large 2-adic order.
+///
+/// # Properties
+///
+/// Implementations are expected to satisfy the NTT-specific laws checked by
+/// the property tests:
+///
+/// - `root_of_unity(lg)` returns `None` only when `lg > MAX_LG_ROOT_ORDER`,
+/// - otherwise, `root_of_unity(lg)^(2^lg) = 1` and, for `lg > 0`, `root_of_unity(lg)^(2^lg - 1) != 1`,
+/// - `coset_shift()` and `coset_shift_inv()` satisfy `coset_shift() * coset_shift_inv() = 1`,
+/// - `div_2(a)` satisfies `div_2(a) * (1 + 1) = a`.
 pub trait FieldNTT: Field {
     /// The maximum (lg) of the power of two root of unity this fields supports.
     const MAX_LG_ROOT_ORDER: u8;
@@ -326,6 +382,12 @@ pub trait CryptoGroup: Space<Self::Scalar> {
 ///
 /// Advanced protocols use this capability to create new generator elements
 /// whose discrete logarithm relative to other points is unknown.
+///
+/// # Properties
+///
+/// - equal `(domain_separator, message)` pairs satisfy
+///   `hash_to_group(dst0, m0) = hash_to_group(dst1, m1)` whenever
+///   `(dst0, m0) = (dst1, m1)`.
 pub trait HashToGroup: CryptoGroup {
     /// Hash a domain separator, and a message, returning a group element.
     ///
@@ -708,7 +770,7 @@ commonware_macros::stability_scope!(ALPHA {
             ExpOne(F),
             ExpZero(F),
             Exp(F, u32, u32),
-            PowersMatchesExp(F, u16),
+            PowersMatchesExp(F, F, u16),
             ScaleOne(F),
             ScaleZero(F),
             Scale(F, u32, u32),
@@ -729,11 +791,12 @@ commonware_macros::stability_scope!(ALPHA {
                         let b = u64::from(b);
                         assert_eq!(x.exp(&[a + b]), x.exp(&[a]) * x.exp(&[b]));
                     }
-                    Self::PowersMatchesExp(base, index) => {
-                        let pow_i = powers(&base, usize::from(index) + 1)
+                    Self::PowersMatchesExp(shift, base, index) => {
+                        let pow_i = powers(shift, &base)
+                            .take(usize::from(index) + 1)
                             .last()
                             .expect("len=index+1 guarantees at least one item");
-                        assert_eq!(pow_i, base.exp(&[u64::from(index)]));
+                        assert_eq!(pow_i, shift * base.exp(&[u64::from(index)]));
                     }
                     Self::ScaleOne(x) => {
                         assert_eq!(x.scale(&[1]), x);
@@ -754,7 +817,6 @@ commonware_macros::stability_scope!(ALPHA {
             }
         }
 
-        #[commonware_macros::test_group("slow")]
         #[test]
         fn test_fuzz() {
             commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));

@@ -70,11 +70,19 @@ hash = "ada5da872b95b6369905c2fca454f3276935a380d3da91190bc04f1602e7c501"
 n_cases = 512
 hash = "506b5a02d1a7c3e249f514b889e6099c27bb0723ebc711514263f0c71f0676ef"
 
-["commonware_storage::mmr::conformance::MmrRootStability"]
+["commonware_storage::merkle::conformance::MmbRootStability"]
 n_cases = 200
-hash = "fa3102022fb8dabb5b1e559db14608a413b101f092f893a9e3fd331c26bc1604"
+hash = "7db87b0f0b2d10f3571bfc38a9bb0aa0045b8ef884da5a10dd2e758f9b3399a5"
 
-["commonware_storage::mmr::proof::tests::conformance::CodecConformance<Proof<Sha256Digest>>"]
+["commonware_storage::merkle::conformance::MmrRootStability"]
+n_cases = 200
+hash = "4078ce1f5e242f8edb1d41575d51e166af620404036124f8094fc74d4b401047"
+
+["commonware_storage::merkle::mmr::proof::tests::conformance::CodecConformance<Proof<Family, Sha256Digest>>"]
+n_cases = 65536
+hash = "3636363c592dddcff2eaeb4e6b01ec0cfcca654d69f9fdc1c57626c5adea0de1"
+
+["commonware_storage::merkle::mmr::proof::tests::conformance::CodecConformance<Proof<Family,Sha256Digest>>"]
 n_cases = 65536
 hash = "3636363c592dddcff2eaeb4e6b01ec0cfcca654d69f9fdc1c57626c5adea0de1"
 

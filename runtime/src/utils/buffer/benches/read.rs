@@ -1,7 +1,9 @@
 //! Benchmark read performance at random offsets.
 
 use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE, PAGE_SIZE_USIZE};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Blob as _, Runner as _};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, tokio, BufferPooler, Runner, Storage,
+};
 use commonware_utils::NZUsize;
 use criterion::Criterion;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -11,17 +13,21 @@ use std::time::Instant;
 const TOTAL_PAGES: usize = CACHE_SIZE;
 const TOTAL_SIZE: usize = PAGE_SIZE_USIZE * TOTAL_PAGES;
 
-pub fn bench(c: &mut Criterion) {
-    for read_size in [64, 256, 1024, 4096] {
-        let name = format!("read_{read_size}").into_bytes();
-
-        c.bench_function(&format!("{}/size={}", module_path!(), read_size), |b| {
+fn bench_backend<R>(c: &mut Criterion, backend: &str, read_size: usize)
+where
+    R: Runner + Default,
+    R::Context: Storage + BufferPooler,
+{
+    c.bench_function(
+        &format!("{}/backend={backend} size={read_size}", module_path!()),
+        |b| {
             b.iter_custom(|iters| {
-                let name = name.clone();
+                let name = format!("read_{backend}_{read_size}").into_bytes();
 
-                let executor = deterministic::Runner::default();
+                let executor = R::default();
                 executor.start(|ctx| async move {
                     let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
+
                     // Setup: populate the blob
                     let append = create_append(&ctx, &name, cache_ref.clone()).await;
                     let data = vec![0xABu8; TOTAL_SIZE];
@@ -30,7 +36,7 @@ pub fn bench(c: &mut Criterion) {
                     drop(append);
 
                     // Benchmark: random reads
-                    let append = create_append(&ctx, &name, cache_ref.clone()).await;
+                    let append = create_append(&ctx, &name, cache_ref).await;
                     let mut buf = vec![0u8; read_size];
                     let max_offset = TOTAL_SIZE - read_size;
                     let mut rng = StdRng::seed_from_u64(42);
@@ -51,6 +57,13 @@ pub fn bench(c: &mut Criterion) {
                     elapsed
                 })
             });
-        });
+        },
+    );
+}
+
+pub fn bench(c: &mut Criterion) {
+    for read_size in [64, 256, 1024, 4096] {
+        bench_backend::<deterministic::Runner>(c, "deterministic", read_size);
+        bench_backend::<tokio::Runner>(c, "tokio", read_size);
     }
 }

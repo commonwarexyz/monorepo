@@ -64,7 +64,7 @@ stability_scope!(BETA {
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::types::Round;
-    use commonware_cryptography::Digest;
+    use commonware_cryptography::{Digest, PublicKey};
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
 
@@ -106,8 +106,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
         /// Verify the payload is valid.
         ///
-        /// If it is possible to verify the payload, a boolean should be returned indicating whether
-        /// the payload is valid. If it is not possible to verify the payload, the channel can be dropped.
+        /// This request is single-shot for the given `(context, payload)`. Once the returned
+        /// channel resolves or closes, consensus treats verification as concluded and will not
+        /// retry the same request.
+        ///
+        /// Implementations should therefore keep the request pending while the verdict may still
+        /// change. Return `false` only when the payload is permanently invalid for this context.
+        /// For example, temporary conditions such as time skew, missing dependencies, or data
+        /// that may arrive later should not conclude verification with `false`.
+        ///
+        /// Closing the channel is also terminal for this request and should be reserved for cases
+        /// where verification cannot ever produce a verdict anymore (for example, shutdown), not
+        /// for temporary inability to decide.
         fn verify(
             &mut self,
             context: Self::Context,
@@ -135,6 +145,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// can override this method to delay or prevent finalization until they have
         /// reconstructed and validated the full block (e.g., after receiving enough shards).
         ///
+        /// Like [`Automaton::verify`], certification is single-shot for the given
+        /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
+        /// certification as concluded and will not retry the same request.
+        ///
+        /// Implementations should therefore keep the request pending while the verdict may still
+        /// change. Return `false` only when the payload is permanently uncertifiable for that
+        /// round. Temporary conditions such as waiting for more data should not conclude
+        /// certification with `false`.
+        ///
+        /// Closing the channel is also terminal for this request and should be reserved for cases
+        /// where certification can no longer produce a verdict (for example, shutdown).
+        ///
         /// # Determinism Requirement
         ///
         /// The decision returned by `certify` must be deterministic and consistent across
@@ -161,12 +183,22 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Hash of an arbitrary payload.
         type Digest: Digest;
 
-        /// Called once consensus begins working towards a proposal provided by `Automaton` (i.e.
-        /// it isn't dropped).
+        /// Identity key of a network participant.
+        type PublicKey: PublicKey;
+
+        /// Directive for how a payload should be broadcast.
         ///
-        /// Other participants may not begin voting on a proposal until they have the full contents,
-        /// so timely delivery often yields better performance.
-        fn broadcast(&mut self, payload: Self::Digest) -> impl Future<Output = ()> + Send;
+        /// Consensus mechanisms that need broadcast control (e.g. distinguishing
+        /// initial broadcast from rebroadcasts) define a custom enum here. Mechanisms that
+        /// treat every broadcast identically can set this to `()`.
+        type Plan: Send;
+
+        /// Broadcast a payload to the given recipients.
+        fn broadcast(
+            &mut self,
+            payload: Self::Digest,
+            plan: Self::Plan,
+        ) -> impl Future<Output = ()> + Send;
     }
 
     /// Reporter is the interface responsible for reporting activity to some external actor.
@@ -250,6 +282,11 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         E: Rng + Spawner + Metrics + Clock,
     {
         /// Verify a block produced by the application's proposer, relative to its ancestry.
+        ///
+        /// This future should not resolve until the implementation can produce a stable verdict.
+        /// Return `false` only when the block is permanently invalid for the supplied context and
+        /// ancestry. If validity may still change as additional information becomes available,
+        /// continue waiting instead of returning `false`.
         fn verify<A: BlockProvider<Block = Self::Block>>(
             &mut self,
             context: (E, Self::Context),

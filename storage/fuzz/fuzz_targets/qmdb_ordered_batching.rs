@@ -4,14 +4,15 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
 use commonware_storage::{
-    kv::{Batchable as _, Deletable as _, Gettable as _, Updatable as _},
-    qmdb::any::{ordered::fixed::Db, FixedConfig as Config},
+    journal::contiguous::fixed::Config as FConfig,
+    mmr::journaled::Config as MmrConfig,
+    qmdb::any::{ordered::fixed::Db as AnyDb, FixedConfig as Config},
     translator::EightCap,
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     num::NonZeroU16,
     ops::Bound::{Excluded, Unbounded},
 };
@@ -20,7 +21,7 @@ type Key = FixedBytes<32>;
 type Value = FixedBytes<64>;
 type RawKey = [u8; 32];
 type RawValue = [u8; 64];
-type OrderedDb = Db<deterministic::Context, Key, Value, Sha256, EightCap>;
+type Db = AnyDb<deterministic::Context, Key, Value, Sha256, EightCap>;
 
 const MAX_OPS: usize = 25;
 
@@ -40,31 +41,65 @@ struct FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(111);
 const PAGE_CACHE_SIZE: usize = 100;
 
+async fn commit_pending(
+    db: &mut Db,
+    pending_writes: &mut Vec<(Key, Option<Value>)>,
+    committed_state: &mut BTreeMap<RawKey, RawValue>,
+    pending_inserts: &mut HashMap<RawKey, RawValue>,
+    pending_deletes: &mut HashSet<RawKey>,
+    metadata: Option<Value>,
+) {
+    let finalized = {
+        let mut batch = db.new_batch();
+        for (k, v) in pending_writes.drain(..) {
+            batch = batch.write(k, v);
+        }
+        batch.merkleize(metadata).await.unwrap().finalize()
+    };
+    db.apply_batch(finalized)
+        .await
+        .expect("commit should not fail");
+    db.commit().await.expect("commit fsync should not fail");
+    for key in pending_deletes.drain() {
+        committed_state.remove(&key);
+    }
+    committed_state.extend(pending_inserts.drain());
+}
+
 fn fuzz(data: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = Config::<EightCap> {
-            mmr_journal_partition: "test-qmdb-mmr-journal".into(),
-            mmr_items_per_blob: NZU64!(500000),
-            mmr_write_buffer: NZUsize!(1024),
-            mmr_metadata_partition: "test-qmdb-mmr-metadata".into(),
-            log_journal_partition: "test-qmdb-log-journal".into(),
-            log_items_per_blob: NZU64!(500000),
-            log_write_buffer: NZUsize!(1024),
+            mmr_config: MmrConfig {
+                journal_partition: "test-qmdb-mmr-journal".into(),
+                metadata_partition: "test-qmdb-mmr-metadata".into(),
+                items_per_blob: NZU64!(500000),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: FConfig {
+                partition: "test-qmdb-log-journal".into(),
+                items_per_blob: NZU64!(500000),
+                write_buffer: NZUsize!(1024),
+                page_cache,
+            },
             translator: EightCap,
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         };
 
-        let mut db = OrderedDb::init(context.clone(), cfg.clone())
+        let mut db = Db::init(context.clone(), cfg.clone())
             .await
-            .expect("init qmdb")
-            .into_mutable();
-        let mut batch = Some(db.start_batch());
+            .expect("init qmdb");
         let mut last_commit = None;
+        let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
-        let mut expected_state: BTreeMap<RawKey, RawValue> = BTreeMap::new();
+        // committed_state tracks state after apply_batch. pending_inserts/pending_deletes
+        // track uncommitted mutations.
+        let mut committed_state: BTreeMap<RawKey, RawValue> = BTreeMap::new();
+        let mut pending_inserts: HashMap<RawKey, RawValue> = HashMap::new();
+        let mut pending_deletes: HashSet<RawKey> = HashSet::new();
         let mut all_keys: HashSet<RawKey> = HashSet::new();
 
         for op in data.operations.iter().take(MAX_OPS) {
@@ -73,58 +108,40 @@ fn fuzz(data: FuzzInput) {
                     let k = Key::new(*key);
                     let v = Value::new(*value);
 
-                    batch
-                        .as_mut()
-                        .unwrap()
-                        .update(k, v)
-                        .await
-                        .expect("update should not fail");
-                    expected_state.insert(*key, *value);
+                    pending_writes.push((k, Some(v)));
+                    pending_deletes.remove(key);
+                    pending_inserts.insert(*key, *value);
                     all_keys.insert(*key);
                 }
 
                 QmdbOperation::Delete { key } => {
                     let k = Key::new(*key);
-                    batch
-                        .as_mut()
-                        .unwrap()
-                        .delete(k)
-                        .await
-                        .expect("delete should not fail");
-                    expected_state.remove(key);
+                    pending_writes.push((k, None));
+                    pending_inserts.remove(key);
+                    pending_deletes.insert(*key);
                 }
 
                 QmdbOperation::Commit { value } => {
                     assert_eq!(last_commit, db.get_metadata().await.unwrap());
-                    let b = batch.take().unwrap();
-                    let iter = b.into_iter();
-                    db.write_batch(iter)
-                        .await
-                        .expect("write batch should not fail");
+                    commit_pending(
+                        &mut db,
+                        &mut pending_writes,
+                        &mut committed_state,
+                        &mut pending_inserts,
+                        &mut pending_deletes,
+                        Some(Value::new(*value)),
+                    )
+                    .await;
                     last_commit = Some(Value::new(*value));
-                    let (durable_db, _) = db
-                        .commit(Some(Value::new(*value)))
-                        .await
-                        .expect("commit should not fail");
-                    db = durable_db.into_merkleized().into_mutable();
-
-                    // Restore batch for subsequent operations
-                    batch = Some(db.start_batch());
                 }
 
                 QmdbOperation::Get { key } => {
                     let k = Key::new(*key);
-                    let result = batch
-                        .as_ref()
-                        .unwrap()
-                        .get(&k)
-                        .await
-                        .expect("get should not fail");
+                    let result = db.get(&k).await.expect("get should not fail");
 
-                    // Verify against expected state
-                    match expected_state.get(key) {
+                    // Verify against committed state only.
+                    match committed_state.get(key) {
                         Some(expected_value) => {
-                            // Key should exist with this value
                             let v = result.expect("get should not fail");
                             let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
                             assert_eq!(v_bytes, expected_value, "Value mismatch for key {key:?}");
@@ -136,27 +153,28 @@ fn fuzz(data: FuzzInput) {
                             );
                         }
                     }
-                    // Track that we accessed this key
                     all_keys.insert(*key);
                 }
             }
         }
 
-        // Write any pending batch operations
-        let b = batch.take().unwrap();
-        let iter = b.into_iter();
-        db.write_batch(iter)
-            .await
-            .expect("write batch should not fail");
-        let (durable_db, _) = db.commit(None).await.expect("commit should not fail");
-        let db = durable_db.into_merkleized();
+        // Commit any remaining pending operations.
+        commit_pending(
+            &mut db,
+            &mut pending_writes,
+            &mut committed_state,
+            &mut pending_inserts,
+            &mut pending_deletes,
+            None,
+        )
+        .await;
 
         // Comprehensive final verification - check ALL keys ever touched
         for key in &all_keys {
             let k = Key::new(*key);
             let result = db.get(&k).await.expect("final get should not fail");
 
-            match expected_state.get(key) {
+            match committed_state.get(key) {
                 Some(expected_value) => {
                     let v = result.expect("get should not fail");
                     let v_bytes: &[u8; 64] = v.as_ref().try_into().expect("bytes");
@@ -170,13 +188,13 @@ fn fuzz(data: FuzzInput) {
                         .await
                         .expect("get span should not fail")
                         .expect("span should exist");
-                    let expected_next = expected_state.range((Excluded(*key), Unbounded)).next();
+                    let expected_next = committed_state.range((Excluded(*key), Unbounded)).next();
                     match expected_next {
                         Some((next_key, _)) => {
                             assert_eq!(span.1.next_key, Key::new(*next_key));
                         }
                         None => {
-                            let first_key = expected_state.first_key_value().unwrap().0;
+                            let first_key = committed_state.first_key_value().unwrap().0;
                             assert_eq!(span.1.next_key, Key::new(*first_key));
                         }
                     }
@@ -191,7 +209,7 @@ fn fuzz(data: FuzzInput) {
         }
 
         db.destroy().await.expect("destroy should not fail");
-        expected_state.clear();
+        committed_state.clear();
         all_keys.clear();
     });
 }
