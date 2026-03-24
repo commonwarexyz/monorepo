@@ -29,7 +29,7 @@ But this strategy comes with two limitations:
 1. introduces an extra "hop" in each slot from proposer $\rightarrow$ aggregator $\rightarrow$ validator, which in turn increases latency
 2. relies on availability of the aggregator to maintain the system's throughput
 
-**Our goal:** fast verification of SNARKs on chain with <i><b><u>zero latency</u></b></i> overhead and no additional assumptions.
+**Our goal:** fast verification of SNARKs on chain with <i><b><u>zero latency overhead</u></b></i> and no additional assumptions.
 
 The zero-latency requirement immediately disallows any strategy that *delegates* verification to a third party. This also means that verification cannot be sub-linear time, as validators need to, at the very least, read all proofs in the block.
 Giving up sub-linear verification might seem like we're going in the opposite direction of scaling, but in practice validators typically still perform a non-trivial amount of work for each transaction. In private payments, for instance, they update the state with newly minted UTXOs and check nullifiers to prevent double spending. Thus, if we can drive *amortized* proof verification costs down to roughly the cost of transaction processing/dissemination, we are in very good shape.
