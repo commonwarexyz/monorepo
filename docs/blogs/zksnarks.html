@@ -93,10 +93,14 @@ Vamsi Policharla</a></div>
         payments and trading. We’ve made real progress in scaling these
         systems with many chains supporting 10K–100K TPS. But what
         happens when we introduce privacy?</p>
-        <p>Recall that there are really only two tools at our disposal:
-        - zero-knowledge proofs for private payments, smart contracts,
-        and zk-identity - <em>advanced</em> encryption schemes for
-        privacy of pending bids/trades</p>
+        <p>Recall that there are really only two tools at our
+        disposal:</p>
+        <ul>
+        <li>zero-knowledge proofs for private payments, smart contracts,
+        and zk-identity</li>
+        <li><em>advanced</em> encryption schemes for privacy of pending
+        bids/trades</li>
+        </ul>
         <p>The chain (validators) needs to verify every proof and
         decrypt every ciphertext to process the block. Very loosely
         speaking, this translates to a “few” public key operations
@@ -120,12 +124,15 @@ Vamsi Policharla</a></div>
         href="https://eprint.iacr.org/2021/529">GMN21</a>). In fact, <a
         href="https://eprint.iacr.org/2021/529">GMN21</a> shows that
         verification time can be sub-linear in the number of proofs.</p>
-        <p>But this strategy comes with two limitations: 1. introduces
-        an extra “hop” in each slot from proposer <span
+        <p>But this strategy comes with two limitations:</p>
+        <ol type="1">
+        <li>introduces an extra “hop” in each slot from proposer <span
         class="math inline">\(\rightarrow\)</span> aggregator <span
         class="math inline">\(\rightarrow\)</span> validator, which in
-        turn increases latency 2. relies on availability of the
-        aggregator to maintain the system’s throughput</p>
+        turn increases latency</li>
+        <li>relies on availability of the aggregator to maintain the
+        system’s throughput</li>
+        </ol>
         <p><strong>Our goal:</strong> fast verification of SNARKs on
         chain with <i><b><u>zero latency</u></b></i> overhead and no
         additional assumptions.</p>

@@ -14,6 +14,7 @@ katex: true
 Blockchains are especially well-suited for two use cases: payments and trading. We’ve made real progress in scaling these systems with many chains supporting 10K–100K TPS. But what happens when we introduce privacy?
 
 Recall that there are really only two tools at our disposal:
+
 - zero-knowledge proofs for private payments, smart contracts, and zk-identity
 - *advanced* encryption schemes for privacy of pending bids/trades
 
@@ -24,6 +25,7 @@ The chain (validators) needs to verify every proof and decrypt every ciphertext 
 Note that if we just want to quickly verify proofs on chain, there are known techniques that utilize an untrusted third party to reduce the cost of verification on chain ([MBK+19](https://eprint.iacr.org/2019/099), [BMM+19](https://eprint.iacr.org/2019/1177), [GMN21](https://eprint.iacr.org/2021/529)). In fact, [GMN21](https://eprint.iacr.org/2021/529) shows that verification time can be sub-linear in the number of proofs.
 
 But this strategy comes with two limitations:
+
 1. introduces an extra "hop" in each slot from proposer $\rightarrow$ aggregator $\rightarrow$ validator, which in turn increases latency
 2. relies on availability of the aggregator to maintain the system's throughput
 
