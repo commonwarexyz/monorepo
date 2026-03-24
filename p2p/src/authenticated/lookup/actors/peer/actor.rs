@@ -63,15 +63,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         )
     }
 
-    /// Assert the outbound message's `channel` is registered.
-    fn validate_outbound_msg<V>(msg: EncodedData, rate_limits: &HashMap<u64, V>) -> EncodedData {
-        assert!(
-            rate_limits.contains_key(&msg.channel),
-            "outbound message on invalid channel"
-        );
-        msg
-    }
-
     /// Drains already-queued messages into `batch`.
     ///
     /// Priority order: control > high > low. Only consumes messages that are
@@ -95,7 +86,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 }
             }
             if let Ok(msg) = high.try_recv() {
-                let encoded = Self::validate_outbound_msg(msg, rate_limits);
+                let encoded = msg.validate_channel(rate_limits);
                 sent_messages
                     .get_or_create(&metrics::Message::new_data(peer, encoded.channel))
                     .inc();
@@ -103,7 +94,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 continue;
             }
             if let Ok(msg) = low.try_recv() {
-                let encoded = Self::validate_outbound_msg(msg, rate_limits);
+                let encoded = msg.validate_channel(rate_limits);
                 sent_messages
                     .get_or_create(&metrics::Message::new_data(peer, encoded.channel))
                     .inc();
@@ -179,7 +170,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                     Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                                 },
                                 Prioritized::Data(encoded) => {
-                                    let encoded = Self::validate_outbound_msg(encoded, &rate_limits);
+                                    let encoded = encoded.validate_channel(&rate_limits);
                                     self.sent_messages
                                         .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
                                         .inc();
