@@ -299,10 +299,10 @@ mod tests {
         deterministic, mocks, BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner,
     };
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::channel::fallible::AsyncFallibleExt;
+    use commonware_utils::{channel::fallible::AsyncFallibleExt, NZUsize};
     use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::{
-        num::{NonZeroU32, NonZeroUsize},
+        num::NonZeroU32,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -334,7 +334,7 @@ mod tests {
     fn default_peer_config() -> Config {
         Config {
             mailbox_size: 10,
-            send_batch_size: NonZeroUsize::new(8).unwrap(),
+            send_batch_size: NZUsize!(8),
             ping_frequency: Duration::from_secs(30),
             sent_messages: Family::<metrics::Message, Counter>::default(),
             received_messages: Family::<metrics::Message, Counter>::default(),
@@ -519,7 +519,7 @@ mod tests {
             sends.store(0, Ordering::Relaxed);
 
             let cfg = Config {
-                send_batch_size: NonZeroUsize::new(2).unwrap(),
+                send_batch_size: NZUsize!(2),
                 ..default_peer_config()
             };
             let (peer_actor, peer_mailbox, relay) =

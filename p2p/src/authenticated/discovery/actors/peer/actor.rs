@@ -412,11 +412,10 @@ mod tests {
     };
     use commonware_runtime::{deterministic, mocks, BufferPooler, IoBuf, Runner, Spawner};
     use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::{bitmap::BitMap, SystemTimeExt};
+    use commonware_utils::{bitmap::BitMap, NZUsize, SystemTimeExt};
     use prometheus_client::metrics::{counter::Counter, family::Family};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
-        num::NonZeroUsize,
         time::Duration,
     };
 
@@ -427,7 +426,7 @@ mod tests {
     fn default_peer_config(me: PublicKey) -> Config<PublicKey> {
         Config {
             mailbox_size: 10,
-            send_batch_size: NonZeroUsize::new(8).unwrap(),
+            send_batch_size: NZUsize!(8),
             gossip_bit_vec_frequency: Duration::from_secs(30),
             max_peer_set_size: 128,
             peer_gossip_max_count: 10,
@@ -825,7 +824,7 @@ mod tests {
             // Create peer config with our metric
             let config = Config {
                 mailbox_size: 10,
-                send_batch_size: NonZeroUsize::new(8).unwrap(),
+                send_batch_size: NZUsize!(8),
                 gossip_bit_vec_frequency: Duration::from_secs(30),
                 max_peer_set_size: 128,
                 peer_gossip_max_count: 10,
