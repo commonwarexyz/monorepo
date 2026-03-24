@@ -302,6 +302,7 @@ impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: T
 
         Ok(())
     }
+
     /// Return the root of the db.
     pub fn root(&self) -> H::Digest {
         self.journal.root()
