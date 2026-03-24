@@ -842,7 +842,7 @@ mod tests {
         str::FromStr,
         sync::{
             atomic::{AtomicU32, Ordering},
-            Arc,
+            Arc, Barrier,
         },
         task::{Context as TContext, Poll, Waker},
     };
@@ -939,18 +939,19 @@ mod tests {
         // shutdown returns or unwinds before the child has fully exited.
         struct BlockOnDrop {
             dropped: Option<oneshot::Sender<()>>,
-            release: Option<oneshot::Receiver<()>>,
+            release: Arc<Barrier>,
         }
 
         impl Drop for BlockOnDrop {
             fn drop(&mut self) {
                 let _ = self.dropped.take().unwrap().send(());
-                self.release.take().unwrap().blocking_recv().unwrap();
+                self.release.wait();
             }
         }
 
         let (dropped_tx, dropped_rx) = oneshot::channel();
-        let (release_tx, release_rx) = oneshot::channel();
+        let release = Arc::new(Barrier::new(2));
+        let release2 = release.clone();
 
         // Run the root task on a separate thread so the test can observe
         // shutdown progress while `runner.start(...)` is still blocked.
@@ -960,7 +961,7 @@ mod tests {
                 context.dedicated().spawn(move |_| async move {
                     let _dropped = BlockOnDrop {
                         dropped: Some(dropped_tx),
-                        release: Some(release_rx),
+                        release: release2,
                     };
                     started_tx.send(()).unwrap();
                     pending::<()>().await;
@@ -987,7 +988,7 @@ mod tests {
 
         // Let child cleanup finish and then observe whether the root returns
         // normally or resumes unwinding.
-        release_tx.send(()).unwrap();
+        release.wait();
         let result = thread.join();
 
         if should_panic {
