@@ -516,6 +516,8 @@ where
                         }
 
                         // Finalize the round before acknowledging
+                        //
+                        // TODO(#3453): Minimize end-of-epoch processing via pre-verify
                         let mut logs = Logs::<_, _, N3f1>::new(round.clone());
                         for (dealer, log) in storage.logs(epoch) {
                             logs.record(dealer, log);
