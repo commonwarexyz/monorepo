@@ -67,7 +67,9 @@ stability_scope!(BETA {
     pub use governor::Quota;
 
     pub mod iobuf;
-    pub use iobuf::{BufferPool, BufferPoolConfig, IoBuf, IoBufMut, IoBufs, IoBufsMut};
+    pub use iobuf::{
+        BufferPool, BufferPoolConfig, BufferPoolThreadCache, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+    };
 
     pub mod utils;
     pub use utils::*;
@@ -3959,7 +3961,7 @@ mod tests {
 
     #[test]
     fn test_deterministic_buffer_pooler() {
-        test_buffer_pooler(deterministic::Runner::default(), 4096, 32);
+        test_buffer_pooler(deterministic::Runner::default(), 4096, 64);
 
         let runner = deterministic::Runner::new(
             deterministic::Config::default()
@@ -3975,7 +3977,7 @@ mod tests {
 
     #[test]
     fn test_tokio_buffer_pooler() {
-        test_buffer_pooler(tokio::Runner::default(), 4096, 32);
+        test_buffer_pooler(tokio::Runner::default(), 4096, 64);
 
         let runner = tokio::Runner::new(
             tokio::Config::default()

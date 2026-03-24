@@ -24,7 +24,7 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
-use commonware_utils::sync::Mutex;
+use commonware_utils::{sync::Mutex, NZUsize};
 use futures::{future::BoxFuture, FutureExt};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -157,11 +157,11 @@ pub struct Config {
     /// Network configuration.
     network_cfg: NetworkConfig,
 
-    /// Buffer pool configuration for network I/O.
-    network_buffer_pool_cfg: BufferPoolConfig,
+    /// Explicit buffer pool configuration for network I/O, if provided.
+    network_buffer_pool_cfg: Option<BufferPoolConfig>,
 
-    /// Buffer pool configuration for storage I/O.
-    storage_buffer_pool_cfg: BufferPoolConfig,
+    /// Explicit buffer pool configuration for storage I/O, if provided.
+    storage_buffer_pool_cfg: Option<BufferPoolConfig>,
 }
 
 impl Config {
@@ -176,8 +176,8 @@ impl Config {
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
-            network_buffer_pool_cfg: BufferPoolConfig::for_network(),
-            storage_buffer_pool_cfg: BufferPoolConfig::for_storage(),
+            network_buffer_pool_cfg: None,
+            storage_buffer_pool_cfg: None,
         }
     }
 
@@ -224,12 +224,12 @@ impl Config {
     }
     /// See [Config]
     pub const fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
-        self.network_buffer_pool_cfg = cfg;
+        self.network_buffer_pool_cfg = Some(cfg);
         self
     }
     /// See [Config]
     pub const fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
-        self.storage_buffer_pool_cfg = cfg;
+        self.storage_buffer_pool_cfg = Some(cfg);
         self
     }
 
@@ -266,13 +266,23 @@ impl Config {
     pub const fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
     }
-    /// See [Config]
-    pub const fn network_buffer_pool_config(&self) -> &BufferPoolConfig {
-        &self.network_buffer_pool_cfg
+
+    /// Returns the network buffer pool config, deriving thread-cache
+    /// parallelism from `worker_threads` if not explicitly configured.
+    fn resolved_network_buffer_pool_config(&self) -> BufferPoolConfig {
+        self.network_buffer_pool_cfg.clone().unwrap_or_else(|| {
+            BufferPoolConfig::for_network()
+                .with_thread_cache_for_parallelism(NZUsize!(self.worker_threads))
+        })
     }
-    /// See [Config]
-    pub const fn storage_buffer_pool_config(&self) -> &BufferPoolConfig {
-        &self.storage_buffer_pool_cfg
+
+    /// Returns the storage buffer pool config, deriving thread-cache
+    /// parallelism from `worker_threads` if not explicitly configured.
+    fn resolved_storage_buffer_pool_config(&self) -> BufferPoolConfig {
+        self.storage_buffer_pool_cfg.clone().unwrap_or_else(|| {
+            BufferPoolConfig::for_storage()
+                .with_thread_cache_for_parallelism(NZUsize!(self.worker_threads))
+        })
     }
 }
 
@@ -342,11 +352,11 @@ impl crate::Runner for Runner {
 
         // Initialize buffer pools
         let network_buffer_pool = BufferPool::new(
-            self.cfg.network_buffer_pool_cfg.clone(),
+            self.cfg.resolved_network_buffer_pool_config(),
             runtime_registry.sub_registry_with_prefix("network_buffer_pool"),
         );
         let storage_buffer_pool = BufferPool::new(
-            self.cfg.storage_buffer_pool_cfg.clone(),
+            self.cfg.resolved_storage_buffer_pool_config(),
             runtime_registry.sub_registry_with_prefix("storage_buffer_pool"),
         );
 
@@ -840,5 +850,52 @@ impl crate::BufferPooler for Context {
 
     fn storage_buffer_pool(&self) -> &BufferPool {
         &self.storage_buffer_pool
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::BufferPoolThreadCache;
+
+    #[test]
+    fn test_worker_threads_updates_default_buffer_pool_parallelism() {
+        let cfg = Config::new().with_worker_threads(8);
+
+        assert_eq!(cfg.worker_threads, 8);
+        assert_eq!(
+            cfg.resolved_network_buffer_pool_config()
+                .thread_cache_capacity,
+            BufferPoolThreadCache::ForParallelism(NZUsize!(8))
+        );
+        assert_eq!(
+            cfg.resolved_storage_buffer_pool_config()
+                .thread_cache_capacity,
+            BufferPoolThreadCache::ForParallelism(NZUsize!(8))
+        );
+    }
+
+    #[test]
+    fn test_explicit_buffer_pool_configs_override_worker_threads() {
+        // Order does not matter -- explicit configs always win.
+        let cfg = Config::new()
+            .with_network_buffer_pool_config(
+                BufferPoolConfig::for_network().with_thread_cache_for_parallelism(NZUsize!(2)),
+            )
+            .with_worker_threads(8)
+            .with_storage_buffer_pool_config(
+                BufferPoolConfig::for_storage().with_thread_cache_disabled(),
+            );
+
+        assert_eq!(
+            cfg.resolved_network_buffer_pool_config()
+                .thread_cache_capacity,
+            BufferPoolThreadCache::ForParallelism(NZUsize!(2))
+        );
+        assert_eq!(
+            cfg.resolved_storage_buffer_pool_config()
+                .thread_cache_capacity,
+            BufferPoolThreadCache::Disabled
+        );
     }
 }
