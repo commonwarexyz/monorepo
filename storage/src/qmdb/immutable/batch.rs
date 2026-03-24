@@ -97,7 +97,7 @@ where
         T: Translator,
     {
         Self {
-            journal_batch: immutable.journal.into_merkleized_batch().new_batch::<H>(),
+            journal_batch: immutable.journal.to_merkleized_batch().new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::new(BTreeMap::new()),
             base_size: journal_size,
@@ -288,7 +288,7 @@ where
     pub fn to_batch(&self) -> MerkleizedBatch<H::Digest, K, V> {
         let journal_size = *self.last_commit_loc + 1;
         MerkleizedBatch {
-            journal: self.journal.into_merkleized_batch(),
+            journal: self.journal.to_merkleized_batch(),
             diff: Arc::new(BTreeMap::new()),
             total_size: journal_size,
             db_size: journal_size,

@@ -1179,7 +1179,7 @@ where
         // The DB is always committed, so journal size = last_commit_loc + 1.
         let journal_size = *self.last_commit_loc + 1;
         UnmerkleizedBatch {
-            journal_batch: self.log.into_merkleized_batch().new_batch::<H>(),
+            journal_batch: self.log.to_merkleized_batch().new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::new(BTreeMap::new()),
             base_operations: Vec::new(),
@@ -1277,7 +1277,7 @@ where
     pub fn to_batch(&self) -> MerkleizedBatch<H::Digest, U> {
         let journal_size = *self.last_commit_loc + 1;
         MerkleizedBatch {
-            journal_batch: self.log.into_merkleized_batch(),
+            journal_batch: self.log.to_merkleized_batch(),
             diff: Arc::new(BTreeMap::new()),
             new_inactivity_floor_loc: self.inactivity_floor_loc,
             new_last_commit_loc: self.last_commit_loc,
