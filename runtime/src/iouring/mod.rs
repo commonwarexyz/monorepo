@@ -662,26 +662,31 @@ impl IoUringLoop {
         // Route op/cancel completions through waiter state. Only terminal
         // transitions return a completed waiter to deliver to the caller.
         if let Some(completed) = self.waiters.on_completion(user_data, cqe.result()) {
-            let CompletedWaiter {
-                sender,
-                buffer,
-                mut result,
-                cancelled,
-                target_tick,
-            } = completed;
-
-            // Remove active deadline tracking when this waiter completes.
-            if let Some(target_tick) = target_tick {
-                self.timeout_wheel.remove(target_tick);
-            }
-
-            // Surface timeout as ETIMEDOUT when cancellation succeeded.
-            if cancelled && result == -libc::ECANCELED {
-                result = -libc::ETIMEDOUT;
-            }
-
-            let _ = sender.send((result, buffer));
+            self.deliver_completion(completed);
         }
+    }
+
+    /// Deliver a completed waiter to its caller and clean up timeout state.
+    fn deliver_completion(&mut self, completed: CompletedWaiter) {
+        let CompletedWaiter {
+            sender,
+            buffer,
+            mut result,
+            cancelled,
+            target_tick,
+        } = completed;
+
+        // Remove active deadline tracking when this waiter completes.
+        if let Some(target_tick) = target_tick {
+            self.timeout_wheel.remove(target_tick);
+        }
+
+        // Surface timeout as ETIMEDOUT when cancellation succeeded.
+        if cancelled && result == -libc::ECANCELED {
+            result = -libc::ETIMEDOUT;
+        }
+
+        let _ = sender.send((result, buffer));
     }
 
     /// Advance the timeout wheel and enqueue cancellations for newly expired waiters.
@@ -1113,20 +1118,7 @@ mod tests {
             .waiters
             .on_completion(old_slot.user_data(), 0)
             .expect("missing waiter completion");
-        let CompletedWaiter {
-            sender,
-            buffer,
-            mut result,
-            cancelled,
-            target_tick,
-        } = completed;
-        if let Some(target_tick) = target_tick {
-            iouring.timeout_wheel.remove(target_tick);
-        }
-        if cancelled && result == -libc::ECANCELED {
-            result = -libc::ETIMEDOUT;
-        }
-        let _ = sender.send((result, buffer));
+        iouring.deliver_completion(completed);
 
         // Reuse the same slot for a new waiter with a later timeout.
         let (tx, _rx) = oneshot::channel();
@@ -1167,20 +1159,7 @@ mod tests {
             .waiters
             .on_completion(slot_index.user_data(), 123)
             .expect("missing completion");
-        let CompletedWaiter {
-            sender,
-            buffer,
-            mut result,
-            cancelled,
-            target_tick,
-        } = completed;
-        if let Some(target_tick) = target_tick {
-            iouring.timeout_wheel.remove(target_tick);
-        }
-        if cancelled && result == -libc::ECANCELED {
-            result = -libc::ETIMEDOUT;
-        }
-        let _ = sender.send((result, buffer));
+        iouring.deliver_completion(completed);
         let completed = iouring
             .waiters
             .on_completion(slot_index.cancel_user_data(), -libc::ECANCELED);
