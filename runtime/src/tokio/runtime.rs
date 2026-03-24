@@ -93,8 +93,7 @@ impl Metrics {
     }
 }
 
-/// Tracks spawned tasks so root shutdown can wait for quiescence after aborting
-/// the supervision tree.
+/// Tracks running spawned tasks.
 #[derive(Default)]
 struct TaskTracker {
     live: AtomicUsize,
@@ -111,7 +110,7 @@ impl TaskTracker {
         }
     }
 
-    /// Blocks until all tracked tasks have finished or the timeout expires.
+    /// Blocks until all spawned tasks have finished or the timeout expires.
     fn wait_for_idle(&self, timeout: Duration) -> bool {
         if self.live.load(Ordering::Acquire) == 0 {
             return true;
@@ -141,8 +140,8 @@ impl TaskTracker {
 
 /// Guard held by a spawned task until it has fully exited.
 ///
-/// Dropping the guard decrements the live task count and wakes the root
-/// shutdown path when the final tracked task completes.
+/// Dropping the guard decrements the live task count and wakes waiters when the
+/// final tracked task completes.
 struct TaskGuard {
     tracker: Arc<TaskTracker>,
 }
@@ -218,7 +217,7 @@ pub struct Config {
     /// Whether or not to catch panics.
     catch_panics: bool,
 
-    /// Maximum time to wait for tracked spawned tasks to finish after root shutdown begins.
+    /// Maximum time to wait for spawned tasks to finish after shutdown begins.
     shutdown_timeout: Duration,
 
     /// Base directory for all storage operations.
@@ -531,9 +530,11 @@ impl crate::Runner for Runner {
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
         let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 
-        // Build the root context and run the future. Keep the root cleanup path
-        // running even if the root unwinds. We still resume the original panic
-        // after aborting descendants and waiting for tracked tasks.
+        // Build the root context and run the future.
+        //
+        // Handle root task panic so that shutdown cleanup still happens. We
+        // still resume the original panic after aborting descendants and
+        // waiting for tracked tasks.
         let tree = Tree::root();
         let context = Context {
             storage,
