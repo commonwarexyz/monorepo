@@ -4,16 +4,23 @@
 //! field. This module wraps the arkworks implementation to conform to the
 //! codebase's algebra trait hierarchy.
 
-use ark_ec::{twisted_edwards::Projective, AdditiveGroup, CurveGroup, PrimeGroup, VariableBaseMSM};
+use ark_ec::{
+    hashing::{
+        curve_maps::elligator2::Elligator2Map, map_to_curve_hasher::MapToCurveBasedHasher,
+        HashToCurve,
+    },
+    twisted_edwards::Projective,
+    AdditiveGroup, CurveGroup, PrimeGroup, VariableBaseMSM,
+};
 use ark_ed_on_bls12_381_bandersnatch::{BandersnatchConfig, EdwardsAffine, Fr};
 #[cfg(any(test, feature = "arbitrary"))]
 use ark_ff::PrimeField;
-use ark_ff::{Field as ArkField, UniformRand, Zero as ArkZero};
+use ark_ff::{field_hashers::DefaultFieldHasher, Field as ArkField, UniformRand, Zero as ArkZero};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{
-    Additive, CryptoGroup, Field, Multiplicative, Object, Random, Ring, Space,
+    Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring, Space,
 };
 use commonware_parallel::Strategy;
 use core::{
@@ -21,6 +28,7 @@ use core::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 use rand_core::CryptoRngCore;
+use sha2::Sha256;
 
 /// A scalar in the Bandersnatch scalar field.
 #[derive(Clone, Eq, PartialEq)]
@@ -285,6 +293,24 @@ impl CryptoGroup for G {
     }
 }
 
+impl HashToGroup for G {
+    fn hash_to_group(domain_separator: &[u8], message: &[u8]) -> Self {
+        let hasher = MapToCurveBasedHasher::<
+            Projective<BandersnatchConfig>,
+            DefaultFieldHasher<Sha256, 128>,
+            Elligator2Map<BandersnatchConfig>,
+        >::new(domain_separator)
+        // In non-test builds, new() unconditionally returns Ok. In test builds
+        // it validates the Elligator2 constants, which are hardcoded correctly.
+        .expect("valid DST");
+        // Elligator2 is a total map (defined for every field element), so hash()
+        // cannot fail. The Result comes from the generic MapToCurve trait which
+        // also covers partial maps like try-and-increment.
+        let affine = hasher.hash(message).expect("Elligator2 is a total map");
+        Self(affine.into())
+    }
+}
+
 impl Write for G {
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_slice(&self.to_bytes());
@@ -325,5 +351,10 @@ mod tests {
     #[test]
     fn test_point_as_space() {
         minifuzz::test(test_suites::fuzz_space_ring::<F, G>);
+    }
+
+    #[test]
+    fn test_hash_to_group() {
+        minifuzz::test(test_suites::fuzz_hash_to_group::<G>);
     }
 }
