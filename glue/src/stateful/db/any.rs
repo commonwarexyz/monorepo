@@ -261,6 +261,18 @@ where
             range: non_empty_range!(self.inactivity_floor_loc(), bounds.end),
         }
     }
+
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error> {
+        self.rewind(target.range.end()).await?;
+        self.commit().await?;
+
+        let rewound_target = self.sync_target().await;
+        assert_eq!(
+            rewound_target, target,
+            "rewound database target mismatch after rewind",
+        );
+        Ok(())
+    }
 }
 
 /// Implement [`ManagedDb`] for unordered QMDB databases with variable-size values.
@@ -325,6 +337,18 @@ where
             root: self.root(),
             range: non_empty_range!(self.inactivity_floor_loc(), bounds.end),
         }
+    }
+
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error> {
+        self.rewind(target.range.end()).await?;
+        self.commit().await?;
+
+        let rewound_target = self.sync_target().await;
+        assert_eq!(
+            rewound_target, target,
+            "rewound database target mismatch after rewind",
+        );
+        Ok(())
     }
 }
 
