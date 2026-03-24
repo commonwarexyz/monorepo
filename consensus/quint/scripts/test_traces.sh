@@ -31,6 +31,20 @@ if [ ! -d "$TEST_DIR" ]; then
 fi
 
 QUINT_BIN="$(which quint)"
+TRACE_SELECTION_STRATEGY="${COMMONWARE_TRACE_SELECTION_STRATEGY:-current}"
+
+case "$TRACE_SELECTION_STRATEGY" in
+    short)
+        MAX_SAMPLES=1000
+        ;;
+    current | default)
+        MAX_SAMPLES=10000
+        ;;
+    *)
+        echo "Error: unsupported COMMONWARE_TRACE_SELECTION_STRATEGY=$TRACE_SELECTION_STRATEGY"
+        exit 1
+        ;;
+esac
 
 for qnt_file in "$TEST_DIR"/trace_*.qnt; do
     [ -f "$qnt_file" ] || continue
@@ -44,7 +58,7 @@ for qnt_file in "$TEST_DIR"/trace_*.qnt; do
     echo "Testing: $qnt_file"
     heap_mb=24576
     quint_bin="$(command -v quint)"
-    cmd=("$quint_bin" test --main=tests --backend=rust --verbosity=4 --match=traceTest)
+    cmd=("$quint_bin" test --main=tests --backend=rust "--max-samples=$MAX_SAMPLES" --verbosity=4 --match=traceTest)
     if [ -n "${OUT_ITF_DIR:-}" ]; then
         mkdir -p "$OUT_ITF_DIR"
         basename_noext=$(basename "$qnt_file" .qnt)

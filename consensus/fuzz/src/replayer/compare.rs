@@ -175,9 +175,8 @@ fn compare_signers(
         .collect();
 
     for view in all_views {
-        // Skip INIT_VIEW: initial votes are pre-populated in Quint but
-        // the Rust engine only constructs its own vote and receives the certificate.
-        if view <= 1 {
+        // Skip GENESIS_VIEW: no consensus votes at view 0.
+        if view == 0 {
             continue;
         }
         let empty = BTreeSet::new();

@@ -1,7 +1,8 @@
 TRACES_ROOT ?= ../fuzz/artifacts/traces
 TEST_DIR ?= traces
 
-FUZZ_RUNS ?= 20
+FUZZ_RUNS ?= 300
+TRACE_SELECTION_STRATEGY ?= short
 
 .PHONY: test typecheck repl check clean get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces tv generate_itf convert_itf replay_itf clean_mbt_traces conformance_roundtrip ist
 
@@ -42,6 +43,7 @@ run:
 
 
 get_fuzz_traces:
+	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
 	cargo +nightly fuzz run simplex_ed25519_quint_disrupter -- -runs=$(FUZZ_RUNS)
 
 build_quint_tests_from_fuzz_traces:
@@ -52,6 +54,7 @@ build_quint_tests_from_fuzz_traces:
 	done
 
 test_traces:
+	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
 	./scripts/test_traces.sh
 
 clean_fuzz_traces:

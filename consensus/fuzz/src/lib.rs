@@ -55,12 +55,12 @@ pub use simplex::{
     SimplexBls12381MultisigMinSig, SimplexEd25519, SimplexSecp256r1,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     num::{NonZeroU16, NonZeroUsize},
     panic,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 use commonware_consensus::simplex::mocks::twins;
@@ -730,81 +730,248 @@ impl FuzzMode for Twinable {
     const TWIN: bool = true;
 }
 
-/// Returns `true` if the trace is interesting enough to save.
-///
-/// Computes a feature vector from Byzantine node 0 activity (votes sent,
-/// certificates sent), finalization height, and last view. If the Euclidean
-/// distance of this vector is <= 3.0, the trace is considered uninteresting.
-fn is_interesting_trace(entries: &[tracing::sniffer::TraceEntry], max_view: u64) -> bool {
-    use tracing::sniffer::{TraceEntry, TracedCert, TracedVote};
+const TRACE_SELECTION_STRATEGY_ENV: &str = "COMMONWARE_TRACE_SELECTION_STRATEGY";
 
-    let mut notarize_by_n0: u64 = 0;
-    let mut nullify_by_n0: u64 = 0;
-    let mut finalize_by_n0: u64 = 0;
-    let mut certs_by_n0: u64 = 0;
-    let mut finalized_views = std::collections::HashSet::new();
-    for entry in entries {
-        match entry {
-            TraceEntry::Vote { vote, .. } => {
-                // Count votes signed by n0 (sig field)
-                let sig = match vote {
-                    TracedVote::Notarize { sig, .. } => sig,
-                    TracedVote::Nullify { sig, .. } => sig,
-                    TracedVote::Finalize { sig, .. } => sig,
-                };
-                if sig == "n0" {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TraceSelectionStrategyName {
+    Current,
+    Short,
+}
+
+impl TraceSelectionStrategyName {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "current" | "default" => Ok(Self::Current),
+            "short" => Ok(Self::Short),
+            _ => Err(format!(
+                "invalid {}={value}; expected one of: current, short",
+                TRACE_SELECTION_STRATEGY_ENV
+            )),
+        }
+    }
+
+    fn from_env() -> Result<Self, String> {
+        match std::env::var(TRACE_SELECTION_STRATEGY_ENV) {
+            Ok(value) => Self::parse(&value),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Current),
+            Err(err) => Err(format!(
+                "failed to read {}: {err}",
+                TRACE_SELECTION_STRATEGY_ENV
+            )),
+        }
+    }
+
+    fn as_strategy(self) -> &'static dyn TraceSelectionStrategy {
+        match self {
+            Self::Current => &CURRENT_TRACE_SELECTION_STRATEGY,
+            Self::Short => &SHORT_TRACE_SELECTION_STRATEGY,
+        }
+    }
+}
+
+trait TraceSelectionStrategy {
+    fn name(&self) -> &'static str;
+
+    fn is_interesting(&self, metrics: &TraceMetrics) -> bool;
+}
+
+struct CurrentTraceSelectionStrategy;
+
+impl TraceSelectionStrategy for CurrentTraceSelectionStrategy {
+    fn name(&self) -> &'static str {
+        "current"
+    }
+
+    fn is_interesting(&self, metrics: &TraceMetrics) -> bool {
+        metrics.byzantine_distance > 3.0
+            && metrics.byzantine_vote_types >= 2
+            && metrics.certs_by_n0 > 0
+            && metrics.notarize_by_n0 > 1
+            && metrics.nullify_by_n0 > 1
+            && metrics.finalize_by_n0 > 1
+    }
+}
+
+struct ShortTraceSelectionStrategy;
+
+impl TraceSelectionStrategy for ShortTraceSelectionStrategy {
+    fn name(&self) -> &'static str {
+        "short"
+    }
+
+    fn is_interesting(&self, metrics: &TraceMetrics) -> bool {
+        metrics.max_view <= 10 && metrics.committed_blocks >= 5
+    }
+}
+
+static CURRENT_TRACE_SELECTION_STRATEGY: CurrentTraceSelectionStrategy =
+    CurrentTraceSelectionStrategy;
+static SHORT_TRACE_SELECTION_STRATEGY: ShortTraceSelectionStrategy =
+    ShortTraceSelectionStrategy;
+
+fn configured_trace_selection_strategy() -> &'static dyn TraceSelectionStrategy {
+    static SELECTED: OnceLock<TraceSelectionStrategyName> = OnceLock::new();
+    SELECTED
+        .get_or_init(|| TraceSelectionStrategyName::from_env().unwrap_or_else(|msg| panic!("{msg}")))
+        .as_strategy()
+}
+
+#[derive(Debug, Clone)]
+struct TraceMetrics {
+    entry_count: usize,
+    vote_entries: u64,
+    certificate_entries: u64,
+    unique_blocks: usize,
+    committed_blocks: u64,
+    max_view: u64,
+    notarize_by_n0: u64,
+    nullify_by_n0: u64,
+    finalize_by_n0: u64,
+    certs_by_n0: u64,
+    byzantine_vote_types: u64,
+    byzantine_distance: f64,
+}
+
+impl TraceMetrics {
+    fn from_entries(entries: &[tracing::sniffer::TraceEntry], max_view: u64) -> Self {
+        use tracing::sniffer::{TraceEntry, TracedCert, TracedVote};
+
+        let mut vote_entries = 0;
+        let mut certificate_entries = 0;
+        let mut notarize_by_n0 = 0;
+        let mut nullify_by_n0 = 0;
+        let mut finalize_by_n0 = 0;
+        let mut certs_by_n0 = 0;
+        let mut finalized_views = HashSet::new();
+        let mut unique_blocks = HashSet::new();
+
+        for entry in entries {
+            match entry {
+                TraceEntry::Vote { vote, .. } => {
+                    vote_entries += 1;
                     match vote {
-                        TracedVote::Notarize { .. } => notarize_by_n0 += 1,
-                        TracedVote::Nullify { .. } => nullify_by_n0 += 1,
-                        TracedVote::Finalize { .. } => finalize_by_n0 += 1,
+                        TracedVote::Notarize { sig, block, .. } => {
+                            unique_blocks.insert(block.clone());
+                            if sig == "n0" {
+                                notarize_by_n0 += 1;
+                            }
+                        }
+                        TracedVote::Nullify { sig, .. } => {
+                            if sig == "n0" {
+                                nullify_by_n0 += 1;
+                            }
+                        }
+                        TracedVote::Finalize { sig, block, .. } => {
+                            unique_blocks.insert(block.clone());
+                            if sig == "n0" {
+                                finalize_by_n0 += 1;
+                            }
+                        }
+                    }
+                }
+                TraceEntry::Certificate { sender, cert, .. } => {
+                    certificate_entries += 1;
+                    if sender == "n0" {
+                        certs_by_n0 += 1;
+                    }
+                    match cert {
+                        TracedCert::Notarization { block, .. } => {
+                            unique_blocks.insert(block.clone());
+                        }
+                        TracedCert::Nullification { .. } => {}
+                        TracedCert::Finalization { view, block, .. } => {
+                            unique_blocks.insert(block.clone());
+                            finalized_views.insert(*view);
+                        }
                     }
                 }
             }
-            TraceEntry::Certificate { sender, cert, .. } => {
-                if sender == "n0" {
-                    certs_by_n0 += 1;
-                }
-                if let TracedCert::Finalization { view, .. } = cert {
-                    finalized_views.insert(*view);
-                }
-            }
+        }
+
+        let byzantine_distance = [
+            notarize_by_n0 as f64,
+            nullify_by_n0 as f64,
+            finalize_by_n0 as f64,
+            certs_by_n0 as f64,
+        ]
+        .iter()
+        .map(|x| x * x)
+        .sum::<f64>()
+        .sqrt();
+        let byzantine_vote_types =
+            (notarize_by_n0 > 0) as u64 + (nullify_by_n0 > 0) as u64 + (finalize_by_n0 > 0) as u64;
+
+        Self {
+            entry_count: entries.len(),
+            vote_entries,
+            certificate_entries,
+            unique_blocks: unique_blocks.len(),
+            committed_blocks: finalized_views.len() as u64,
+            max_view,
+            notarize_by_n0,
+            nullify_by_n0,
+            finalize_by_n0,
+            certs_by_n0,
+            byzantine_vote_types,
+            byzantine_distance,
         }
     }
-    let height = finalized_views.len() as u64;
+}
 
-    // Distance uses only Byzantine-specific metrics (not max_view/height
-    // which dominate and make every trace appear interesting).
-    let vec = [
-        notarize_by_n0 as f64,
-        nullify_by_n0 as f64,
-        finalize_by_n0 as f64,
-        certs_by_n0 as f64,
-    ];
-    let distance = vec.iter().map(|x| x * x).sum::<f64>().sqrt();
+fn log_trace_selection(
+    strategy: &'static dyn TraceSelectionStrategy,
+    metrics: &TraceMetrics,
+    selected: bool,
+) {
+    let verdict = if selected { "selected" } else { "skipping" };
+    println!(
+        "{verdict} trace (strategy={}, entries={}, votes={}, certs={}, unique_blocks={}, committed_blocks={}, max_view={}, distance={:.2}, vote_types={}, notarize_n0={}, nullify_n0={}, finalize_n0={}, certs_n0={})",
+        strategy.name(),
+        metrics.entry_count,
+        metrics.vote_entries,
+        metrics.certificate_entries,
+        metrics.unique_blocks,
+        metrics.committed_blocks,
+        metrics.max_view,
+        metrics.byzantine_distance,
+        metrics.byzantine_vote_types,
+        metrics.notarize_by_n0,
+        metrics.nullify_by_n0,
+        metrics.finalize_by_n0,
+        metrics.certs_by_n0,
+    );
+}
 
-    // Count how many distinct vote types n0 used
-    let vote_types =
-        (notarize_by_n0 > 0) as u64 + (nullify_by_n0 > 0) as u64 + (finalize_by_n0 > 0) as u64;
+fn trace_artifacts_dir(base_dir: &str, strategy_name: &str) -> PathBuf {
+    let dir_name = if strategy_name == "current" {
+        base_dir.to_string()
+    } else {
+        format!("{base_dir}_{strategy_name}")
+    };
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("artifacts/traces")
+        .join(dir_name)
+}
 
-    // Interesting = meaningful Byzantine activity: distance > 3, at least 2
-    // vote types, more than 1 of each vote type, and at least 1 certificate.
-    let interesting = distance > 3.0
-        && vote_types >= 2
-        && certs_by_n0 > 0
-        && notarize_by_n0 > 1
-        && nullify_by_n0 > 1
-        && finalize_by_n0 > 1;
-
-    if !interesting {
-        println!(
-            "skipping uninteresting trace (distance={:.2}, vote_types={}, notarize_n0={}, nullify_n0={}, finalize_n0={}, certs_n0={}, height={}, max_view={})",
-            distance, vote_types, notarize_by_n0, nullify_by_n0, finalize_by_n0, certs_by_n0, height, max_view
-        );
+fn persist_trace_if_selected(base_dir: &str, hash_hex: &str, trace_data: &TraceData) -> bool {
+    let strategy = configured_trace_selection_strategy();
+    let metrics = TraceMetrics::from_entries(&trace_data.entries, trace_data.max_view);
+    let selected = strategy.is_interesting(&metrics);
+    log_trace_selection(strategy, &metrics, selected);
+    if !selected {
         return false;
     }
+
+    let artifacts_dir = trace_artifacts_dir(base_dir, strategy.name());
+    fs::create_dir_all(&artifacts_dir).expect("failed to create artifacts directory");
+
+    let json = serde_json::to_string_pretty(trace_data).expect("failed to serialize trace");
+    let json_path = artifacts_dir.join(format!("{hash_hex}.json"));
+    fs::write(&json_path, &json).expect("failed to write trace JSON");
     println!(
-        "interesting trace (distance={:.2}, vote_types={}, notarize_n0={}, nullify_n0={}, finalize_n0={}, certs_n0={}, height={}, max_view={})",
-        distance, vote_types, notarize_by_n0, nullify_by_n0, finalize_by_n0, certs_by_n0, height, max_view
+        "wrote {} trace entries to {}",
+        trace_data.entries.len(),
+        json_path.display()
     );
     true
 }
@@ -1217,22 +1384,7 @@ pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             required_containers: tracing_input.required_containers,
         };
 
-        if !is_interesting_trace(&trace.structured, max_view) {
-            return;
-        }
-
-        let artifacts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("artifacts/traces/simplex_ed25519_quint");
-        fs::create_dir_all(&artifacts_dir).expect("failed to create artifacts directory");
-
-        let json = serde_json::to_string_pretty(&trace_data).expect("failed to serialize trace");
-        let json_path = artifacts_dir.join(format!("{}.json", hash_hex));
-        fs::write(&json_path, &json).expect("failed to write trace JSON");
-        println!(
-            "wrote {} trace entries to {}",
-            trace.structured.len(),
-            json_path.display()
-        );
+        persist_trace_if_selected("simplex_ed25519_quint", &hash_hex, &trace_data);
     });
 }
 
@@ -1418,22 +1570,7 @@ pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             required_containers: tracing_input.required_containers,
         };
 
-        if !is_interesting_trace(&trace.structured, max_view) {
-            return;
-        }
-
-        let artifacts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("artifacts/traces/simplex_ed25519_quint_disrupter");
-        fs::create_dir_all(&artifacts_dir).expect("failed to create artifacts directory");
-
-        let json = serde_json::to_string_pretty(&trace_data).expect("failed to serialize trace");
-        let json_path = artifacts_dir.join(format!("{}.json", hash_hex));
-        fs::write(&json_path, &json).expect("failed to write trace JSON");
-        println!(
-            "wrote {} trace entries to {}",
-            trace.structured.len(),
-            json_path.display()
-        );
+        persist_trace_if_selected("simplex_ed25519_quint_disrupter", &hash_hex, &trace_data);
     });
 }
 
