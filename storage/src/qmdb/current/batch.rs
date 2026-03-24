@@ -5,11 +5,8 @@
 
 use crate::{
     index::Unordered as UnorderedIndex,
-    journal::{
-        authenticated::{self, BatchChain},
-        contiguous::{Contiguous, Mutable},
-    },
-    merkle::{batch::ChainInfo, storage::Storage as MmrStorage},
+    journal::contiguous::{Contiguous, Mutable},
+    merkle::storage::Storage as MmrStorage,
     mmr::{self, Location, Position, Readable, StandardHasher},
     qmdb::{
         any::{
@@ -35,6 +32,42 @@ use std::{
     sync::Arc,
 };
 
+/// Apply pushed bits and cleared bits to `chunk` at absolute position `chunk_start`.
+///
+/// `push_start` is the absolute bit index where pushes begin (i.e. the parent's length).
+fn apply_push_clear<const N: usize>(
+    chunk: &mut [u8; N],
+    chunk_start: u64,
+    push_start: u64,
+    pushed_bits: &[bool],
+    cleared_bits: &[Location],
+) {
+    let chunk_end = chunk_start + BitMap::<N>::CHUNK_SIZE_BITS;
+
+    let push_end = push_start + pushed_bits.len() as u64;
+    if push_start < chunk_end && push_end > chunk_start {
+        let abs_start = push_start.max(chunk_start);
+        let abs_end = push_end.min(chunk_end);
+        let from = (abs_start - push_start) as usize;
+        let to = (abs_end - push_start) as usize;
+        let rel_offset = (abs_start - chunk_start) as usize;
+        for (j, &bit) in pushed_bits[from..to].iter().enumerate() {
+            if bit {
+                let rel = rel_offset + j;
+                chunk[rel / 8] |= 1 << (rel % 8);
+            }
+        }
+    }
+
+    for &loc in cleared_bits {
+        let bit = *loc;
+        if bit >= chunk_start && bit < chunk_end {
+            let rel = (bit - chunk_start) as usize;
+            chunk[rel / 8] &= !(1 << (rel % 8));
+        }
+    }
+}
+
 /// A bitmap that can be read.
 pub trait BitmapRead<const N: usize> {
     /// Return the number of complete (fully filled) chunks.
@@ -50,6 +83,10 @@ pub trait BitmapRead<const N: usize> {
     /// Returns true if the bitmap is empty.
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+    /// Return the number of pruned bits (i.e. pruned chunks * bits per chunk).
+    fn pruned_bits(&self) -> u64 {
+        (self.pruned_chunks() as u64) * BitMap::<N>::CHUNK_SIZE_BITS
     }
     /// Return the value of a single bit.
     fn get_bit(&self, bit: u64) -> bool {
@@ -107,9 +144,8 @@ impl<B: BitmapRead<N>, const N: usize> FloorScan for BitmapScan<'_, B, N> {
     }
 }
 
-/// Uncommitted bitmap changes on top of a base bitmap. Records pushed bits
-/// and cleared bits without cloning the base. Implements [`BitmapRead`] for
-/// read-through access.
+/// Uncommitted bitmap changes on top of a base bitmap. Records pushed bits and cleared bits
+/// without cloning the base. Implements [`BitmapRead`] for read-through access.
 pub struct BitmapDiff<'a, B: BitmapRead<N>, const N: usize> {
     /// The parent bitmap this diff is built on top of.
     base: &'a B,
@@ -151,12 +187,9 @@ impl<'a, B: BitmapRead<N>, const N: usize> BitmapDiff<'a, B, N> {
         }
     }
 
-    fn pushed_bits(&self) -> &[bool] {
-        &self.pushed_bits
-    }
-
-    fn cleared_bits(&self) -> &[Location] {
-        &self.cleared_bits
+    /// Consume the diff, returning the parts needed for a [`BitmapBatchLayer`].
+    fn into_parts(self) -> (u64, Vec<bool>, Vec<Location>) {
+        (self.base_len, self.pushed_bits, self.cleared_bits)
     }
 }
 
@@ -167,7 +200,6 @@ impl<B: BitmapRead<N>, const N: usize> BitmapRead<N> for BitmapDiff<'_, B, N> {
 
     fn get_chunk(&self, idx: usize) -> [u8; N] {
         let chunk_start = idx as u64 * Self::CHUNK_SIZE_BITS;
-        let chunk_end = chunk_start + Self::CHUNK_SIZE_BITS;
 
         // Start with base data.
         let base_complete = self.base.complete_chunks();
@@ -180,33 +212,13 @@ impl<B: BitmapRead<N>, const N: usize> BitmapRead<N> for BitmapDiff<'_, B, N> {
             [0u8; N]
         };
 
-        // Apply pushed bits. The relevant slice is identified in O(1) since pushes
-        // are contiguous from base_len.
-        let push_start = self.base_len;
-        let push_end = push_start + self.pushed_bits.len() as u64;
-        if push_start < chunk_end && push_end > chunk_start {
-            let abs_start = push_start.max(chunk_start);
-            let abs_end = push_end.min(chunk_end);
-            let from = (abs_start - push_start) as usize;
-            let to = (abs_end - push_start) as usize;
-            let rel_offset = (abs_start - chunk_start) as usize;
-            for (j, &bit) in self.pushed_bits[from..to].iter().enumerate() {
-                if bit {
-                    let rel = rel_offset + j;
-                    chunk[rel / 8] |= 1 << (rel % 8);
-                }
-            }
-        }
-
-        // Apply clears.
-        for &loc in &self.cleared_bits {
-            let bit = *loc;
-            if bit >= chunk_start && bit < chunk_end {
-                let rel = (bit - chunk_start) as usize;
-                chunk[rel / 8] &= !(1 << (rel % 8));
-            }
-        }
-
+        apply_push_clear(
+            &mut chunk,
+            chunk_start,
+            self.base_len,
+            &self.pushed_bits,
+            &self.cleared_bits,
+        );
         chunk
     }
 
@@ -238,9 +250,9 @@ impl<B: BitmapRead<N>, const N: usize> BitmapRead<N> for BitmapDiff<'_, B, N> {
 
 /// Adapter that resolves ops MMR nodes for a batch's `compute_current_layer`.
 ///
-/// Tries the batch chain's sync [`Readable`] first (which covers nodes appended
-/// or overwritten by the batch, plus anything still in the in-memory MMR).
-/// Falls through to the base's async [`MmrStorage`].
+/// Tries the batch chain's sync [`Readable`] first (which covers nodes appended or overwritten
+/// by the batch, plus anything still in the in-memory MMR). Falls through to the base's async
+/// [`MmrStorage`].
 struct BatchStorageAdapter<
     'a,
     D: Digest,
@@ -288,28 +300,18 @@ impl<
 }
 
 /// A speculative batch of mutations whose root digest has not yet been computed,
-/// in contrast to [MerkleizedBatch].
-#[allow(clippy::type_complexity)]
-pub struct UnmerkleizedBatch<'a, E, C, I, H, U, P, G, B, const N: usize>
+/// in contrast to [`MerkleizedBatch`].
+///
+/// Wraps a [`any::batch::UnmerkleizedBatch`] and adds bitmap and grafted MMR parent state
+/// needed to compute the current layer during [`merkleize`](Self::merkleize).
+pub struct UnmerkleizedBatch<H, U, const N: usize>
 where
-    E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
-    G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>,
-    B: BitmapRead<N>,
 {
     /// The inner any-layer batch that handles mutations, journal, and floor raise.
-    inner: any::batch::UnmerkleizedBatch<'a, E, C, I, H, U, P>,
-
-    /// The committed current-layer DB (for bitmap and grafted MMR access).
-    current_db: &'a super::db::Db<E, C, I, H, U, N>,
+    inner: any::batch::UnmerkleizedBatch<H, U>,
 
     /// Bitmap pushes accumulated by prior batches in the chain.
     base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
@@ -317,51 +319,39 @@ where
     /// Bitmap clears accumulated by prior batches in the chain.
     base_bitmap_clears: Vec<Arc<Vec<Location>>>,
 
-    /// Parent's grafted MMR state.
-    grafted_parent: &'a G,
+    /// Parent's grafted MMR state (owned, Arc-based internally).
+    grafted_parent: mmr::batch::MerkleizedBatch<H::Digest>,
 
-    /// Parent's bitmap state.
-    bitmap_parent: &'a B,
+    /// Parent's bitmap state (COW, Arc-based).
+    bitmap_parent: BitmapBatch<N>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
-/// in contrast to [UnmerkleizedBatch].
-#[allow(clippy::type_complexity)]
-pub struct MerkleizedBatch<'a, E, C, I, H, U, P, G, B, const N: usize>
+/// in contrast to [`UnmerkleizedBatch`].
+///
+/// Wraps an [`any::batch::MerkleizedBatch`] and adds the bitmap and grafted MMR state needed
+/// to compute the canonical root.
+pub struct MerkleizedBatch<D: Digest, U: update::Update + Send + Sync, const N: usize>
 where
-    E: Storage + Clock + Metrics,
-    U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
-    G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>,
-    B: BitmapRead<N>,
+    Operation<U>: Send + Sync,
 {
-    /// The inner any-layer merkleized batch.
-    inner: any::batch::MerkleizedBatch<'a, E, C, I, H, U, P>,
+    /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
+    inner: any::batch::MerkleizedBatch<D, U>,
 
-    /// The committed current-layer DB (for bitmap and grafted MMR access).
-    current_db: &'a super::db::Db<E, C, I, H, U, N>,
+    /// Accumulated bitmap pushes from all batches in the chain.
+    bitmap_pushes: Vec<Arc<Vec<bool>>>,
 
-    /// Bitmap pushes accumulated by prior batches in the chain.
-    base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
+    /// Accumulated bitmap clears from all batches in the chain.
+    bitmap_clears: Vec<Arc<Vec<Location>>>,
 
-    /// Bitmap clears accumulated by prior batches in the chain.
-    base_bitmap_clears: Vec<Arc<Vec<Location>>>,
+    /// Grafted MMR state.
+    grafted: mmr::batch::MerkleizedBatch<D>,
 
-    /// Merkleized grafted MMR changes on top of the parent's state.
-    grafted_merkleized: mmr::MerkleizedBatch<'a, H::Digest, G>,
+    /// COW bitmap state (for use as a parent in `BitmapDiff`).
+    bitmap: BitmapBatch<N>,
 
-    /// Uncommitted bitmap changes on top of the parent bitmap.
-    bitmap_diff: BitmapDiff<'a, B, N>,
-
-    /// The canonical root (ops MMR root + grafted MMR root + partial chunk).
-    canonical_root: H::Digest,
+    /// The canonical root (ops root + grafted root + partial chunk).
+    canonical_root: D,
 }
 
 /// An owned changeset that can be applied to the database.
@@ -382,32 +372,21 @@ pub struct Changeset<K, D: Digest, Item: Send, const N: usize> {
     pub(super) canonical_root: D,
 }
 
-impl<'a, E, C, I, H, U, P, G, B, const N: usize> UnmerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>
+impl<H, U, const N: usize> UnmerkleizedBatch<H, U, N>
 where
-    E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
-    G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>,
-    B: BitmapRead<N>,
 {
     pub(super) const fn new(
-        inner: any::batch::UnmerkleizedBatch<'a, E, C, I, H, U, P>,
-        current_db: &'a super::db::Db<E, C, I, H, U, N>,
+        inner: any::batch::UnmerkleizedBatch<H, U>,
         base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
         base_bitmap_clears: Vec<Arc<Vec<Location>>>,
-        grafted_parent: &'a G,
-        bitmap_parent: &'a B,
+        grafted_parent: mmr::batch::MerkleizedBatch<H::Digest>,
+        bitmap_parent: BitmapBatch<N>,
     ) -> Self {
         Self {
             inner,
-            current_db,
             base_bitmap_pushes,
             base_bitmap_clears,
             grafted_parent,
@@ -426,100 +405,114 @@ where
 }
 
 // Unordered get + merkleize.
-impl<'a, E, K, V, C, I, H, P, G, B, const N: usize>
-    UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>
+impl<K, V, H, const N: usize> UnmerkleizedBatch<H, update::Unordered<K, V>, N>
 where
-    E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<update::Unordered<K, V>>>,
-    I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
     Operation<update::Unordered<K, V>>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<update::Unordered<K, V>>>,
-    G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>,
-    B: BitmapRead<N>,
 {
     /// Read through: mutations -> base diff -> committed DB.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
-        self.inner.get(key).await
+    pub async fn get<E, C, I>(
+        &self,
+        key: &K,
+        db: &super::db::Db<E, C, I, H, update::Unordered<K, V>, N>,
+    ) -> Result<Option<V::Value>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location> + 'static,
+    {
+        self.inner.get(key, &db.any).await
     }
 
-    /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
-    pub async fn merkleize(
+    /// Resolve mutations into operations, merkleize, and return a
+    /// [`MerkleizedBatch`].
+    pub async fn merkleize<E, C, I>(
         self,
         metadata: Option<V::Value>,
-    ) -> Result<MerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>, Error> {
+        db: &super::db::Db<E, C, I, H, update::Unordered<K, V>, N>,
+    ) -> Result<MerkleizedBatch<H::Digest, update::Unordered<K, V>, N>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location> + 'static,
+    {
         let Self {
             inner,
-            current_db,
             base_bitmap_pushes,
             base_bitmap_clears,
             grafted_parent,
             bitmap_parent,
         } = self;
-        let scan = BitmapScan::new(bitmap_parent);
-        let inner = inner.merkleize_with_floor_scan(metadata, scan).await?;
+        let scan = BitmapScan::new(&bitmap_parent);
+        let inner = inner
+            .merkleize_with_floor_scan(metadata, scan, &db.any)
+            .await?;
         compute_current_layer(
             inner,
-            current_db,
+            db,
             base_bitmap_pushes,
             base_bitmap_clears,
-            grafted_parent,
-            bitmap_parent,
+            &grafted_parent,
+            &bitmap_parent,
         )
         .await
     }
 }
 
 // Ordered get + merkleize.
-impl<'a, E, K, V, C, I, H, P, G, B, const N: usize>
-    UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>
+impl<K, V, H, const N: usize> UnmerkleizedBatch<H, update::Ordered<K, V>, N>
 where
-    E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<update::Ordered<K, V>>>,
-    I: crate::index::Ordered<Value = Location> + 'static,
     H: Hasher,
     Operation<update::Ordered<K, V>>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<update::Ordered<K, V>>>,
-    G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>,
-    B: BitmapRead<N>,
 {
     /// Read through: mutations -> base diff -> committed DB.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
-        self.inner.get(key).await
+    pub async fn get<E, C, I>(
+        &self,
+        key: &K,
+        db: &super::db::Db<E, C, I, H, update::Ordered<K, V>, N>,
+    ) -> Result<Option<V::Value>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location> + 'static,
+    {
+        self.inner.get(key, &db.any).await
     }
 
-    /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
-    pub async fn merkleize(
+    /// Resolve mutations into operations, merkleize, and return a
+    /// [`MerkleizedBatch`].
+    pub async fn merkleize<E, C, I>(
         self,
         metadata: Option<V::Value>,
-    ) -> Result<MerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>, Error> {
+        db: &super::db::Db<E, C, I, H, update::Ordered<K, V>, N>,
+    ) -> Result<MerkleizedBatch<H::Digest, update::Ordered<K, V>, N>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location> + 'static,
+    {
         let Self {
             inner,
-            current_db,
             base_bitmap_pushes,
             base_bitmap_clears,
             grafted_parent,
             bitmap_parent,
         } = self;
-        let scan = BitmapScan::new(bitmap_parent);
-        let inner = inner.merkleize_with_floor_scan(metadata, scan).await?;
+        let scan = BitmapScan::new(&bitmap_parent);
+        let inner = inner
+            .merkleize_with_floor_scan(metadata, scan, &db.any)
+            .await?;
         compute_current_layer(
             inner,
-            current_db,
+            db,
             base_bitmap_pushes,
             base_bitmap_clears,
-            grafted_parent,
-            bitmap_parent,
+            &grafted_parent,
+            &bitmap_parent,
         )
         .await
     }
@@ -601,22 +594,21 @@ fn clear_ancestor_superseded<U, B, const N: usize>(
     }
 }
 
-/// Compute the current layer (bitmap + grafted MMR + canonical root) on top of
-/// a merkleized any batch.
+/// Compute the current layer (bitmap + grafted MMR + canonical root) on top of a merkleized
+/// any batch.
 ///
-/// Creates a `BitmapDiff` and grafted MMR batch from the immediate parent's
-/// state, and produces the speculative grafted `MerkleizedBatch` and
-/// `BitmapDiff` that live on the returned `MerkleizedBatch`. The ancestor
-/// chain's accumulated bitmap pushes/clears are stored alongside the diff
-/// so that `finalize()` can concatenate them without recomputation.
-async fn compute_current_layer<'a, E, U, C, I, H, P, G, B, const N: usize>(
-    inner: any::batch::MerkleizedBatch<'a, E, C, I, H, U, P>,
-    current_db: &'a super::db::Db<E, C, I, H, U, N>,
+/// Creates a `BitmapDiff` and grafted MMR batch from the immediate parent's state, and
+/// produces the [`MerkleizedBatch`] directly. The ancestor chain's accumulated bitmap
+/// pushes/clears are stored alongside the batch so that `finalize()` can concatenate them
+/// without recomputation.
+async fn compute_current_layer<E, U, C, I, H, const N: usize>(
+    inner: any::batch::MerkleizedBatch<H::Digest, U>,
+    current_db: &super::db::Db<E, C, I, H, U, N>,
     base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
     base_bitmap_clears: Vec<Arc<Vec<Location>>>,
-    grafted_parent: &'a G,
-    bitmap_parent: &'a B,
-) -> Result<MerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>, Error>
+    grafted_parent: &mmr::batch::MerkleizedBatch<H::Digest>,
+    bitmap_parent: &BitmapBatch<N>,
+) -> Result<MerkleizedBatch<H::Digest, U, N>, Error>
 where
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
@@ -624,17 +616,11 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
-    G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>,
-    B: BitmapRead<N>,
 {
     let old_grafted_leaves = *grafted_parent.leaves() as usize;
     let mut bitmap = BitmapDiff::new(bitmap_parent, old_grafted_leaves);
 
-    let chain = &inner.base_operations;
+    let chain = &inner.journal_batch.items;
     let this_segment = chain.last().expect("operation chain should not be empty");
     let segment_base = *inner.new_last_commit_loc + 1 - this_segment.len() as u64;
 
@@ -676,11 +662,12 @@ where
     )
     .await?;
 
-    // 6. Build grafted MMR batch from parent ref (no clone).
+    // 6. Build grafted MMR from parent batch (owned, no borrow).
     let grafting_height = grafting::height::<N>();
-    let grafted_merkleized = {
-        let mut grafted_batch =
-            mmr::UnmerkleizedBatch::new(grafted_parent).with_pool(current_db.thread_pool.clone());
+    let grafted_batch = {
+        let mut grafted_batch = grafted_parent
+            .new_batch()
+            .with_pool(current_db.thread_pool.clone());
         for &(ops_pos, digest) in &new_leaves {
             let grafted_pos = grafting::ops_to_grafted_pos(ops_pos, grafting_height);
             if grafted_pos < grafted_batch.size() {
@@ -696,26 +683,342 @@ where
         grafted_batch.merkleize(&gh)
     };
 
-    // 7. Compute canonical root using the merkleized batch directly.
+    // 7. Compute canonical root using the grafted batch directly.
     let ops_root = inner.root();
-    let grafted_storage =
-        grafting::Storage::new(&grafted_merkleized, grafting_height, &ops_mmr_adapter);
+    let grafted_storage = grafting::Storage::new(&grafted_batch, grafting_height, &ops_mmr_adapter);
     let partial = partial_chunk(&bitmap);
     let canonical_root =
         compute_db_root::<H, _, _, N>(&hasher, &grafted_storage, partial, &ops_root).await?;
 
+    // 8. Extract diff data and build COW bitmap layer + push/clear chain.
+    let (parent_len, pushed_bits, cleared_bits) = bitmap.into_parts();
+
+    let pushed_bits = Arc::new(pushed_bits);
+    let cleared_bits = Arc::new(cleared_bits);
+
+    let mut bitmap_pushes = base_bitmap_pushes;
+    bitmap_pushes.push(Arc::clone(&pushed_bits));
+    let mut bitmap_clears = base_bitmap_clears;
+    bitmap_clears.push(Arc::clone(&cleared_bits));
+
+    let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
+        parent: bitmap_parent.clone(),
+        parent_len,
+        pushed_bits,
+        cleared_bits,
+    }));
+
     Ok(MerkleizedBatch {
         inner,
-        current_db,
-        base_bitmap_pushes,
-        base_bitmap_clears,
-        grafted_merkleized,
-        bitmap_diff: bitmap,
+        bitmap_pushes,
+        bitmap_clears,
+        grafted: grafted_batch,
+        bitmap: bitmap_batch,
         canonical_root,
     })
 }
 
-impl<'a, E, C, I, H, U, P, G, B, const N: usize> MerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>
+/// Immutable bitmap state at any point in a batch chain.
+///
+/// Mirrors the [`crate::mmr::batch::MerkleizedBatch`] pattern.
+#[derive(Clone, Debug)]
+pub(crate) enum BitmapBatch<const N: usize> {
+    /// Committed bitmap (chain terminal).
+    Base(Arc<BitMap<N>>),
+    /// Speculative layer on top of a parent batch.
+    Layer(Arc<BitmapBatchLayer<N>>),
+}
+
+/// The data behind a [`BitmapBatch::Layer`].
+#[derive(Debug)]
+pub(crate) struct BitmapBatchLayer<const N: usize> {
+    parent: BitmapBatch<N>,
+    /// Cached `parent.len()` at layer creation time.
+    parent_len: u64,
+    /// New bits appended contiguously from `parent_len`.
+    pushed_bits: Arc<Vec<bool>>,
+    /// Locations of parent bits that were deactivated.
+    cleared_bits: Arc<Vec<Location>>,
+}
+
+impl<const N: usize> BitmapBatch<N> {
+    const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
+}
+
+impl<const N: usize> BitmapRead<N> for BitmapBatch<N> {
+    fn complete_chunks(&self) -> usize {
+        (self.len() / Self::CHUNK_SIZE_BITS) as usize
+    }
+
+    fn get_chunk(&self, idx: usize) -> [u8; N] {
+        match self {
+            Self::Base(bm) => *bm.get_chunk(idx),
+            Self::Layer(layer) => {
+                let chunk_start = idx as u64 * Self::CHUNK_SIZE_BITS;
+
+                // Start with parent's data, or zeroed if this chunk is
+                // entirely beyond the parent's range (created by pushes).
+                let parent_chunks = layer.parent_len.div_ceil(Self::CHUNK_SIZE_BITS);
+                let mut chunk = if (idx as u64) < parent_chunks {
+                    layer.parent.get_chunk(idx)
+                } else {
+                    [0u8; N]
+                };
+
+                apply_push_clear(
+                    &mut chunk,
+                    chunk_start,
+                    layer.parent_len,
+                    &layer.pushed_bits,
+                    &layer.cleared_bits,
+                );
+                chunk
+            }
+        }
+    }
+
+    fn last_chunk(&self) -> ([u8; N], u64) {
+        let total = self.len();
+        if total == 0 {
+            return ([0u8; N], 0);
+        }
+        let rem = total % Self::CHUNK_SIZE_BITS;
+        let bits_in_last = if rem == 0 { Self::CHUNK_SIZE_BITS } else { rem };
+        let idx = if rem == 0 {
+            self.complete_chunks().saturating_sub(1)
+        } else {
+            self.complete_chunks()
+        };
+        (self.get_chunk(idx), bits_in_last)
+    }
+
+    fn pruned_chunks(&self) -> usize {
+        match self {
+            Self::Base(bm) => bm.pruned_chunks(),
+            Self::Layer(layer) => layer.parent.pruned_chunks(),
+        }
+    }
+
+    fn len(&self) -> u64 {
+        match self {
+            Self::Base(bm) => BitmapRead::<N>::len(bm.as_ref()),
+            Self::Layer(layer) => layer.parent_len + layer.pushed_bits.len() as u64,
+        }
+    }
+}
+
+impl<const N: usize> BitmapBatch<N> {
+    /// Push a changeset as a new layer on top of this bitmap, mutating `self` in place.
+    ///
+    /// The old value becomes the parent of the new layer.
+    pub(super) fn push_changeset(&mut self, pushed_bits: Vec<bool>, cleared_bits: Vec<Location>) {
+        if pushed_bits.is_empty() && cleared_bits.is_empty() {
+            return;
+        }
+        let parent_len = self.len();
+        let parent = self.clone();
+        *self = Self::Layer(Arc::new(BitmapBatchLayer {
+            parent,
+            parent_len,
+            pushed_bits: Arc::new(pushed_bits),
+            cleared_bits: Arc::new(cleared_bits),
+        }));
+    }
+
+    /// Flatten all layers back to a single `Base(Arc<BitMap<N>>)`.
+    ///
+    /// After flattening, the new `Base` Arc has refcount 1 (assuming no external clones
+    /// are held).
+    pub(super) fn flatten(&mut self) {
+        if matches!(self, Self::Base(_)) {
+            return;
+        }
+
+        // Take ownership of the chain so that Arc refcounts are not
+        // artificially inflated by a clone.
+        let mut owned = std::mem::replace(self, Self::Base(Arc::new(BitMap::default())));
+
+        // Collect layers from tip to base.
+        let mut layers = Vec::new();
+        let base = loop {
+            match owned {
+                Self::Base(bm) => break bm,
+                Self::Layer(layer) => match Arc::try_unwrap(layer) {
+                    Ok(inner) => {
+                        layers.push((inner.pushed_bits, inner.cleared_bits));
+                        owned = inner.parent;
+                    }
+                    Err(arc) => {
+                        layers.push((arc.pushed_bits.clone(), arc.cleared_bits.clone()));
+                        owned = arc.parent.clone();
+                    }
+                },
+            }
+        };
+
+        // Replay mutations from base to tip.
+        let mut bitmap = Arc::try_unwrap(base).unwrap_or_else(|arc| (*arc).clone());
+        for (pushed, cleared) in layers.into_iter().rev() {
+            for &bit in pushed.iter() {
+                bitmap.push(bit);
+            }
+            for loc in cleared.iter() {
+                bitmap.set_bit(**loc, false);
+            }
+        }
+        *self = Self::Base(Arc::new(bitmap));
+    }
+}
+
+impl<D: Digest, U: update::Update + Send + Sync, const N: usize> MerkleizedBatch<D, U, N>
+where
+    Operation<U>: Send + Sync,
+{
+    /// Return the canonical root.
+    pub const fn root(&self) -> D {
+        self.canonical_root
+    }
+
+    /// Return the ops-only MMR root.
+    pub fn ops_root(&self) -> D {
+        self.inner.root()
+    }
+}
+
+impl<D: Digest, U: update::Update + Send + Sync, const N: usize> MerkleizedBatch<D, U, N>
+where
+    Operation<U>: Codec,
+{
+    /// Create a new speculative batch of operations with this batch as its parent.
+    pub fn new_batch<H>(&self) -> UnmerkleizedBatch<H, U, N>
+    where
+        H: Hasher<Digest = D>,
+    {
+        let pushes = self.bitmap_pushes.clone();
+        let clears = self.bitmap_clears.clone();
+
+        UnmerkleizedBatch::new(
+            self.inner.new_batch::<H>(),
+            pushes,
+            clears,
+            self.grafted.clone(),
+            self.bitmap.clone(),
+        )
+    }
+
+    /// Read through: diff -> committed DB.
+    pub async fn get<E, C, I, H>(
+        &self,
+        key: &U::Key,
+        db: &super::db::Db<E, C, I, H, U, N>,
+    ) -> Result<Option<U::Value>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location> + 'static,
+        H: Hasher<Digest = D>,
+    {
+        self.inner.get(key, &db.any).await
+    }
+
+    /// Consume this batch, producing an owned [`Changeset`].
+    pub fn finalize(self) -> Changeset<U::Key, D, Operation<U>, N>
+    where
+        U: 'static,
+    {
+        // Flatten accumulated bitmap pushes + clears into flat Vecs.
+        let total_pushes: usize = self.bitmap_pushes.iter().map(|s| s.len()).sum();
+        let mut bitmap_pushes = Vec::with_capacity(total_pushes);
+        for seg in &self.bitmap_pushes {
+            bitmap_pushes.extend_from_slice(seg);
+        }
+
+        let total_clears: usize = self.bitmap_clears.iter().map(|s| s.len()).sum();
+        let mut bitmap_clears = Vec::with_capacity(total_clears);
+        for seg in &self.bitmap_clears {
+            bitmap_clears.extend_from_slice(seg);
+        }
+
+        Changeset {
+            inner: self.inner.finalize(),
+            bitmap_pushes,
+            bitmap_clears,
+            grafted_changeset: self.grafted.finalize(),
+            canonical_root: self.canonical_root,
+        }
+    }
+
+    /// Like [`Self::finalize`], but produces a [`Changeset`] relative to `current_db_size`
+    /// instead of the original DB size when this batch chain was created.
+    ///
+    /// Use this when an ancestor batch in the chain has already been committed, advancing
+    /// the DB's operation count past the original fork point. Skips bitmap pushes/clears
+    /// and grafted MMR entries from ancestor batches that have already been committed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `current_db_size` is less than the DB size when this batch was created,
+    /// or if `items_to_skip` does not align with push segment boundaries.
+    pub fn finalize_from(self, current_db_size: u64) -> Changeset<U::Key, D, Operation<U>, N>
+    where
+        U: 'static,
+    {
+        assert!(
+            current_db_size >= self.inner.db_size,
+            "current_db_size ({current_db_size}) < batch db_size ({})",
+            self.inner.db_size
+        );
+        let items_to_skip = (current_db_size - self.inner.db_size) as usize;
+
+        // Determine how many complete batch segments have been committed.
+        // Push segments have one entry per operation, so their cumulative
+        // length maps directly to items_to_skip. Committed batches are
+        // always committed as whole units, so items_to_skip always aligns
+        // with segment boundaries.
+        let mut remaining = items_to_skip;
+        let mut segments_to_skip = 0;
+        for seg in &self.bitmap_pushes {
+            if remaining == 0 {
+                break;
+            }
+            assert!(
+                remaining >= seg.len(),
+                "items_to_skip does not align with push segment boundary"
+            );
+            remaining -= seg.len();
+            segments_to_skip += 1;
+        }
+
+        // Flatten uncommitted push segments.
+        let mut bitmap_pushes = Vec::new();
+        for seg in &self.bitmap_pushes[segments_to_skip..] {
+            bitmap_pushes.extend_from_slice(seg);
+        }
+
+        // Flatten uncommitted clear segments (1:1 with push segments).
+        let mut bitmap_clears = Vec::new();
+        for seg in &self.bitmap_clears[segments_to_skip..] {
+            bitmap_clears.extend_from_slice(seg);
+        }
+
+        // The grafted MMR base must reflect the current committed bitmap's
+        // complete chunk count (after committed ancestors' pushes).
+        let committed_complete_chunks = current_db_size / BitmapBatch::<N>::CHUNK_SIZE_BITS;
+        let grafted_base =
+            Position::try_from(Location::new(committed_complete_chunks)).expect("valid leaf count");
+        let grafted_changeset = self.grafted.finalize_from(grafted_base);
+
+        Changeset {
+            inner: self.inner.finalize_from(current_db_size),
+            bitmap_pushes,
+            bitmap_clears,
+            grafted_changeset,
+            canonical_root: self.canonical_root,
+        }
+    }
+}
+
+impl<E, C, I, H, U, const N: usize> super::db::Db<E, C, I, H, U, N>
 where
     E: Storage + Clock + Metrics,
     U: update::Update + Send + Sync,
@@ -723,153 +1026,16 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
-    G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>,
-    B: BitmapRead<N>,
 {
-    /// Return the speculative root.
-    pub const fn root(&self) -> H::Digest {
-        self.canonical_root
-    }
-
-    /// Return the ops-only MMR root.
-    pub fn ops_root(&self) -> H::Digest {
-        self.inner.root()
-    }
-
-    /// Create a new speculative batch of operations with this batch as its parent.
-    #[allow(clippy::type_complexity)]
-    pub fn new_batch(
-        &self,
-    ) -> UnmerkleizedBatch<
-        '_,
-        E,
-        C,
-        I,
-        H,
-        U,
-        authenticated::MerkleizedBatch<'a, H, P, Operation<U>>,
-        mmr::MerkleizedBatch<'a, H::Digest, G>,
-        BitmapDiff<'a, B, N>,
-        N,
-    > {
-        // Clone the chain of Arc segments (1 Arc bump per batch in the chain), then push this
-        // batch's diff data as a new segment.
-        let mut pushes = self.base_bitmap_pushes.clone();
-        pushes.push(Arc::new(self.bitmap_diff.pushed_bits().to_vec()));
-        let mut clears = self.base_bitmap_clears.clone();
-        clears.push(Arc::new(self.bitmap_diff.cleared_bits().to_vec()));
-        UnmerkleizedBatch {
-            inner: self.inner.new_batch(),
-            current_db: self.current_db,
-            base_bitmap_pushes: pushes,
-            base_bitmap_clears: clears,
-            grafted_parent: &self.grafted_merkleized,
-            bitmap_parent: &self.bitmap_diff,
-        }
-    }
-}
-
-// Unordered get.
-impl<'a, E, K, V, C, I, H, P, G, B, const N: usize>
-    MerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: Contiguous<Item = Operation<update::Unordered<K, V>>>,
-    I: UnorderedIndex<Value = Location> + 'static,
-    H: Hasher,
-    Operation<update::Unordered<K, V>>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<update::Unordered<K, V>>>,
-    G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>,
-    B: BitmapRead<N>,
-{
-    /// Read through: diff -> committed DB.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
-        self.inner.get(key).await
-    }
-}
-
-// Ordered get.
-impl<'a, E, K, V, C, I, H, P, G, B, const N: usize>
-    MerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>
-where
-    E: Storage + Clock + Metrics,
-    K: Key,
-    V: ValueEncoding,
-    C: Contiguous<Item = Operation<update::Ordered<K, V>>>,
-    I: crate::index::Ordered<Value = Location> + 'static,
-    H: Hasher,
-    Operation<update::Ordered<K, V>>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<update::Ordered<K, V>>>,
-    G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>,
-    B: BitmapRead<N>,
-{
-    /// Read through: diff -> committed DB.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
-        self.inner.get(key).await
-    }
-}
-
-// Finalize (requires Mutable journal for apply_batch).
-impl<'a, E, C, I, H, U, P, G, B, const N: usize> MerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>
-where
-    E: Storage + Clock + Metrics,
-    U: update::Update + Send + Sync + 'static,
-    C: Mutable<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
-    G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>,
-    B: BitmapRead<N>,
-{
-    /// Consume this batch, producing an owned [`Changeset`].
-    pub fn finalize(self) -> Changeset<U::Key, H::Digest, Operation<U>, N> {
-        // Flatten the chain of Arc segments + this level's diff into flat Vecs.
-        let total_pushes: usize = self
-            .base_bitmap_pushes
-            .iter()
-            .map(|s| s.len())
-            .sum::<usize>()
-            + self.bitmap_diff.pushed_bits().len();
-        let mut bitmap_pushes = Vec::with_capacity(total_pushes);
-        for seg in &self.base_bitmap_pushes {
-            bitmap_pushes.extend_from_slice(seg);
-        }
-        bitmap_pushes.extend_from_slice(self.bitmap_diff.pushed_bits());
-
-        let total_clears: usize = self
-            .base_bitmap_clears
-            .iter()
-            .map(|s| s.len())
-            .sum::<usize>()
-            + self.bitmap_diff.cleared_bits().len();
-        let mut bitmap_clears = Vec::with_capacity(total_clears);
-        for seg in &self.base_bitmap_clears {
-            bitmap_clears.extend_from_slice(seg);
-        }
-        bitmap_clears.extend_from_slice(self.bitmap_diff.cleared_bits());
-
-        Changeset {
-            inner: self.inner.finalize(),
-            bitmap_pushes,
-            bitmap_clears,
-            grafted_changeset: self.grafted_merkleized.finalize(),
-            canonical_root: self.canonical_root,
+    /// Create an initial [`MerkleizedBatch`] from the committed DB state.
+    pub fn to_batch(&self) -> MerkleizedBatch<H::Digest, U, N> {
+        MerkleizedBatch {
+            inner: self.any.to_batch(),
+            bitmap_pushes: Vec::new(),
+            bitmap_clears: Vec::new(),
+            grafted: self.grafted_snapshot(),
+            bitmap: self.status.clone(),
+            canonical_root: self.root,
         }
     }
 }
@@ -879,8 +1045,6 @@ mod trait_impls {
     use super::*;
     use crate::{
         journal::contiguous::Mutable,
-        merkle::batch::ChainInfo,
-        mmr::journaled::Mmr,
         qmdb::any::traits::{
             BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
             UnmerkleizedBatch as UnmerkleizedBatchTrait,
@@ -891,95 +1055,77 @@ mod trait_impls {
 
     type CurrentDb<E, C, I, H, U, const N: usize> = crate::qmdb::current::db::Db<E, C, I, H, U, N>;
 
-    impl<'a, E, K, V, C, I, H, P, G, B, const N: usize> UnmerkleizedBatchTrait
-        for UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>
+    impl<K, V, H, E, C, I, const N: usize>
+        UnmerkleizedBatchTrait<CurrentDb<E, C, I, H, update::Unordered<K, V>, N>>
+        for UnmerkleizedBatch<H, update::Unordered<K, V>, N>
     where
-        E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+        H: Hasher,
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Unordered<K, V>>>
+            + Persistable<Error = crate::journal::Error>,
         I: UnorderedIndex<Value = Location> + 'static,
-        H: Hasher,
         Operation<update::Unordered<K, V>>: Codec,
-        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + ChainInfo<mmr::Family, Digest = H::Digest>
-            + BatchChain<Operation<update::Unordered<K, V>>>,
-        G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + ChainInfo<mmr::Family, Digest = H::Digest>,
-        B: BitmapRead<N>,
     {
         type K = K;
         type V = V::Value;
         type Metadata = V::Value;
-        type Merkleized =
-            super::MerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P, G, B, N>;
+        type Merkleized = MerkleizedBatch<H::Digest, update::Unordered<K, V>, N>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
-            UnmerkleizedBatch::write(self, key, value)
+            Self::write(self, key, value)
         }
 
         fn merkleize(
             self,
             metadata: Option<V::Value>,
+            db: &CurrentDb<E, C, I, H, update::Unordered<K, V>, N>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error>> {
-            self.merkleize(metadata)
+            self.merkleize(metadata, db)
         }
     }
 
-    impl<'a, E, K, V, C, I, H, P, G, B, const N: usize> UnmerkleizedBatchTrait
-        for UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>
+    impl<K, V, H, E, C, I, const N: usize>
+        UnmerkleizedBatchTrait<CurrentDb<E, C, I, H, update::Ordered<K, V>, N>>
+        for UnmerkleizedBatch<H, update::Ordered<K, V>, N>
     where
-        E: Storage + Clock + Metrics,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
-        I: crate::index::Ordered<Value = Location> + 'static,
         H: Hasher,
+        E: Storage + Clock + Metrics,
+        C: Mutable<Item = Operation<update::Ordered<K, V>>>
+            + Persistable<Error = crate::journal::Error>,
+        I: crate::index::Ordered<Value = Location> + 'static,
         Operation<update::Ordered<K, V>>: Codec,
-        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + ChainInfo<mmr::Family, Digest = H::Digest>
-            + BatchChain<Operation<update::Ordered<K, V>>>,
-        G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + ChainInfo<mmr::Family, Digest = H::Digest>,
-        B: BitmapRead<N>,
     {
         type K = K;
         type V = V::Value;
         type Metadata = V::Value;
-        type Merkleized = super::MerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P, G, B, N>;
+        type Merkleized = MerkleizedBatch<H::Digest, update::Ordered<K, V>, N>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
-            UnmerkleizedBatch::write(self, key, value)
+            Self::write(self, key, value)
         }
 
         fn merkleize(
             self,
             metadata: Option<V::Value>,
+            db: &CurrentDb<E, C, I, H, update::Ordered<K, V>, N>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error>> {
-            self.merkleize(metadata)
+            self.merkleize(metadata, db)
         }
     }
 
-    impl<'a, E, C, I, H, U, P, G, B, const N: usize> MerkleizedBatchTrait
-        for super::MerkleizedBatch<'a, E, C, I, H, U, P, G, B, N>
+    impl<D: Digest, U: update::Update + Send + Sync + 'static, const N: usize> MerkleizedBatchTrait
+        for MerkleizedBatch<D, U, N>
     where
-        E: Storage + Clock + Metrics,
-        U: update::Update + Send + Sync + 'static,
-        C: Mutable<Item = Operation<U>>,
-        I: UnorderedIndex<Value = Location>,
-        H: Hasher,
         Operation<U>: Codec,
-        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + ChainInfo<mmr::Family, Digest = H::Digest>
-            + BatchChain<Operation<U>>,
-        G: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + ChainInfo<mmr::Family, Digest = H::Digest>,
-        B: BitmapRead<N>,
     {
-        type Digest = H::Digest;
-        type Changeset = Changeset<U::Key, H::Digest, Operation<U>, N>;
+        type Digest = D;
+        type Changeset = Changeset<U::Key, D, Operation<U>, N>;
 
-        fn root(&self) -> H::Digest {
+        fn root(&self) -> D {
             self.root()
         }
 
@@ -1003,23 +1149,9 @@ mod trait_impls {
         type K = K;
         type V = V::Value;
         type Changeset = Changeset<K, H::Digest, Operation<update::Unordered<K, V>>, N>;
-        type Batch<'a>
-            = UnmerkleizedBatch<
-            'a,
-            E,
-            C,
-            I,
-            H,
-            update::Unordered<K, V>,
-            Mmr<E, H::Digest>,
-            mmr::mem::Mmr<H::Digest>,
-            commonware_utils::bitmap::Prunable<N>,
-            N,
-        >
-        where
-            Self: 'a;
+        type Batch = UnmerkleizedBatch<H, update::Unordered<K, V>, N>;
 
-        fn new_batch(&self) -> Self::Batch<'_> {
+        fn new_batch(&self) -> Self::Batch {
             self.new_batch()
         }
 
@@ -1046,23 +1178,9 @@ mod trait_impls {
         type K = K;
         type V = V::Value;
         type Changeset = Changeset<K, H::Digest, Operation<update::Ordered<K, V>>, N>;
-        type Batch<'a>
-            = UnmerkleizedBatch<
-            'a,
-            E,
-            C,
-            I,
-            H,
-            update::Ordered<K, V>,
-            Mmr<E, H::Digest>,
-            mmr::mem::Mmr<H::Digest>,
-            commonware_utils::bitmap::Prunable<N>,
-            N,
-        >
-        where
-            Self: 'a;
+        type Batch = UnmerkleizedBatch<H, update::Ordered<K, V>, N>;
 
-        fn new_batch(&self) -> Self::Batch<'_> {
+        fn new_batch(&self) -> Self::Batch {
             self.new_batch()
         }
 
@@ -1267,7 +1385,7 @@ mod tests {
         push_operation_bits::<U, Bm, N>(&mut bitmap, &segment, 0, &diff);
 
         // Expected: [true(key1 active), false(key2 superseded), false(delete), true(commit)]
-        assert_eq!(bitmap.pushed_bits(), &[true, false, false, true]);
+        assert_eq!(bitmap.pushed_bits, [true, false, false, true]);
     }
 
     // ---- clear_base_old_locs test ----
@@ -1312,7 +1430,7 @@ mod tests {
 
         clear_base_old_locs::<K, u64, Bm, N>(&mut bitmap, &diff);
 
-        assert_eq!(bitmap.cleared_bits().len(), 2);
+        assert_eq!(bitmap.cleared_bits.len(), 2);
 
         // Verify bits 5 and 10 are cleared.
         let c0 = bitmap.get_chunk(0);

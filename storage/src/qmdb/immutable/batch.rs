@@ -2,9 +2,8 @@
 
 use super::Immutable;
 use crate::{
-    journal::authenticated::{self, BatchChain},
-    merkle::batch::ChainInfo,
-    mmr::{self, Location, Readable},
+    journal::authenticated,
+    mmr::{Location, Position},
     qmdb::{any::VariableValue, immutable::operation::Operation, Error},
     translator::Translator,
 };
@@ -26,71 +25,47 @@ pub(crate) enum SnapshotDiff<K> {
     Insert { key: K, new_loc: Location },
 }
 
-/// A speculative batch of operations whose root digest has not yet been
-/// computed, in contrast to [MerkleizedBatch].
-pub struct UnmerkleizedBatch<'a, E, K, V, H, T, P>
+/// A speculative batch of operations whose root digest has not yet been computed, in contrast
+/// to [`MerkleizedBatch`].
+///
+/// Consuming [`UnmerkleizedBatch::merkleize`] produces an owned [`MerkleizedBatch`].
+/// Methods that need the committed DB (e.g. [`get`](Self::get)) accept it as a parameter.
+pub struct UnmerkleizedBatch<H, K, V>
 where
-    E: RStorage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     H: CHasher,
-    T: Translator,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<K, V>>,
 {
-    /// The committed DB this batch is built on top of.
-    pub(super) immutable: &'a Immutable<E, K, V, H, T>,
-
     /// Authenticated journal batch for computing the speculative MMR root.
-    pub(super) journal_batch: authenticated::UnmerkleizedBatch<'a, H, P, Operation<K, V>>,
+    journal_batch: authenticated::UnmerkleizedBatch<H, Operation<K, V>>,
 
     /// Pending mutations.
-    pub(super) mutations: BTreeMap<K, V>,
+    mutations: BTreeMap<K, V>,
 
     /// Uncommitted key-level changes accumulated by prior batches in the chain.
-    pub(super) base_diff: Arc<BTreeMap<K, DiffEntry<V>>>,
-
-    /// One Arc segment of operations per prior batch in the chain.
-    pub(super) base_operations: Vec<Arc<Vec<Operation<K, V>>>>,
+    base_diff: Arc<BTreeMap<K, DiffEntry<V>>>,
 
     /// Total operation count before this batch (committed DB + prior batches).
     /// This batch's i-th operation lands at location `base_size + i`.
-    pub(super) base_size: u64,
+    base_size: u64,
 
     /// The database size when this batch was created, used to detect stale changesets.
-    pub(super) db_size: u64,
+    db_size: u64,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
-/// in contrast to [UnmerkleizedBatch].
-pub struct MerkleizedBatch<'a, E, K, V, H, T, P>
-where
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: VariableValue,
-    H: CHasher,
-    T: Translator,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<K, V>>,
-{
-    /// The committed DB this batch is built on top of.
-    immutable: &'a Immutable<E, K, V, H, T>,
+/// in contrast to [`UnmerkleizedBatch`].
+pub struct MerkleizedBatch<D: Digest, K: Array, V: VariableValue> {
+    /// Journal batch (MMR state + accumulated operation segments).
+    journal: authenticated::MerkleizedBatch<D, Operation<K, V>>,
 
-    /// Merkleized authenticated journal batch (provides the speculative MMR root).
-    journal_batch: authenticated::MerkleizedBatch<'a, H, P, Operation<K, V>>,
-
-    /// All uncommitted key-level changes in this batch chain.
+    /// All uncommitted key-level changes from the batch chain.
     diff: Arc<BTreeMap<K, DiffEntry<V>>>,
-
-    /// One Arc segment of operations per batch in the chain (chronological order).
-    base_operations: Vec<Arc<Vec<Operation<K, V>>>>,
 
     /// Total operation count after this batch.
     total_size: u64,
 
-    /// The database size when this batch was created, used to detect stale changesets.
+    /// The database size when the initial batch was created.
     db_size: u64,
 }
 
@@ -109,17 +84,27 @@ pub struct Changeset<K: Array, D: Digest, V: VariableValue> {
     pub(super) db_size: u64,
 }
 
-impl<'a, E, K, V, H, T, P> UnmerkleizedBatch<'a, E, K, V, H, T, P>
+impl<H, K, V> UnmerkleizedBatch<H, K, V>
 where
-    E: RStorage + Clock + Metrics,
     K: Array,
     V: VariableValue,
     H: CHasher,
-    T: Translator,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<K, V>>,
 {
+    /// Create a batch from a committed DB (no parent chain).
+    pub(super) fn new<E, T>(immutable: &Immutable<E, K, V, H, T>, journal_size: u64) -> Self
+    where
+        E: RStorage + Clock + Metrics,
+        T: Translator,
+    {
+        Self {
+            journal_batch: immutable.journal.to_merkleized_batch().new_batch::<H>(),
+            mutations: BTreeMap::new(),
+            base_diff: Arc::new(BTreeMap::new()),
+            base_size: journal_size,
+            db_size: journal_size,
+        }
+    }
+
     /// Set a key to a value.
     ///
     /// The key must not already exist in the database or in any ancestor batch
@@ -130,7 +115,15 @@ where
     }
 
     /// Read through: mutations -> base diff -> committed DB.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+    pub async fn get<E, T>(
+        &self,
+        key: &K,
+        db: &Immutable<E, K, V, H, T>,
+    ) -> Result<Option<V>, Error>
+    where
+        E: RStorage + Clock + Metrics,
+        T: Translator,
+    {
         // Check this batch's pending mutations.
         if let Some(value) = self.mutations.get(key) {
             return Ok(Some(value.clone()));
@@ -140,11 +133,11 @@ where
             return Ok(Some(entry.value.clone()));
         }
         // Fall through to base DB.
-        self.immutable.get(key).await
+        db.get(key).await
     }
 
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
-    pub fn merkleize(self, metadata: Option<V>) -> MerkleizedBatch<'a, E, K, V, H, T, P> {
+    pub fn merkleize(self, metadata: Option<V>) -> MerkleizedBatch<H::Digest, K, V> {
         let base = self.base_size;
 
         // Build operations: one Set per key (BTreeMap iterates in sorted order), then Commit.
@@ -161,86 +154,71 @@ where
 
         let total_size = base + ops.len() as u64;
 
-        // Merkleize the journal batch (created eagerly at batch construction).
+        // Add operations to the journal batch and merkleize.
         let mut journal_batch = self.journal_batch;
         for op in &ops {
             journal_batch = journal_batch.add(op.clone());
         }
-        let journal_batch = journal_batch.merkleize();
-
-        // Build the operation chain: parent segments + this batch's segment.
-        let mut base_operations = self.base_operations;
-        base_operations.push(Arc::new(ops));
+        let journal = journal_batch.merkleize();
 
         // Merge parent diff entries that weren't overridden by this batch.
+        // O(K) deep copy (K = distinct keys in parent diff) when the parent MerkleizedBatch or
+        // any sibling UnmerkleizedBatch still exists. O(1) when all have been dropped.
         let base_diff = Arc::try_unwrap(self.base_diff).unwrap_or_else(|arc| (*arc).clone());
         for (k, v) in base_diff {
             diff.entry(k).or_insert(v);
         }
 
         MerkleizedBatch {
-            immutable: self.immutable,
-            journal_batch,
+            journal,
             diff: Arc::new(diff),
-            base_operations,
             total_size,
             db_size: self.db_size,
         }
     }
 }
 
-impl<'a, E, K, V, H, T, P> MerkleizedBatch<'a, E, K, V, H, T, P>
-where
-    E: RStorage + Clock + Metrics,
-    K: Array,
-    V: VariableValue,
-    H: CHasher,
-    T: Translator,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<K, V>>,
-{
+impl<D: Digest, K: Array, V: VariableValue> MerkleizedBatch<D, K, V> {
     /// Return the speculative root.
-    pub fn root(&self) -> H::Digest {
-        self.journal_batch.root()
+    pub fn root(&self) -> D {
+        self.journal.root()
     }
 
     /// Read through: diff -> committed DB.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+    pub async fn get<E, H, T>(
+        &self,
+        key: &K,
+        db: &Immutable<E, K, V, H, T>,
+    ) -> Result<Option<V>, Error>
+    where
+        E: RStorage + Clock + Metrics,
+        H: CHasher<Digest = D>,
+        T: Translator,
+    {
         if let Some(entry) = self.diff.get(key) {
             return Ok(Some(entry.value.clone()));
         }
-        self.immutable.get(key).await
+        db.get(key).await
     }
 
     /// Create a new speculative batch of operations with this batch as its parent.
-    #[allow(clippy::type_complexity)]
-    pub fn new_batch(
-        &self,
-    ) -> UnmerkleizedBatch<
-        '_,
-        E,
-        K,
-        V,
-        H,
-        T,
-        authenticated::MerkleizedBatch<'a, H, P, Operation<K, V>>,
-    > {
+    pub fn new_batch<H>(&self) -> UnmerkleizedBatch<H, K, V>
+    where
+        H: CHasher<Digest = D>,
+    {
         UnmerkleizedBatch {
-            immutable: self.immutable,
-            journal_batch: self.journal_batch.new_batch(),
+            journal_batch: self.journal.new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::clone(&self.diff),
-            base_operations: self.base_operations.clone(),
             base_size: self.total_size,
             db_size: self.db_size,
         }
     }
 
-    /// Consume this batch, producing an owned `Changeset`.
-    pub fn finalize(self) -> Changeset<K, H::Digest, V> {
-        // Build snapshot diffs from diff. All entries are inserts since
-        // immutable databases don't support updates or deletes.
+    /// Consume this batch, producing an owned [`Changeset`].
+    pub fn finalize(self) -> Changeset<K, D, V> {
+        // O(K) deep copy (K = distinct keys in diff) when a child UnmerkleizedBatch or
+        // MerkleizedBatch still exists. O(1) when all children have been dropped.
         let diff = Arc::try_unwrap(self.diff).unwrap_or_else(|arc| (*arc).clone());
         let snapshot_diffs: Vec<_> = diff
             .into_iter()
@@ -251,10 +229,69 @@ where
             .collect();
 
         Changeset {
-            journal_finalized: self.journal_batch.finalize(),
+            journal_finalized: self.journal.finalize(),
             snapshot_diffs,
             total_size: self.total_size,
             db_size: self.db_size,
+        }
+    }
+
+    /// Like [`Self::finalize`], but produces a [`Changeset`] relative to `current_db_size`
+    /// instead of the original DB size when this batch chain was created.
+    ///
+    /// Use this when an ancestor batch in the chain has already been committed, advancing
+    /// the DB past the original fork point.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `current_db_size` is less than the DB size when this batch was created.
+    pub fn finalize_from(self, current_db_size: u64) -> Changeset<K, D, V> {
+        assert!(
+            current_db_size >= self.db_size,
+            "current_db_size ({current_db_size}) < batch db_size ({})",
+            self.db_size
+        );
+        let items_to_skip = current_db_size - self.db_size;
+
+        // O(K) deep copy (K = distinct keys in diff) when a child UnmerkleizedBatch or
+        // MerkleizedBatch still exists. O(1) when all children have been dropped.
+        let diff = Arc::try_unwrap(self.diff).unwrap_or_else(|arc| (*arc).clone());
+        let snapshot_diffs: Vec<_> = diff
+            .into_iter()
+            .filter(|(_, entry)| *entry.loc >= current_db_size)
+            .map(|(key, entry)| SnapshotDiff::Insert {
+                key,
+                new_loc: entry.loc,
+            })
+            .collect();
+
+        let mmr_base =
+            Position::try_from(Location::new(current_db_size)).expect("valid leaf count");
+        Changeset {
+            journal_finalized: self.journal.finalize_from(mmr_base, items_to_skip),
+            snapshot_diffs,
+            total_size: self.total_size,
+            db_size: current_db_size,
+        }
+    }
+}
+
+impl<E, K, V, H, T> Immutable<E, K, V, H, T>
+where
+    E: RStorage + Clock + Metrics,
+    K: Array,
+    V: VariableValue,
+    H: CHasher,
+    T: Translator,
+{
+    /// Create an initial [`MerkleizedBatch`] from the committed DB state.
+    pub fn to_batch(&self) -> MerkleizedBatch<H::Digest, K, V> {
+        let journal_size = *self.last_commit_loc + 1;
+        MerkleizedBatch {
+            journal: self.journal.to_merkleized_batch(),
+            diff: Arc::new(BTreeMap::new()),
+            total_size: journal_size,
+            db_size: journal_size,
         }
     }
 }
