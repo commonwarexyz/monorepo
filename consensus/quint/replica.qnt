@@ -416,30 +416,23 @@ module replica {
         l: ViewNumber -> ReplicaId,
         certify: ReplicaId -> (Block -> bool)
     ): bool = {
-        // All correct replicas nullified INIT_VIEW on startup.
-        pure val init_nullify_sigs = CORRECT.map(id => sig_of(id))
-        pure val init_null_cert = nullification(INIT_VIEW, init_nullify_sigs, sig_of(CORRECT.fold("", (acc, id) => if (acc == "") id else acc)))
         all {
             replica_state' = CORRECT.mapBy(id => {
-                view: INIT_VIEW,
+                view: FIRST_VIEW,
                 ghost_last_seen_notarization: GENESIS_VIEW,
                 last_finalized: GENESIS_VIEW,
                 notarized: VIEWS.mapBy(_ => None),
                 certified: VIEWS.mapBy(_ => None),
                 propose_sent: false,
-                nullified: true,
-                leader_timeout_cancelled: true,
-                advance_timeout_cancelled: true,
-                ghost_sent_votes: VIEWS.mapBy(v =>
-                    if (v == INIT_VIEW) List(NullifyKind) else List()
-                )
+                nullified: false,
+                leader_timeout_cancelled: false,
+                advance_timeout_cancelled: false,
+                ghost_sent_votes: VIEWS.mapBy(_ => List())
             }),
             sent_proposal' = Set(),
-            sent_vote' = CORRECT.map(id => nullify(INIT_VIEW, sig_of(id))),
+            sent_vote' = Set(),
             sent_certificate' = Set(),
-            store_vote' = CORRECT.mapBy(id =>
-                CORRECT.map(other => nullify(INIT_VIEW, sig_of(other)))
-            ),
+            store_vote' = CORRECT.mapBy(_ => Set()),
             store_certificate' = CORRECT.mapBy(_ => Set()),
             ghost_committed_blocks' = CORRECT.mapBy(_ => List()),
             parent_refs' = VIEWS.mapBy(_ => ParentTrackedBlocks.mapBy(_ => Set())),
@@ -449,40 +442,6 @@ module replica {
             lastAction' = "init"
         }
     }
-
-    /// Resolve the INIT_VIEW nullification: form cert and advance all correct replicas to FIRST_VIEW.
-    action resolveInitNullification: bool = {
-        pure val init_nullify_sigs = CORRECT.map(id => sig_of(id))
-        pure val init_null_cert = nullification(INIT_VIEW, init_nullify_sigs, sig_of(CORRECT.fold("", (acc, id) => if (acc == "") id else acc)))
-        all {
-            store_certificate' = CORRECT.mapBy(_ => Set(init_null_cert)),
-            sent_certificate' = Set(init_null_cert),
-            replica_state' = CORRECT.mapBy(id => {
-                ...replica_state.get(id),
-                view: FIRST_VIEW,
-                nullified: false,
-                leader_timeout_cancelled: false,
-                advance_timeout_cancelled: false,
-            }),
-            // unchanged
-            sent_proposal' = sent_proposal,
-            sent_vote' = sent_vote,
-            store_vote' = store_vote,
-            ghost_committed_blocks' = ghost_committed_blocks,
-            parent_refs' = parent_refs,
-            ghost_proposal' = ghost_proposal,
-            leader' = leader,
-            certify_policy' = certify_policy,
-            lastAction' = "resolve_init"
-        }
-    }
-
-    /// Fully resolved init: nullification of INIT_VIEW complete, replicas at FIRST_VIEW ready to act.
-    action initWithLeaderAndCertifyTimeout(
-        l: ViewNumber -> ReplicaId,
-        certify: ReplicaId -> (Block -> bool)
-    ): bool =
-        initWithLeaderAndCertify(l, certify).then(resolveInitNullification)
 
     // A step by a correct or byzantine replica.
     action step = {

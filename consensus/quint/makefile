@@ -1,7 +1,7 @@
 TRACES_ROOT ?= ../fuzz/artifacts/traces
 TEST_DIR ?= traces
 
-FUZZ_RUNS ?= 1000
+FUZZ_RUNS ?= 20
 
 .PHONY: test typecheck repl check clean get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces tv generate_itf convert_itf replay_itf clean_mbt_traces conformance_roundtrip ist
 

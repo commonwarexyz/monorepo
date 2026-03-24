@@ -30,8 +30,8 @@ module tests {
             sig: sig_of("n4")
         }
 
-        initWithLeaderAndCertifyTimeout(
-            Map(0 -> "n2", 1 -> "n3", 2 -> "n4", 3 -> "n0", 4 -> "n1", 5 -> "n2", 6 -> "n3"),
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n4", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
             CERTIFY_ALL_TRUE
         )
             .then(inject_proposal(proposal))
@@ -44,15 +44,15 @@ module tests {
                 assert(store_certificate.get("n3").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b1"))),
                 assert(sent_vote.exists(v => vote_sig(v) == "n3" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == Some("val_b1"))),
                 assert(replica_state.get("n3").certified.get(FIRST_VIEW) == Some("val_b1")),
-                assert(replica_state.get("n3").view == 3),
+                assert(replica_state.get("n3").view == 2),
                 unchanged_all,
             })
             .expect(all_invariants)
     }
 
     run timeoutBroadcastsNullifyTest = {
-        initWithLeaderAndCertifyTimeout(
-            Map(0 -> "n2", 1 -> "n3", 2 -> "n4", 3 -> "n0", 4 -> "n1", 5 -> "n2", 6 -> "n3"),
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n4", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
             CERTIFY_ALL_TRUE
         )
             .then(on_timeout("n2"))
