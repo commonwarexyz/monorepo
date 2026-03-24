@@ -718,10 +718,10 @@ mod test {
             sends.store(0, Ordering::Relaxed);
             chunk_counts.lock().unwrap().clear();
 
-            let payload = vec![7u8; 100];
             // The first two framed messages fit together under the 256-byte cap,
             // but the third must spill into a second chunk. We still hand the
             // runtime one chunked `IoBufs`, so there is only one sink call.
+            let payload = vec![7u8; 100];
             dialer_sender
                 .send_many(vec![
                     IoBufs::from(IoBuf::from(payload.clone())),
@@ -786,10 +786,10 @@ mod test {
             sends.store(0, Ordering::Relaxed);
             chunk_counts.lock().unwrap().clear();
 
-            let large = vec![3u8; 200];
-            let small = vec![9u8; 16];
             // A single framed message larger than the cap still goes out, but it
             // must occupy its own chunk instead of being rejected or merged.
+            let large = vec![3u8; 200];
+            let small = vec![9u8; 16];
             dialer_sender
                 .send_many(vec![
                     IoBufs::from(IoBuf::from(large.clone())),
