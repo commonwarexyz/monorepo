@@ -198,10 +198,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     // Set the initial deadline to now to start gossiping immediately
                     let mut deadline = context.current();
 
-                    // Reused across iterations to avoid per-send allocation.
-                    let mut batch = Vec::with_capacity(self.send_batch_size);
-
                     // Enter into the main loop
+                    let mut batch = Vec::with_capacity(self.send_batch_size);
                     select_loop! {
                         context,
                         on_stopped => {},
@@ -346,7 +344,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             context.sleep(wait_duration).await;
                         }
                     }
-
 
                     match msg {
                         types::Payload::Data(data) => {

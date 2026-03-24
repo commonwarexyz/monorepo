@@ -157,9 +157,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     let mut deadline = context.current() + self.ping_frequency;
 
                     // Enter into the main loop
-                    // Reused across iterations to avoid per-send allocation.
                     let mut batch = Vec::with_capacity(self.send_batch_size);
-
                     select_loop! {
                         context,
                         on_stopped => {},
