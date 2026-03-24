@@ -107,6 +107,10 @@ pub struct NetworkConfig {
     so_linger: Option<Duration>,
 
     /// Read/write timeout for network operations.
+    ///
+    /// Bounds the full `Sink::send` and `Stream::recv` calls rather than each
+    /// individual socket syscall. Larger
+    /// batched writes may therefore require a larger timeout.
     read_write_timeout: Duration,
 }
 
@@ -394,10 +398,11 @@ impl crate::Runner for Runner {
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
                     so_linger: self.cfg.network_cfg.so_linger,
+                    read_write_timeout: self.cfg.network_cfg.read_write_timeout,
                     iouring_config: iouring::Config {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
                         size: IOURING_NETWORK_SIZE,
-                        op_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                        max_op_timeout: self.cfg.network_cfg.read_write_timeout,
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()
                     },

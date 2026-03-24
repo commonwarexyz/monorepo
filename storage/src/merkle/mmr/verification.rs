@@ -11,9 +11,11 @@
 //! Historical proofs are essential for sync operations where we need to prove elements against a
 //! past state of the MMR rather than its current state.
 
-use crate::mmr::{
-    hasher::Hasher, iterator::PeakIterator, proof, storage::Storage, Error, Location, Position,
-    Proof,
+use crate::merkle::{
+    hasher::Hasher,
+    mmr::{iterator::PeakIterator, Error, Family, Location, Position, Proof},
+    proof::{self as merkle_proof, Blueprint},
+    storage::Storage,
 };
 use commonware_cryptography::Digest;
 use core::ops::Range;
@@ -41,14 +43,14 @@ impl<D: Digest> ProofStore<D> {
     /// with different fold prefix boundaries can be generated without requiring individual peak
     /// digests.
     pub fn new<H, E>(
-        hasher: &mut H,
+        hasher: &H,
         proof: &Proof<D>,
         elements: &[E],
         start_loc: Location,
         root: &D,
     ) -> Result<Self, Error>
     where
-        H: Hasher<Digest = D>,
+        H: Hasher<Family, Digest = D>,
         E: AsRef<[u8]>,
     {
         let digests =
@@ -82,13 +84,13 @@ impl<D: Digest> ProofStore<D> {
     /// The sub-range's fold prefix accumulator is derived from the stored fold accumulator
     /// (covering the original proof's fold prefix peaks) plus any additional peaks that are
     /// individually available in the store (original range peaks now preceding the sub-range).
-    pub fn range_proof<H: Hasher<Digest = D>>(
+    pub fn range_proof<H: Hasher<Family, Digest = D>>(
         &self,
-        hasher: &mut H,
+        hasher: &H,
         range: Range<Location>,
     ) -> Result<Proof<D>, Error> {
         let leaves = Location::try_from(self.size)?;
-        let bp = proof::blueprint(leaves, range)?;
+        let bp = Blueprint::new(leaves, range)?;
 
         let mut digests: Vec<D> = Vec::new();
         if !bp.fold_prefix.is_empty() {
@@ -132,7 +134,8 @@ impl<D: Digest> ProofStore<D> {
         }
 
         let leaves = Location::try_from(self.size)?;
-        let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(leaves, locations)?;
+        let node_positions: BTreeSet<_> =
+            merkle_proof::nodes_required_for_multi_proof(leaves, locations)?;
 
         let peak_map: HashMap<Position, D> = peaks.iter().copied().collect();
 
@@ -155,12 +158,16 @@ impl<D: Digest> ProofStore<D> {
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::LocationOverflow] if any location in `range` > [crate::merkle::Family::MAX_LEAVES]
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn range_proof<D: Digest, H: Hasher<Digest = D>, S: Storage<Digest = D>>(
-    hasher: &mut H,
+pub async fn range_proof<
+    D: Digest,
+    H: Hasher<Family, Digest = D>,
+    S: Storage<Family, Digest = D>,
+>(
+    hasher: &H,
     mmr: &S,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
@@ -173,17 +180,21 @@ pub async fn range_proof<D: Digest, H: Hasher<Digest = D>, S: Storage<Digest = D
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if any location in `range` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::LocationOverflow] if any location in `range` > [crate::merkle::Family::MAX_LEAVES]
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `leaves`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn historical_range_proof<D: Digest, H: Hasher<Digest = D>, S: Storage<Digest = D>>(
-    hasher: &mut H,
+pub async fn historical_range_proof<
+    D: Digest,
+    H: Hasher<Family, Digest = D>,
+    S: Storage<Family, Digest = D>,
+>(
+    hasher: &H,
     mmr: &S,
     leaves: Location,
     range: Range<Location>,
 ) -> Result<Proof<D>, Error> {
-    let bp = proof::blueprint(leaves, range)?;
+    let bp = Blueprint::new(leaves, range)?;
 
     let mut digests: Vec<D> = Vec::new();
     if !bp.fold_prefix.is_empty() {
@@ -216,11 +227,11 @@ pub async fn historical_range_proof<D: Digest, H: Hasher<Digest = D>, S: Storage
 ///
 /// # Errors
 ///
-/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::mmr::MAX_LOCATION]
+/// Returns [Error::LocationOverflow] if any location in `locations` > [crate::merkle::Family::MAX_LEAVES]
 /// Returns [Error::RangeOutOfBounds] if any location in `locations` > `mmr.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if locations is empty
-pub async fn multi_proof<D: Digest, S: Storage<Digest = D>>(
+pub async fn multi_proof<D: Digest, S: Storage<Family, Digest = D>>(
     mmr: &S,
     locations: &[Location],
 ) -> Result<Proof<D>, Error> {
@@ -232,7 +243,8 @@ pub async fn multi_proof<D: Digest, S: Storage<Digest = D>>(
     // Collect all required node positions
     let size = mmr.size().await;
     let leaves = Location::try_from(size)?;
-    let node_positions: BTreeSet<_> = proof::nodes_required_for_multi_proof(leaves, locations)?;
+    let node_positions: BTreeSet<_> =
+        merkle_proof::nodes_required_for_multi_proof(leaves, locations)?;
 
     // Fetch all required digests in parallel and collect with positions
     let node_futures: Vec<_> = node_positions
@@ -256,7 +268,10 @@ pub async fn multi_proof<D: Digest, S: Storage<Digest = D>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{location::LocationRangeExt as _, mem::Mmr, StandardHasher as Standard};
+    use crate::{
+        merkle::LocationRangeExt as _,
+        mmr::{mem::Mmr, StandardHasher as Standard},
+    };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
@@ -270,15 +285,15 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             // create a new MMR and add a non-trivial amount (49) of elements
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&mut hasher);
+            let hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = Mmr::new(&hasher);
             let elements: Vec<_> = (0..49).map(test_digest).collect();
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
-                    batch.add(&mut hasher, element);
+                    batch = batch.add(&hasher, element);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let root = mmr.root();
@@ -289,9 +304,9 @@ mod tests {
             let mut range_end = Location::new(49);
             while range_start < range_end {
                 let range = range_start..range_end;
-                let range_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
+                let range_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
                 let proof_store = ProofStore::new(
-                    &mut hasher,
+                    &hasher,
                     &range_proof,
                     &elements[range.to_usize_range()],
                     range_start,
@@ -307,11 +322,10 @@ mod tests {
                 while subrange_start < subrange_end {
                     // Verify a proof over a sub-range of the original range.
                     let sub_range = subrange_start..subrange_end;
-                    let sub_range_proof = proof_store
-                        .range_proof(&mut hasher, sub_range.clone())
-                        .unwrap();
+                    let sub_range_proof =
+                        proof_store.range_proof(&hasher, sub_range.clone()).unwrap();
                     assert!(sub_range_proof.verify_range_inclusion(
-                        &mut hasher,
+                        &hasher,
                         &elements[sub_range.to_usize_range()],
                         sub_range.start,
                         root
@@ -331,15 +345,15 @@ mod tests {
         executor.start(|_| async move {
             // Build MMR with 49 elements. Peaks cover locations 0-31, 32-47, 48.
             // A proof starting at location 32 puts the first peak entirely in the fold prefix.
-            let mut hasher: Standard<Sha256> = Standard::new();
-            let mut mmr = Mmr::new(&mut hasher);
+            let hasher: Standard<Sha256> = Standard::new();
+            let mut mmr = Mmr::new(&hasher);
             let elements: Vec<_> = (0..49).map(test_digest).collect();
             let changeset = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
-                    batch.add(&mut hasher, element);
+                    batch = batch.add(&hasher, element);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
             let root = mmr.root();
@@ -348,9 +362,9 @@ mod tests {
             // The ProofStore derives the fold accumulator from the proof itself, so
             // sub-proofs should succeed for all sub-ranges without needing peaks.
             let range = Location::new(32)..Location::new(49);
-            let range_proof = mmr.range_proof(&mut hasher, range.clone()).unwrap();
+            let range_proof = mmr.range_proof(&hasher, range.clone()).unwrap();
             let proof_store = ProofStore::new(
-                &mut hasher,
+                &hasher,
                 &range_proof,
                 &elements[range.to_usize_range()],
                 range.start,
@@ -362,12 +376,10 @@ mod tests {
             for start in 32u64..49 {
                 for end in (start + 1)..=49 {
                     let sub_range = Location::new(start)..Location::new(end);
-                    let sub_proof = proof_store
-                        .range_proof(&mut hasher, sub_range.clone())
-                        .unwrap();
+                    let sub_proof = proof_store.range_proof(&hasher, sub_range.clone()).unwrap();
                     assert!(
                         sub_proof.verify_range_inclusion(
-                            &mut hasher,
+                            &hasher,
                             &elements[sub_range.to_usize_range()],
                             sub_range.start,
                             root,

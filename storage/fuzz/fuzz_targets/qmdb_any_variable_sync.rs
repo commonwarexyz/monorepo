@@ -4,7 +4,9 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
-    mmr::{self, hasher::Standard, MAX_LOCATION},
+    journal::contiguous::variable::Config as VConfig,
+    merkle::Family as _,
+    mmr::{self, journaled::Config as MmrConfig, Family, StandardHasher as Standard},
     qmdb::{
         any::{unordered::variable::Db, VariableConfig as Config},
         verify_proof,
@@ -13,7 +15,7 @@ use commonware_storage::{
 };
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use mmr::location::Location;
+use mmr::Location;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU16, NonZeroU64},
@@ -89,7 +91,7 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             5 => Ok(Operation::GetMetadata),
             6 => {
-                let start_loc = u.arbitrary::<u64>()? % (*MAX_LOCATION + 1);
+                let start_loc = u.arbitrary::<u64>()? % (*Family::MAX_LEAVES + 1);
                 let start_loc = Location::new(start_loc);
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
@@ -97,7 +99,7 @@ impl<'a> Arbitrary<'a> for Operation {
             }
             7 => {
                 let size = u.arbitrary()?;
-                let start_loc = u.arbitrary::<u64>()? % (*MAX_LOCATION + 1);
+                let start_loc = u.arbitrary::<u64>()? % (*Family::MAX_LEAVES + 1);
                 let start_loc = Location::new(start_loc);
                 let max_ops = u.int_in_range(1..=u32::MAX)? as u64;
                 let max_ops = NZU64!(max_ops);
@@ -138,19 +140,25 @@ fn test_config(
     test_name: &str,
     pooler: &impl BufferPooler,
 ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
-        mmr_journal_partition: format!("{test_name}-mmr"),
-        mmr_metadata_partition: format!("{test_name}-meta"),
-        mmr_items_per_blob: NZU64!(3),
-        mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("{test_name}-log"),
-        log_items_per_blob: NZU64!(3),
-        log_write_buffer: NZUsize!(1024),
-        log_compression: None,
-        log_codec_config: ((), ((0..=100000).into(), ())),
+        mmr_config: MmrConfig {
+            journal_partition: format!("{test_name}-mmr"),
+            metadata_partition: format!("{test_name}-meta"),
+            items_per_blob: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        journal_config: VConfig {
+            partition: format!("{test_name}-log"),
+            items_per_section: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            compression: None,
+            codec_config: ((), ((0..=100000).into(), ())),
+            page_cache,
+        },
         translator: TwoCap,
-        thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1)),
     }
 }
 
@@ -158,7 +166,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut hasher = Standard::<Sha256>::new();
+        let hasher = Standard::<Sha256>::new();
         let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
         let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
             .await
@@ -234,7 +242,7 @@ fn fuzz(input: FuzzInput) {
                     if *start_loc >= oldest_retained_loc && *start_loc < *op_count {
                         if let Ok((proof, log)) = db.proof(*start_loc, *max_ops).await {
                             let root = db.root();
-                            assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, &root));
+                            assert!(verify_proof(&hasher, &proof, *start_loc, &log, &root));
                         }
                     }
                 }
@@ -275,7 +283,7 @@ fn fuzz(input: FuzzInput) {
                         let root = historical_roots
                             .get(&op_count)
                             .expect("historical root missing for known commit point");
-                        assert!(verify_proof(&mut hasher, &proof, *start_loc, &log, root));
+                        assert!(verify_proof(&hasher, &proof, *start_loc, &log, root));
                     }
                 }
 

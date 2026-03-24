@@ -60,20 +60,20 @@ fn bench_update(c: &mut Criterion) {
                             let mut elements = Vec::with_capacity(leaves);
                             let mut sampler = StdRng::seed_from_u64(0);
                             let mut leaf_locations = Vec::with_capacity(leaves);
-                            let mut h = StandardHasher::<Sha256>::new();
+                            let h = StandardHasher::<Sha256>::new();
 
                             // Append random elements to MMR
-                            let mut mmr = Mmr::new(&mut h);
+                            let mut mmr = Mmr::new(&h);
                             let changeset = {
                                 let mut batch = UnmerkleizedBatch::new(&mmr);
                                 for _ in 0..leaves {
                                     let digest = sha256::Digest::random(&mut sampler);
                                     elements.push(digest);
-                                    let pos = batch.add(&mut h, &digest);
-                                    let loc = Location::try_from(pos).expect("leaf position");
+                                    let loc = batch.leaves();
                                     leaf_locations.push(loc);
+                                    batch = batch.add(&h, &digest);
                                 }
-                                batch.merkleize(&mut h).finalize()
+                                batch.merkleize(&h).finalize()
                             };
                             mmr.apply(changeset).unwrap();
 
@@ -93,9 +93,9 @@ fn bench_update(c: &mut Criterion) {
                             match strategy {
                                 Strategy::NoBatching => {
                                     for (loc, element) in &leaf_map {
-                                        let mut batch = mmr.new_batch();
-                                        batch.update_leaf(&mut h, *loc, element).unwrap();
-                                        mmr.apply(batch.merkleize(&mut h).finalize()).unwrap();
+                                        let batch =
+                                            mmr.new_batch().update_leaf(&h, *loc, element).unwrap();
+                                        mmr.apply(batch.merkleize(&h).finalize()).unwrap();
                                     }
                                 }
                                 _ => {
@@ -108,8 +108,8 @@ fn bench_update(c: &mut Criterion) {
                                         if let Some(ref p) = pool {
                                             batch = batch.with_pool(Some(p.clone()));
                                         }
-                                        batch.update_leaf_batched(&updates).unwrap();
-                                        batch.merkleize(&mut h).finalize()
+                                        batch = batch.update_leaf_batched(&updates).unwrap();
+                                        batch.merkleize(&h).finalize()
                                     };
                                     mmr.apply(changeset).unwrap();
                                 }

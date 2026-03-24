@@ -6,11 +6,8 @@ use crate::{
         authenticated::{self, BatchChain},
         contiguous::{Contiguous, Mutable, Reader},
     },
-    mmr::{
-        journaled::Mmr,
-        read::{BatchChainInfo, Readable},
-        Location,
-    },
+    merkle::batch::ChainInfo,
+    mmr::{self, journaled::Mmr, Location, Readable},
     qmdb::{
         any::{
             db::Db,
@@ -129,7 +126,9 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<U>>,
 {
     /// The committed DB this batch is built on top of.
     db: &'a Db<E, C, I, H, U>,
@@ -171,7 +170,9 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<U>>,
 {
     /// The committed DB this batch is built on top of.
     db: &'a Db<E, C, I, H, U>,
@@ -237,7 +238,9 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<U>>,
 {
     db: &'a Db<E, C, I, H, U>,
     journal_batch: authenticated::UnmerkleizedBatch<'a, H, P, Operation<U>>,
@@ -257,7 +260,9 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<U>>,
 {
     /// Read an operation at a given location from the correct source.
     ///
@@ -452,10 +457,11 @@ where
         // parent already contains all prior batches' MMR state, so we only
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
+        let mut journal_batch = self.journal_batch;
         for op in &ops {
-            self.journal_batch.add(op.clone());
+            journal_batch = journal_batch.add(op.clone());
         }
-        let journal_batch = self.journal_batch.merkleize();
+        let journal_batch = journal_batch.merkleize();
 
         // Build the operation chain: parent segments + this batch's segment.
         self.base_operations.push(Arc::new(ops));
@@ -490,7 +496,9 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<U>>,
 {
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     ///
@@ -534,7 +542,9 @@ where
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<U>>,
 {
     /// Read through: mutations -> base diff -> committed DB.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error> {
@@ -558,8 +568,8 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<update::Unordered<K, V>>: Codec,
-    P: Readable<Digest = H::Digest>
-        + BatchChainInfo<Digest = H::Digest>
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<update::Unordered<K, V>>>,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
@@ -680,8 +690,8 @@ where
     I: OrderedIndex<Value = Location>,
     H: Hasher,
     Operation<update::Ordered<K, V>>: Codec,
-    P: Readable<Digest = H::Digest>
-        + BatchChainInfo<Digest = H::Digest>
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<update::Ordered<K, V>>>,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
@@ -944,7 +954,9 @@ where
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<U>>,
 {
     /// Read through: diff -> committed DB.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error> {
@@ -963,7 +975,9 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<U>>,
 {
     /// Return the speculative root.
     pub fn root(&self) -> H::Digest {
@@ -998,7 +1012,9 @@ where
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<U>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<U>>,
 {
     /// Consume this batch, producing an owned [`Changeset`].
     pub fn finalize(self) -> Changeset<U::Key, H::Digest, Operation<U>> {
@@ -1165,9 +1181,12 @@ fn extract_update_value<U: update::Update>(op: &Operation<U>) -> U::Value {
 #[cfg(any(test, feature = "test-traits"))]
 mod trait_impls {
     use super::*;
-    use crate::qmdb::any::traits::{
-        BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
-        UnmerkleizedBatch as UnmerkleizedBatchTrait,
+    use crate::{
+        merkle::batch::ChainInfo,
+        qmdb::any::traits::{
+            BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
+            UnmerkleizedBatch as UnmerkleizedBatchTrait,
+        },
     };
     use std::future::Future;
 
@@ -1181,8 +1200,8 @@ mod trait_impls {
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         Operation<update::Unordered<K, V>>: Codec,
-        P: Readable<Digest = H::Digest>
-            + BatchChainInfo<Digest = H::Digest>
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+            + ChainInfo<mmr::Family, Digest = H::Digest>
             + BatchChain<Operation<update::Unordered<K, V>>>,
     {
         type K = K;
@@ -1215,8 +1234,8 @@ mod trait_impls {
         I: OrderedIndex<Value = Location>,
         H: Hasher,
         Operation<update::Ordered<K, V>>: Codec,
-        P: Readable<Digest = H::Digest>
-            + BatchChainInfo<Digest = H::Digest>
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+            + ChainInfo<mmr::Family, Digest = H::Digest>
             + BatchChain<Operation<update::Ordered<K, V>>>,
     {
         type K = K;
@@ -1245,8 +1264,8 @@ mod trait_impls {
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
         Operation<U>: Codec,
-        P: Readable<Digest = H::Digest>
-            + BatchChainInfo<Digest = H::Digest>
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+            + ChainInfo<mmr::Family, Digest = H::Digest>
             + BatchChain<Operation<U>>,
     {
         type Digest = H::Digest;

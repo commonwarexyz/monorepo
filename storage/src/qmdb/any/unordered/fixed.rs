@@ -5,7 +5,7 @@ use crate::{
     journal::contiguous::fixed::Journal,
     mmr::Location,
     qmdb::{
-        any::{init_fixed, unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
+        any::{unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
         Error,
     },
     translator::Translator,
@@ -43,7 +43,7 @@ impl<E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher, T: Transl
         known_inactivity_floor: Option<Location>,
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
-        init_fixed(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+        crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
             Index::new(ctx, t)
         })
         .await
@@ -62,7 +62,7 @@ pub mod partitioned {
         journal::contiguous::fixed::Journal,
         mmr::Location,
         qmdb::{
-            any::{init_fixed, FixedConfig as Config, FixedValue},
+            any::{FixedConfig as Config, FixedValue},
             Error,
         },
         translator::Translator,
@@ -115,7 +115,7 @@ pub mod partitioned {
             known_inactivity_floor: Option<Location>,
             callback: impl FnMut(bool, Option<Location>),
         ) -> Result<Self, Error> {
-            init_fixed(context, cfg, known_inactivity_floor, callback, |ctx, t| {
+            crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
                 Index::new(ctx, t)
             })
             .await
@@ -141,7 +141,7 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        mmr::{Location, Position, StandardHasher},
+        mmr::{Location, StandardHasher},
         qmdb::{
             any::{
                 test::fixed_db_config,
@@ -281,9 +281,9 @@ pub(crate) mod test {
             assert_eq!(historical_proof.leaves, regular_proof.leaves);
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new();
             assert!(verify_proof(
-                &mut hasher,
+                &hasher,
                 &historical_proof,
                 Location::new(6),
                 &historical_ops,
@@ -306,7 +306,7 @@ pub(crate) mod test {
             assert_eq!(historical_proof.digests, regular_proof.digests);
             assert_eq!(historical_ops, regular_ops);
             assert!(verify_proof(
-                &mut hasher,
+                &hasher,
                 &historical_proof,
                 Location::new(6),
                 &historical_ops,
@@ -329,7 +329,7 @@ pub(crate) mod test {
     fn test_any_fixed_db_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new();
             let ops = create_test_ops(50);
 
             let mut db = create_test_db(context.with_label("first")).await;
@@ -342,7 +342,7 @@ pub(crate) mod test {
             let (proof, proof_ops) = db.proof(Location::new(1), NZU64!(1)).await.unwrap();
             assert_eq!(proof_ops.len(), 1);
             assert!(verify_proof(
-                &mut hasher,
+                &hasher,
                 &proof,
                 Location::new(1),
                 &proof_ops,
@@ -381,7 +381,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ops = create_test_ops(100);
-            let mut hasher = StandardHasher::<Sha256>::new();
+            let hasher = StandardHasher::<Sha256>::new();
             let start_loc = Location::new(2);
             let max_ops = NZU64!(10);
 
@@ -412,7 +412,7 @@ pub(crate) mod test {
                 assert_eq!(historical_proof.digests, reference_proof.digests);
                 assert_eq!(historical_ops, reference_ops);
                 assert!(verify_proof(
-                    &mut hasher,
+                    &hasher,
                     &historical_proof,
                     start_loc,
                     &historical_ops,
@@ -424,7 +424,7 @@ pub(crate) mod test {
             let full_root = db.root();
             let (full_proof, full_ops) = db.proof(start_loc, max_ops).await.unwrap();
             assert!(verify_proof(
-                &mut hasher,
+                &hasher,
                 &full_proof,
                 start_loc,
                 &full_ops,
@@ -704,8 +704,8 @@ pub(crate) mod test {
                 (self.log.mmr, self.log.journal)
             }
 
-            async fn pinned_nodes_at(&self, pos: Position) -> Vec<Digest> {
-                join_all(nodes_to_pin(pos).map(|p| self.log.mmr.get_node(p)))
+            async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
+                join_all(nodes_to_pin(loc).map(|p| self.log.mmr.get_node(p)))
                     .await
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())

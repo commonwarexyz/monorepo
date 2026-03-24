@@ -3,10 +3,8 @@
 use super::Keyless;
 use crate::{
     journal::authenticated::{self, BatchChain},
-    mmr::{
-        read::{BatchChainInfo, Readable},
-        Location,
-    },
+    merkle::batch::ChainInfo,
+    mmr::{self, Location, Readable},
     qmdb::{any::VariableValue, keyless::operation::Operation, Error},
 };
 use commonware_cryptography::{Digest, Hasher};
@@ -20,7 +18,9 @@ where
     E: Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<V>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<V>>,
 {
     /// The committed DB this batch is built on top of.
     pub(super) keyless: &'a Keyless<E, V, H>,
@@ -49,7 +49,9 @@ where
     E: Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<V>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<V>>,
 {
     /// The committed DB this batch is built on top of.
     keyless: &'a Keyless<E, V, H>,
@@ -84,14 +86,19 @@ where
     E: Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<V>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<V>>,
 {
+    /// The location that the next appended value will be placed at.
+    pub const fn size(&self) -> Location {
+        Location::new(self.base_size + self.appends.len() as u64)
+    }
+
     /// Append a value.
-    /// Returns the uncommitted location where this value will be placed.
-    pub fn append(&mut self, value: V) -> Location {
-        let loc = Location::new(self.base_size + self.appends.len() as u64);
+    pub fn append(mut self, value: V) -> Self {
         self.appends.push(value);
-        loc
+        self
     }
 
     /// Read a value at `loc`.
@@ -138,7 +145,7 @@ where
         // Merkleize the journal batch (created eagerly at batch construction).
         let mut journal_batch = self.journal_batch;
         for op in &ops {
-            journal_batch.add(op.clone());
+            journal_batch = journal_batch.add(op.clone());
         }
         let journal_batch = journal_batch.merkleize();
 
@@ -161,7 +168,9 @@ where
     E: Storage + Clock + Metrics,
     V: VariableValue,
     H: Hasher,
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Operation<V>>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Operation<V>>,
 {
     /// Return the speculative root.
     pub fn root(&self) -> H::Digest {

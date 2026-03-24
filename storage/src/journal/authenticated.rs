@@ -10,11 +10,10 @@ use crate::{
         contiguous::{fixed, variable, Contiguous, Mutable, Reader},
         Error as JournalError,
     },
+    merkle::batch::ChainInfo,
     mmr::{
-        batch,
-        journaled::Mmr,
-        read::{BatchChainInfo, Readable},
-        Error as MmrError, Location, Position, Proof, StandardHasher,
+        self, batch, journaled::Mmr, Error as MmrError, Location, Position, Proof, Readable,
+        StandardHasher,
     },
     Persistable,
 };
@@ -31,7 +30,7 @@ use tracing::{debug, warn};
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("mmr error: {0}")]
-    Mmr(#[from] crate::mmr::Error),
+    Mmr(#[from] mmr::Error),
 
     #[error("journal error: {0}")]
     Journal(#[from] super::Error),
@@ -51,7 +50,12 @@ impl<E: Storage + Clock + Metrics, D: Digest, Item> BatchChain<Item> for Mmr<E, 
 
 /// A speculative batch whose root digest has not yet been computed,
 /// in contrast to [MerkleizedBatch].
-pub struct UnmerkleizedBatch<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item> {
+pub struct UnmerkleizedBatch<
+    'a,
+    H: Hasher,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+    Item,
+> {
     // The inner batch of MMR leaf digests.
     inner: batch::UnmerkleizedBatch<'a, H::Digest, P>,
     // The hasher to use for hashing the items.
@@ -60,20 +64,26 @@ pub struct UnmerkleizedBatch<'a, H: Hasher, P: Readable<Digest = H::Digest>, Ite
     items: Vec<Item>,
 }
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Encode>
-    UnmerkleizedBatch<'a, H, P, Item>
+impl<
+        'a,
+        H: Hasher,
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+        Item: Encode,
+    > UnmerkleizedBatch<'a, H, P, Item>
 {
     /// Add an item to the batch.
-    pub fn add(&mut self, item: Item) {
+    #[allow(clippy::should_implement_trait)]
+    pub fn add(mut self, item: Item) -> Self {
         let encoded = item.encode();
-        self.inner.add(&mut self.hasher, &encoded);
+        self.inner = self.inner.add(&self.hasher, &encoded);
         self.items.push(item);
+        self
     }
 
     /// Merkleize the batch, computing the root digest.
-    pub fn merkleize(mut self) -> MerkleizedBatch<'a, H, P, Item> {
+    pub fn merkleize(self) -> MerkleizedBatch<'a, H, P, Item> {
         MerkleizedBatch {
-            inner: self.inner.merkleize(&mut self.hasher),
+            inner: self.inner.merkleize(&self.hasher),
             items: Arc::new(self.items),
         }
     }
@@ -81,24 +91,42 @@ impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Encode>
 
 /// A speculative batch whose root digest has been computed,
 /// in contrast to [UnmerkleizedBatch].
-pub struct MerkleizedBatch<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item> {
+pub struct MerkleizedBatch<
+    'a,
+    H: Hasher,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+    Item,
+> {
     // The inner batch of MMR leaf digests.
     inner: batch::MerkleizedBatch<'a, H::Digest, P>,
     // The items to append.
     items: Arc<Vec<Item>>,
 }
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item> MerkleizedBatch<'a, H, P, Item> {
+impl<
+        'a,
+        H: Hasher,
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+        Item,
+    > MerkleizedBatch<'a, H, P, Item>
+{
     /// Return the root digest of the authenticated journal after this batch is applied.
     pub fn root(&self) -> H::Digest {
         self.inner.root()
     }
 }
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Send + Sync> Readable
-    for MerkleizedBatch<'a, H, P, Item>
+impl<
+        'a,
+        H: Hasher,
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+        Item: Send + Sync,
+    > Readable for MerkleizedBatch<'a, H, P, Item>
 {
+    type Family = mmr::Family;
     type Digest = H::Digest;
+    type Error = mmr::Error;
+
     fn size(&self) -> Position {
         self.inner.size()
     }
@@ -108,17 +136,34 @@ impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Send + Sync> Readable
     fn root(&self) -> H::Digest {
         self.inner.root()
     }
-    fn pruned_to_pos(&self) -> Position {
-        self.inner.pruned_to_pos()
+    fn pruning_boundary(&self) -> Location {
+        self.inner.pruning_boundary()
+    }
+
+    fn proof(
+        &self,
+        hasher: &impl crate::merkle::hasher::Hasher<mmr::Family, Digest = H::Digest>,
+        loc: Location,
+    ) -> Result<Proof<H::Digest>, mmr::Error> {
+        self.inner.proof(hasher, loc)
+    }
+
+    fn range_proof(
+        &self,
+        hasher: &impl crate::merkle::hasher::Hasher<mmr::Family, Digest = H::Digest>,
+        range: core::ops::Range<Location>,
+    ) -> Result<Proof<H::Digest>, mmr::Error> {
+        self.inner.range_proof(hasher, range)
     }
 }
 
 impl<
         'a,
         H: Hasher,
-        P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest>,
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+            + ChainInfo<mmr::Family, Digest = H::Digest>,
         Item: Send + Sync,
-    > BatchChainInfo for MerkleizedBatch<'a, H, P, Item>
+    > ChainInfo<mmr::Family> for MerkleizedBatch<'a, H, P, Item>
 {
     type Digest = H::Digest;
     fn base_size(&self) -> Position {
@@ -129,8 +174,12 @@ impl<
     }
 }
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest> + BatchChain<Item>, Item: Send + Sync>
-    BatchChain<Item> for MerkleizedBatch<'a, H, P, Item>
+impl<
+        'a,
+        H: Hasher,
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error> + BatchChain<Item>,
+        Item: Send + Sync,
+    > BatchChain<Item> for MerkleizedBatch<'a, H, P, Item>
 {
     fn collect(&self, into: &mut Vec<Arc<Vec<Item>>>) {
         self.inner.parent().collect(into); // recurse to parent first
@@ -138,8 +187,12 @@ impl<'a, H: Hasher, P: Readable<Digest = H::Digest> + BatchChain<Item>, Item: Se
     }
 }
 
-impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Send + Sync + Encode>
-    MerkleizedBatch<'a, H, P, Item>
+impl<
+        'a,
+        H: Hasher,
+        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+        Item: Send + Sync + Encode,
+    > MerkleizedBatch<'a, H, P, Item>
 {
     /// Create a new speculative batch of operations with this batch as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<'_, H, Self, Item> {
@@ -156,7 +209,9 @@ impl<'a, H: Hasher, P: Readable<Digest = H::Digest>, Item: Send + Sync + Encode>
 
 impl<'a, H: Hasher, P, Item: Send + Sync> MerkleizedBatch<'a, H, P, Item>
 where
-    P: Readable<Digest = H::Digest> + BatchChainInfo<Digest = H::Digest> + BatchChain<Item>,
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
+        + BatchChain<Item>,
 {
     /// Consume this batch, collecting the changes from its ancestors and itself into a
     /// [Changeset] which can be applied to the journal.
@@ -248,10 +303,10 @@ where
     pub async fn from_components(
         mut mmr: Mmr<E, H::Digest>,
         journal: C,
-        mut hasher: StandardHasher<H>,
+        hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error> {
-        Self::align(&mut mmr, &journal, &mut hasher, apply_batch_size).await?;
+        Self::align(&mut mmr, &journal, &hasher, apply_batch_size).await?;
 
         // Sync the MMR to disk to avoid having to repeat any recovery that may have been performed
         // on next startup.
@@ -270,7 +325,7 @@ where
     async fn align(
         mmr: &mut Mmr<E, H::Digest>,
         journal: &C,
-        hasher: &mut StandardHasher<H>,
+        hasher: &StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<(), Error> {
         // Rewind MMR elements that are ahead of the journal.
@@ -303,7 +358,7 @@ where
                     let mut count = 0u64;
                     while count < apply_batch_size && mmr_size < journal_size {
                         let op = reader.read(*mmr_size).await?;
-                        batch.add(hasher, &op.encode());
+                        batch = batch.add(hasher, &op.encode());
                         mmr_size += 1;
                         count += 1;
                     }
@@ -326,11 +381,12 @@ where
 
         // Append item to the journal, then update the MMR state.
         let loc = self.journal.append(item).await?;
-        let changeset = {
-            let mut batch = self.mmr.new_batch();
-            batch.add(&mut self.hasher, &encoded_item);
-            batch.merkleize(&mut self.hasher).finalize()
-        };
+        let changeset = self
+            .mmr
+            .new_batch()
+            .add(&self.hasher, &encoded_item)
+            .merkleize(&self.hasher)
+            .finalize();
         self.mmr.apply(changeset)?;
 
         Ok(Location::new(loc))
@@ -406,7 +462,7 @@ where
     /// # Errors
     ///
     /// - Returns [Error::Mmr] with [MmrError::LocationOverflow] if `start_loc` >
-    ///   [crate::mmr::MAX_LOCATION].
+    ///   [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [Error::Mmr] with [MmrError::RangeOutOfBounds] if `start_loc` >= current
     ///   item count.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
@@ -451,10 +507,10 @@ where
 
         let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
 
-        let mut hasher = self.hasher.clone();
+        let hasher = self.hasher.clone();
         let proof = self
             .mmr
-            .historical_range_proof(&mut hasher, historical_leaves, start_loc..end_loc)
+            .historical_range_proof(&hasher, historical_leaves, start_loc..end_loc)
             .await?;
 
         let mut ops = Vec::with_capacity((*end_loc - *start_loc) as usize);
@@ -500,84 +556,49 @@ where
 /// The number of items to apply to the MMR in a single batch.
 const APPLY_BATCH_SIZE: u64 = 1 << 16;
 
-impl<E, O, H> Journal<E, fixed::Journal<E, O>, H>
-where
-    E: Storage + Clock + Metrics,
-    O: CodecFixedShared,
-    H: Hasher,
-{
-    /// Create a new [Journal] for fixed-length items.
-    ///
-    /// The journal will be rewound to the last item that matches the `rewind_predicate` on
-    /// initialization.
-    pub async fn new(
-        context: E,
-        mmr_cfg: crate::mmr::journaled::Config,
-        journal_cfg: fixed::Config,
-        rewind_predicate: fn(&O) -> bool,
-    ) -> Result<Self, Error> {
-        let mut journal = fixed::Journal::init(context.with_label("journal"), journal_cfg).await?;
+/// Generate a `new()` constructor for an authenticated journal backed by a specific contiguous
+/// journal type.
+macro_rules! impl_journal_new {
+    ($journal_mod:ident, $cfg_ty:ty, $codec_bound:path) => {
+        impl<E, O, H> Journal<E, $journal_mod::Journal<E, O>, H>
+        where
+            E: Storage + Clock + Metrics,
+            O: $codec_bound,
+            H: Hasher,
+        {
+            /// Create a new authenticated [Journal].
+            ///
+            /// The inner journal will be rewound to the last item matching `rewind_predicate`,
+            /// and the MMR will be aligned to match.
+            pub async fn new(
+                context: E,
+                mmr_cfg: crate::mmr::journaled::Config,
+                journal_cfg: $cfg_ty,
+                rewind_predicate: fn(&O) -> bool,
+            ) -> Result<Self, Error> {
+                let mut journal =
+                    $journal_mod::Journal::init(context.with_label("journal"), journal_cfg).await?;
+                journal.rewind_to(rewind_predicate).await?;
 
-        // Rewind journal to last matching item.
-        journal.rewind_to(rewind_predicate).await?;
+                let hasher = StandardHasher::<H>::new();
+                let mut mmr = Mmr::init(context.with_label("mmr"), &hasher, mmr_cfg).await?;
+                Self::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE).await?;
 
-        // Align the MMR and journal.
-        let mut hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
-        Self::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
+                journal.sync().await?;
+                mmr.sync().await?;
 
-        // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
-        // been performed on next startup.
-        journal.sync().await?;
-        mmr.sync().await?;
-
-        Ok(Self {
-            mmr,
-            journal,
-            hasher,
-        })
-    }
+                Ok(Self {
+                    mmr,
+                    journal,
+                    hasher,
+                })
+            }
+        }
+    };
 }
 
-impl<E, O, H> Journal<E, variable::Journal<E, O>, H>
-where
-    E: Storage + Clock + Metrics,
-    O: CodecShared,
-    H: Hasher,
-{
-    /// Create a new [Journal] for variable-length items.
-    ///
-    /// The journal will be rewound to the last item that matches the `rewind_predicate` on
-    /// initialization.
-    pub async fn new(
-        context: E,
-        mmr_cfg: crate::mmr::journaled::Config,
-        journal_cfg: variable::Config<O::Cfg>,
-        rewind_predicate: fn(&O) -> bool,
-    ) -> Result<Self, Error> {
-        let mut hasher = StandardHasher::<H>::new();
-        let mut mmr = Mmr::init(context.with_label("mmr"), &mut hasher, mmr_cfg).await?;
-        let mut journal =
-            variable::Journal::init(context.with_label("journal"), journal_cfg).await?;
-
-        // Rewind to last matching item.
-        journal.rewind_to(rewind_predicate).await?;
-
-        // Align the MMR and journal.
-        Self::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE).await?;
-
-        // Sync the journal and MMR to disk to avoid having to repeat any recovery that may have
-        // been performed on next startup.
-        journal.sync().await?;
-        mmr.sync().await?;
-
-        Ok(Self {
-            mmr,
-            journal,
-            hasher,
-        })
-    }
-}
+impl_journal_new!(fixed, fixed::Config, CodecFixedShared);
+impl_journal_new!(variable, variable::Config<O::Cfg>, CodecShared);
 
 impl<E, C, H> Contiguous for Journal<E, C, H>
 where
@@ -621,13 +642,30 @@ where
         let leaves = *self.mmr.leaves();
         if leaves > size {
             self.mmr
-                .rewind((leaves - size) as usize, &mut self.hasher)
+                .rewind((leaves - size) as usize, &self.hasher)
                 .await
                 .map_err(|error| JournalError::Mmr(anyhow::Error::from(error)))?;
         }
 
         Ok(())
     }
+}
+
+/// A [Mutable] journal that can serve as the inner journal of an authenticated [Journal].
+pub trait Inner<E: Storage + Clock + Metrics>: Mutable + Persistable<Error = JournalError> {
+    /// The configuration needed to initialize this journal.
+    type Config: Clone + Send;
+
+    /// Initialize an authenticated [Journal] backed by this journal type.
+    fn init<H: Hasher>(
+        context: E,
+        mmr_cfg: mmr::journaled::Config,
+        journal_cfg: Self::Config,
+        rewind_predicate: fn(&Self::Item) -> bool,
+    ) -> impl core::future::Future<Output = Result<Journal<E, Self, H>, Error>> + Send
+    where
+        Self: Sized,
+        Self::Item: EncodeShared;
 }
 
 impl<E, C, H> Persistable for Journal<E, C, H>
@@ -789,10 +827,10 @@ mod tests {
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         StandardHasher<Sha256>,
     ) {
-        let mut hasher = StandardHasher::new();
+        let hasher = StandardHasher::new();
         let mmr = Mmr::init(
             context.with_label("mmr"),
-            &mut hasher,
+            &hasher,
             mmr_config(suffix, &context),
         )
         .await
@@ -808,11 +846,11 @@ mod tests {
 
     /// Verify that a proof correctly proves the given operations are included in the MMR.
     fn verify_proof(
-        proof: &crate::mmr::Proof<<Sha256 as commonware_cryptography::Hasher>::Digest>,
+        proof: &mmr::Proof<<Sha256 as commonware_cryptography::Hasher>::Digest>,
         operations: &[Operation<Digest, Digest>],
         start_loc: Location,
         root: &<Sha256 as commonware_cryptography::Hasher>::Digest,
-        hasher: &mut StandardHasher<Sha256>,
+        hasher: &StandardHasher<Sha256>,
     ) -> bool {
         let encoded_ops: Vec<_> = operations.iter().map(|op| op.encode()).collect();
         proof.verify_range_inclusion(hasher, &encoded_ops, start_loc, root)
@@ -837,9 +875,9 @@ mod tests {
     fn test_align_with_empty_mmr_and_journal() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, journal, mut hasher) = create_components(context, "align-empty").await;
+            let (mut mmr, journal, hasher) = create_components(context, "align-empty").await;
 
-            AuthenticatedJournal::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
+            AuthenticatedJournal::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -853,7 +891,7 @@ mod tests {
     fn test_align_when_mmr_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, journal, mut hasher) = create_components(context, "mmr-ahead").await;
+            let (mut mmr, journal, hasher) = create_components(context, "mmr-ahead").await;
 
             // Add 20 operations to both MMR and journal
             {
@@ -862,10 +900,10 @@ mod tests {
                     for i in 0..20 {
                         let op = create_operation(i as u8);
                         let encoded = op.encode();
-                        batch.add(&mut hasher, &encoded);
+                        batch = batch.add(&hasher, &encoded);
                         journal.append(&op).await.unwrap();
                     }
-                    batch.merkleize(&mut hasher).finalize()
+                    batch.merkleize(&hasher).finalize()
                 };
                 mmr.apply(changeset).unwrap();
             }
@@ -876,7 +914,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // MMR has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-            AuthenticatedJournal::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
+            AuthenticatedJournal::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -891,7 +929,7 @@ mod tests {
     fn test_align_when_journal_ahead() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (mut mmr, journal, mut hasher) = create_components(context, "journal-ahead").await;
+            let (mut mmr, journal, hasher) = create_components(context, "journal-ahead").await;
 
             // Add 20 operations to journal only
             for i in 0..20 {
@@ -905,7 +943,7 @@ mod tests {
             journal.sync().await.unwrap();
 
             // Journal has 21 operations, MMR has 0 leaves
-            AuthenticatedJournal::align(&mut mmr, &journal, &mut hasher, APPLY_BATCH_SIZE)
+            AuthenticatedJournal::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE)
                 .await
                 .unwrap();
 
@@ -1537,15 +1575,9 @@ mod tests {
             }
 
             // Verify the proof is valid
-            let mut hasher = StandardHasher::new();
+            let hasher = StandardHasher::new();
             let root = journal.root();
-            assert!(verify_proof(
-                &proof,
-                &ops,
-                Location::new(0),
-                &root,
-                &mut hasher
-            ));
+            assert!(verify_proof(&proof, &ops, Location::new(0), &root, &hasher));
         });
     }
 
@@ -1569,15 +1601,9 @@ mod tests {
             }
 
             // Verify the proof is valid
-            let mut hasher = StandardHasher::new();
+            let hasher = StandardHasher::new();
             let root = journal.root();
-            assert!(verify_proof(
-                &proof,
-                &ops,
-                Location::new(0),
-                &root,
-                &mut hasher
-            ));
+            assert!(verify_proof(&proof, &ops, Location::new(0), &root, &hasher));
         });
     }
 
@@ -1602,14 +1628,14 @@ mod tests {
             }
 
             // Verify the proof is valid
-            let mut hasher = StandardHasher::new();
+            let hasher = StandardHasher::new();
             let root = journal.root();
             assert!(verify_proof(
                 &proof,
                 &ops,
                 Location::new(40),
                 &root,
-                &mut hasher
+                &hasher
             ));
         });
     }
@@ -1628,7 +1654,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Mmr(mmr::Error::RangeOutOfBounds(_)))
             ));
         });
     }
@@ -1646,7 +1672,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Mmr(mmr::Error::RangeOutOfBounds(_)))
             ));
         });
     }
@@ -1660,7 +1686,7 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "proof_historical", 50).await;
 
             // Capture root at historical state
-            let mut hasher = StandardHasher::new();
+            let hasher = StandardHasher::new();
             let historical_root = journal.root();
             let historical_size = journal.size().await;
 
@@ -1688,7 +1714,7 @@ mod tests {
                 &ops,
                 Location::new(0),
                 &historical_root,
-                &mut hasher
+                &hasher
             ));
         });
     }
@@ -1780,14 +1806,14 @@ mod tests {
             let original_root = journal.root();
 
             // Fork two independent speculative batches.
-            let mut b1 = journal.new_batch();
-            let mut b2 = journal.new_batch();
+            let b1 = journal.new_batch();
+            let b2 = journal.new_batch();
 
             // Add different items to each batch.
             let op_a = create_operation(100);
             let op_b = create_operation(200);
-            b1.add(op_a.clone());
-            b2.add(op_b);
+            let b1 = b1.add(op_a.clone());
+            let b2 = b2.add(op_b);
 
             // Merkleize and verify independent roots.
             let m1 = b1.merkleize();
@@ -1824,13 +1850,11 @@ mod tests {
 
             // Build stacked batches in a block so intermediate borrows drop.
             let (expected_root, finalized) = {
-                let mut batch_a = journal.new_batch();
-                batch_a.add(op_a.clone());
-                let merkleized_a = batch_a.merkleize();
+                let batch_a = journal.new_batch();
+                let merkleized_a = batch_a.add(op_a.clone()).merkleize();
 
-                let mut batch_b = merkleized_a.new_batch();
-                batch_b.add(op_b.clone());
-                let merkleized_b = batch_b.merkleize();
+                let batch_b = merkleized_a.new_batch();
+                let merkleized_b = batch_b.add(op_b.clone()).merkleize();
 
                 let root = merkleized_b.root();
                 (root, merkleized_b.finalize())
@@ -1859,16 +1883,8 @@ mod tests {
             let op_b = create_operation(2);
 
             // Create two batches from the same base.
-            let finalized_a = {
-                let mut batch = journal.new_batch();
-                batch.add(op_a.clone());
-                batch.merkleize().finalize()
-            };
-            let finalized_b = {
-                let mut batch = journal.new_batch();
-                batch.add(op_b);
-                batch.merkleize().finalize()
-            };
+            let finalized_a = journal.new_batch().add(op_a.clone()).merkleize().finalize();
+            let finalized_b = journal.new_batch().add(op_b).merkleize().finalize();
 
             // Apply A -- should succeed.
             journal.apply_batch(finalized_a).await.unwrap();
@@ -1880,7 +1896,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset, got {result:?}"
             );
@@ -1900,21 +1916,17 @@ mod tests {
             let mut journal = create_journal_with_ops(context, "stale-chained", 5).await;
 
             // Parent batch, then fork two children.
-            let parent = {
-                let mut batch = journal.new_batch();
-                batch.add(create_operation(10));
-                batch.merkleize()
-            };
-            let child_a = {
-                let mut batch = parent.new_batch();
-                batch.add(create_operation(20));
-                batch.merkleize().finalize()
-            };
-            let child_b = {
-                let mut batch = parent.new_batch();
-                batch.add(create_operation(30));
-                batch.merkleize().finalize()
-            };
+            let parent = journal.new_batch().add(create_operation(10)).merkleize();
+            let child_a = parent
+                .new_batch()
+                .add(create_operation(20))
+                .merkleize()
+                .finalize();
+            let child_b = parent
+                .new_batch()
+                .add(create_operation(30))
+                .merkleize()
+                .finalize();
             drop(parent);
 
             // Apply child_a, then child_b should be stale.
@@ -1923,7 +1935,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset for sibling, got {result:?}"
             );
@@ -1938,16 +1950,12 @@ mod tests {
 
             // Create parent, then child.
             let (parent_finalized, child_finalized) = {
-                let parent = {
-                    let mut batch = journal.new_batch();
-                    batch.add(create_operation(1));
-                    batch.merkleize()
-                };
-                let child = {
-                    let mut batch = parent.new_batch();
-                    batch.add(create_operation(2));
-                    batch.merkleize().finalize()
-                };
+                let parent = journal.new_batch().add(create_operation(1)).merkleize();
+                let child = parent
+                    .new_batch()
+                    .add(create_operation(2))
+                    .merkleize()
+                    .finalize();
                 (parent.finalize(), child)
             };
 
@@ -1957,7 +1965,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset for child after parent applied, got {result:?}"
             );
@@ -1972,16 +1980,12 @@ mod tests {
 
             // Create parent, then child.
             let (parent_finalized, child_finalized) = {
-                let parent = {
-                    let mut batch = journal.new_batch();
-                    batch.add(create_operation(1));
-                    batch.merkleize()
-                };
-                let child = {
-                    let mut batch = parent.new_batch();
-                    batch.add(create_operation(2));
-                    batch.merkleize().finalize()
-                };
+                let parent = journal.new_batch().add(create_operation(1)).merkleize();
+                let child = parent
+                    .new_batch()
+                    .add(create_operation(2))
+                    .merkleize()
+                    .finalize();
                 (parent.finalize(), child)
             };
 
@@ -1991,7 +1995,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(crate::mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset for parent after child applied, got {result:?}"
             );

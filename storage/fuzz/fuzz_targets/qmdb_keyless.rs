@@ -4,7 +4,8 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
-    mmr::{hasher::Standard, Location},
+    journal::contiguous::variable::Config as VConfig,
+    mmr::{journaled::Config as MmrConfig, Location, StandardHasher as Standard},
     qmdb::{
         keyless::{Config, Keyless},
         verify_proof,
@@ -127,18 +128,24 @@ fn test_config(
     test_name: &str,
     pooler: &impl BufferPooler,
 ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
+    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
-        mmr_journal_partition: format!("{test_name}-mmr"),
-        mmr_metadata_partition: format!("{test_name}-meta"),
-        mmr_items_per_blob: NZU64!(3),
-        mmr_write_buffer: NZUsize!(1024),
-        log_partition: format!("{test_name}-log"),
-        log_write_buffer: NZUsize!(1024),
-        log_compression: None,
-        log_codec_config: ((0..=10000).into(), ()),
-        log_items_per_section: NZU64!(7),
-        thread_pool: None,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        mmr: MmrConfig {
+            journal_partition: format!("{test_name}-mmr"),
+            metadata_partition: format!("{test_name}-meta"),
+            items_per_blob: NZU64!(3),
+            write_buffer: NZUsize!(1024),
+            thread_pool: None,
+            page_cache: page_cache.clone(),
+        },
+        log: VConfig {
+            partition: format!("{test_name}-log"),
+            write_buffer: NZUsize!(1024),
+            compression: None,
+            codec_config: ((0..=10000).into(), ()),
+            items_per_section: NZU64!(7),
+            page_cache,
+        },
     }
 }
 
@@ -146,7 +153,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let mut hasher = Standard::<Sha256>::new();
+        let hasher = Standard::<Sha256>::new();
         let cfg = test_config("keyless-fuzz-test", &context);
         let mut db = Db::init(context.clone(), cfg)
             .await
@@ -165,7 +172,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for v in pending_appends.drain(..) {
-                            batch.append(v);
+                            batch = batch.append(v);
                         }
                         batch.merkleize(metadata_bytes.clone()).finalize()
                     };
@@ -189,7 +196,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for v in pending_appends.drain(..) {
-                            batch.append(v);
+                            batch = batch.append(v);
                         }
                         batch.merkleize(None).finalize()
                     };
@@ -204,7 +211,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for v in pending_appends.drain(..) {
-                            batch.append(v);
+                            batch = batch.append(v);
                         }
                         batch.merkleize(None).finalize()
                     };
@@ -228,7 +235,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for v in pending_appends.drain(..) {
-                            batch.append(v);
+                            batch = batch.append(v);
                         }
                         batch.merkleize(None).finalize()
                     };
@@ -248,7 +255,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for v in pending_appends.drain(..) {
-                            batch.append(v);
+                            batch = batch.append(v);
                         }
                         batch.merkleize(None).finalize()
                     };
@@ -260,7 +267,7 @@ fn fuzz(input: FuzzInput) {
                     let root = db.root();
                     if let Ok((proof, ops)) = db.proof(start_loc, NZU64!(max_ops_value)).await {
                             assert!(
-                                verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
+                                verify_proof(&hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify proof for start loc{start_loc} with ops {max_ops} ops",
                             );
                     }
@@ -278,7 +285,7 @@ fn fuzz(input: FuzzInput) {
                     let finalized = {
                         let mut batch = db.new_batch();
                         for v in pending_appends.drain(..) {
-                            batch.append(v);
+                            batch = batch.append(v);
                         }
                         batch.merkleize(None).finalize()
                     };
@@ -296,7 +303,7 @@ fn fuzz(input: FuzzInput) {
                         .historical_proof(op_count, start_loc, NZU64!(max_ops_value))
                             .await {
                             assert!(
-                                verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
+                                verify_proof(&hasher, &proof, start_loc, &ops, &root),
                                 "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
                             );
                         }
@@ -321,7 +328,7 @@ fn fuzz(input: FuzzInput) {
         let finalized = {
             let mut batch = db.new_batch();
             for v in pending_appends.drain(..) {
-                batch.append(v);
+                batch = batch.append(v);
             }
             batch.merkleize(None).finalize()
         };

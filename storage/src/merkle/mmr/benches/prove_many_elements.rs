@@ -1,7 +1,8 @@
 use commonware_cryptography::{sha256, Sha256};
 use commonware_math::algebra::Random as _;
-use commonware_storage::mmr::{
-    batch::UnmerkleizedBatch, location::LocationRangeExt as _, mem::Mmr, Location, StandardHasher,
+use commonware_storage::{
+    merkle::LocationRangeExt as _,
+    mmr::{batch::UnmerkleizedBatch, mem::Mmr, Location, StandardHasher},
 };
 use criterion::{criterion_group, Criterion};
 use futures::executor::block_on;
@@ -17,8 +18,8 @@ const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000]
 fn bench_prove_many_elements(c: &mut Criterion) {
     for n in N_LEAVES {
         // Populate MMR
-        let mut hasher = StandardHasher::<Sha256>::new();
-        let mut mmr = Mmr::new(&mut hasher);
+        let hasher = StandardHasher::<Sha256>::new();
+        let mut mmr = Mmr::new(&hasher);
         let mut elements = Vec::with_capacity(n);
         let mut sampler = StdRng::seed_from_u64(0);
 
@@ -27,10 +28,10 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                 let mut batch = UnmerkleizedBatch::new(&mmr);
                 for _ in 0..n {
                     let element = sha256::Digest::random(&mut sampler);
-                    batch.add(&mut hasher, &element);
+                    batch = batch.add(&hasher, &element);
                     elements.push(element);
                 }
-                batch.merkleize(&mut hasher).finalize()
+                batch.merkleize(&hasher).finalize()
             };
             mmr.apply(changeset).unwrap();
         });
@@ -65,13 +66,12 @@ fn bench_prove_many_elements(c: &mut Criterion) {
                             })
                         },
                         |samples| {
-                            let mut hasher = StandardHasher::<Sha256>::new();
+                            let hasher = StandardHasher::<Sha256>::new();
                             block_on(async {
                                 for range in samples {
-                                    let proof =
-                                        mmr.range_proof(&mut hasher, range.clone()).unwrap();
+                                    let proof = mmr.range_proof(&hasher, range.clone()).unwrap();
                                     assert!(proof.verify_range_inclusion(
-                                        &mut hasher,
+                                        &hasher,
                                         &elements[range.to_usize_range()],
                                         range.start,
                                         root,

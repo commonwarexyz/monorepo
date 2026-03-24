@@ -6,7 +6,8 @@
 
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
-    mmr::{hasher::Hasher as _, storage::Storage, verification, Location, Proof},
+    merkle::{hasher::Hasher as _, storage::Storage},
+    mmr::{self, verification, Location, Proof},
     qmdb::{current::grafting, Error},
 };
 use commonware_codec::Codec;
@@ -33,15 +34,19 @@ pub struct RangeProof<D: Digest> {
 
 impl<D: Digest> RangeProof<D> {
     /// Create a new range proof for the provided `range` of operations.
-    pub async fn new<H: CHasher<Digest = D>, S: Storage<Digest = D>, const N: usize>(
+    pub async fn new<
+        H: CHasher<Digest = D>,
+        S: Storage<mmr::Family, Digest = D>,
+        const N: usize,
+    >(
         hasher: &mut H,
         status: &BitMap<N>,
         storage: &S,
         range: Range<Location>,
         ops_root: D,
     ) -> Result<Self, Error> {
-        let mut mmr_hasher = crate::mmr::StandardHasher::<H>::new();
-        let proof = verification::range_proof(&mut mmr_hasher, storage, range).await?;
+        let mmr_hasher = crate::mmr::StandardHasher::<H>::new();
+        let proof = verification::range_proof(&mmr_hasher, storage, range).await?;
 
         let (last_chunk, next_bit) = status.last_chunk();
         let partial_chunk_digest = if next_bit != BitMap::<N>::CHUNK_SIZE_BITS {
@@ -67,12 +72,12 @@ impl<D: Digest> RangeProof<D> {
     /// # Errors
     ///
     /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk.
-    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::mmr::MAX_LOCATION].
+    /// Returns [crate::mmr::Error::LocationOverflow] if `start_loc` > [crate::merkle::Family::MAX_LEAVES].
     /// Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     pub async fn new_with_ops<
         H: CHasher<Digest = D>,
         C: Contiguous,
-        S: Storage<Digest = D>,
+        S: Storage<mmr::Family, Digest = D>,
         const N: usize,
     >(
         hasher: &mut H,
@@ -168,7 +173,7 @@ impl<D: Digest> RangeProof<D> {
 
         let chunk_vec = chunks.iter().map(|c| c.as_ref()).collect::<Vec<_>>();
         let start_chunk_idx = *start_loc / BitMap::<N>::CHUNK_SIZE_BITS;
-        let mut verifier =
+        let verifier =
             grafting::Verifier::<H>::new(grafting::height::<N>(), start_chunk_idx, chunk_vec);
 
         let next_bit = *leaves % BitMap::<N>::CHUNK_SIZE_BITS;
@@ -199,10 +204,7 @@ impl<D: Digest> RangeProof<D> {
         }
 
         // Reconstruct the grafted MMR root from the proof.
-        let mmr_root = match self
-            .proof
-            .reconstruct_root(&mut verifier, &elements, start_loc)
-        {
+        let mmr_root = match self.proof.reconstruct_root(&verifier, &elements, start_loc) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
@@ -243,7 +245,7 @@ impl<D: Digest, const N: usize> OperationProof<D, N> {
     /// # Errors
     ///
     /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
-    pub async fn new<H: CHasher<Digest = D>, S: Storage<Digest = D>>(
+    pub async fn new<H: CHasher<Digest = D>, S: Storage<mmr::Family, Digest = D>>(
         hasher: &mut H,
         status: &BitMap<N>,
         storage: &S,

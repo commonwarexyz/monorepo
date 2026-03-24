@@ -3,7 +3,7 @@
 
 use super::relay::Relay;
 use crate::{
-    simplex::types::Context,
+    simplex::{types::Context, Plan},
     types::{Epoch, Round},
     Automaton as Au, CertifiableAutomaton as CAu, Relay as Re,
 };
@@ -113,8 +113,10 @@ impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
 
 impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
     type Digest = D;
+    type PublicKey = P;
+    type Plan = Plan<P>;
 
-    async fn broadcast(&mut self, payload: Self::Digest) {
+    async fn broadcast(&mut self, payload: Self::Digest, _plan: Plan<P>) {
         self.sender.send_lossy(Message::Broadcast { payload }).await;
     }
 }

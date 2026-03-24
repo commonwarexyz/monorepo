@@ -3,10 +3,8 @@
 use super::Immutable;
 use crate::{
     journal::authenticated::{self, BatchChain},
-    mmr::{
-        read::{BatchChainInfo, Readable},
-        Location,
-    },
+    merkle::batch::ChainInfo,
+    mmr::{self, Location, Readable},
     qmdb::{any::VariableValue, immutable::operation::Operation, Error},
     translator::Translator,
 };
@@ -37,8 +35,8 @@ where
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<Digest = H::Digest>
-        + BatchChainInfo<Digest = H::Digest>
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
     /// The committed DB this batch is built on top of.
@@ -73,8 +71,8 @@ where
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<Digest = H::Digest>
-        + BatchChainInfo<Digest = H::Digest>
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
     /// The committed DB this batch is built on top of.
@@ -118,8 +116,8 @@ where
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<Digest = H::Digest>
-        + BatchChainInfo<Digest = H::Digest>
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
     /// Set a key to a value.
@@ -166,7 +164,7 @@ where
         // Merkleize the journal batch (created eagerly at batch construction).
         let mut journal_batch = self.journal_batch;
         for op in &ops {
-            journal_batch.add(op.clone());
+            journal_batch = journal_batch.add(op.clone());
         }
         let journal_batch = journal_batch.merkleize();
 
@@ -198,8 +196,8 @@ where
     V: VariableValue,
     H: CHasher,
     T: Translator,
-    P: Readable<Digest = H::Digest>
-        + BatchChainInfo<Digest = H::Digest>
+    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
+        + ChainInfo<mmr::Family, Digest = H::Digest>
         + BatchChain<Operation<K, V>>,
 {
     /// Return the speculative root.

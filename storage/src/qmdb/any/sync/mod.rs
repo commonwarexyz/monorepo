@@ -8,7 +8,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    mmr::{journaled::Config as MmrConfig, Location, StandardHasher},
+    mmr::{journaled, Location, StandardHasher},
     qmdb::{
         self,
         any::{
@@ -50,7 +50,7 @@ pub(crate) mod tests;
 /// Shared helper to build a [Db] from sync components.
 async fn build_db<E, O, I, H, U, C>(
     context: E,
-    mmr_config: MmrConfig,
+    mmr_config: journaled::Config,
     log: C,
     index: I,
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -65,7 +65,7 @@ where
     U: Send + Sync + 'static,
     C: Mutable<Item = O>,
 {
-    let mut hasher = StandardHasher::<H>::new();
+    let hasher = StandardHasher::<H>::new();
 
     let mmr = crate::mmr::journaled::Mmr::init_sync(
         context.with_label("mmr"),
@@ -74,7 +74,7 @@ where
             range: range.clone(),
             pinned_nodes,
         },
-        &mut hasher,
+        &hasher,
     )
     .await?;
 
@@ -88,30 +88,6 @@ where
     let db = Db::from_components(range.start, log, index).await?;
 
     Ok(db)
-}
-
-/// Extract MMR config from FixedConfig
-fn mmr_config_from_fixed<T: Translator>(config: &FixedConfig<T>) -> MmrConfig {
-    MmrConfig {
-        journal_partition: config.mmr_journal_partition.clone(),
-        metadata_partition: config.mmr_metadata_partition.clone(),
-        items_per_blob: config.mmr_items_per_blob,
-        write_buffer: config.mmr_write_buffer,
-        thread_pool: config.thread_pool.clone(),
-        page_cache: config.page_cache.clone(),
-    }
-}
-
-/// Extract MMR config from VariableConfig
-fn mmr_config_from_variable<T: Translator, C>(config: &VariableConfig<T, C>) -> MmrConfig {
-    MmrConfig {
-        journal_partition: config.mmr_journal_partition.clone(),
-        metadata_partition: config.mmr_metadata_partition.clone(),
-        items_per_blob: config.mmr_items_per_blob,
-        write_buffer: config.mmr_write_buffer,
-        thread_pool: config.thread_pool.clone(),
-        page_cache: config.page_cache.clone(),
-    }
 }
 
 impl<E, K, V, H, T> qmdb::sync::Database for UnorderedFixedDb<E, K, V, H, T>
@@ -137,7 +113,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = mmr_config_from_fixed(&config);
+        let mmr_config = config.mmr_config.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, Self::Op, _, H, UnorderedFixedUpdate<K, V>, _>(
             context,
@@ -180,7 +156,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = mmr_config_from_variable(&config);
+        let mmr_config = config.mmr_config.clone();
         let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, Self::Op, _, H, UnorderedVariableUpdate<K, V>, _>(
             context,
@@ -222,7 +198,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = mmr_config_from_fixed(&config);
+        let mmr_config = config.mmr_config.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, Self::Op, _, H, OrderedFixedUpdate<K, V>, _>(
             context,
@@ -265,7 +241,7 @@ where
         range: Range<Location>,
         apply_batch_size: usize,
     ) -> Result<Self, qmdb::Error> {
-        let mmr_config = mmr_config_from_variable(&config);
+        let mmr_config = config.mmr_config.clone();
         let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
         build_db::<_, Self::Op, _, H, OrderedVariableUpdate<K, V>, _>(
             context,

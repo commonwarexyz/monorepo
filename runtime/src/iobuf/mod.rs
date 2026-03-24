@@ -965,6 +965,43 @@ impl IoBufs {
         matches!(self.inner, IoBufsInner::Single(_))
     }
 
+    /// Visit each readable chunk in order without coalescing.
+    #[inline]
+    pub fn for_each_chunk(&self, mut f: impl FnMut(&[u8])) {
+        match &self.inner {
+            IoBufsInner::Single(buf) => {
+                let chunk = buf.as_ref();
+                if !chunk.is_empty() {
+                    f(chunk);
+                }
+            }
+            IoBufsInner::Pair(pair) => {
+                for buf in pair {
+                    let chunk = buf.as_ref();
+                    if !chunk.is_empty() {
+                        f(chunk);
+                    }
+                }
+            }
+            IoBufsInner::Triple(triple) => {
+                for buf in triple {
+                    let chunk = buf.as_ref();
+                    if !chunk.is_empty() {
+                        f(chunk);
+                    }
+                }
+            }
+            IoBufsInner::Chunked(bufs) => {
+                for buf in bufs {
+                    let chunk = buf.as_ref();
+                    if !chunk.is_empty() {
+                        f(chunk);
+                    }
+                }
+            }
+        }
+    }
+
     /// Prepend a buffer to the front.
     ///
     /// Empty input buffers are ignored.

@@ -10,7 +10,7 @@ use crate::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    mmr::{iterator::nodes_to_pin, Location, Position, Proof},
+    mmr::{iterator::nodes_to_pin, Location, Proof},
     qmdb::{build_snapshot_from_log, operation::Operation as OperationTrait, Error},
     Persistable,
 };
@@ -125,8 +125,10 @@ where
 
     /// Return the pinned MMR nodes for a lower operation boundary of `loc`.
     pub async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<H::Digest>, Error> {
-        let pos = Position::try_from(loc)?;
-        let futs: Vec<_> = nodes_to_pin(pos)
+        if !loc.is_valid() {
+            return Err(crate::mmr::Error::LocationOverflow(loc).into());
+        }
+        let futs: Vec<_> = nodes_to_pin(loc)
             .map(|p| async move {
                 self.log
                     .mmr
@@ -155,7 +157,7 @@ where
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::mmr::MAX_LOCATION].
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(

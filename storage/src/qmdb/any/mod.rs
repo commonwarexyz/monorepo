@@ -72,11 +72,8 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        authenticated,
-        contiguous::{
-            fixed::{Config as FConfig, Journal as FJournal},
-            variable::{Config as VConfig, Journal as VJournal},
-        },
+        authenticated::Inner,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
     mmr::{journaled::Config as MmrConfig, Location},
     qmdb::{
@@ -86,11 +83,9 @@ use crate::{
     },
     translator::Translator,
 };
-use commonware_codec::{Codec, CodecFixedShared, Read};
+use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
-use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use std::num::{NonZeroU64, NonZeroUsize};
+use commonware_runtime::{Clock, Metrics, Storage};
 use tracing::warn;
 
 pub mod batch;
@@ -104,173 +99,48 @@ pub mod ordered;
 pub(crate) mod sync;
 pub mod unordered;
 
-/// Configuration for an `Any` authenticated db with fixed-size values.
+/// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
-pub struct FixedConfig<T: Translator> {
-    /// The name of the [Storage] partition used for the MMR's backing journal.
-    pub mmr_journal_partition: String,
+pub struct Config<T: Translator, J> {
+    /// Configuration for the MMR backing the authenticated journal.
+    pub mmr_config: MmrConfig,
 
-    /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: NonZeroUsize,
-
-    /// The name of the [Storage] partition used for the MMR's metadata.
-    pub mmr_metadata_partition: String,
-
-    /// The name of the [Storage] partition used to persist the (pruned) log of operations.
-    pub log_journal_partition: String,
-
-    /// The items per blob configuration value used by the log journal.
-    pub log_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: NonZeroUsize,
+    /// Configuration for the operations log journal.
+    pub journal_config: J,
 
     /// The translator used by the compressed index.
     pub translator: T,
-
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
 }
+
+/// Configuration for an `Any` authenticated db with fixed-size values.
+pub type FixedConfig<T> = Config<T, FConfig>;
 
 /// Configuration for an `Any` authenticated db with variable-sized values.
-#[derive(Clone)]
-pub struct VariableConfig<T: Translator, C> {
-    /// The name of the [Storage] partition used for the MMR's backing journal.
-    pub mmr_journal_partition: String,
+pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
 
-    /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: NonZeroUsize,
-
-    /// The name of the [Storage] partition used for the MMR's metadata.
-    pub mmr_metadata_partition: String,
-
-    /// The name of the [Storage] partition used to persist the log of operations.
-    pub log_partition: String,
-
-    /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: NonZeroUsize,
-
-    /// Optional compression level (using `zstd`) to apply to log data before storing.
-    pub log_compression: Option<u8>,
-
-    /// The codec configuration to use for encoding and decoding log items.
-    pub log_codec_config: C,
-
-    /// The number of items to put in each blob of the journal.
-    pub log_items_per_blob: NonZeroU64,
-
-    /// The translator used by the compressed index.
-    pub translator: T,
-
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
-}
-
-/// Shared initialization logic for fixed-sized value [db::Db].
-pub(super) async fn init_fixed<E, U, H, T, I, F, NewIndex>(
+/// Initialize an `Any` authenticated db from the given config.
+pub(super) async fn init<E, U, H, T, I, J, F, NewIndex>(
     context: E,
-    cfg: FixedConfig<T>,
+    cfg: Config<T, J::Config>,
     known_inactivity_floor: Option<Location>,
     callback: F,
     new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<U>>, I, H, U>, Error>
+) -> Result<db::Db<E, J, I, H, U>, Error>
 where
     E: Storage + Clock + Metrics,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
+    J: Inner<E, Item = Operation<U>>,
+    Operation<U>: Committable + CodecShared,
     F: FnMut(bool, Option<Location>),
     NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: CodecFixedShared + Committable,
 {
-    let mmr_config = MmrConfig {
-        journal_partition: cfg.mmr_journal_partition,
-        metadata_partition: cfg.mmr_metadata_partition,
-        items_per_blob: cfg.mmr_items_per_blob,
-        write_buffer: cfg.mmr_write_buffer,
-        thread_pool: cfg.thread_pool,
-        page_cache: cfg.page_cache.clone(),
-    };
-
-    let journal_config = FConfig {
-        partition: cfg.log_journal_partition,
-        items_per_blob: cfg.log_items_per_blob,
-        write_buffer: cfg.log_write_buffer,
-        page_cache: cfg.page_cache,
-    };
-
-    let mut log = authenticated::Journal::<_, FJournal<_, _>, _>::new(
+    let mut log = J::init(
         context.with_label("log"),
-        mmr_config,
-        journal_config,
-        Operation::is_commit,
-    )
-    .await?;
-
-    if log.size().await == 0 {
-        warn!("Authenticated log is empty, initializing new db");
-        let commit_floor = Operation::CommitFloor(None, Location::new(0));
-        log.append(&commit_floor).await?;
-        log.sync().await?;
-    }
-
-    let index = new_index(context.with_label("index"), cfg.translator);
-    db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
-}
-
-/// Shared initialization logic for variable-sized value [db::Db].
-pub(super) async fn init_variable<E, U, H, T, I, F, NewIndex>(
-    context: E,
-    cfg: VariableConfig<T, <Operation<U> as Read>::Cfg>,
-    known_inactivity_floor: Option<Location>,
-    callback: F,
-    new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<U>>, I, H, U>, Error>
-where
-    E: Storage + Clock + Metrics,
-    U: Update + Send + Sync,
-    H: Hasher,
-    T: Translator,
-    I: UnorderedIndex<Value = Location>,
-    F: FnMut(bool, Option<Location>),
-    NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: Codec + Committable,
-{
-    let mmr_config = MmrConfig {
-        journal_partition: cfg.mmr_journal_partition,
-        metadata_partition: cfg.mmr_metadata_partition,
-        items_per_blob: cfg.mmr_items_per_blob,
-        write_buffer: cfg.mmr_write_buffer,
-        thread_pool: cfg.thread_pool,
-        page_cache: cfg.page_cache.clone(),
-    };
-
-    let journal_config = VConfig {
-        partition: cfg.log_partition,
-        items_per_section: cfg.log_items_per_blob,
-        compression: cfg.log_compression,
-        codec_config: cfg.log_codec_config,
-        page_cache: cfg.page_cache,
-        write_buffer: cfg.log_write_buffer,
-    };
-
-    let mut log = authenticated::Journal::<_, VJournal<_, _>, _>::new(
-        context.with_label("log"),
-        mmr_config,
-        journal_config,
+        cfg.mmr_config,
+        cfg.journal_config,
         Operation::is_commit,
     )
     .await?;
@@ -291,11 +161,12 @@ where
 pub(crate) mod test {
     use super::*;
     use crate::{
-        qmdb::any::{FixedConfig, VariableConfig},
+        journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+        qmdb::any::{FixedConfig, MmrConfig, VariableConfig},
         translator::OneCap,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
-    use std::num::NonZeroU16;
+    use std::num::{NonZeroU16, NonZeroUsize};
 
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -305,17 +176,23 @@ pub(crate) mod test {
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            mmr_journal_partition: format!("journal-{suffix}"),
-            mmr_metadata_partition: format!("metadata-{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_journal_partition: format!("log-journal-{suffix}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
+            mmr_config: MmrConfig {
+                journal_partition: format!("journal-{suffix}"),
+                metadata_partition: format!("metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: FConfig {
+                partition: format!("log-journal-{suffix}"),
+                items_per_blob: NZU64!(7),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
             translator: T::default(),
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -323,19 +200,25 @@ pub(crate) mod test {
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ((), ())> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            mmr_journal_partition: format!("journal-{suffix}"),
-            mmr_metadata_partition: format!("metadata-{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log-journal-{suffix}"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: ((), ()),
+            mmr_config: MmrConfig {
+                journal_partition: format!("journal-{suffix}"),
+                metadata_partition: format!("metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: VConfig {
+                partition: format!("log-journal-{suffix}"),
+                items_per_section: NZU64!(7),
+                compression: None,
+                codec_config: ((), ()),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
             translator: T::default(),
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -345,7 +228,7 @@ pub(crate) mod test {
     };
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_runtime::{deterministic::Context, BufferPooler};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic::Context, BufferPooler};
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
 
@@ -597,13 +480,13 @@ pub(crate) mod test {
             }
         }
 
-        let mut hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new();
         let bounds = db.bounds().await;
         let inactivity_floor = db.inactivity_floor_loc().await;
         for loc in *inactivity_floor..*bounds.end {
             let loc = Location::new(loc);
             let (proof, ops) = db.proof(loc, NZU64!(10)).await.unwrap();
-            assert!(verify_proof(&mut hasher, &proof, loc, &ops, &root));
+            assert!(verify_proof(&hasher, &proof, loc, &ops, &root));
         }
 
         db.destroy().await.unwrap();
@@ -686,9 +569,9 @@ pub(crate) mod test {
         assert_eq!(historical_proof.leaves, regular_proof.leaves);
         assert_eq!(historical_proof.digests, regular_proof.digests);
         assert_eq!(historical_ops, regular_ops);
-        let mut hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new();
         assert!(verify_proof(
-            &mut hasher,
+            &hasher,
             &historical_proof,
             start_loc,
             &historical_ops,
@@ -716,7 +599,7 @@ pub(crate) mod test {
         assert_eq!(historical_proof2.digests, regular_proof.digests);
         assert_eq!(historical_ops2, regular_ops);
         assert!(verify_proof(
-            &mut hasher,
+            &hasher,
             &historical_proof2,
             start_loc,
             &historical_ops2,
@@ -758,7 +641,7 @@ pub(crate) mod test {
         assert_eq!(proof.leaves, historical_op_count);
         assert_eq!(ops.len(), 4);
 
-        let mut hasher = StandardHasher::<Sha256>::new();
+        let hasher = StandardHasher::<Sha256>::new();
 
         // Changing the proof digests should cause verification to fail
         {
@@ -766,7 +649,7 @@ pub(crate) mod test {
             tampered_proof.digests[0] = Sha256::hash(b"invalid");
             let root_hash = db.root();
             assert!(!verify_proof(
-                &mut hasher,
+                &hasher,
                 &tampered_proof,
                 Location::new(1),
                 &ops,
@@ -780,7 +663,7 @@ pub(crate) mod test {
             tampered_proof.digests.push(Sha256::hash(b"invalid"));
             let root_hash = db.root();
             assert!(!verify_proof(
-                &mut hasher,
+                &hasher,
                 &tampered_proof,
                 Location::new(1),
                 &ops,
@@ -796,7 +679,7 @@ pub(crate) mod test {
             if tampered_ops.len() >= 2 {
                 tampered_ops.swap(0, 1);
                 assert!(!verify_proof(
-                    &mut hasher,
+                    &hasher,
                     &proof,
                     Location::new(1),
                     &tampered_ops,
@@ -811,7 +694,7 @@ pub(crate) mod test {
             let mut tampered_ops = ops.clone();
             tampered_ops.push(tampered_ops[0].clone());
             assert!(!verify_proof(
-                &mut hasher,
+                &hasher,
                 &proof,
                 Location::new(1),
                 &tampered_ops,
@@ -823,7 +706,7 @@ pub(crate) mod test {
         {
             let root_hash = db.root();
             assert!(!verify_proof(
-                &mut hasher,
+                &hasher,
                 &proof,
                 Location::new(2),
                 &ops,
@@ -835,7 +718,7 @@ pub(crate) mod test {
         {
             let invalid_root = Sha256::hash(b"invalid");
             assert!(!verify_proof(
-                &mut hasher,
+                &hasher,
                 &proof,
                 Location::new(1),
                 &ops,
@@ -849,7 +732,7 @@ pub(crate) mod test {
             tampered_proof.leaves = Location::new(100);
             let root_hash = db.root();
             assert!(!verify_proof(
-                &mut hasher,
+                &hasher,
                 &tampered_proof,
                 Location::new(1),
                 &ops,

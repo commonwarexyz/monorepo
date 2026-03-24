@@ -231,25 +231,26 @@
 
 use crate::{
     index::Unordered as UnorderedIndex,
-    journal::contiguous::{fixed::Journal as FJournal, variable::Journal as VJournal},
-    mmr::{Location, StandardHasher},
+    journal::{
+        authenticated::Inner,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    },
+    mmr::{journaled::Config as MmrConfig, Location, StandardHasher},
     qmdb::{
         any::{
             self,
             operation::{Operation, Update},
-            FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
+            Config as AnyConfig,
         },
-        operation::{Committable, Key},
+        operation::Committable,
         Error,
     },
     translator::Translator,
 };
-use commonware_codec::{Codec, CodecFixedShared, FixedSize, Read};
+use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
-use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex, Array};
-use std::num::{NonZeroU64, NonZeroUsize};
+use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
 
 pub mod batch;
 pub mod db;
@@ -259,136 +260,53 @@ pub mod proof;
 pub(crate) mod sync;
 pub mod unordered;
 
+/// Configuration for a `Current` authenticated db.
+#[derive(Clone)]
+pub struct Config<T: Translator, J> {
+    /// Configuration for the MMR backing the authenticated journal.
+    pub mmr_config: MmrConfig,
+
+    /// Configuration for the operations log journal.
+    pub journal_config: J,
+
+    /// The name of the storage partition used for the grafted MMR metadata.
+    pub grafted_mmr_metadata_partition: String,
+
+    /// The translator used by the compressed index.
+    pub translator: T,
+}
+
+impl<T: Translator, J> From<Config<T, J>> for AnyConfig<T, J> {
+    fn from(cfg: Config<T, J>) -> Self {
+        Self {
+            mmr_config: cfg.mmr_config,
+            journal_config: cfg.journal_config,
+            translator: cfg.translator,
+        }
+    }
+}
+
 /// Configuration for a `Current` authenticated db with fixed-size values.
-#[derive(Clone)]
-pub struct FixedConfig<T: Translator> {
-    /// The name of the storage partition used for the MMR's backing journal.
-    pub mmr_journal_partition: String,
+pub type FixedConfig<T> = Config<T, FConfig>;
 
-    /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: NonZeroU64,
+/// Configuration for a `Current` authenticated db with variable-sized values.
+pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
 
-    /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: NonZeroUsize,
-
-    /// The name of the storage partition used for the MMR's metadata.
-    pub mmr_metadata_partition: String,
-
-    /// The name of the storage partition used to persist the (pruned) log of operations.
-    pub log_journal_partition: String,
-
-    /// The items per blob configuration value used by the log journal.
-    pub log_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: NonZeroUsize,
-
-    /// The name of the storage partition used for the grafted MMR metadata.
-    pub grafted_mmr_metadata_partition: String,
-
-    /// The translator used by the compressed index.
-    pub translator: T,
-
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
-}
-
-impl<T: Translator> From<FixedConfig<T>> for AnyFixedConfig<T> {
-    fn from(cfg: FixedConfig<T>) -> Self {
-        Self {
-            mmr_journal_partition: cfg.mmr_journal_partition,
-            mmr_metadata_partition: cfg.mmr_metadata_partition,
-            mmr_items_per_blob: cfg.mmr_items_per_blob,
-            mmr_write_buffer: cfg.mmr_write_buffer,
-            log_journal_partition: cfg.log_journal_partition,
-            log_items_per_blob: cfg.log_items_per_blob,
-            log_write_buffer: cfg.log_write_buffer,
-            translator: cfg.translator,
-            thread_pool: cfg.thread_pool,
-            page_cache: cfg.page_cache,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct VariableConfig<T: Translator, C> {
-    /// The name of the storage partition used for the MMR's backing journal.
-    pub mmr_journal_partition: String,
-
-    /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: NonZeroUsize,
-
-    /// The name of the storage partition used for the MMR's metadata.
-    pub mmr_metadata_partition: String,
-
-    /// The name of the storage partition used to persist the log of operations.
-    pub log_partition: String,
-
-    /// The size of the write buffer to use for each blob in the log journal.
-    pub log_write_buffer: NonZeroUsize,
-
-    /// Optional compression level (using `zstd`) to apply to log data before storing.
-    pub log_compression: Option<u8>,
-
-    /// The codec configuration to use for the log.
-    pub log_codec_config: C,
-
-    /// The items per blob configuration value used by the log journal.
-    pub log_items_per_blob: NonZeroU64,
-
-    /// The name of the storage partition used for the grafted MMR metadata.
-    pub grafted_mmr_metadata_partition: String,
-
-    /// The translator used by the compressed index.
-    pub translator: T,
-
-    /// An optional thread pool to use for parallelizing batch operations.
-    pub thread_pool: Option<ThreadPool>,
-
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
-}
-
-impl<T: Translator, C> From<VariableConfig<T, C>> for AnyVariableConfig<T, C> {
-    fn from(cfg: VariableConfig<T, C>) -> Self {
-        Self {
-            mmr_journal_partition: cfg.mmr_journal_partition,
-            mmr_metadata_partition: cfg.mmr_metadata_partition,
-            mmr_items_per_blob: cfg.mmr_items_per_blob,
-            mmr_write_buffer: cfg.mmr_write_buffer,
-            log_items_per_blob: cfg.log_items_per_blob,
-            log_partition: cfg.log_partition,
-            log_write_buffer: cfg.log_write_buffer,
-            log_compression: cfg.log_compression,
-            log_codec_config: cfg.log_codec_config,
-            translator: cfg.translator,
-            thread_pool: cfg.thread_pool,
-            page_cache: cfg.page_cache,
-        }
-    }
-}
-
-/// Shared initialization logic for fixed-sized value Current [db::Db].
-pub(super) async fn init_fixed<E, U, H, T, I, const N: usize, NewIndex>(
+/// Initialize a `Current` authenticated db from the given config.
+pub(super) async fn init<E, U, H, T, I, J, const N: usize, NewIndex>(
     context: E,
-    config: FixedConfig<T>,
+    config: Config<T, J::Config>,
     new_index: NewIndex,
-) -> Result<db::Db<E, FJournal<E, Operation<U>>, I, H, U, N>, Error>
+) -> Result<db::Db<E, J, I, H, U, N>, Error>
 where
     E: Storage + Clock + Metrics,
     U: Update + Send + Sync,
-    U::Key: Array,
     H: Hasher,
     T: Translator,
     I: UnorderedIndex<Value = Location>,
+    J: Inner<E, Item = Operation<U>>,
+    Operation<U>: Committable + CodecShared,
     NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: CodecFixedShared + Committable,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
@@ -404,7 +322,7 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
-    let thread_pool = config.thread_pool.clone();
+    let thread_pool = config.mmr_config.thread_pool.clone();
     let metadata_partition = config.grafted_mmr_metadata_partition.clone();
 
     // Load bitmap metadata (pruned_chunks + pinned nodes for grafted MMR).
@@ -417,7 +335,7 @@ where
 
     // Initialize the anydb with a callback that populates the status bitmap.
     let last_known_inactivity_floor = Location::new(status.len());
-    let any = any::init_fixed(
+    let any = any::init(
         context.with_label("any"),
         config.into(),
         Some(last_known_inactivity_floor),
@@ -432,9 +350,9 @@ where
     .await?;
 
     // Build the grafted MMR from the bitmap and ops MMR.
-    let mut hasher = StandardHasher::<H>::new();
+    let hasher = StandardHasher::<H>::new();
     let grafted_mmr = db::build_grafted_mmr::<H, N>(
-        &mut hasher,
+        &hasher,
         &status,
         &pinned_nodes,
         &any.log.mmr,
@@ -446,7 +364,7 @@ where
     let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
     let partial_chunk = db::partial_chunk(&status);
     let ops_root = any.log.root();
-    let root = db::compute_db_root(&mut hasher, &storage, partial_chunk, &ops_root).await?;
+    let root = db::compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
 
     Ok(db::Db {
         any,
@@ -454,90 +372,6 @@ where
         grafted_mmr,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
-        root,
-    })
-}
-
-/// Shared initialization logic for variable-sized value Current [db::Db].
-pub(super) async fn init_variable<E, U, H, T, I, const N: usize, NewIndex>(
-    context: E,
-    config: VariableConfig<T, <Operation<U> as Read>::Cfg>,
-    new_index: NewIndex,
-) -> Result<db::Db<E, VJournal<E, Operation<U>>, I, H, U, N>, Error>
-where
-    E: Storage + Clock + Metrics,
-    U: Update + Send + Sync,
-    U::Key: Key,
-    H: Hasher,
-    T: Translator,
-    I: UnorderedIndex<Value = Location>,
-    NewIndex: FnOnce(E, T) -> I,
-    Operation<U>: Codec + Committable,
-{
-    // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
-    const {
-        // A compile-time assertion that the chunk size is some multiple of digest size. A multiple
-        // of 1 is optimal with respect to proof size, but a higher multiple allows for a smaller
-        // (RAM resident) merkle tree over the structure.
-        assert!(
-            N.is_multiple_of(H::Digest::SIZE),
-            "chunk size must be some multiple of the digest size",
-        );
-        // A compile-time assertion that chunk size is a power of 2, which is necessary to allow
-        // the status bitmap tree to be aligned with the underlying operations MMR.
-        assert!(N.is_power_of_two(), "chunk size must be a power of 2");
-    }
-
-    let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-    let pool = config.thread_pool.clone();
-
-    // Load bitmap metadata (pruned_chunks + pinned nodes for grafted MMR).
-    let (metadata, pruned_chunks, pinned_nodes) =
-        db::init_metadata(context.with_label("metadata"), &metadata_partition).await?;
-
-    // Initialize the activity status bitmap.
-    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| Error::DataCorrupted("pruned chunks overflow"))?;
-
-    // Initialize the anydb with a callback that populates the activity status bitmap.
-    let last_known_inactivity_floor = Location::new(status.len());
-    let any = any::init_variable(
-        context.with_label("any"),
-        config.into(),
-        Some(last_known_inactivity_floor),
-        |append: bool, loc: Option<Location>| {
-            status.push(append);
-            if let Some(loc) = loc {
-                status.set_bit(*loc, false);
-            }
-        },
-        new_index,
-    )
-    .await?;
-
-    // Build the grafted MMR from the bitmap and ops MMR.
-    let mut hasher = StandardHasher::<H>::new();
-    let grafted_mmr = db::build_grafted_mmr::<H, N>(
-        &mut hasher,
-        &status,
-        &pinned_nodes,
-        &any.log.mmr,
-        pool.as_ref(),
-    )
-    .await?;
-
-    // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
-    let partial_chunk = db::partial_chunk(&status);
-    let ops_root = any.log.root();
-    let root = db::compute_db_root(&mut hasher, &storage, partial_chunk, &ops_root).await?;
-
-    Ok(db::Db {
-        any,
-        status,
-        grafted_mmr,
-        metadata: AsyncMutex::new(metadata),
-        thread_pool: pool,
         root,
     })
 }
@@ -560,7 +394,7 @@ pub mod tests {
     //! Shared test utilities for Current QMDB variants.
 
     pub use super::BitmapPrunedBits;
-    use super::{ordered, unordered, FixedConfig, VariableConfig};
+    use super::{ordered, unordered, FConfig, FixedConfig, MmrConfig, VConfig, VariableConfig};
     use crate::{
         qmdb::{
             any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
@@ -589,20 +423,26 @@ pub mod tests {
         partition_prefix: &str,
         pooler: &impl BufferPooler,
     ) -> FixedConfig<T> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            mmr_journal_partition: format!("{partition_prefix}-journal-partition"),
-            mmr_metadata_partition: format!("{partition_prefix}-metadata-partition"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_journal_partition: format!("{partition_prefix}-partition-prefix"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
+            mmr_config: MmrConfig {
+                journal_partition: format!("{partition_prefix}-journal-partition"),
+                metadata_partition: format!("{partition_prefix}-metadata-partition"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: FConfig {
+                partition: format!("{partition_prefix}-partition-prefix"),
+                items_per_blob: NZU64!(7),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
             grafted_mmr_metadata_partition: format!(
                 "{partition_prefix}-grafted-mmr-metadata-partition"
             ),
             translator: T::default(),
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -611,22 +451,28 @@ pub mod tests {
         partition_prefix: &str,
         pooler: &impl BufferPooler,
     ) -> VariableConfig<T, ((), ())> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            mmr_journal_partition: format!("{partition_prefix}-journal-partition"),
-            mmr_metadata_partition: format!("{partition_prefix}-metadata-partition"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("{partition_prefix}-partition-prefix"),
-            log_items_per_blob: NZU64!(7),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: ((), ()),
+            mmr_config: MmrConfig {
+                journal_partition: format!("{partition_prefix}-journal-partition"),
+                metadata_partition: format!("{partition_prefix}-metadata-partition"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            journal_config: VConfig {
+                partition: format!("{partition_prefix}-partition-prefix"),
+                items_per_section: NZU64!(7),
+                compression: None,
+                codec_config: ((), ()),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
             grafted_mmr_metadata_partition: format!(
                 "{partition_prefix}-grafted-mmr-metadata-partition"
             ),
             translator: T::default(),
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

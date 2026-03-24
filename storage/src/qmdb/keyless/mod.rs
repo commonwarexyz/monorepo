@@ -5,8 +5,8 @@
 //!
 //! ```ignore
 //! // Simple mode: apply a batch, then durably commit it.
-//! let mut batch = db.new_batch();
-//! let loc = batch.append(value);  // returns the location
+//! let loc = db.new_batch().size();  // location of the next append
+//! let batch = db.new_batch().append(value);
 //! let merkleized = batch.merkleize(None);
 //! let finalized = merkleized.finalize();
 //! db.apply_batch(finalized).await?;
@@ -15,16 +15,15 @@
 //!
 //! ```ignore
 //! // Batches can still fork before you apply them.
-//! let mut parent = db.new_batch();
-//! let _ = parent.append(value_a);
+//! let parent = db.new_batch().append(value_a);
 //! let parent = parent.merkleize(None);
 //!
-//! let mut child_a = parent.new_batch();
-//! let _ = child_a.append(value_b);
+//! let child_a = parent.new_batch();
+//! let child_a = child_a.append(value_b);
 //! let child_a = child_a.merkleize(None);
 //!
-//! let mut child_b = parent.new_batch();
-//! let _ = child_b.append(value_c);
+//! let child_b = parent.new_batch();
+//! let child_b = child_b.append(value_c);
 //! let child_b = child_b.merkleize(None);
 //!
 //! db.apply_batch(child_a.finalize()).await?;
@@ -34,15 +33,13 @@
 //! ```ignore
 //! // Advanced mode: while the previous batch is being committed, build one child batch from the
 //! // the newly published state.
-//! let mut parent = db.new_batch();
-//! let _ = parent.append(value_a);
+//! let parent = db.new_batch().append(value_a);
 //! let parent_finalized = parent.merkleize(None).finalize();
 //! db.apply_batch(parent_finalized).await?;
 //!
 //! let (child_finalized, commit_result) = futures::join!(
 //!     async {
-//!         let mut child = db.new_batch();
-//!         let _ = child.append(value_b);
+//!         let child = db.new_batch().append(value_b);
 //!         child.merkleize(None).finalize()
 //!     },
 //!     db.commit(),
@@ -68,9 +65,8 @@ use crate::{
     qmdb::{any::VariableValue, operation::Committable, Error},
 };
 use commonware_cryptography::Hasher;
-use commonware_parallel::ThreadPool;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
-use std::num::{NonZeroU64, NonZeroUsize};
+use commonware_runtime::{Clock, Metrics, Storage};
+use std::num::NonZeroU64;
 use tracing::{debug, warn};
 
 pub mod batch;
@@ -80,38 +76,11 @@ pub use operation::Operation;
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The name of the [Storage] partition used for the MMR's backing journal.
-    pub mmr_journal_partition: String,
+    /// Configuration for the MMR backing the authenticated journal.
+    pub mmr: MmrConfig,
 
-    /// The items per blob configuration value used by the MMR journal.
-    pub mmr_items_per_blob: NonZeroU64,
-
-    /// The size of the write buffer to use for each blob in the MMR journal.
-    pub mmr_write_buffer: NonZeroUsize,
-
-    /// The name of the [Storage] partition used for the MMR's metadata.
-    pub mmr_metadata_partition: String,
-
-    /// The name of the [Storage] partition used to persist the operations log.
-    pub log_partition: String,
-
-    /// The size of the write buffer to use with the log journal.
-    pub log_write_buffer: NonZeroUsize,
-
-    /// Optional compression level (using `zstd`) to apply to log data before storing.
-    pub log_compression: Option<u8>,
-
-    /// The codec configuration to use for encoding and decoding the operations log.
-    pub log_codec_config: C,
-
-    /// The max number of operations to put in each section of the operations log.
-    pub log_items_per_section: NonZeroU64,
-
-    /// An optional thread pool to use for parallelizing batch MMR operations.
-    pub thread_pool: Option<ThreadPool>,
-
-    /// The page cache to use for caching data.
-    pub page_cache: CacheRef,
+    /// Configuration for the variable-size operations log journal.
+    pub log: JournalConfig<C>,
 }
 
 /// A keyless QMDB for variable length data.
@@ -173,25 +142,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     /// Returns a [Keyless] qmdb initialized from `cfg`. Any uncommitted operations will be discarded
     /// and the state of the db will be as of the last committed operation.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        let mmr_cfg = MmrConfig {
-            journal_partition: cfg.mmr_journal_partition,
-            metadata_partition: cfg.mmr_metadata_partition,
-            items_per_blob: cfg.mmr_items_per_blob,
-            write_buffer: cfg.mmr_write_buffer,
-            thread_pool: cfg.thread_pool,
-            page_cache: cfg.page_cache.clone(),
-        };
-
-        let journal_cfg = JournalConfig {
-            partition: cfg.log_partition,
-            items_per_section: cfg.log_items_per_section,
-            compression: cfg.log_compression,
-            codec_config: cfg.log_codec_config,
-            page_cache: cfg.page_cache,
-            write_buffer: cfg.log_write_buffer,
-        };
-
-        let mut journal = Journal::new(context, mmr_cfg, journal_cfg, Operation::is_commit).await?;
+        let mut journal = Journal::new(context, cfg.mmr, cfg.log, Operation::is_commit).await?;
         if journal.size().await == 0 {
             warn!("no operations found in log, creating initial commit");
             journal.append(&Operation::Commit(None)).await?;
@@ -236,7 +187,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     /// # Errors
     ///
     /// - Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
-    ///   [crate::mmr::MAX_LOCATION].
+    ///   [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [crate::mmr::Error::RangeOutOfBounds] if `start_loc` >= `op_count` or `op_count` >
     ///   number of operations.
     pub async fn historical_proof(
@@ -256,7 +207,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `loc` > last commit point.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::mmr::MAX_LOCATION]
+    /// - Returns [crate::mmr::Error::LocationOverflow] if `loc` > [crate::merkle::Family::MAX_LEAVES]
     pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
         if loc > self.last_commit_loc {
             return Err(Error::PruneBeyondMinRequired(loc, self.last_commit_loc));
@@ -342,10 +293,12 @@ mod test {
     use crate::{mmr::StandardHasher as Standard, qmdb::verify_proof};
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use rand::Rng;
-    use std::num::NonZeroU16;
+    use std::num::{NonZeroU16, NonZeroUsize};
 
     // Use some weird sizes here to test boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -355,18 +308,24 @@ mod test {
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> Config<(commonware_codec::RangeCfg<usize>, ())> {
+        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            mmr_journal_partition: format!("journal-{suffix}"),
-            mmr_metadata_partition: format!("metadata-{suffix}"),
-            mmr_items_per_blob: NZU64!(11),
-            mmr_write_buffer: NZUsize!(1024),
-            log_partition: format!("log-journal-{suffix}"),
-            log_write_buffer: NZUsize!(1024),
-            log_compression: None,
-            log_codec_config: ((0..=10000).into(), ()),
-            log_items_per_section: NZU64!(7),
-            thread_pool: None,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            mmr: MmrConfig {
+                journal_partition: format!("journal-{suffix}"),
+                metadata_partition: format!("metadata-{suffix}"),
+                items_per_blob: NZU64!(11),
+                write_buffer: NZUsize!(1024),
+                thread_pool: None,
+                page_cache: page_cache.clone(),
+            },
+            log: JournalConfig {
+                partition: format!("log-journal-{suffix}"),
+                items_per_section: NZU64!(7),
+                compression: None,
+                codec_config: ((0..=10000).into(), ()),
+                page_cache,
+                write_buffer: NZUsize!(1024),
+            },
         }
     }
 
@@ -394,8 +353,7 @@ mod test {
             let v1 = vec![1u8; 8];
             let root = db.root();
             {
-                let mut batch = db.new_batch();
-                batch.append(v1);
+                db.new_batch().append(v1);
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
             drop(db);
@@ -439,9 +397,11 @@ mod test {
             let v2 = vec![2u8; 20];
 
             let finalized = {
-                let mut batch = db.new_batch();
-                let loc1 = batch.append(v1.clone());
-                let loc2 = batch.append(v2.clone());
+                let batch = db.new_batch();
+                let loc1 = batch.size();
+                let batch = batch.append(v1.clone());
+                let loc2 = batch.size();
+                let batch = batch.append(v2.clone());
                 assert_eq!(loc1, Location::new(1));
                 assert_eq!(loc2, Location::new(2));
                 batch.merkleize(None).finalize()
@@ -465,8 +425,7 @@ mod test {
             assert_eq!(db.get(loc2).await.unwrap().unwrap(), v2);
 
             {
-                let mut batch = db.new_batch();
-                batch.append(v2);
+                let batch = db.new_batch().append(v2);
                 batch.append(v1);
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -506,7 +465,7 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for value in generate_values(&mut context, ELEMENTS) {
-                    batch.append(value);
+                    batch = batch.append(value);
                 }
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -519,7 +478,7 @@ mod test {
             let finalized = {
                 let mut batch = db.new_batch();
                 for value in generate_values(&mut context, ELEMENTS) {
-                    batch.append(value);
+                    batch = batch.append(value);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -531,7 +490,7 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for value in generate_values(&mut context, ELEMENTS) {
-                    batch.append(value);
+                    batch = batch.append(value);
                 }
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -544,7 +503,7 @@ mod test {
             let finalized = {
                 let mut batch = db.new_batch();
                 for value in generate_values(&mut context, ELEMENTS) {
-                    batch.append(value);
+                    batch = batch.append(value);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -575,7 +534,7 @@ mod test {
             let finalized = {
                 let mut batch = db.new_batch();
                 for value in generate_values(&mut context, ELEMENTS) {
-                    batch.append(value);
+                    batch = batch.append(value);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -605,7 +564,7 @@ mod test {
                 {
                     let mut batch = db.new_batch();
                     for value in generate_values(&mut context, ELEMENTS) {
-                        batch.append(value);
+                        batch = batch.append(value);
                     }
                     // Don't merkleize/finalize/apply -- simulate failed commit
                 }
@@ -632,7 +591,7 @@ mod test {
             let finalized = {
                 let mut batch = db.new_batch();
                 for value in generate_values(&mut context, ELEMENTS) {
-                    batch.append(value);
+                    batch = batch.append(value);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -673,7 +632,7 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for v in build_values() {
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -686,7 +645,7 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for v in build_values() {
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -699,13 +658,13 @@ mod test {
             {
                 let mut batch = db.new_batch();
                 for v in build_values() {
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 for v in build_values() {
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 for v in build_values() {
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -719,7 +678,7 @@ mod test {
             let finalized = {
                 let mut batch = db.new_batch();
                 for v in build_values() {
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -737,7 +696,7 @@ mod test {
     pub fn test_keyless_db_proof_generation_and_verification() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.clone()).await;
 
             // Build a db with some values
@@ -748,7 +707,7 @@ mod test {
                 for i in 0u64..ELEMENTS {
                     let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                     values.push(v.clone());
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -779,7 +738,7 @@ mod test {
 
                 // Verify the proof
                 assert!(
-                    verify_proof(&mut hasher, &proof, Location::new(start_loc), &ops, &root),
+                    verify_proof(&hasher, &proof, Location::new(start_loc), &ops, &root),
                     "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops",
                 );
 
@@ -818,14 +777,14 @@ mod test {
                 // Verify that proof fails with wrong root
                 let wrong_root = Sha256::hash(&[0xFF; 32]);
                 assert!(
-                    !verify_proof(&mut hasher, &proof, Location::new(start_loc), &ops, &wrong_root),
+                    !verify_proof(&hasher, &proof, Location::new(start_loc), &ops, &wrong_root),
                     "Proof should fail with wrong root"
                 );
 
                 // Verify that proof fails with wrong start location
                 if start_loc > 0 {
                     assert!(
-                        !verify_proof(&mut hasher, &proof, Location::new(start_loc - 1), &ops, &root),
+                        !verify_proof(&hasher, &proof, Location::new(start_loc - 1), &ops, &root),
                         "Proof should fail with wrong start location"
                     );
                 }
@@ -839,7 +798,7 @@ mod test {
     pub fn test_keyless_db_proof_with_pruning() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
             let mut db = open_db(context.with_label("db1")).await;
 
             // Build a db with some values
@@ -850,7 +809,7 @@ mod test {
                 for i in 0u64..ELEMENTS {
                     let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                     values.push(v.clone());
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -862,7 +821,7 @@ mod test {
                 for i in ELEMENTS..ELEMENTS * 2 {
                     let v = vec![(i % 255) as u8; ((i % 17) + 5) as usize];
                     values.push(v.clone());
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -924,7 +883,7 @@ mod test {
 
                 // Verify the proof still works
                 assert!(
-                    verify_proof(&mut hasher, &proof, start_loc, &ops, &root),
+                    verify_proof(&hasher, &proof, start_loc, &ops, &root),
                     "Failed to verify proof for range starting at {start_loc} with max {max_ops} ops after pruning",
                 );
 
@@ -948,7 +907,7 @@ mod test {
             // Can still generate proofs for the remaining data
             let (proof, ops) = db.proof(new_oldest, NZU64!(20)).await.unwrap();
             assert!(
-                verify_proof(&mut hasher, &proof, new_oldest, &ops, &root),
+                verify_proof(&hasher, &proof, new_oldest, &ops, &root),
                 "Proof should still verify after aggressive pruning"
             );
 
@@ -963,7 +922,7 @@ mod test {
             if final_oldest < bounds.end {
                 let (final_proof, final_ops) = db.proof(final_oldest, NZU64!(10)).await.unwrap();
                 assert!(
-                    verify_proof(&mut hasher, &final_proof, final_oldest, &final_ops, &root),
+                    verify_proof(&hasher, &final_proof, final_oldest, &final_ops, &root),
                     "Should be able to prove remaining operations after extensive pruning"
                 );
             }
@@ -984,7 +943,7 @@ mod test {
                 let mut batch = db.new_batch();
                 for i in 0..10 {
                     let v = vec![i as u8; 10];
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 batch.merkleize(None).finalize()
             };
@@ -995,8 +954,7 @@ mod test {
 
             // Add exactly one more append (uncommitted)
             {
-                let mut batch = db.new_batch();
-                batch.append(vec![99u8; 20]);
+                db.new_batch().append(vec![99u8; 20]);
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
 
@@ -1022,8 +980,9 @@ mod test {
             // Verify we can append and commit new data without issues
             let new_value = vec![77u8; 15];
             let finalized = {
-                let mut batch = db.new_batch();
-                let loc = batch.append(new_value.clone());
+                let batch = db.new_batch();
+                let loc = batch.size();
+                let batch = batch.append(new_value.clone());
                 assert_eq!(
                     loc, committed_size,
                     "New append should get the expected location"
@@ -1044,7 +1003,7 @@ mod test {
                 let mut batch = db.new_batch();
                 for i in 0..5 {
                     let v = vec![(200 + i) as u8; 10];
-                    batch.append(v);
+                    batch = batch.append(v);
                 }
                 // Don't merkleize/finalize/apply -- simulate failed commit
             }
@@ -1087,12 +1046,12 @@ mod test {
             // Add some values
             let v1 = vec![1u8; 8];
             let v2 = vec![2u8; 8];
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(v1.clone());
-                batch.append(v2.clone());
-                batch.merkleize(None).finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .append(v1.clone())
+                .append(v2.clone())
+                .merkleize(None)
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
 
             // Test getting valid locations - should succeed
@@ -1129,12 +1088,12 @@ mod test {
             let v1 = vec![1u8; 8];
             let v2 = vec![2u8; 8];
             let v3 = vec![3u8; 8];
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(v1.clone());
-                batch.append(v2.clone());
-                batch.merkleize(None).finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .append(v1.clone())
+                .append(v2.clone())
+                .merkleize(None)
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
 
             // op_count is 4 (initial_commit, v1, v2, commit), last_commit_loc is 3
@@ -1142,8 +1101,7 @@ mod test {
             assert_eq!(last_commit, Location::new(3));
 
             let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(v3.clone());
+                let batch = db.new_batch().append(v3.clone());
                 batch.merkleize(None).finalize()
             };
             db.apply_batch(finalized).await.unwrap();
@@ -1187,14 +1145,16 @@ mod test {
             let finalized = {
                 let mut batch = db.new_batch();
                 for v in &base_vals {
-                    base_locs.push(batch.append(v.clone()));
+                    let loc = batch.size();
+                    batch = batch.append(v.clone());
+                    base_locs.push(loc);
                 }
                 batch.merkleize(None).finalize()
             };
             db.apply_batch(finalized).await.unwrap();
 
             // Second batch: read base DB values through the batch.
-            let mut batch = db.new_batch();
+            let batch = db.new_batch();
             for (i, loc) in base_locs.iter().enumerate() {
                 assert_eq!(
                     batch.get(*loc).await.unwrap(),
@@ -1205,7 +1165,8 @@ mod test {
 
             // Pending append is visible.
             let new_val = vec![99u8; 16];
-            let new_loc = batch.append(new_val.clone());
+            let new_loc = batch.size();
+            let batch = batch.append(new_val.clone());
             assert_eq!(batch.get(new_loc).await.unwrap(), Some(new_val));
 
             // Location past the end returns None.
@@ -1227,16 +1188,18 @@ mod test {
             let v2 = vec![2u8; 16];
 
             // Parent batch appends v1.
-            let mut parent = db.new_batch();
-            let loc1 = parent.append(v1.clone());
+            let parent = db.new_batch();
+            let loc1 = parent.size();
+            let parent = parent.append(v1.clone());
             let parent_m = parent.merkleize(None);
 
             // Child reads v1 from parent chain.
-            let mut child = parent_m.new_batch();
+            let child = parent_m.new_batch();
             assert_eq!(child.get(loc1).await.unwrap(), Some(v1));
 
             // Child appends v2.
-            let loc2 = child.append(v2.clone());
+            let loc2 = child.size();
+            let child = child.append(v2.clone());
             assert_eq!(child.get(loc2).await.unwrap(), Some(v2));
 
             // Nonexistent location.
@@ -1256,11 +1219,11 @@ mod test {
 
             // Batch with metadata.
             let metadata = vec![42u8; 32];
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(vec![1u8; 8]);
-                batch.merkleize(Some(metadata.clone())).finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .append(vec![1u8; 8])
+                .merkleize(Some(metadata.clone()))
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
@@ -1283,7 +1246,7 @@ mod test {
             let merkleized = {
                 let mut batch = db.new_batch();
                 for i in 0u8..10 {
-                    batch.append(vec![i; 16]);
+                    batch = batch.append(vec![i; 16]);
                 }
                 batch.merkleize(None)
             };
@@ -1297,11 +1260,10 @@ mod test {
 
             // Second batch: verify again with metadata.
             let metadata = vec![55u8; 8];
-            let merkleized = {
-                let mut batch = db.new_batch();
-                batch.append(vec![0xAA; 20]);
-                batch.merkleize(Some(metadata))
-            };
+            let merkleized = db
+                .new_batch()
+                .append(vec![0xAA; 20])
+                .merkleize(Some(metadata));
             let speculative = merkleized.root();
             let finalized = merkleized.finalize();
             db.apply_batch(finalized).await.unwrap();
@@ -1321,19 +1283,17 @@ mod test {
 
             // Pre-populate base DB.
             let base_val = vec![10u8; 12];
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(base_val.clone());
-                batch.merkleize(None).finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .append(base_val.clone())
+                .merkleize(None)
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             // Locations: 0=initial commit, 1=append, 2=commit
 
             // Create a merkleized batch with new appends.
             let new_val = vec![20u8; 16];
-            let mut batch = db.new_batch();
-            batch.append(new_val.clone());
-            let merkleized = batch.merkleize(None);
+            let merkleized = db.new_batch().append(new_val.clone()).merkleize(None);
             // Locations: 3=append, 4=commit
 
             // Read base DB value through merkleized batch.
@@ -1371,15 +1331,18 @@ mod test {
             let v3 = vec![3u8; 24];
 
             // Parent batch.
-            let mut parent = db.new_batch();
-            let loc1 = parent.append(v1.clone());
+            let parent = db.new_batch();
+            let loc1 = parent.size();
+            let parent = parent.append(v1.clone());
             let parent_m = parent.merkleize(None);
             let parent_root = parent_m.root();
 
             // Child batch built on top of parent.
-            let mut child = parent_m.new_batch();
-            let loc2 = child.append(v2.clone());
-            let loc3 = child.append(v3.clone());
+            let child = parent_m.new_batch();
+            let loc2 = child.size();
+            let child = child.append(v2.clone());
+            let loc3 = child.size();
+            let child = child.append(v3.clone());
             let child_m = child.merkleize(None);
             let child_root = child_m.root();
 
@@ -1415,8 +1378,9 @@ mod test {
             let v2 = vec![2u8; 16];
 
             // Parent batch.
-            let mut parent = db.new_batch();
-            let loc1 = parent.append(v1.clone());
+            let parent = db.new_batch();
+            let loc1 = parent.size();
+            let parent = parent.append(v1.clone());
             let parent_m = parent.merkleize(None);
             let parent_root = parent_m.root();
 
@@ -1427,8 +1391,9 @@ mod test {
             assert_eq!(db.get(loc1).await.unwrap(), Some(v1));
 
             // Now create a second (independent) batch.
-            let mut batch2 = db.new_batch();
-            let loc2 = batch2.append(v2.clone());
+            let batch2 = db.new_batch();
+            let loc2 = batch2.size();
+            let batch2 = batch2.append(v2.clone());
             let batch2_m = batch2.merkleize(None);
             let batch2_root = batch2_m.root();
             let batch2_finalized = batch2_m.finalize();
@@ -1446,7 +1411,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.with_label("db")).await;
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
             const BATCHES: u64 = 20;
             const APPENDS_PER_BATCH: u64 = 5;
@@ -1459,7 +1424,8 @@ mod test {
                     let mut batch = db.new_batch();
                     for j in 0..APPENDS_PER_BATCH {
                         let v = vec![(batch_idx * 10 + j) as u8; 8];
-                        let loc = batch.append(v.clone());
+                        let loc = batch.size();
+                        batch = batch.append(v.clone());
                         all_values.push(v);
                         all_locs.push(loc);
                     }
@@ -1480,13 +1446,7 @@ mod test {
             // Verify proof over the full range.
             let root = db.root();
             let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-            assert!(verify_proof(
-                &mut hasher,
-                &proof,
-                Location::new(0),
-                &ops,
-                &root
-            ));
+            assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
 
             // Expected size: 1 initial commit + BATCHES * (APPENDS_PER_BATCH + 1 commit).
             let expected = 1 + BATCHES * (APPENDS_PER_BATCH + 1);
@@ -1504,11 +1464,11 @@ mod test {
             let mut db = open_db(context.with_label("db")).await;
 
             // Apply a non-empty batch first so the DB has some state.
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(vec![1u8; 8]);
-                batch.merkleize(None).finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .append(vec![1u8; 8])
+                .merkleize(None)
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             let root_before = db.root();
             let size_before = db.bounds().await.end;
@@ -1538,24 +1498,26 @@ mod test {
 
             // Pre-populate base DB.
             let base_val = vec![10u8; 12];
-            let finalized = {
-                let mut batch = db.new_batch();
-                batch.append(base_val.clone());
-                batch.merkleize(None).finalize()
-            };
+            let finalized = db
+                .new_batch()
+                .append(base_val.clone())
+                .merkleize(None)
+                .finalize();
             db.apply_batch(finalized).await.unwrap();
             let base_loc = Location::new(1);
 
             // Parent batch appends v1.
             let v1 = vec![1u8; 8];
-            let mut parent = db.new_batch();
-            let loc1 = parent.append(v1.clone());
+            let parent = db.new_batch();
+            let loc1 = parent.size();
+            let parent = parent.append(v1.clone());
             let parent_m = parent.merkleize(None);
 
             // Child batch appends v2.
             let v2 = vec![2u8; 16];
-            let mut child = parent_m.new_batch();
-            let loc2 = child.append(v2.clone());
+            let child = parent_m.new_batch();
+            let loc2 = child.size();
+            let child = child.append(v2.clone());
             let child_m = child.merkleize(None);
 
             // Child's MerkleizedBatch can read all three layers:
@@ -1588,7 +1550,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.with_label("db")).await;
-            let mut hasher = Standard::<Sha256>::new();
+            let hasher = Standard::<Sha256>::new();
 
             const N: u64 = 500;
             let mut values = Vec::new();
@@ -1598,7 +1560,9 @@ mod test {
                 let mut batch = db.new_batch();
                 for i in 0..N {
                     let v = vec![(i % 256) as u8; ((i % 29) + 3) as usize];
-                    locs.push(batch.append(v.clone()));
+                    let loc = batch.size();
+                    batch = batch.append(v.clone());
+                    locs.push(loc);
                     values.push(v);
                 }
                 batch.merkleize(None).finalize()
@@ -1617,13 +1581,7 @@ mod test {
             // Verify proof over the full range.
             let root = db.root();
             let (proof, ops) = db.proof(Location::new(0), NZU64!(1000)).await.unwrap();
-            assert!(verify_proof(
-                &mut hasher,
-                &proof,
-                Location::new(0),
-                &ops,
-                &root
-            ));
+            assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
 
             // Expected: 1 initial commit + N appends + 1 commit.
             assert_eq!(db.bounds().await.end, 1 + N + 1);
@@ -1639,16 +1597,8 @@ mod test {
             let mut db = open_db(context.with_label("db")).await;
 
             // Create two batches from the same DB state.
-            let changeset_a = {
-                let mut batch = db.new_batch();
-                batch.append(vec![10]);
-                batch.merkleize(None).finalize()
-            };
-            let changeset_b = {
-                let mut batch = db.new_batch();
-                batch.append(vec![20]);
-                batch.merkleize(None).finalize()
-            };
+            let changeset_a = db.new_batch().append(vec![10]).merkleize(None).finalize();
+            let changeset_b = db.new_batch().append(vec![20]).merkleize(None).finalize();
 
             // Apply the first -- should succeed.
             db.apply_batch(changeset_a).await.unwrap();
@@ -1681,21 +1631,19 @@ mod test {
             let mut db = open_db(context.with_label("db")).await;
 
             // Parent batch.
-            let mut parent = db.new_batch();
-            parent.append(vec![1]);
-            let parent_m = parent.merkleize(None);
+            let parent = db.new_batch().append(vec![1]).merkleize(None);
 
             // Fork two children from the same parent.
-            let child_a = {
-                let mut batch = parent_m.new_batch();
-                batch.append(vec![2]);
-                batch.merkleize(None).finalize()
-            };
-            let child_b = {
-                let mut batch = parent_m.new_batch();
-                batch.append(vec![3]);
-                batch.merkleize(None).finalize()
-            };
+            let child_a = parent
+                .new_batch()
+                .append(vec![2])
+                .merkleize(None)
+                .finalize();
+            let child_b = parent
+                .new_batch()
+                .append(vec![3])
+                .merkleize(None)
+                .finalize();
 
             // Apply child A.
             db.apply_batch(child_a).await.unwrap();
@@ -1718,17 +1666,17 @@ mod test {
             let mut db = open_db(context.with_label("db")).await;
 
             // Parent batch.
-            let mut parent = db.new_batch();
-            parent.append(vec![1]);
-            let parent_m = parent.merkleize(None);
+            let parent = db.new_batch().append(vec![1]).merkleize(None);
 
             // Child batch.
-            let mut child = parent_m.new_batch();
-            child.append(vec![2]);
-            let child_changeset = child.merkleize(None).finalize();
+            let child_changeset = parent
+                .new_batch()
+                .append(vec![2])
+                .merkleize(None)
+                .finalize();
 
             // Apply parent first.
-            let parent_changeset = parent_m.finalize();
+            let parent_changeset = parent.finalize();
             db.apply_batch(parent_changeset).await.unwrap();
 
             // Child is stale because it expected to be applied on top of the
@@ -1750,16 +1698,16 @@ mod test {
             let mut db = open_db(context.with_label("db")).await;
 
             // Parent batch.
-            let mut parent = db.new_batch();
-            parent.append(vec![1]);
-            let parent_m = parent.merkleize(None);
+            let parent = db.new_batch().append(vec![1]).merkleize(None);
 
             // Child batch. Finalize both before applying either so the
-            // borrow on `db` through `parent_m` is released.
-            let mut child = parent_m.new_batch();
-            child.append(vec![2]);
-            let child_changeset = child.merkleize(None).finalize();
-            let parent_changeset = parent_m.finalize();
+            // borrow on `db` through `parent` is released.
+            let child_changeset = parent
+                .new_batch()
+                .append(vec![2])
+                .merkleize(None)
+                .finalize();
+            let parent_changeset = parent.finalize();
 
             // Apply child first (it carries all parent ops too).
             db.apply_batch(child_changeset).await.unwrap();

@@ -8,13 +8,11 @@ use crate::{
         contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
+    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher as _, storage::Storage as MerkleStorage},
     metadata::{Config as MConfig, Metadata},
     mmr::{
         self,
-        hasher::Hasher as _,
         iterator::{nodes_to_pin, PeakIterator},
-        mem::MIN_TO_PARALLELIZE,
-        storage::Storage as _,
         Location, Position, StandardHasher,
     },
     qmdb::{
@@ -142,7 +140,7 @@ where
     /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR. For positions at or
     /// above the grafting height, returns grafted MMR node. For positions below the grafting
     /// height, the ops MMR is used.
-    fn grafted_storage(&self) -> impl mmr::storage::Storage<Digest = H::Digest> + '_ {
+    fn grafted_storage(&self) -> impl MerkleStorage<mmr::Family, Digest = H::Digest> + '_ {
         grafting::Storage::new(
             &self.grafted_mmr,
             grafting::height::<N>(),
@@ -212,7 +210,7 @@ where
     /// # Errors
     ///
     /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk.
-    /// Returns [mmr::Error::LocationOverflow] if `start_loc` > [mmr::MAX_LOCATION].
+    /// Returns [mmr::Error::LocationOverflow] if `start_loc` > [crate::merkle::Family::MAX_LEAVES].
     /// Returns [mmr::Error::RangeOutOfBounds] if `start_loc` >= number of leaves in the MMR.
     pub async fn range_proof(
         &self,
@@ -271,7 +269,7 @@ where
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [mmr::Error::LocationOverflow] if `prune_loc` > [mmr::MAX_LOCATION].
+    /// - Returns [mmr::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
     pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         // Persist grafted MMR pruning state before pruning the ops log. If the subsequent
         // `any.prune` fails, the metadata is ahead of the log, which is safe: on recovery,
@@ -312,7 +310,7 @@ where
             metadata.put(key, digest.to_vec());
         }
 
-        metadata.sync().await.map_err(mmr::Error::MetadataError)?;
+        metadata.sync().await.map_err(mmr::Error::Metadata)?;
 
         Ok(())
     }
@@ -455,7 +453,7 @@ pub(super) fn partial_chunk<B: super::batch::BitmapRead<N>, const N: usize>(
 ///
 /// See the [Root structure](super) section in the module documentation.
 pub(super) fn combine_roots<H: Hasher>(
-    hasher: &mut StandardHasher<H>,
+    hasher: &StandardHasher<H>,
     ops_root: &H::Digest,
     grafted_mmr_root: &H::Digest,
     partial: Option<(u64, &H::Digest)>,
@@ -479,11 +477,11 @@ pub(super) fn combine_roots<H: Hasher>(
 /// See the [Root structure](super) section in the module documentation.
 pub(super) async fn compute_db_root<
     H: Hasher,
-    G: mmr::read::Readable<Digest = H::Digest>,
-    S: mmr::storage::Storage<Digest = H::Digest>,
+    G: mmr::Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+    S: MerkleStorage<mmr::Family, Digest = H::Digest>,
     const N: usize,
 >(
-    hasher: &mut StandardHasher<H>,
+    hasher: &StandardHasher<H>,
     storage: &grafting::Storage<'_, H::Digest, G, S>,
     partial_chunk: Option<([u8; N], u64)>,
     ops_root: &H::Digest,
@@ -506,14 +504,14 @@ pub(super) async fn compute_db_root<
 /// `storage` is the grafted storage over the grafted MMR and the ops MMR.
 pub(super) async fn compute_grafted_mmr_root<
     H: Hasher,
-    G: mmr::read::Readable<Digest = H::Digest>,
-    S: mmr::storage::Storage<Digest = H::Digest>,
+    G: mmr::Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>,
+    S: MerkleStorage<mmr::Family, Digest = H::Digest>,
 >(
-    hasher: &mut StandardHasher<H>,
+    hasher: &StandardHasher<H>,
     storage: &grafting::Storage<'_, H::Digest, G, S>,
 ) -> Result<H::Digest, Error> {
     let size = storage.size().await;
-    let leaves = Location::try_from(size).map_err(mmr::Error::from)?;
+    let leaves = Location::try_from(size)?;
 
     // Collect peak digests from the grafted storage, which transparently dispatches
     // to the grafted MMR or the ops MMR based on height.
@@ -536,8 +534,8 @@ pub(super) async fn compute_grafted_mmr_root<
 ///
 /// When a thread pool is provided and there are enough chunks, hashing is parallelized.
 pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
-    hasher: &mut StandardHasher<H>,
-    ops_mmr: &impl mmr::storage::Storage<Digest = H::Digest>,
+    hasher: &StandardHasher<H>,
+    ops_mmr: &impl MerkleStorage<mmr::Family, Digest = H::Digest>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
     pool: Option<&ThreadPool>,
 ) -> Result<Vec<(Position, H::Digest)>, Error> {
@@ -599,10 +597,10 @@ pub(super) async fn compute_grafted_leaves<H: Hasher, const N: usize>(
 /// ops MMR nodes for chunks >= `bitmap.pruned_chunks()` are still accessible in the ops MMR
 /// (i.e., not pruned from the journal).
 pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
-    hasher: &mut StandardHasher<H>,
+    hasher: &StandardHasher<H>,
     bitmap: &BitMap<N>,
     pinned_nodes: &[H::Digest],
-    ops_mmr: &impl mmr::storage::Storage<Digest = H::Digest>,
+    ops_mmr: &impl MerkleStorage<mmr::Family, Digest = H::Digest>,
     pool: Option<&ThreadPool>,
 ) -> Result<mmr::mem::Mmr<H::Digest>, Error> {
     let grafting_height = grafting::height::<N>();
@@ -619,17 +617,17 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
     .await?;
 
     // Build a base Mmr: either from pruned components or empty.
-    let mut grafted_hasher = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
+    let grafted_hasher = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
     let mut grafted_mmr = if pruned_chunks > 0 {
-        let grafted_pruned_to = Location::new(pruned_chunks as u64);
+        let grafted_pruning_boundary = Location::new(pruned_chunks as u64);
         mmr::mem::Mmr::from_components(
-            &mut grafted_hasher,
+            &grafted_hasher,
             Vec::new(),
-            grafted_pruned_to,
+            grafted_pruning_boundary,
             pinned_nodes.to_vec(),
         )?
     } else {
-        mmr::mem::Mmr::new(&mut grafted_hasher)
+        mmr::mem::Mmr::new(&grafted_hasher)
     };
 
     // Add each grafted leaf digest.
@@ -637,9 +635,9 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
         let changeset = {
             let mut batch = grafted_mmr.new_batch().with_pool(pool.cloned());
             for &(_ops_pos, digest) in &leaves {
-                batch.add_leaf_digest(digest);
+                batch = batch.add_leaf_digest(digest);
             }
-            batch.merkleize(&mut grafted_hasher).finalize()
+            batch.merkleize(&grafted_hasher).finalize()
         };
         grafted_mmr.apply(changeset)?;
     }
@@ -684,9 +682,12 @@ pub(super) async fn init_metadata<E: Storage + Clock + Metrics, D: Digest>(
     // to determine how many peaks to read. (Multiplying pruned_chunks by chunk_size is a
     // left-shift, preserving popcount, so the peak count is the same in grafted or ops space.)
     let pinned_nodes = if pruned_chunks > 0 {
-        let mmr_size = Position::try_from(Location::new(pruned_chunks as u64))?;
+        let pruned_loc = Location::new(pruned_chunks as u64);
+        if !pruned_loc.is_valid() {
+            return Err(Error::DataCorrupted("pruned chunks exceeds MAX_LEAVES"));
+        }
         let mut pinned = Vec::new();
-        for (index, pos) in nodes_to_pin(mmr_size).enumerate() {
+        for (index, pos) in nodes_to_pin(pruned_loc).enumerate() {
             let metadata_key = U64::new(NODE_PREFIX, index as u64);
             let Some(bytes) = metadata.get(&metadata_key) else {
                 return Err(mmr::Error::MissingNode(pos).into());
@@ -746,38 +747,38 @@ mod tests {
 
     #[test]
     fn combine_roots_deterministic() {
-        let mut h1 = StandardHasher::<Sha256>::new();
-        let mut h2 = StandardHasher::<Sha256>::new();
+        let h1 = StandardHasher::<Sha256>::new();
+        let h2 = StandardHasher::<Sha256>::new();
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
-        let r1 = combine_roots(&mut h1, &ops, &grafted, None);
-        let r2 = combine_roots(&mut h2, &ops, &grafted, None);
+        let r1 = combine_roots(&h1, &ops, &grafted, None);
+        let r2 = combine_roots(&h2, &ops, &grafted, None);
         assert_eq!(r1, r2);
     }
 
     #[test]
     fn combine_roots_with_partial_differs() {
-        let mut h1 = StandardHasher::<Sha256>::new();
-        let mut h2 = StandardHasher::<Sha256>::new();
+        let h1 = StandardHasher::<Sha256>::new();
+        let h2 = StandardHasher::<Sha256>::new();
         let ops = Sha256::hash(b"ops");
         let grafted = Sha256::hash(b"grafted");
         let partial_digest = Sha256::hash(b"partial");
 
-        let without = combine_roots(&mut h1, &ops, &grafted, None);
-        let with = combine_roots(&mut h2, &ops, &grafted, Some((5, &partial_digest)));
+        let without = combine_roots(&h1, &ops, &grafted, None);
+        let with = combine_roots(&h2, &ops, &grafted, Some((5, &partial_digest)));
         assert_ne!(without, with);
     }
 
     #[test]
     fn combine_roots_different_ops_root() {
-        let mut h1 = StandardHasher::<Sha256>::new();
-        let mut h2 = StandardHasher::<Sha256>::new();
+        let h1 = StandardHasher::<Sha256>::new();
+        let h2 = StandardHasher::<Sha256>::new();
         let ops_a = Sha256::hash(b"ops_a");
         let ops_b = Sha256::hash(b"ops_b");
         let grafted = Sha256::hash(b"grafted");
 
-        let r1 = combine_roots(&mut h1, &ops_a, &grafted, None);
-        let r2 = combine_roots(&mut h2, &ops_b, &grafted, None);
+        let r1 = combine_roots(&h1, &ops_a, &grafted, None);
+        let r2 = combine_roots(&h2, &ops_b, &grafted, None);
         assert_ne!(r1, r2);
     }
 }
