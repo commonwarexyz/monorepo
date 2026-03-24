@@ -23,9 +23,13 @@ impl<T> Relay<T> {
     }
 }
 
+/// Message received from one of the prioritized relay channels.
 pub enum Prioritized<C, D> {
+    /// Control message received from the control channel.
     Control(C),
+    /// Data message received from either the high- or low-priority data channel.
     Data(D),
+    /// One of the relay channels closed before yielding a message.
     Closed,
 }
 
