@@ -4,7 +4,7 @@ use super::{fixed, variable};
 use crate::{
     qmdb::{
         any::{unordered::variable::Operation as VariableOperation, FixedValue, VariableValue},
-        current::BitmapPrunedBits,
+        current::{batch::BitmapRead, BitmapPrunedBits},
     },
     translator::Translator,
     Context,

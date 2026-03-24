@@ -95,7 +95,7 @@ pub mod test {
     use super::*;
     use crate::{
         qmdb::{
-            current::{ordered::tests as shared, tests::fixed_config},
+            current::{batch::BitmapRead, ordered::tests as shared, tests::fixed_config},
             Error,
         },
         translator::OneCap,
@@ -144,12 +144,16 @@ pub mod test {
                 let finalized = db
                     .new_batch()
                     .write(key, Some(value))
-                    .merkleize(None)
+                    .merkleize(None, &db)
                     .await
                     .unwrap()
                     .finalize();
                 db.apply_batch(finalized).await.unwrap();
             }
+
+            // Prune the database
+            let floor = db.any.inactivity_floor_loc;
+            db.prune(floor).await.unwrap();
 
             assert!(
                 db.status.pruned_chunks() > 0,

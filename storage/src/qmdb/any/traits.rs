@@ -23,7 +23,7 @@ impl<T, O> PersistableMutableLog<O> for T where
 }
 
 /// Unmerkleized batch of operations.
-pub trait UnmerkleizedBatch: Sized {
+pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
     type K;
     type V;
     type Metadata;
@@ -36,6 +36,7 @@ pub trait UnmerkleizedBatch: Sized {
     fn merkleize(
         self,
         metadata: Option<Self::Metadata>,
+        db: &Db,
     ) -> impl Future<Output = Result<Self::Merkleized, Error>>;
 }
 
@@ -56,17 +57,16 @@ pub trait BatchableDb {
     type K;
     type V;
     type Changeset: Send;
-    type Batch<'a>: UnmerkleizedBatch<
+    type Batch: UnmerkleizedBatch<
+        Self,
         K = Self::K,
         V = Self::V,
         Metadata = Self::V,
         Merkleized: MerkleizedBatch<Changeset = Self::Changeset>,
-    >
-    where
-        Self: 'a;
+    >;
 
     /// Create a new speculative batch of operations with this database as its parent.
-    fn new_batch(&self) -> Self::Batch<'_>;
+    fn new_batch(&self) -> Self::Batch;
 
     /// Apply a changeset.
     fn apply_batch(

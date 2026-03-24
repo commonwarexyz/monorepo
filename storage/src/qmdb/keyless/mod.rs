@@ -58,10 +58,7 @@ use crate::{
             Contiguous, Reader,
         },
     },
-    mmr::{
-        journaled::{Config as MmrConfig, Mmr},
-        Location, Proof,
-    },
+    mmr::{journaled::Config as MmrConfig, Location, Proof},
     qmdb::{any::VariableValue, operation::Committable, Error},
     Context,
 };
@@ -236,17 +233,9 @@ impl<E: Context, V: VariableValue, H: Hasher> Keyless<E, V, H> {
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
-    #[allow(clippy::type_complexity)]
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<'_, E, V, H, Mmr<E, H::Digest>> {
+    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<H, V> {
         let journal_size = *self.last_commit_loc + 1;
-        batch::UnmerkleizedBatch {
-            keyless: self,
-            journal_batch: self.journal.new_batch(),
-            appends: Vec::new(),
-            base_operations: Vec::new(),
-            base_size: journal_size,
-            db_size: journal_size,
-        }
+        batch::UnmerkleizedBatch::new(self, journal_size)
     }
 
     /// Apply a changeset to the database.
@@ -1157,7 +1146,7 @@ mod test {
             let batch = db.new_batch();
             for (i, loc) in base_locs.iter().enumerate() {
                 assert_eq!(
-                    batch.get(*loc).await.unwrap(),
+                    batch.get(*loc, &db).await.unwrap(),
                     Some(base_vals[i].clone()),
                     "base DB value at loc {loc} mismatch"
                 );
@@ -1167,11 +1156,11 @@ mod test {
             let new_val = vec![99u8; 16];
             let new_loc = batch.size();
             let batch = batch.append(new_val.clone());
-            assert_eq!(batch.get(new_loc).await.unwrap(), Some(new_val));
+            assert_eq!(batch.get(new_loc, &db).await.unwrap(), Some(new_val));
 
             // Location past the end returns None.
             let beyond = Location::new(*new_loc + 1);
-            assert_eq!(batch.get(beyond).await.unwrap(), None);
+            assert_eq!(batch.get(beyond, &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1194,17 +1183,17 @@ mod test {
             let parent_m = parent.merkleize(None);
 
             // Child reads v1 from parent chain.
-            let child = parent_m.new_batch();
-            assert_eq!(child.get(loc1).await.unwrap(), Some(v1));
+            let child = parent_m.new_batch::<Sha256>();
+            assert_eq!(child.get(loc1, &db).await.unwrap(), Some(v1));
 
             // Child appends v2.
             let loc2 = child.size();
             let child = child.append(v2.clone());
-            assert_eq!(child.get(loc2).await.unwrap(), Some(v2));
+            assert_eq!(child.get(loc2, &db).await.unwrap(), Some(v2));
 
             // Nonexistent location.
             let nonexistent = Location::new(9999);
-            assert_eq!(child.get(nonexistent).await.unwrap(), None);
+            assert_eq!(child.get(nonexistent, &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1298,18 +1287,18 @@ mod test {
 
             // Read base DB value through merkleized batch.
             assert_eq!(
-                merkleized.get(Location::new(1)).await.unwrap(),
+                merkleized.get(Location::new(1), &db).await.unwrap(),
                 Some(base_val),
             );
 
             // Read this batch's append from the operation chain.
             assert_eq!(
-                merkleized.get(Location::new(3)).await.unwrap(),
+                merkleized.get(Location::new(3), &db).await.unwrap(),
                 Some(new_val),
             );
 
             // Commit op returns None (no metadata).
-            assert_eq!(merkleized.get(Location::new(4)).await.unwrap(), None);
+            assert_eq!(merkleized.get(Location::new(4), &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1338,7 +1327,7 @@ mod test {
             let parent_root = parent_m.root();
 
             // Child batch built on top of parent.
-            let child = parent_m.new_batch();
+            let child = parent_m.new_batch::<Sha256>();
             let loc2 = child.size();
             let child = child.append(v2.clone());
             let loc3 = child.size();
@@ -1515,7 +1504,7 @@ mod test {
 
             // Child batch appends v2.
             let v2 = vec![2u8; 16];
-            let child = parent_m.new_batch();
+            let child = parent_m.new_batch::<Sha256>();
             let loc2 = child.size();
             let child = child.append(v2.clone());
             let child_m = child.merkleize(None);
@@ -1523,19 +1512,19 @@ mod test {
             // Child's MerkleizedBatch can read all three layers:
             // base DB value
             assert_eq!(
-                child_m.get(base_loc).await.unwrap(),
+                child_m.get(base_loc, &db).await.unwrap(),
                 Some(base_val),
                 "should read base DB value"
             );
             // parent chain value
             assert_eq!(
-                child_m.get(loc1).await.unwrap(),
+                child_m.get(loc1, &db).await.unwrap(),
                 Some(v1),
                 "should read parent chain value"
             );
             // child's own value
             assert_eq!(
-                child_m.get(loc2).await.unwrap(),
+                child_m.get(loc2, &db).await.unwrap(),
                 Some(v2),
                 "should read child's own value"
             );
@@ -1635,12 +1624,12 @@ mod test {
 
             // Fork two children from the same parent.
             let child_a = parent
-                .new_batch()
+                .new_batch::<Sha256>()
                 .append(vec![2])
                 .merkleize(None)
                 .finalize();
             let child_b = parent
-                .new_batch()
+                .new_batch::<Sha256>()
                 .append(vec![3])
                 .merkleize(None)
                 .finalize();
@@ -1670,7 +1659,7 @@ mod test {
 
             // Child batch.
             let child_changeset = parent
-                .new_batch()
+                .new_batch::<Sha256>()
                 .append(vec![2])
                 .merkleize(None)
                 .finalize();
@@ -1691,6 +1680,42 @@ mod test {
         });
     }
 
+    /// Apply parent via finalize(), then child via finalize_from(). Both values present.
+    #[test_traced]
+    fn test_keyless_finalize_from() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Parent batch.
+            let parent = db.new_batch();
+            let parent_loc = parent.size();
+            let parent = parent.append(vec![1]);
+            let parent_m = parent.merkleize(None);
+
+            // Child batch built on parent.
+            let child = parent_m.new_batch::<Sha256>();
+            let child_loc = child.size();
+            let child = child.append(vec![2]);
+            let child_m = child.merkleize(None);
+
+            // Apply parent first.
+            db.apply_batch(parent_m.finalize()).await.unwrap();
+            let current_db_size = *db.last_commit_loc() + 1;
+
+            // Apply child via finalize_from (rebased onto committed parent).
+            db.apply_batch(child_m.finalize_from(current_db_size))
+                .await
+                .unwrap();
+
+            // Both values present.
+            assert_eq!(db.get(parent_loc).await.unwrap(), Some(vec![1]));
+            assert_eq!(db.get(child_loc).await.unwrap(), Some(vec![2]));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced]
     fn test_stale_changeset_child_applied_before_parent() {
         let executor = deterministic::Runner::default();
@@ -1703,7 +1728,7 @@ mod test {
             // Child batch. Finalize both before applying either so the
             // borrow on `db` through `parent` is released.
             let child_changeset = parent
-                .new_batch()
+                .new_batch::<Sha256>()
                 .append(vec![2])
                 .merkleize(None)
                 .finalize();
@@ -1718,6 +1743,40 @@ mod test {
                 matches!(result, Err(Error::StaleChangeset { .. })),
                 "expected StaleChangeset error, got {result:?}"
             );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// to_batch() creates an owned snapshot whose root matches the committed DB.
+    /// A child batch chained from it can be applied.
+    #[test_traced]
+    fn test_keyless_to_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Populate.
+            let batch = db.new_batch();
+            let loc1 = batch.size();
+            let batch = batch.append(vec![10]);
+            db.apply_batch(batch.merkleize(None).finalize())
+                .await
+                .unwrap();
+
+            // to_batch root matches committed root.
+            let snapshot = db.to_batch();
+            assert_eq!(snapshot.root(), db.root());
+
+            // Chain a child from the snapshot, apply it.
+            let child_batch = snapshot.new_batch::<Sha256>();
+            let loc2 = child_batch.size();
+            let child_batch = child_batch.append(vec![20]);
+            let child = child_batch.merkleize(None);
+            db.apply_batch(child.finalize()).await.unwrap();
+
+            assert_eq!(db.get(loc1).await.unwrap(), Some(vec![10]));
+            assert_eq!(db.get(loc2).await.unwrap(), Some(vec![20]));
 
             db.destroy().await.unwrap();
         });

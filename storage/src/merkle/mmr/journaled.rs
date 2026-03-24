@@ -12,10 +12,10 @@ use crate::{
         },
         Error as JError,
     },
-    merkle::{batch::ChainInfo, hasher::Hasher, storage::Storage},
+    merkle::{hasher::Hasher, storage::Storage},
     metadata::{Config as MConfig, Metadata},
     mmr::{
-        batch::{self, UnmerkleizedBatch},
+        batch::{self, MerkleizedBatch},
         iterator::{nodes_to_pin, PeakIterator},
         mem::{Config as MemConfig, Mmr as MemMmr},
         verification, Error, Family, Location, Position, Proof, Readable,
@@ -34,19 +34,61 @@ use core::ops::Range;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
 };
 use tracing::{debug, error, warn};
 
+/// Append-only wrapper around [`batch::UnmerkleizedBatch`].
+///
+/// The journaled MMR's [`Mmr::sync`] only persists *appended* nodes (positions
+/// in `[journal_size, state.size())`).  Overwrites to existing positions are
+/// stored in the in-memory layer but never flushed, so they would be silently
+/// lost on crash recovery. This wrapper prevents that by exposing only append
+/// and merkleize operations, hiding `update_leaf*` at compile time.
+pub struct UnmerkleizedBatch<D: Digest>(batch::UnmerkleizedBatch<D>);
+
+impl<D: Digest> UnmerkleizedBatch<D> {
+    /// Hash `element` and add it as a leaf.
+    pub fn add(self, hasher: &impl Hasher<Family, Digest = D>, element: &[u8]) -> Self {
+        Self(self.0.add(hasher, element))
+    }
+
+    /// Add a pre-computed leaf digest.
+    pub fn add_leaf_digest(self, digest: D) -> Self {
+        Self(self.0.add_leaf_digest(digest))
+    }
+
+    /// The number of leaves visible through this batch.
+    pub fn leaves(&self) -> Location {
+        self.0.leaves()
+    }
+
+    /// Set a thread pool for parallel merkleization.
+    #[cfg(feature = "std")]
+    pub fn with_pool(self, pool: Option<ThreadPool>) -> Self {
+        Self(self.0.with_pool(pool))
+    }
+
+    /// Consume this batch and produce an immutable [`MerkleizedBatch`] with computed root.
+    pub fn merkleize(self, hasher: &impl Hasher<Family, Digest = D>) -> MerkleizedBatch<D> {
+        self.0.merkleize(hasher)
+    }
+}
+
 /// Fields of [Mmr] that are protected by an [RwLock] for interior mutability.
 struct Inner<D: Digest> {
-    /// A memory resident MMR used to build the MMR structure and cache updates. It caches all
-    /// un-synced nodes, and the pinned node set as derived from both its own pruning boundary and
-    /// the journaled MMR's pruning boundary.
-    mem_mmr: MemMmr<D>,
+    /// In-memory MMR state. Caches un-synced nodes and the pinned node set.
+    state: MerkleizedBatch<D>,
 
     /// The highest position for which this MMR has been pruned, or 0 if this MMR has never been
     /// pruned.
     pruning_boundary: Position,
+}
+
+impl<D: Digest> Inner<D> {
+    fn leaves(&self) -> Location {
+        Location::try_from(self.state.size()).expect("valid size")
+    }
 }
 
 /// Configuration for a journal-backed MMR.
@@ -123,12 +165,12 @@ impl<E: Context, D: Digest> Mmr<E, D> {
     /// Return the total number of nodes in the MMR, irrespective of any pruning. The next added
     /// element's position will have this value.
     pub fn size(&self) -> Position {
-        self.inner.read().mem_mmr.size()
+        self.inner.read().state.size()
     }
 
     /// Return the total number of leaves in the MMR.
     pub fn leaves(&self) -> Location {
-        self.inner.read().mem_mmr.leaves()
+        self.inner.read().leaves()
     }
 
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
@@ -172,8 +214,7 @@ impl<E: Context, D: Digest> Mmr<E, D> {
     /// count.
     pub fn bounds(&self) -> std::ops::Range<Location> {
         let inner = self.inner.read();
-        Location::try_from(inner.pruning_boundary).expect("valid pruning_boundary")
-            ..inner.mem_mmr.leaves()
+        Location::try_from(inner.pruning_boundary).expect("valid pruning_boundary")..inner.leaves()
     }
 
     /// Adds the pinned nodes based on `prune_loc` to `mem_mmr`.
@@ -227,7 +268,7 @@ impl<E: Context, D: Digest> Mmr<E, D> {
             )?;
             return Ok(Self {
                 inner: RwLock::new(Inner {
-                    mem_mmr,
+                    state: MerkleizedBatch::Base(mem_mmr),
                     pruning_boundary: Position::new(0),
                 }),
                 journal,
@@ -362,7 +403,7 @@ impl<E: Context, D: Digest> Mmr<E, D> {
 
         Ok(Self {
             inner: RwLock::new(Inner {
-                mem_mmr,
+                state: MerkleizedBatch::Base(mem_mmr),
                 pruning_boundary: effective_prune_pos,
             }),
             journal,
@@ -489,7 +530,7 @@ impl<E: Context, D: Digest> Mmr<E, D> {
 
         Ok(Self {
             inner: RwLock::new(Inner {
-                mem_mmr,
+                state: MerkleizedBatch::Base(mem_mmr),
                 pruning_boundary: prune_pos,
             }),
             journal,
@@ -530,7 +571,7 @@ impl<E: Context, D: Digest> Mmr<E, D> {
     pub async fn get_node(&self, position: Position) -> Result<Option<D>, Error> {
         {
             let inner = self.inner.read();
-            if let Some(node) = inner.mem_mmr.get_node(position) {
+            if let Some(node) = inner.state.get_node(position) {
                 return Ok(Some(node));
             }
         }
@@ -548,12 +589,11 @@ impl<E: Context, D: Digest> Mmr<E, D> {
 
         let journal_size = Position::new(self.journal.size().await);
 
-        // Snapshot nodes in the mem_mmr that are missing from the journal, along with the pinned
-        // node set for the current pruning boundary.
-        let (sync_target_leaves, missing_nodes, pinned_nodes) = {
+        // Nodes in the state that are missing from the journal, along with the pinned
+        // node set for the journaled pruning boundary.
+        let (sync_target_size, missing_nodes, mut pinned_nodes) = {
             let inner = self.inner.read();
-            let size = inner.mem_mmr.size();
-            let sync_target_leaves = inner.mem_mmr.leaves();
+            let size = inner.state.size();
 
             assert!(
                 journal_size <= size,
@@ -565,24 +605,27 @@ impl<E: Context, D: Digest> Mmr<E, D> {
 
             let mut missing_nodes = Vec::with_capacity((*size - *journal_size) as usize);
             for pos in *journal_size..*size {
-                let node = *inner.mem_mmr.get_node_unchecked(Position::new(pos));
+                let node = inner
+                    .state
+                    .get_node(Position::new(pos))
+                    .expect("node in state");
                 missing_nodes.push(node);
             }
 
-            // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared
-            // by pruning the mem_mmr.
+            // Recompute pinned nodes for the journal's pruning boundary, since we'll
+            // rebuild the state after flushing.
+            let mut pinned_nodes = BTreeMap::new();
             let pruning_boundary_loc =
                 Location::try_from(inner.pruning_boundary).expect("valid pruning_boundary");
-            let mut pinned_nodes = BTreeMap::new();
             for pos in nodes_to_pin(pruning_boundary_loc) {
-                let digest = inner.mem_mmr.get_node_unchecked(pos);
-                pinned_nodes.insert(pos, *digest);
+                let digest = inner.state.get_node(pos).expect("pinned node in state");
+                pinned_nodes.insert(pos, digest);
             }
 
-            (sync_target_leaves, missing_nodes, pinned_nodes)
+            (size, missing_nodes, pinned_nodes)
         };
 
-        // Append missing nodes to the journal without holding the mem_mmr read lock.
+        // Append missing nodes to the journal without holding the state read lock.
         for node in missing_nodes {
             self.journal.append(&node).await?;
         }
@@ -590,16 +633,30 @@ impl<E: Context, D: Digest> Mmr<E, D> {
         // Sync the journal while still holding the sync_lock to ensure durability before returning.
         self.journal.sync().await?;
 
-        // Now that the missing nodes are in the journal, it's safe to prune them from the
-        // mem_mmr. We prune to the previously captured leaf count to avoid a race with concurrent
-        // appends between the read lock above and this write lock.
+        // Collapse the (potentially layered) state into a flat Base.
+        //
+        // After flushing, all nodes [0, sync_target_size) are on disk. Rebuild
+        // the in-memory state as a minimal MemMmr with only pinned peaks (matching
+        // the old prune-after-sync behavior). Pin peaks for BOTH the sync target
+        // (needed by batch chains to compute roots) and the journal prune
+        // boundary (needed for proof generation at the prune frontier).
         {
             let mut inner = self.inner.write();
-            inner
-                .mem_mmr
-                .prune(sync_target_leaves)
-                .expect("captured leaves is in bounds");
-            inner.mem_mmr.add_pinned_nodes(pinned_nodes);
+            let root = inner.state.root();
+
+            // Add peaks at the sync target position (needed for batch merkleize).
+            let sync_target_loc = Location::try_from(sync_target_size).expect("valid size");
+            for pos in nodes_to_pin(sync_target_loc) {
+                pinned_nodes.entry(pos).or_insert_with(|| {
+                    inner
+                        .state
+                        .get_node(pos)
+                        .expect("sync-target peak in state")
+                });
+            }
+
+            inner.state =
+                MerkleizedBatch::Base(MemMmr::from_pruned(root, sync_target_size, pinned_nodes));
         }
 
         Ok(())
@@ -616,7 +673,7 @@ impl<E: Context, D: Digest> Mmr<E, D> {
         let pos = Position::try_from(loc)?;
         {
             let inner = self.inner.get_mut();
-            if loc > inner.mem_mmr.leaves() {
+            if loc > inner.leaves() {
                 return Err(Error::LeafOutOfBounds(loc));
             }
             if pos <= inner.pruning_boundary {
@@ -624,7 +681,7 @@ impl<E: Context, D: Digest> Mmr<E, D> {
             }
         }
 
-        // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
+        // Flush items cached in the state to disk to ensure the current state is recoverable.
         self.sync().await?;
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
@@ -633,15 +690,19 @@ impl<E: Context, D: Digest> Mmr<E, D> {
 
         self.journal.prune(*pos).await?;
         let inner = self.inner.get_mut();
-        inner.mem_mmr.add_pinned_nodes(pinned_nodes);
+        let MerkleizedBatch::Base(mmr) = &mut inner.state else {
+            unreachable!("state should be Base after sync");
+        };
+        let prune_loc = Location::try_from(pos)?;
+        mmr.prune(prune_loc).expect("prune boundary is in bounds");
+        mmr.add_pinned_nodes(pinned_nodes);
         inner.pruning_boundary = pos;
-
         Ok(())
     }
 
     /// Return the root of the MMR.
     pub fn root(&self) -> D {
-        *self.inner.read().mem_mmr.root()
+        self.inner.read().state.root()
     }
 
     /// Return an inclusion proof for the element at the location `loc` against a historical MMR
@@ -736,8 +797,8 @@ impl<E: Context, D: Digest> Mmr<E, D> {
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
     /// blob.
     pub async fn prune_all(&mut self) -> Result<(), Error> {
-        let leaves = self.inner.get_mut().mem_mmr.leaves();
-        if leaves != 0 {
+        let leaves = self.inner.get_mut().leaves();
+        if *leaves != 0 {
             self.prune(leaves).await?;
         }
         Ok(())
@@ -765,8 +826,11 @@ impl<E: Context, D: Digest> Mmr<E, D> {
         // Write the nodes cached in the memory-resident MMR to the journal, aborting after
         // write_count nodes have been written.
         let mut written_count = 0usize;
-        for i in *journal_size..*inner.mem_mmr.size() {
-            let node = *inner.mem_mmr.get_node_unchecked(Position::new(i));
+        for i in *journal_size..*inner.state.size() {
+            let node = inner
+                .state
+                .get_node(Position::new(i))
+                .expect("node in state");
             self.journal.append(&node).await?;
             written_count += 1;
             if written_count >= write_limit {
@@ -780,15 +844,22 @@ impl<E: Context, D: Digest> Mmr<E, D> {
 
     #[cfg(test)]
     pub fn get_pinned_nodes(&self) -> BTreeMap<Position, D> {
-        self.inner.read().mem_mmr.pinned_nodes()
+        // After sync, state should be Base. Access pinned_nodes from the base MemMmr.
+        match &*self.inner.read() {
+            Inner {
+                state: MerkleizedBatch::Base(mmr),
+                ..
+            } => mmr.pinned_nodes(),
+            _ => panic!("expected Base state for pinned_nodes"),
+        }
     }
 
     #[cfg(test)]
     pub async fn simulate_pruning_failure(mut self, prune_to: Location) -> Result<(), Error> {
         let prune_to_pos = Position::try_from(prune_to)?;
-        assert!(prune_to_pos <= self.inner.get_mut().mem_mmr.size());
+        assert!(prune_to_pos <= self.inner.get_mut().state.size());
 
-        // Flush items cached in the mem_mmr to disk to ensure the current state is recoverable.
+        // Flush items cached in the state to disk to ensure the current state is recoverable.
         self.sync().await?;
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
@@ -806,13 +877,51 @@ impl<E: Context, D: Digest> Mmr<E, D> {
     /// the same parent for speculative execution, but only one may be applied.
     /// Applying a stale changeset returns [`Error::StaleChangeset`].
     pub fn apply(&mut self, changeset: batch::Changeset<D>) -> Result<(), Error> {
-        self.inner.get_mut().mem_mmr.apply(changeset)?;
+        let inner = self.inner.get_mut();
+        if changeset.base_size != inner.state.size() {
+            return Err(Error::StaleChangeset {
+                expected: changeset.base_size,
+                actual: inner.state.size(),
+            });
+        }
+        inner.state.push_changeset(changeset);
         Ok(())
     }
 
-    /// Create a new speculative batch with this MMR as its parent.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, D, Self> {
-        UnmerkleizedBatch::new(self).with_pool(self.pool())
+    /// Create a new append-only speculative batch with this MMR as its parent.
+    ///
+    /// Returns an [`UnmerkleizedBatch`] wrapper that exposes only append and
+    /// merkleize operations. The journaled MMR's `sync()` only persists
+    /// appended nodes; overwriting existing leaves would silently lose data on
+    /// crash recovery. The wrapper enforces this at compile time by hiding
+    /// `update_leaf*` methods.
+    pub fn new_batch(&self) -> UnmerkleizedBatch<D> {
+        let batch = self.to_batch().new_batch();
+        #[cfg(feature = "std")]
+        let batch = batch.with_pool(self.pool());
+        UnmerkleizedBatch(batch)
+    }
+
+    /// Capture the current committed state as a [`MerkleizedBatch`].
+    ///
+    /// Use this as the starting point for batch chains: call `.new_batch()` on the
+    /// returned value to create speculative batches whose changesets are computed
+    /// relative to this point.
+    ///
+    /// When the internal state has `Layer` variants, wraps in `Checkpoint` so that
+    /// `base_size()` equals the current tip. When the state is already `Base`,
+    /// `base_size()` naturally equals the tip, so `Checkpoint` is unnecessary.
+    pub fn to_batch(&self) -> MerkleizedBatch<D> {
+        let inner = self.inner.read();
+        let state = inner.state.clone();
+        if matches!(state, MerkleizedBatch::Base(_)) {
+            return state;
+        }
+        let size = state.size();
+        MerkleizedBatch::Checkpoint {
+            inner: Arc::new(state),
+            size,
+        }
     }
 
     /// Return the thread pool, if any.
@@ -857,6 +966,11 @@ impl<E: Context, D: Digest> Mmr<E, D> {
             return Err(Error::ElementPruned(new_size));
         }
 
+        // Flush un-synced nodes to the journal before rewinding it, otherwise
+        // they would be lost. This also collapses any Layer chain into a flat
+        // Base, which is required because Layer chains cannot be truncated.
+        self.sync().await?;
+
         // Rewind the journal if needed.
         let journal_size = Position::new(self.journal.size().await);
         if new_size < journal_size {
@@ -864,44 +978,37 @@ impl<E: Context, D: Digest> Mmr<E, D> {
             self.journal.sync().await?;
         }
 
-        // Truncate the in-memory MMR to the target size and recompute the root.
-        // If the in-memory MMR has been pruned past the target (e.g. after sync),
-        // rebuild from the journal/metadata instead.
+        // Rebuild the state from journal/metadata at the target size.
         let inner = self.inner.get_mut();
-        if new_size
-            >= Position::try_from(inner.mem_mmr.bounds().start).expect("valid mem bounds start")
-        {
-            inner.mem_mmr.truncate(new_size, hasher);
-        } else {
-            let mut pinned_nodes = Vec::new();
-            for pos in nodes_to_pin(destination_loc) {
-                pinned_nodes.push(
-                    Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?,
-                );
-            }
-            inner.mem_mmr = MemMmr::from_components(hasher, vec![], destination_loc, pinned_nodes)?;
-            let pruning_boundary_loc =
-                Location::try_from(inner.pruning_boundary).expect("valid pruning_boundary");
-            Self::add_extra_pinned_nodes(
-                &mut inner.mem_mmr,
-                &self.metadata,
-                &self.journal,
-                pruning_boundary_loc,
-            )
-            .await?;
+        let mut pinned_nodes = Vec::new();
+        let new_size_loc = Location::try_from(new_size).expect("valid size");
+        for pos in nodes_to_pin(new_size_loc) {
+            pinned_nodes.push(
+                Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?,
+            );
         }
+        inner.state = MerkleizedBatch::Base(MemMmr::from_components(
+            hasher,
+            vec![],
+            destination_loc,
+            pinned_nodes,
+        )?);
+        let MerkleizedBatch::Base(mmr) = &mut inner.state else {
+            unreachable!("state should be Base after assignment");
+        };
+        let pruning_boundary_loc =
+            Location::try_from(inner.pruning_boundary).expect("valid pruning_boundary");
+        Self::add_extra_pinned_nodes(mmr, &self.metadata, &self.journal, pruning_boundary_loc)
+            .await?;
 
         Ok(())
     }
 }
 
-/// The [`Readable`] implementation for the journaled MMR operates only on the in-memory
-/// portion of the MMR. After [`Mmr::sync`], nodes that have been flushed to the journal
-/// are no longer accessible through this interface. In particular, [`Readable::get_node`]
-/// returns `None` for flushed positions, and [`Readable::pruning_boundary`] reflects the
-/// in-memory boundary (which may be tighter than the journal's prune boundary reported by
-/// [`Mmr::bounds`]). This means batch operations like `update_leaf` will correctly reject
-/// leaves that have been synced out of memory with [`Error::ElementPruned`].
+/// The [`Readable`] implementation delegates to the in-memory state. After [`Mmr::sync`],
+/// only pinned peaks remain in memory, so [`Readable::get_node`] returns `None` for most
+/// positions. [`Readable::pruning_boundary`] returns the journal prune boundary (set by
+/// [`Mmr::prune`]), not the in-memory boundary.
 impl<E: Context, D: Digest> Readable for Mmr<E, D> {
     type Family = Family;
     type Digest = D;
@@ -912,15 +1019,15 @@ impl<E: Context, D: Digest> Readable for Mmr<E, D> {
     }
 
     fn get_node(&self, pos: Position) -> Option<D> {
-        self.inner.read().mem_mmr.get_node(pos)
+        self.inner.read().state.get_node(pos)
     }
 
     fn root(&self) -> D {
-        *self.inner.read().mem_mmr.root()
+        self.inner.read().state.root()
     }
 
     fn pruning_boundary(&self) -> Location {
-        self.inner.read().mem_mmr.pruning_boundary()
+        Location::try_from(self.inner.read().pruning_boundary).expect("valid pruning_boundary")
     }
 
     fn proof(
@@ -957,16 +1064,6 @@ impl<E: Context, D: Digest> Readable for Mmr<E, D> {
             Error::ElementPruned,
         )
     }
-}
-
-impl<E: Context, D: Digest> ChainInfo<Family> for Mmr<E, D> {
-    type Digest = D;
-
-    fn base_size(&self) -> Position {
-        self.size()
-    }
-
-    fn collect_overwrites(&self, _into: &mut BTreeMap<Position, D>) {}
 }
 
 impl<E: Context + Sync, D: Digest> Storage<Family> for Mmr<E, D> {
@@ -2473,16 +2570,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            // After sync, mem_mmr should be pruned (data lives in journal).
-            let (mem_start, journal_start) = {
-                let inner = mmr.inner.read();
-                (
-                    inner.mem_mmr.bounds().start,
-                    Location::try_from(inner.pruning_boundary).unwrap(),
-                )
-            };
-            assert!(mem_start > journal_start);
-
             let actual = mmr
                 .historical_range_proof(&hasher, historical_leaves, range)
                 .await
@@ -2828,7 +2915,6 @@ mod tests {
 
             // Flatten and apply.
             let changeset = merkleized_b.finalize();
-            drop(merkleized_a);
             mmr.apply(changeset).unwrap();
             assert_eq!(mmr.root(), expected_root);
 
@@ -3050,7 +3136,9 @@ mod tests {
             mmr.sync().await.unwrap();
 
             // Attempt to update leaf 0 which has been synced out of memory.
-            let batch = mmr.new_batch();
+            // Use the inner batch type directly since the journaled wrapper
+            // intentionally hides update_leaf.
+            let batch = mmr.to_batch().new_batch();
             let result = batch.update_leaf(&hasher, Location::new(0), b"updated");
             assert!(matches!(result, Err(Error::ElementPruned(_))));
 

@@ -3,11 +3,10 @@
 use crate::{
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::{
-        authenticated::{self, BatchChain},
+        authenticated,
         contiguous::{Contiguous, Mutable, Reader},
     },
-    merkle::batch::ChainInfo,
-    mmr::{self, journaled::Mmr, Location, Readable},
+    mmr::Location,
     qmdb::{
         any::{
             db::Db,
@@ -115,26 +114,19 @@ pub(crate) enum SnapshotDiff<K> {
     Delete { key: K, old_loc: Location },
 }
 
-/// A speculative batch of operations whose root digest has not yet been
-/// computed, in contrast to [MerkleizedBatch].
-#[allow(clippy::type_complexity)]
-pub struct UnmerkleizedBatch<'a, E, C, I, H, U, P>
+/// A speculative batch of operations whose root digest has not yet been computed,
+/// in contrast to [`MerkleizedBatch`].
+///
+/// Methods that need the committed DB (e.g. `get`, `merkleize`) accept it as a
+/// parameter, so the batch is lifetime-free and can be stored independently of the DB.
+pub struct UnmerkleizedBatch<H, U>
 where
-    E: Context,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
 {
-    /// The committed DB this batch is built on top of.
-    db: &'a Db<E, C, I, H, U>,
-
     /// Authenticated journal batch for computing the speculative MMR root.
-    journal_batch: authenticated::UnmerkleizedBatch<'a, H, P, Operation<U>>,
+    journal_batch: authenticated::UnmerkleizedBatch<H, Operation<U>>,
 
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
@@ -160,31 +152,19 @@ where
 }
 
 /// A speculative batch of operations whose root digest has been computed,
-/// in contrast to [UnmerkleizedBatch].
-#[allow(clippy::type_complexity)]
-pub struct MerkleizedBatch<'a, E, C, I, H, U, P>
+/// in contrast to [`UnmerkleizedBatch`].
+///
+/// Owned and lifetime-free, so instances can be stored in homogeneous collections (e.g.
+/// `HashMap<Digest, MerkleizedBatch>`) regardless of chain depth.
+pub struct MerkleizedBatch<D: Digest, U: update::Update + Send + Sync>
 where
-    E: Context,
-    U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+    Operation<U>: Send + Sync,
 {
-    /// The committed DB this batch is built on top of.
-    db: &'a Db<E, C, I, H, U>,
-
     /// Merkleized authenticated journal batch (provides the speculative MMR root).
-    pub(crate) journal_batch: authenticated::MerkleizedBatch<'a, H, P, Operation<U>>,
+    pub(crate) journal_batch: authenticated::MerkleizedBatch<D, Operation<U>>,
 
     /// All uncommitted key-level changes in this batch chain.
     pub(crate) diff: Arc<BTreeMap<U::Key, DiffEntry<U::Value>>>,
-
-    /// One Arc segment of operations per batch in the chain (chronological order).
-    pub(crate) base_operations: Vec<Arc<Vec<Operation<U>>>>,
 
     /// Inactivity floor location after this batch's floor raise.
     new_inactivity_floor_loc: Location,
@@ -198,8 +178,8 @@ where
     /// Total active keys after this batch.
     total_active_keys: usize,
 
-    /// The database size when this batch was created, used to detect stale changesets.
-    db_size: u64,
+    /// The database size when the initial batch was created.
+    pub(crate) db_size: u64,
 }
 
 /// An owned changeset that can be applied to the database.
@@ -229,21 +209,13 @@ pub struct Changeset<K, D: Digest, Item: Send> {
 /// mutations from the resolution/merkleization machinery. Helpers that need
 /// access to the base diff, DB snapshot, or operation chain are methods on this
 /// struct, eliminating parameter threading.
-#[allow(clippy::type_complexity)]
-struct Merkleizer<'a, E, C, I, H, U, P>
+struct Merkleizer<H, U>
 where
-    E: Context,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
 {
-    db: &'a Db<E, C, I, H, U>,
-    journal_batch: authenticated::UnmerkleizedBatch<'a, H, P, Operation<U>>,
+    journal_batch: authenticated::UnmerkleizedBatch<H, Operation<U>>,
     base_diff: Arc<BTreeMap<U::Key, DiffEntry<U::Value>>>,
     base_operations: Vec<Arc<Vec<Operation<U>>>>,
     base_size: u64,
@@ -252,17 +224,11 @@ where
     base_active_keys: usize,
 }
 
-impl<'a, E, C, I, H, U, P> Merkleizer<'a, E, C, I, H, U, P>
+impl<H, U> Merkleizer<H, U>
 where
-    E: Context,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
 {
     /// Read an operation at a given location from the correct source.
     ///
@@ -274,11 +240,17 @@ where
     /// ```
     ///
     /// For top-level batches, the parent chain is empty, so db_size == base.
-    async fn read_op(
+    async fn read_op<E, C, I>(
         &self,
         loc: Location,
         current_ops: &[Operation<U>],
-    ) -> Result<Operation<U>, Error> {
+        db: &Db<E, C, I, H, U>,
+    ) -> Result<Operation<U>, Error>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location>,
+    {
         let loc_val = *loc;
 
         if loc_val >= self.base_size {
@@ -296,7 +268,7 @@ where
             unreachable!("location within parent chain range but not found in segments");
         } else {
             // Base DB's journal (on-disk async read).
-            let reader = self.db.log.reader().await;
+            let reader = db.log.reader().await;
             Ok(reader.read(loc_val).await?)
         }
     }
@@ -306,14 +278,20 @@ where
     /// For each mutation key, checks the base diff first (returning the
     /// uncommitted location for Active entries, skipping Deleted entries), then
     /// falls back to the base DB snapshot.
-    fn gather_existing_locations(
+    fn gather_existing_locations<E, C, I>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
-    ) -> Vec<Location> {
+        db: &Db<E, C, I, H, U>,
+    ) -> Vec<Location>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location>,
+    {
         let mut locations = Vec::new();
         if self.base_diff.is_empty() {
             for key in mutations.keys() {
-                locations.extend(self.db.snapshot.get(key).copied());
+                locations.extend(db.snapshot.get(key).copied());
             }
         } else {
             for key in mutations.keys() {
@@ -323,7 +301,7 @@ where
                     }
                     continue;
                 }
-                locations.extend(self.db.snapshot.get(key).copied());
+                locations.extend(db.snapshot.get(key).copied());
             }
         }
         locations.sort();
@@ -332,16 +310,22 @@ where
     }
 
     /// Check if the operation at `loc` for `key` is still active.
-    fn is_active_at(
+    fn is_active_at<E, C, I>(
         &self,
         key: &U::Key,
         loc: Location,
         batch_diff: &BTreeMap<U::Key, DiffEntry<U::Value>>,
-    ) -> bool {
+        db: &Db<E, C, I, H, U>,
+    ) -> bool
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location>,
+    {
         if let Some(entry) = batch_diff.get(key).or_else(|| self.base_diff.get(key)) {
             return entry.loc() == Some(loc);
         }
-        self.db.snapshot.get(key).any(|&l| l == loc)
+        db.snapshot.get(key).any(|&l| l == loc)
     }
 
     /// Extract keys that were deleted by a parent batch but are being
@@ -372,26 +356,32 @@ where
     /// allowing implementations to skip locations known to be inactive without reading them.
     /// Returns `true` if an active op was found and moved, `false` if the floor reached
     /// `fixed_tip`.
-    async fn advance_floor_once<S: FloorScan>(
+    async fn advance_floor_once<E, C, I, S: FloorScan>(
         &self,
         floor: &mut Location,
         fixed_tip: u64,
         ops: &mut Vec<Operation<U>>,
         diff: &mut BTreeMap<U::Key, DiffEntry<U::Value>>,
         scan: &mut S,
-    ) -> Result<bool, Error> {
+        db: &Db<E, C, I, H, U>,
+    ) -> Result<bool, Error>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location>,
+    {
         loop {
             let Some(candidate) = scan.next_candidate(*floor, fixed_tip) else {
                 return Ok(false);
             };
             *floor = Location::new(*candidate + 1);
 
-            let op = self.read_op(candidate, ops).await?;
+            let op = self.read_op(candidate, ops, db).await?;
             let Some(key) = op.key().cloned() else {
                 continue; // skip CommitFloor and other non-keyed ops
             };
 
-            if self.is_active_at(&key, candidate, diff) {
+            if self.is_active_at(&key, candidate, diff, db) {
                 let new_loc = Location::new(self.base_size + ops.len() as u64);
                 let base_old_loc = diff
                     .get(&key)
@@ -414,7 +404,8 @@ where
 
     /// Shared final phases of merkleization: floor raise, CommitFloor, journal
     /// merkleize, diff merge, and `MerkleizedBatch` construction.
-    async fn finish<S: FloorScan>(
+    #[allow(clippy::too_many_arguments)]
+    async fn finish<E, C, I, S: FloorScan>(
         mut self,
         mut ops: Vec<Operation<U>>,
         mut diff: BTreeMap<U::Key, DiffEntry<U::Value>>,
@@ -422,7 +413,13 @@ where
         user_steps: u64,
         metadata: Option<U::Value>,
         mut scan: S,
-    ) -> Result<MerkleizedBatch<'a, E, C, I, H, U, P>, Error> {
+        db: &Db<E, C, I, H, U>,
+    ) -> Result<MerkleizedBatch<H::Digest, U>, Error>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location>,
+    {
         // Floor raise.
         // Steps = user_steps + 1 (+1 for previous commit becoming inactive).
         let total_steps = user_steps + 1;
@@ -436,7 +433,7 @@ where
             let fixed_tip = self.base_size + ops.len() as u64;
             for _ in 0..total_steps {
                 if !self
-                    .advance_floor_once(&mut floor, fixed_tip, &mut ops, &mut diff, &mut scan)
+                    .advance_floor_once(&mut floor, fixed_tip, &mut ops, &mut diff, &mut scan, db)
                     .await?
                 {
                     break;
@@ -461,13 +458,14 @@ where
         for op in &ops {
             journal_batch = journal_batch.add(op.clone());
         }
-        let journal_batch = journal_batch.merkleize();
+        let journal = journal_batch.merkleize();
 
         // Build the operation chain: parent segments + this batch's segment.
         self.base_operations.push(Arc::new(ops));
 
         // Merge with base diff: entries not overridden by this batch.
-        // try_unwrap avoids cloning when no sibling batches share the parent diff.
+        // O(K) deep copy (K = distinct keys in parent diff) when the parent MerkleizedBatch or
+        // any sibling UnmerkleizedBatch still exists. O(1) when all have been dropped.
         let base_diff = Arc::try_unwrap(self.base_diff).unwrap_or_else(|arc| (*arc).clone());
         for (k, v) in base_diff {
             diff.entry(k).or_insert(v);
@@ -475,10 +473,8 @@ where
 
         debug_assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(MerkleizedBatch {
-            db: self.db,
-            journal_batch,
+            journal_batch: journal,
             diff: Arc::new(diff),
-            base_operations: self.base_operations,
             new_inactivity_floor_loc: floor,
             new_last_commit_loc: commit_loc,
             total_size: *commit_loc + 1,
@@ -488,17 +484,11 @@ where
     }
 }
 
-impl<'a, E, C, I, H, U, P> UnmerkleizedBatch<'a, E, C, I, H, U, P>
+impl<H, U> UnmerkleizedBatch<H, U>
 where
-    E: Context,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
 {
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     ///
@@ -511,16 +501,10 @@ where
 
     /// Split into pending mutations and the merkleization machinery.
     #[allow(clippy::type_complexity)]
-    fn into_parts(
-        self,
-    ) -> (
-        BTreeMap<U::Key, Option<U::Value>>,
-        Merkleizer<'a, E, C, I, H, U, P>,
-    ) {
+    fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<H, U>) {
         (
             self.mutations,
             Merkleizer {
-                db: self.db,
                 journal_batch: self.journal_batch,
                 base_diff: self.base_diff,
                 base_operations: self.base_operations,
@@ -534,65 +518,74 @@ where
 }
 
 // Generic get() for both ordered and unordered UnmerkleizedBatch.
-impl<'a, E, C, I, H, U, P> UnmerkleizedBatch<'a, E, C, I, H, U, P>
+impl<H, U> UnmerkleizedBatch<H, U>
 where
-    E: Context,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
 {
     /// Read through: mutations -> base diff -> committed DB.
-    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error> {
+    pub async fn get<E, C, I>(
+        &self,
+        key: &U::Key,
+        db: &Db<E, C, I, H, U>,
+    ) -> Result<Option<U::Value>, Error>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location> + 'static,
+    {
         if let Some(value) = self.mutations.get(key) {
             return Ok(value.clone());
         }
         if let Some(entry) = self.base_diff.get(key) {
             return Ok(entry.value().cloned());
         }
-        self.db.get(key).await
+        db.get(key).await
     }
 }
 
 // Unordered-specific methods.
-impl<'a, E, K, V, C, I, H, P> UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P>
+impl<K, V, H> UnmerkleizedBatch<H, update::Unordered<K, V>>
 where
-    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<update::Unordered<K, V>>>,
-    I: UnorderedIndex<Value = Location>,
     H: Hasher,
     Operation<update::Unordered<K, V>>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<update::Unordered<K, V>>>,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
-    pub async fn merkleize(
+    pub async fn merkleize<E, C, I>(
         self,
         metadata: Option<V::Value>,
-    ) -> Result<MerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P>, Error> {
-        self.merkleize_with_floor_scan(metadata, SequentialScan)
+        db: &Db<E, C, I, H, update::Unordered<K, V>>,
+    ) -> Result<MerkleizedBatch<H::Digest, update::Unordered<K, V>>, Error>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location>,
+    {
+        self.merkleize_with_floor_scan(metadata, SequentialScan, db)
             .await
     }
 
     /// Like [`merkleize`](Self::merkleize) but accepts a custom [`FloorScan`]
     /// to accelerate floor raising.
-    pub(crate) async fn merkleize_with_floor_scan<S: FloorScan>(
+    pub(crate) async fn merkleize_with_floor_scan<E, C, I, S: FloorScan>(
         self,
         metadata: Option<V::Value>,
         scan: S,
-    ) -> Result<MerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P>, Error> {
+        db: &Db<E, C, I, H, update::Unordered<K, V>>,
+    ) -> Result<MerkleizedBatch<H::Digest, update::Unordered<K, V>>, Error>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location>,
+    {
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O, parallelized).
-        let locations = m.gather_existing_locations(&mutations);
-        let futures = locations.iter().map(|&loc| m.read_op(loc, &[]));
+        let locations = m.gather_existing_locations(&mutations, db);
+        let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
         let results = try_join_all(futures).await?;
 
         // Generate user mutation operations.
@@ -675,48 +668,54 @@ where
         }
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan)
+        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan, db)
             .await
     }
 }
 
 // Ordered-specific methods.
-impl<'a, E, K, V, C, I, H, P> UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P>
+impl<K, V, H> UnmerkleizedBatch<H, update::Ordered<K, V>>
 where
-    E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<update::Ordered<K, V>>>,
-    I: OrderedIndex<Value = Location>,
     H: Hasher,
     Operation<update::Ordered<K, V>>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<update::Ordered<K, V>>>,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
-    pub async fn merkleize(
+    pub async fn merkleize<E, C, I>(
         self,
         metadata: Option<V::Value>,
-    ) -> Result<MerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P>, Error> {
-        self.merkleize_with_floor_scan(metadata, SequentialScan)
+        db: &Db<E, C, I, H, update::Ordered<K, V>>,
+    ) -> Result<MerkleizedBatch<H::Digest, update::Ordered<K, V>>, Error>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location>,
+    {
+        self.merkleize_with_floor_scan(metadata, SequentialScan, db)
             .await
     }
 
     /// Like [`merkleize`](Self::merkleize) but accepts a custom [`FloorScan`]
     /// to accelerate floor raising.
-    pub(crate) async fn merkleize_with_floor_scan<S: FloorScan>(
+    pub(crate) async fn merkleize_with_floor_scan<E, C, I, S: FloorScan>(
         self,
         metadata: Option<V::Value>,
         scan: S,
-    ) -> Result<MerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P>, Error> {
+        db: &Db<E, C, I, H, update::Ordered<K, V>>,
+    ) -> Result<MerkleizedBatch<H::Digest, update::Ordered<K, V>>, Error>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location>,
+    {
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O).
-        let locations = m.gather_existing_locations(&mutations);
+        let locations = m.gather_existing_locations(&mutations, db);
 
         // Read and unwrap Update operations (snapshot only references Updates).
-        let futures = locations.iter().map(|&loc| m.read_op(loc, &[]));
+        let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
         let update_results: Vec<_> = try_join_all(futures)
             .await?
             .into_iter()
@@ -779,7 +778,7 @@ where
         // Look up prev_translated_key for created/deleted keys.
         let mut prev_locations = Vec::new();
         for key in deleted.keys().chain(created.keys()) {
-            let Some((iter, _)) = m.db.snapshot.prev_translated_key(key) else {
+            let Some((iter, _)) = db.snapshot.prev_translated_key(key) else {
                 continue;
             };
             prev_locations.extend(iter.copied());
@@ -788,7 +787,7 @@ where
         prev_locations.dedup();
 
         let prev_results = {
-            let reader = m.db.log.reader().await;
+            let reader = db.log.reader().await;
             let futures = prev_locations.iter().map(|loc| reader.read(**loc));
             try_join_all(futures).await?
         };
@@ -811,7 +810,7 @@ where
                 continue;
             }
             if let DiffEntry::Active { value, loc, .. } = entry {
-                let op: Operation<update::Ordered<K, V>> = m.read_op(*loc, &[]).await?;
+                let op: Operation<update::Ordered<K, V>> = m.read_op(*loc, &[], db).await?;
                 let data = match op {
                     Operation::Update(data) => data,
                     _ => unreachable!("base diff Active should reference Update op"),
@@ -940,84 +939,67 @@ where
         }
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan)
+        m.finish(ops, diff, active_keys_delta, user_steps, metadata, scan, db)
             .await
     }
 }
 
-// Generic get() for both ordered and unordered MerkleizedBatch.
-impl<'a, E, C, I, H, U, P> MerkleizedBatch<'a, E, C, I, H, U, P>
+impl<D: Digest, U: update::Update + Send + Sync> MerkleizedBatch<D, U>
 where
-    E: Context,
-    U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location> + 'static,
-    H: Hasher,
-    Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
+    Operation<U>: Send + Sync,
 {
-    /// Read through: diff -> committed DB.
-    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error> {
-        if let Some(entry) = self.diff.get(key) {
-            return Ok(entry.value().cloned());
-        }
-        self.db.get(key).await
+    /// Return the speculative root.
+    pub fn root(&self) -> D {
+        self.journal_batch.root()
     }
 }
 
-impl<'a, E, C, I, H, U, P> MerkleizedBatch<'a, E, C, I, H, U, P>
+impl<D: Digest, U: update::Update + Send + Sync> MerkleizedBatch<D, U>
 where
-    E: Context,
-    U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
     Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
 {
-    /// Return the speculative root.
-    pub fn root(&self) -> H::Digest {
-        self.journal_batch.root()
-    }
-
     /// Create a new speculative batch of operations with this batch as its parent.
-    #[allow(clippy::type_complexity)]
-    pub fn new_batch(
-        &self,
-    ) -> UnmerkleizedBatch<'_, E, C, I, H, U, authenticated::MerkleizedBatch<'a, H, P, Operation<U>>>
+    pub fn new_batch<H>(&self) -> UnmerkleizedBatch<H, U>
+    where
+        H: Hasher<Digest = D>,
     {
         UnmerkleizedBatch {
-            db: self.db,
-            journal_batch: self.journal_batch.new_batch(),
+            journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::clone(&self.diff),
-            base_operations: self.base_operations.clone(),
+            base_operations: self.journal_batch.items.clone(),
             base_size: self.total_size,
             db_size: self.db_size,
             base_inactivity_floor_loc: self.new_inactivity_floor_loc,
             base_active_keys: self.total_active_keys,
         }
     }
-}
 
-impl<'a, E, C, I, H, U, P> MerkleizedBatch<'a, E, C, I, H, U, P>
-where
-    E: Context,
-    U: update::Update + Send + Sync + 'static,
-    C: Mutable<Item = Operation<U>>,
-    I: UnorderedIndex<Value = Location>,
-    H: Hasher,
-    Operation<U>: Codec,
-    P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-        + ChainInfo<mmr::Family, Digest = H::Digest>
-        + BatchChain<Operation<U>>,
-{
+    /// Read through: diff -> committed DB.
+    pub async fn get<E, C, I, H>(
+        &self,
+        key: &U::Key,
+        db: &Db<E, C, I, H, U>,
+    ) -> Result<Option<U::Value>, Error>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location> + 'static,
+        H: Hasher<Digest = D>,
+    {
+        if let Some(entry) = self.diff.get(key) {
+            return Ok(entry.value().cloned());
+        }
+        db.get(key).await
+    }
+
     /// Consume this batch, producing an owned [`Changeset`].
-    pub fn finalize(self) -> Changeset<U::Key, H::Digest, Operation<U>> {
+    pub fn finalize(self) -> Changeset<U::Key, D, Operation<U>>
+    where
+        U: 'static,
+    {
+        // O(K) deep copy (K = distinct keys in diff) when a child UnmerkleizedBatch or
+        // MerkleizedBatch still exists. O(1) when all children have been dropped.
         let diff = Arc::try_unwrap(self.diff).unwrap_or_else(|arc| (*arc).clone());
         let snapshot_diffs: Vec<_> = diff
             .into_iter()
@@ -1069,6 +1051,118 @@ where
             db_size: self.db_size,
         }
     }
+
+    /// Like [`Self::finalize`], but produces a [`Changeset`] relative to `current_db_size`
+    /// instead of the original DB size when this batch chain was created.
+    ///
+    /// Use this when an ancestor batch in the chain has already been committed, advancing
+    /// the DB's operation count past the original fork point. For example, given a chain
+    /// `db -> A -> B`, after committing A: call `B.finalize_from(db.bounds().await.end)`
+    /// to produce a changeset containing only B's operations and snapshot diffs, with
+    /// `old_loc` values adjusted to reflect the current committed DB state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `current_db_size` is less than the DB size when this batch was created.
+    pub fn finalize_from(self, current_db_size: u64) -> Changeset<U::Key, D, Operation<U>>
+    where
+        U: 'static,
+    {
+        assert!(
+            current_db_size >= self.db_size,
+            "current_db_size ({current_db_size}) < batch db_size ({})",
+            self.db_size
+        );
+        let items_to_skip = current_db_size - self.db_size;
+
+        // Scan committed ancestor operations to learn each key's current
+        // committed location. `Some(loc)` = active at loc; `None` = deleted.
+        let committed_actions = {
+            let mut map: BTreeMap<U::Key, Option<Location>> = BTreeMap::new();
+            let mut remaining = items_to_skip as usize;
+            let mut offset = self.db_size;
+            for seg in &self.journal_batch.items {
+                let take = remaining.min(seg.len());
+                for op in &seg[..take] {
+                    let loc = Location::new(offset);
+                    if let Some(key) = OperationTrait::key(op) {
+                        if op.is_update() {
+                            map.insert(key.clone(), Some(loc));
+                        } else if op.is_delete() {
+                            map.insert(key.clone(), None);
+                        }
+                    }
+                    offset += 1;
+                }
+                remaining -= take;
+                if remaining == 0 {
+                    break;
+                }
+            }
+            map
+        };
+
+        // O(K) deep copy (K = distinct keys in diff) when a child UnmerkleizedBatch or
+        // MerkleizedBatch still exists. O(1) when all children have been dropped.
+        let diff = Arc::try_unwrap(self.diff).unwrap_or_else(|arc| (*arc).clone());
+        let snapshot_diffs: Vec<_> = diff
+            .into_iter()
+            .filter_map(|(key, entry)| {
+                // Determine the key's current location in the committed DB.
+                // Priority: committed ancestor action > original base location.
+                let resolve_old_loc = |base_old_loc: Option<Location>| -> Option<Location> {
+                    match committed_actions.get(&key) {
+                        Some(Some(loc)) => Some(*loc), // ancestor set it here
+                        Some(None) => None,            // ancestor deleted it
+                        None => base_old_loc,          // ancestor didn't touch it
+                    }
+                };
+
+                match entry {
+                    // Skip entries committed by ancestors.
+                    DiffEntry::Active { loc, .. } if *loc < current_db_size => None,
+                    DiffEntry::Active {
+                        loc, base_old_loc, ..
+                    } => {
+                        let old = resolve_old_loc(base_old_loc);
+                        if let Some(old_loc) = old {
+                            Some(SnapshotDiff::Update {
+                                key,
+                                old_loc,
+                                new_loc: loc,
+                            })
+                        } else {
+                            Some(SnapshotDiff::Insert { key, new_loc: loc })
+                        }
+                    }
+                    DiffEntry::Deleted { base_old_loc } => {
+                        let old = resolve_old_loc(base_old_loc);
+                        old.map(|old_loc| SnapshotDiff::Delete { key, old_loc })
+                    }
+                }
+            })
+            .collect();
+
+        let active_keys_delta = snapshot_diffs
+            .iter()
+            .map(|d| match d {
+                SnapshotDiff::Insert { .. } => 1isize,
+                SnapshotDiff::Delete { .. } => -1,
+                SnapshotDiff::Update { .. } => 0,
+            })
+            .sum::<isize>();
+
+        let mmr_base = crate::mmr::Position::try_from(Location::new(current_db_size))
+            .expect("valid leaf count");
+        Changeset {
+            journal_finalized: self.journal_batch.finalize_from(mmr_base, items_to_skip),
+            snapshot_diffs,
+            active_keys_delta,
+            new_inactivity_floor_loc: self.new_inactivity_floor_loc,
+            new_last_commit_loc: self.new_last_commit_loc,
+            db_size: current_db_size,
+        }
+    }
 }
 
 impl<E, C, I, H, U> Db<E, C, I, H, U>
@@ -1081,13 +1175,11 @@ where
     Operation<U>: Codec,
 {
     /// Create a new speculative batch of operations with this database as its parent.
-    #[allow(clippy::type_complexity)]
-    pub fn new_batch(&self) -> UnmerkleizedBatch<'_, E, C, I, H, U, Mmr<E, H::Digest>> {
+    pub fn new_batch(&self) -> UnmerkleizedBatch<H, U> {
         // The DB is always committed, so journal size = last_commit_loc + 1.
         let journal_size = *self.last_commit_loc + 1;
         UnmerkleizedBatch {
-            db: self,
-            journal_batch: self.log.new_batch(),
+            journal_batch: self.log.to_merkleized_batch().new_batch::<H>(),
             mutations: BTreeMap::new(),
             base_diff: Arc::new(BTreeMap::new()),
             base_operations: Vec::new(),
@@ -1170,6 +1262,32 @@ where
     }
 }
 
+impl<E, C, I, H, U> Db<E, C, I, H, U>
+where
+    E: Context,
+    U: update::Update + Send + Sync,
+    C: Contiguous<Item = Operation<U>>,
+    I: UnorderedIndex<Value = Location>,
+    H: Hasher,
+    Operation<U>: Codec,
+{
+    /// Create an initial [`MerkleizedBatch`] from the committed DB state.
+    ///
+    /// This is the starting point for building owned batch chains.
+    pub fn to_batch(&self) -> MerkleizedBatch<H::Digest, U> {
+        let journal_size = *self.last_commit_loc + 1;
+        MerkleizedBatch {
+            journal_batch: self.log.to_merkleized_batch(),
+            diff: Arc::new(BTreeMap::new()),
+            new_inactivity_floor_loc: self.inactivity_floor_loc,
+            new_last_commit_loc: self.last_commit_loc,
+            total_size: journal_size,
+            total_active_keys: self.active_keys,
+            db_size: journal_size,
+        }
+    }
+}
+
 /// Extract the value from an Update operation via the `Update` trait.
 fn extract_update_value<U: update::Update>(op: &Operation<U>) -> U::Value {
     match op {
@@ -1181,33 +1299,27 @@ fn extract_update_value<U: update::Update>(op: &Operation<U>) -> U::Value {
 #[cfg(any(test, feature = "test-traits"))]
 mod trait_impls {
     use super::*;
-    use crate::{
-        merkle::batch::ChainInfo,
-        qmdb::any::traits::{
-            BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
-            UnmerkleizedBatch as UnmerkleizedBatchTrait,
-        },
+    use crate::qmdb::any::traits::{
+        BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
+        UnmerkleizedBatch as UnmerkleizedBatchTrait,
     };
     use std::future::Future;
 
-    impl<'a, E, K, V, C, I, H, P> UnmerkleizedBatchTrait
-        for UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P>
+    impl<K, V, H, E, C, I> UnmerkleizedBatchTrait<Db<E, C, I, H, update::Unordered<K, V>>>
+        for UnmerkleizedBatch<H, update::Unordered<K, V>>
     where
-        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
+        H: Hasher,
+        E: Context,
         C: Mutable<Item = Operation<update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location>,
-        H: Hasher,
         Operation<update::Unordered<K, V>>: Codec,
-        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + ChainInfo<mmr::Family, Digest = H::Digest>
-            + BatchChain<Operation<update::Unordered<K, V>>>,
     {
         type K = K;
         type V = V::Value;
         type Metadata = V::Value;
-        type Merkleized = super::MerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, P>;
+        type Merkleized = MerkleizedBatch<H::Digest, update::Unordered<K, V>>;
 
         fn write(mut self, key: K, value: Option<V::Value>) -> Self {
             self.mutations.insert(key, value);
@@ -1217,31 +1329,27 @@ mod trait_impls {
         fn merkleize(
             self,
             metadata: Option<V::Value>,
+            db: &Db<E, C, I, H, update::Unordered<K, V>>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error>> {
-            // Delegates to the inherent async method (inherent methods have
-            // priority over trait methods in Rust's method resolution).
-            self.merkleize(metadata)
+            self.merkleize(metadata, db)
         }
     }
 
-    impl<'a, E, K, V, C, I, H, P> UnmerkleizedBatchTrait
-        for UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P>
+    impl<K, V, H, E, C, I> UnmerkleizedBatchTrait<Db<E, C, I, H, update::Ordered<K, V>>>
+        for UnmerkleizedBatch<H, update::Ordered<K, V>>
     where
-        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
+        H: Hasher,
+        E: Context,
         C: Mutable<Item = Operation<update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location>,
-        H: Hasher,
         Operation<update::Ordered<K, V>>: Codec,
-        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + ChainInfo<mmr::Family, Digest = H::Digest>
-            + BatchChain<Operation<update::Ordered<K, V>>>,
     {
         type K = K;
         type V = V::Value;
         type Metadata = V::Value;
-        type Merkleized = super::MerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, P>;
+        type Merkleized = MerkleizedBatch<H::Digest, update::Ordered<K, V>>;
 
         fn write(mut self, key: K, value: Option<V::Value>) -> Self {
             self.mutations.insert(key, value);
@@ -1251,27 +1359,21 @@ mod trait_impls {
         fn merkleize(
             self,
             metadata: Option<V::Value>,
+            db: &Db<E, C, I, H, update::Ordered<K, V>>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error>> {
-            self.merkleize(metadata)
+            self.merkleize(metadata, db)
         }
     }
 
-    impl<'a, E, C, I, H, U, P> MerkleizedBatchTrait for super::MerkleizedBatch<'a, E, C, I, H, U, P>
+    impl<D: Digest, U: update::Update + Send + Sync + 'static> MerkleizedBatchTrait
+        for MerkleizedBatch<D, U>
     where
-        E: Context,
-        U: update::Update + Send + Sync + 'static,
-        C: Mutable<Item = Operation<U>>,
-        I: UnorderedIndex<Value = Location>,
-        H: Hasher,
         Operation<U>: Codec,
-        P: Readable<Family = mmr::Family, Digest = H::Digest, Error = mmr::Error>
-            + ChainInfo<mmr::Family, Digest = H::Digest>
-            + BatchChain<Operation<U>>,
     {
-        type Digest = H::Digest;
-        type Changeset = Changeset<U::Key, H::Digest, Operation<U>>;
+        type Digest = D;
+        type Changeset = Changeset<U::Key, D, Operation<U>>;
 
-        fn root(&self) -> H::Digest {
+        fn root(&self) -> D {
             self.root()
         }
 
@@ -1294,12 +1396,9 @@ mod trait_impls {
         type K = K;
         type V = V::Value;
         type Changeset = Changeset<K, H::Digest, Operation<update::Unordered<K, V>>>;
-        type Batch<'a>
-            = UnmerkleizedBatch<'a, E, C, I, H, update::Unordered<K, V>, Mmr<E, H::Digest>>
-        where
-            Self: 'a;
+        type Batch = UnmerkleizedBatch<H, update::Unordered<K, V>>;
 
-        fn new_batch(&self) -> Self::Batch<'_> {
+        fn new_batch(&self) -> Self::Batch {
             self.new_batch()
         }
 
@@ -1325,12 +1424,9 @@ mod trait_impls {
         type K = K;
         type V = V::Value;
         type Changeset = Changeset<K, H::Digest, Operation<update::Ordered<K, V>>>;
-        type Batch<'a>
-            = UnmerkleizedBatch<'a, E, C, I, H, update::Ordered<K, V>, Mmr<E, H::Digest>>
-        where
-            Self: 'a;
+        type Batch = UnmerkleizedBatch<H, update::Ordered<K, V>>;
 
-        fn new_batch(&self) -> Self::Batch<'_> {
+        fn new_batch(&self) -> Self::Batch {
             self.new_batch()
         }
 

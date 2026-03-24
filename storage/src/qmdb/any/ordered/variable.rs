@@ -265,7 +265,7 @@ pub(crate) mod test {
                 }
             }
         }
-        let finalized = batch.merkleize(None).await.unwrap().finalize();
+        let finalized = batch.merkleize(None, db).await.unwrap().finalize();
         db.apply_batch(finalized).await.unwrap();
     }
 
@@ -326,7 +326,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), Some(val))
                 .write(key3.clone(), Some(val))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -340,7 +340,7 @@ pub(crate) mod test {
             let finalized = db
                 .new_batch()
                 .write(key2.clone(), Some(val))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -380,7 +380,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), Some(val1))
                 .write(key3.clone(), Some(val3))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -390,7 +390,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), None)
                 .write(key2.clone(), Some(val2))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -411,7 +411,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), Some(val1))
                 .write(key3.clone(), Some(val3))
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -421,7 +421,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key2.clone(), Some(val2))
                 .write(key3.clone(), None)
-                .merkleize(None)
+                .merkleize(None, &db)
                 .await
                 .unwrap()
                 .finalize();
@@ -445,6 +445,149 @@ pub(crate) mod test {
         is_send(db.get_all(&key));
         is_send(db.get_with_loc(&key));
         is_send(db.get_span(&key));
+    }
+
+    /// Parent inserts a key, child inserts another; commit parent then
+    /// apply child via `finalize_from`. Verifies next-key pointers
+    /// are correct after both commits.
+    #[test_traced("WARN")]
+    fn test_ordered_finalize_from_basic() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            // Seed with initial data so the ordered index is non-trivial.
+            apply_ops(&mut db, create_test_ops(10)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_batch();
+
+            // Parent batch: insert key_a.
+            let key_a = Digest::random(&mut test_rng_seeded(800));
+            let val_a = vec![1u8; 10];
+            let parent_batch = {
+                let batch = base.new_batch::<Sha256>().write(key_a, Some(val_a.clone()));
+                batch.merkleize(None, &db).await.unwrap()
+            };
+
+            // Child batch: insert key_b.
+            let key_b = Digest::random(&mut test_rng_seeded(801));
+            let val_b = vec![2u8; 10];
+            let child_batch = {
+                let batch = parent_batch
+                    .new_batch::<Sha256>()
+                    .write(key_b, Some(val_b.clone()));
+                batch.merkleize(None, &db).await.unwrap()
+            };
+
+            // Commit parent.
+            db.apply_batch(parent_batch.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Commit child via finalize_from.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(child_batch.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+
+            // Both keys should be readable.
+            assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
+            assert_eq!(db.get(&key_b).await.unwrap().unwrap(), val_b);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Parent inserts key_x, child deletes key_x. After committing parent
+    /// then child via `finalize_from`, key_x should be gone and the
+    /// next-key ring should exclude it.
+    #[test_traced("WARN")]
+    fn test_ordered_finalize_from_delete_after_insert() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            apply_ops(&mut db, create_test_ops(5)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_batch();
+
+            let key_x = Digest::random(&mut test_rng_seeded(810));
+            let val_x = vec![10u8; 8];
+            let parent_batch = {
+                let batch = base.new_batch::<Sha256>().write(key_x, Some(val_x.clone()));
+                batch.merkleize(None, &db).await.unwrap()
+            };
+
+            let child_batch = {
+                let batch = parent_batch.new_batch::<Sha256>().write(key_x, None);
+                batch.merkleize(None, &db).await.unwrap()
+            };
+
+            // Commit parent.
+            db.apply_batch(parent_batch.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_x);
+
+            // Commit child via finalize_from.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(child_batch.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+
+            // key_x should be deleted.
+            assert!(db.get(&key_x).await.unwrap().is_none());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Parent and child both modify the same key. After committing parent
+    /// then child via `finalize_from`, the child's value wins.
+    #[test_traced("WARN")]
+    fn test_ordered_finalize_from_overlapping_keys() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            apply_ops(&mut db, create_test_ops(5)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_batch();
+
+            let key_x = Digest::random(&mut test_rng_seeded(820));
+            let val_a = vec![10u8; 8];
+            let parent_batch = {
+                let batch = base.new_batch::<Sha256>().write(key_x, Some(val_a.clone()));
+                batch.merkleize(None, &db).await.unwrap()
+            };
+
+            let val_b = vec![20u8; 8];
+            let child_batch = {
+                let batch = parent_batch
+                    .new_batch::<Sha256>()
+                    .write(key_x, Some(val_b.clone()));
+                batch.merkleize(None, &db).await.unwrap()
+            };
+
+            // Commit parent.
+            db.apply_batch(parent_batch.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+            assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
+
+            // Commit child via finalize_from.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(child_batch.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+
+            assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_b);
+
+            db.destroy().await.unwrap();
+        });
     }
 
     // FromSyncTestable implementation for from_sync_result tests
