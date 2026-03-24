@@ -509,11 +509,11 @@ mod test {
         deterministic, mocks, BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _,
         Spawner as _,
     };
-    use commonware_utils::NZUsize;
+    use commonware_utils::{sync::Mutex, NZUsize};
     use std::{
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc, Mutex,
+            Arc,
         },
         time::Duration,
     };
@@ -552,7 +552,7 @@ mod test {
         async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), RuntimeError> {
             let bufs = bufs.into();
             self.sends.fetch_add(1, Ordering::Relaxed);
-            self.chunk_counts.lock().unwrap().push(bufs.chunk_count());
+            self.chunk_counts.lock().push(bufs.chunk_count());
             self.inner.send(bufs).await
         }
     }
@@ -644,7 +644,7 @@ mod test {
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
             sends.store(0, Ordering::Relaxed);
-            chunk_counts.lock().unwrap().clear();
+            chunk_counts.lock().clear();
 
             // Three small messages should fit in one pooled chunk, so `send_many`
             // still reaches the runtime as a single single-chunk send call.
@@ -657,7 +657,7 @@ mod test {
                 .await?;
 
             assert_eq!(sends.load(Ordering::Relaxed), 1);
-            assert_eq!(*chunk_counts.lock().unwrap(), vec![1]);
+            assert_eq!(*chunk_counts.lock(), vec![1]);
             assert_eq!(
                 listener_receiver.recv().await?.coalesce(),
                 IoBuf::from(b"alpha")
@@ -716,7 +716,7 @@ mod test {
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
             sends.store(0, Ordering::Relaxed);
-            chunk_counts.lock().unwrap().clear();
+            chunk_counts.lock().clear();
 
             // The first two framed messages fit together under the 256-byte cap,
             // but the third must spill into a second chunk. We still hand the
@@ -731,7 +731,7 @@ mod test {
                 .await?;
 
             assert_eq!(sends.load(Ordering::Relaxed), 1);
-            assert_eq!(*chunk_counts.lock().unwrap(), vec![2]);
+            assert_eq!(*chunk_counts.lock(), vec![2]);
             for _ in 0..3 {
                 assert_eq!(
                     listener_receiver.recv().await?.coalesce(),
@@ -784,7 +784,7 @@ mod test {
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
             sends.store(0, Ordering::Relaxed);
-            chunk_counts.lock().unwrap().clear();
+            chunk_counts.lock().clear();
 
             // A single framed message larger than the cap still goes out, but it
             // must occupy its own chunk instead of being rejected or merged.
@@ -798,7 +798,7 @@ mod test {
                 .await?;
 
             assert_eq!(sends.load(Ordering::Relaxed), 1);
-            assert_eq!(*chunk_counts.lock().unwrap(), vec![2]);
+            assert_eq!(*chunk_counts.lock(), vec![2]);
             assert_eq!(listener_receiver.recv().await?.coalesce(), large.as_slice());
             assert_eq!(listener_receiver.recv().await?.coalesce(), small.as_slice());
             Ok(())
@@ -843,7 +843,7 @@ mod test {
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
             sends.store(0, Ordering::Relaxed);
-            chunk_counts.lock().unwrap().clear();
+            chunk_counts.lock().clear();
 
             let valid = vec![7u8; 32];
             let oversized = vec![9u8; MAX_MESSAGE_SIZE as usize + 1];
@@ -858,7 +858,7 @@ mod test {
             ));
 
             assert_eq!(sends.load(Ordering::Relaxed), 0);
-            assert!(chunk_counts.lock().unwrap().is_empty());
+            assert!(chunk_counts.lock().is_empty());
 
             let recovered = b"recovered";
             dialer_sender.send(&recovered[..]).await?;
