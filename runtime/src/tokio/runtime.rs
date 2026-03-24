@@ -18,8 +18,8 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard},
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle,
-    Metrics as _, SinkOf, Spawner as _, StreamOf, METRICS_PREFIX,
+    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
+    Spawner as _, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
@@ -267,6 +267,7 @@ impl Config {
     pub const fn maximum_buffer_size(&self) -> usize {
         self.maximum_buffer_size
     }
+
     /// Returns the network buffer pool config, deriving thread-cache
     /// parallelism from `worker_threads` if not explicitly configured.
     fn resolved_network_buffer_pool_config(&self) -> BufferPoolConfig {
@@ -863,11 +864,13 @@ mod tests {
 
         assert_eq!(cfg.worker_threads, 8);
         assert_eq!(
-            cfg.resolved_network_buffer_pool_config().thread_cache_capacity,
+            cfg.resolved_network_buffer_pool_config()
+                .thread_cache_capacity,
             BufferPoolThreadCache::ForParallelism(NZUsize!(8))
         );
         assert_eq!(
-            cfg.resolved_storage_buffer_pool_config().thread_cache_capacity,
+            cfg.resolved_storage_buffer_pool_config()
+                .thread_cache_capacity,
             BufferPoolThreadCache::ForParallelism(NZUsize!(8))
         );
     }
@@ -885,11 +888,13 @@ mod tests {
             );
 
         assert_eq!(
-            cfg.resolved_network_buffer_pool_config().thread_cache_capacity,
+            cfg.resolved_network_buffer_pool_config()
+                .thread_cache_capacity,
             BufferPoolThreadCache::ForParallelism(NZUsize!(2))
         );
         assert_eq!(
-            cfg.resolved_storage_buffer_pool_config().thread_cache_capacity,
+            cfg.resolved_storage_buffer_pool_config()
+                .thread_cache_capacity,
             BufferPoolThreadCache::Disabled
         );
     }
