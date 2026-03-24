@@ -53,7 +53,11 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 // How often the background Rayon buffer-pool cache flush loop asks workers to
 // flush their thread-local caches.
-const RAYON_BUFFER_POOL_CACHE_FLUSH_INTERVAL: Duration = Duration::from_secs(10);
+pub(crate) const RAYON_BUFFER_POOL_CACHE_FLUSH_INTERVAL: Duration = if cfg!(test) {
+    Duration::from_millis(100)
+} else {
+    Duration::from_secs(10)
+};
 
 #[cfg(feature = "iouring-network")]
 cfg_if::cfg_if! {
