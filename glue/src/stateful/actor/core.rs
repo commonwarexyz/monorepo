@@ -496,8 +496,7 @@ where
         .sync_resolvers
         .attach_databases(databases.clone())
         .await;
-    let mut processor =
-        Processor::new(app, databases, last_processed);
+    let mut processor = Processor::new(app, databases, last_processed);
 
     // In case any finalizations were delivered after the floor was updated,
     // process them now to ensure we progress marshal.

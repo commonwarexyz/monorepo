@@ -142,7 +142,7 @@ where
         .property(BlockAgreementAtHeight::new(20))
         .run()
         .unwrap();
-    let r2 = PlanBuilder::new(engine.clone())
+    let r2 = PlanBuilder::new(engine)
         .seeds(seeds.clone())
         .exit_condition(ProcessedHeightAtLeast::new(20))
         .property(BlockAgreementAtHeight::new(20))
@@ -312,7 +312,7 @@ where
         .property(BlockAgreementAtHeight::new(100))
         .run()
         .unwrap();
-    let r2 = PlanBuilder::new(engine.clone())
+    let r2 = PlanBuilder::new(engine)
         .seeds(seeds.clone())
         .crash(Crash::Delay {
             count: 1,
