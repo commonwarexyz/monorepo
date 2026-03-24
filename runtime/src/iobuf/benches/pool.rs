@@ -292,7 +292,7 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
         .with_prefill(true);
 
     let runner_cfg = tokio::Config::default()
-        .with_worker_threads(1, false)
+        .with_worker_threads(1)
         .with_network_buffer_pool_config(cfg);
 
     tokio::Runner::new(runner_cfg).start(|ctx| async move { ctx.network_buffer_pool().clone() })
