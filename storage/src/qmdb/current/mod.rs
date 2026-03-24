@@ -230,7 +230,7 @@
 //! canonical root is the caller's responsibility; the sync engine does not perform this check.
 
 use crate::{
-    index::Unordered as UnorderedIndex,
+    index::Factory as IndexFactory,
     journal::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -293,20 +293,18 @@ pub type FixedConfig<T> = Config<T, FConfig>;
 pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
 
 /// Initialize a `Current` authenticated db from the given config.
-pub(super) async fn init<E, U, H, T, I, J, const N: usize, NewIndex>(
+pub(super) async fn init<E, U, H, T, I, J, const N: usize>(
     context: E,
     config: Config<T, J::Config>,
-    new_index: NewIndex,
 ) -> Result<db::Db<E, J, I, H, U, N>, Error>
 where
     E: Storage + Clock + Metrics,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
-    I: UnorderedIndex<Value = Location>,
+    I: IndexFactory<T, Value = Location>,
     J: Inner<E, Item = Operation<U>>,
     Operation<U>: Committable + CodecShared,
-    NewIndex: FnOnce(E, T) -> I,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
@@ -345,7 +343,6 @@ where
                 status.set_bit(*loc, false);
             }
         },
-        new_index,
     )
     .await?;
 

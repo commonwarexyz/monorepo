@@ -70,7 +70,7 @@
 //! ```
 
 use crate::{
-    index::Unordered as UnorderedIndex,
+    index::Factory as IndexFactory,
     journal::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -119,23 +119,21 @@ pub type FixedConfig<T> = Config<T, FConfig>;
 pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
 
 /// Initialize an `Any` authenticated db from the given config.
-pub(super) async fn init<E, U, H, T, I, J, F, NewIndex>(
+pub(super) async fn init<E, U, H, T, I, J, F>(
     context: E,
     cfg: Config<T, J::Config>,
     known_inactivity_floor: Option<Location>,
     callback: F,
-    new_index: NewIndex,
 ) -> Result<db::Db<E, J, I, H, U>, Error>
 where
     E: Storage + Clock + Metrics,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
-    I: UnorderedIndex<Value = Location>,
+    I: IndexFactory<T, Value = Location>,
     J: Inner<E, Item = Operation<U>>,
     Operation<U>: Committable + CodecShared,
     F: FnMut(bool, Option<Location>),
-    NewIndex: FnOnce(E, T) -> I,
 {
     let mut log = J::init(
         context.with_label("log"),
@@ -152,7 +150,7 @@ where
         log.sync().await?;
     }
 
-    let index = new_index(context.with_label("index"), cfg.translator);
+    let index = I::new(context.with_label("index"), cfg.translator);
     db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
 }
 

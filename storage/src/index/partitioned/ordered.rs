@@ -48,6 +48,14 @@ impl<T: Translator, V: Eq + Send + Sync, const P: usize> Index<T, V, P> {
     }
 }
 
+impl<T: Translator, V: Eq + Send + Sync, const P: usize> super::super::Factory<T>
+    for Index<T, V, P>
+{
+    fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
+        Self::new(ctx, translator)
+    }
+}
+
 impl<T: Translator, V: Eq + Send + Sync, const P: usize> UnorderedTrait for Index<T, V, P> {
     type Value = V;
     type Cursor<'a>

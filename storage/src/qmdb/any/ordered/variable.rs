@@ -54,10 +54,7 @@ where
         known_inactivity_floor: Option<Location>,
         callback: impl FnMut(bool, Option<Location>),
     ) -> Result<Self, Error> {
-        crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
-            Index::new(ctx, t)
-        })
-        .await
+        crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback).await
     }
 }
 
@@ -132,10 +129,7 @@ pub mod partitioned {
             known_inactivity_floor: Option<Location>,
             callback: impl FnMut(bool, Option<Location>),
         ) -> Result<Self, Error> {
-            crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
-                Index::new(ctx, t)
-            })
-            .await
+            crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback).await
         }
     }
 

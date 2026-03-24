@@ -38,7 +38,7 @@ impl<
     /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
     pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
-        crate::qmdb::current::init(context, config, |ctx, t| Index::new(ctx, t)).await
+        crate::qmdb::current::init(context, config).await
     }
 }
 
@@ -94,7 +94,7 @@ pub mod partitioned {
         /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
         /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
         pub async fn init(context: E, config: Config<T>) -> Result<Self, Error> {
-            crate::qmdb::current::init(context, config, |ctx, t| Index::new(ctx, t)).await
+            crate::qmdb::current::init(context, config).await
         }
     }
 }
