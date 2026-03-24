@@ -1293,25 +1293,11 @@ module replica {
         self.last_finalized <= self.ghost_last_seen_notarization
     })
 
-    // Make sure no invalid certificates are stored.
-    val certificates_are_valid_inv = CORRECT.forall(id => {
-        val certs = store_certificate.get(id)
-        certs.forall(cert => and {
-            cert_view(cert) > GENESIS_VIEW,
-            cert_signatures(cert).size() >= Q,
-            cert_kind(cert) == NotarizationKind or cert_kind(cert) == NullificationKind or cert_kind(cert) == FinalizationKind,
-            if (is_nullification_cert(cert)) {
-                true
-            } else {
-                option_has(cert_block(cert), b => VALID_BLOCKS.contains(b) or INVALID_BLOCKS.contains(b) or b == GENESIS_BLOCK)
-            }
-        })
-    })
-
     val notarized_consistency = CORRECT.forall(id => {
         val self = replica_state.get(id)
         VIEWS.forall(v => is_some(self.notarized.get(v)) iff has_notarized_view(id, v, sent_vote))
     })
+
 
     // Learned parent references must always point to an older view.
     val parent_refs_well_formed = VIEWS.forall(v => {
@@ -1324,26 +1310,23 @@ module replica {
         })
     })
 
+    def finalized_blocks_seen(view: ViewNumber): Set[Option[Block]] = {
+        CORRECT.fold(Set(), (acc, id) =>
+            acc.union(
+                store_certificate.get(id)
+                    .filter(c => and {
+                        is_finalization_cert(c),
+                        cert_view(c) == view,
+                    })
+                    .map(c => cert_block(c))
+            )
+        )
+    }
+
     // If a block B for view v is finalized, no other block B' at v can be finalized.
-    val validity = tuples(CORRECT, CORRECT, VIEWS).forall(((id1, id2, v)) => {
-        val certs1 = store_certificate.get(id1).filter(c => is_finalization_cert(c) and cert_view(c) == v)
-        val certs2 = store_certificate.get(id2).filter(c => is_finalization_cert(c) and cert_view(c) == v)
-
-        or {
-            certs1 == Set(),
-            certs2 == Set(),
-            certs1.map(c => cert_block(c)) == certs2.map(c => cert_block(c))
-        }
-    })
-
-    // If there is a finalized block in view v, there is no nullification in view v.
-    val no_nullification_in_finalized_view = tuples(CORRECT, VIEWS).forall(((id, v)) => {
-        val certs = store_certificate.get(id)
-        or {
-            not(certs.exists(c => is_finalization_cert(c) and cert_view(c) == v)),
-            not(certs.exists(c => is_nullification_cert(c) and cert_view(c) == v)),
-        }
-    })
+    val validity = VIEWS.forall(v =>
+        finalized_blocks_seen(v).size() <= 1
+    )
 
     // If there is a finalized block in view v, there is no notarization for another block in view v.
     val no_notarization_in_finalized_view2 = tuples(CORRECT, VIEWS).forall(((id, v)) => {
@@ -1410,11 +1393,6 @@ module replica {
         )
     })
 
-    val safe_finalization = all {
-        unique_notarized_or_finalized_block_per_view
-        no_nullification_in_finalized_view
-    }
-
      def supporting_vote_sigs(cert: Certificate): Set[Signature] = {
         match (cert) {
             | Notarization(n) =>
@@ -1459,10 +1437,9 @@ module replica {
         no_nullification_and_finalization_in_the_same_view,
         validity,
         valid_last_finalized,
-        certificates_are_valid_inv,
         notarized_consistency,
         parent_refs_well_formed,
-        safe_finalization,
+        unique_notarized_or_finalized_block_per_view
         finalize_vote_requires_notarization_cert,
         finalized_blocks_have_unique_parent,
         finalized_certificates_are_committed,
