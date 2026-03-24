@@ -24,7 +24,10 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
-use commonware_utils::{sync::Mutex, NZUsize};
+use commonware_utils::{
+    sync::{Condvar, Mutex},
+    NZUsize,
+};
 use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -40,13 +43,17 @@ use std::{
     future::Future,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
-use tracing::{info_span, Instrument};
+use tracing::{error, info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[cfg(feature = "iouring-network")]
@@ -83,6 +90,71 @@ impl Metrics {
             metrics.tasks_running.clone(),
         );
         metrics
+    }
+}
+
+/// Tracks spawned tasks so root shutdown can wait for quiescence after aborting
+/// the supervision tree.
+#[derive(Default)]
+struct TaskTracker {
+    live: AtomicUsize,
+    gate: Mutex<()>,
+    idle: Condvar,
+}
+
+impl TaskTracker {
+    /// Registers a spawned task and returns a guard that marks it complete on drop.
+    fn track(self: &Arc<Self>) -> TaskGuard {
+        self.live.fetch_add(1, Ordering::Relaxed);
+        TaskGuard {
+            tracker: self.clone(),
+        }
+    }
+
+    /// Blocks until all tracked tasks have finished or the timeout expires.
+    fn wait_for_idle(&self, timeout: Duration) -> bool {
+        if self.live.load(Ordering::Acquire) == 0 {
+            return true;
+        }
+
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .expect("shutdown timeout overflow");
+
+        let mut gate = self.gate.lock();
+        loop {
+            if self.live.load(Ordering::Acquire) == 0 {
+                return true;
+            }
+
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            if remaining.is_zero() {
+                return false;
+            }
+
+            self.idle.wait_for(&mut gate, remaining);
+        }
+    }
+}
+
+/// Guard held by a spawned task until it has fully exited.
+///
+/// Dropping the guard decrements the live task count and wakes the root
+/// shutdown path when the final tracked task completes.
+struct TaskGuard {
+    tracker: Arc<TaskTracker>,
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        let live = self.tracker.live.fetch_sub(1, Ordering::Release);
+        assert_ne!(live, 0, "task tracker underflow");
+        if live == 1 {
+            let _gate = self.tracker.gate.lock();
+            self.tracker.idle.notify_all();
+        }
     }
 }
 
@@ -146,6 +218,9 @@ pub struct Config {
     /// Whether or not to catch panics.
     catch_panics: bool,
 
+    /// Maximum time to wait for tracked spawned tasks to finish after root shutdown begins.
+    shutdown_timeout: Duration,
+
     /// Base directory for all storage operations.
     storage_directory: PathBuf,
 
@@ -173,6 +248,7 @@ impl Config {
             worker_threads: 2,
             max_blocking_threads: 512,
             catch_panics: false,
+            shutdown_timeout: Duration::from_secs(60),
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
@@ -195,6 +271,11 @@ impl Config {
     /// See [Config]
     pub const fn with_catch_panics(mut self, b: bool) -> Self {
         self.catch_panics = b;
+        self
+    }
+    /// See [Config]
+    pub const fn with_shutdown_timeout(mut self, d: Duration) -> Self {
+        self.shutdown_timeout = d;
         self
     }
     /// See [Config]
@@ -245,6 +326,10 @@ impl Config {
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
+    }
+    /// See [Config]
+    pub const fn shutdown_timeout(&self) -> Duration {
+        self.shutdown_timeout
     }
     /// See [Config]
     pub const fn read_write_timeout(&self) -> Duration {
@@ -298,6 +383,7 @@ pub struct Executor {
     metrics: Arc<Metrics>,
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
+    tasks: Arc<TaskTracker>,
     panicker: Panicker,
 }
 
@@ -436,6 +522,7 @@ impl crate::Runner for Runner {
             metrics,
             runtime,
             shutdown: Mutex::new(Stopper::default()),
+            tasks: Arc::new(TaskTracker::default()),
             panicker,
         });
 
@@ -444,7 +531,10 @@ impl crate::Runner for Runner {
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
         let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 
-        // Run the future
+        // Build the root context and run the future. Keep the root cleanup path
+        // running even if the root unwinds. We still resume the original panic
+        // after aborting descendants and waiting for tracked tasks.
+        let tree = Tree::root();
         let context = Context {
             storage,
             name: label.name(),
@@ -454,14 +544,23 @@ impl crate::Runner for Runner {
             network,
             network_buffer_pool,
             storage_buffer_pool,
-            tree: Tree::root(),
+            tree: tree.clone(),
             execution: Execution::default(),
             instrumented: false,
         };
-        let output = executor.runtime.block_on(panicked.interrupt(f(context)));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            executor.runtime.block_on(panicked.interrupt(f(context)))
+        }));
+        tree.abort();
         gauge.dec();
 
-        output
+        // This wait is best-effort. If a tracked task does not finish before
+        // the timeout, log the slow shutdown and continue returning or resuming
+        // the original panic.
+        if !executor.tasks.wait_for_idle(self.cfg.shutdown_timeout) {
+            error!("timed out waiting for tracked tasks to finish during tokio runtime shutdown");
+        }
+        result.unwrap_or_else(|payload| resume_unwind(payload))
     }
 }
 
@@ -578,6 +677,11 @@ impl crate::Spawner for Context {
             executor.panicker.clone(),
             Arc::clone(&parent),
         );
+        let task_guard = executor.tasks.track();
+        let f = async move {
+            let _task_guard = task_guard;
+            f.await;
+        };
 
         if matches!(past, Execution::Dedicated) {
             thread::spawn({

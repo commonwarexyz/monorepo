@@ -842,7 +842,7 @@ mod tests {
         str::FromStr,
         sync::{
             atomic::{AtomicU32, Ordering},
-            Arc,
+            mpsc as std_mpsc, Arc, Barrier,
         },
         task::{Context as TContext, Poll, Waker},
     };
@@ -928,6 +928,93 @@ mod tests {
                 }
             });
         });
+    }
+
+    struct BlockOnDrop {
+        dropped: Option<std_mpsc::Sender<()>>,
+        release: Arc<Barrier>,
+    }
+
+    impl Drop for BlockOnDrop {
+        fn drop(&mut self) {
+            let _ = self.dropped.take().unwrap().send(());
+            self.release.wait();
+        }
+    }
+
+    fn test_root_completion_waits_for_direct_child_cleanup<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner,
+    {
+        let (dropped_tx, dropped_rx) = std_mpsc::channel();
+        let release = Arc::new(Barrier::new(2));
+        let release2 = release.clone();
+        let thread = std::thread::spawn(move || {
+            runner.start(move |context| async move {
+                let (started_tx, started_rx) = oneshot::channel();
+                context.dedicated().spawn(move |_| async move {
+                    let _dropped = BlockOnDrop {
+                        dropped: Some(dropped_tx),
+                        release: release2,
+                    };
+                    started_tx.send(()).unwrap();
+                    pending::<()>().await;
+                });
+
+                started_rx.await.unwrap();
+            });
+        });
+
+        dropped_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("root completion should start direct child cleanup");
+        let finished = thread.is_finished();
+        release.wait();
+        let result = thread.join();
+        assert!(
+            !finished,
+            "root completion should wait for direct child cleanup",
+        );
+        result.unwrap();
+    }
+
+    fn test_root_panic_waits_for_direct_child_cleanup_before_unwind<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner,
+    {
+        let (dropped_tx, dropped_rx) = std_mpsc::channel();
+        let release = Arc::new(Barrier::new(2));
+        let release2 = release.clone();
+        let thread = std::thread::spawn(move || {
+            runner.start(move |context| async move {
+                let (started_tx, started_rx) = oneshot::channel();
+                context.dedicated().spawn(move |_| async move {
+                    let _dropped = BlockOnDrop {
+                        dropped: Some(dropped_tx),
+                        release: release2,
+                    };
+                    started_tx.send(()).unwrap();
+                    pending::<()>().await;
+                });
+
+                started_rx.await.unwrap();
+                panic!("root panic");
+            });
+        });
+
+        dropped_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("root panic should start direct child cleanup");
+        let finished = thread.is_finished();
+        release.wait();
+        let result = thread.join();
+        assert!(
+            !finished,
+            "root panic should clean up direct children before unwinding",
+        );
+        assert!(result.is_err(), "root should have panicked");
     }
 
     fn test_spawn_after_abort<R>(runner: R)
@@ -3160,6 +3247,18 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_root_completion_waits_for_direct_child_cleanup() {
+        let executor = deterministic::Runner::default();
+        test_root_completion_waits_for_direct_child_cleanup(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_panic_waits_for_direct_child_cleanup_before_unwind() {
+        let executor = deterministic::Runner::default();
+        test_root_panic_waits_for_direct_child_cleanup_before_unwind(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_after_abort() {
         let executor = deterministic::Runner::default();
         test_spawn_after_abort(executor);
@@ -3500,6 +3599,20 @@ mod tests {
     fn test_tokio_root_finishes() {
         let executor = tokio::Runner::default();
         test_root_finishes(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_completion_waits_for_direct_child_cleanup() {
+        let cfg = tokio::Config::default().with_shutdown_timeout(Duration::from_secs(1));
+        let executor = tokio::Runner::new(cfg);
+        test_root_completion_waits_for_direct_child_cleanup(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_panic_waits_for_direct_child_cleanup_before_unwind() {
+        let cfg = tokio::Config::default().with_shutdown_timeout(Duration::from_secs(1));
+        let executor = tokio::Runner::new(cfg);
+        test_root_panic_waits_for_direct_child_cleanup_before_unwind(executor);
     }
 
     #[test]
