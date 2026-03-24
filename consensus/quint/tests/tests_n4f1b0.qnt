@@ -12,7 +12,6 @@ module tests {
         CORRECT = Set("n0", "n1", "n2", "n3"),
         BYZANTINE = Set(),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3"),
-        REPLICA_LIST = ["n0", "n1", "n2", "n3"],
         VIEWS = 1.to(6),
         VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2", "val_b3_part"),
         INVALID_BLOCKS = Set("inv_b3")

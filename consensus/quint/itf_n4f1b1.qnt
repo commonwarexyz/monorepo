@@ -17,7 +17,6 @@ module itf_main {
         CORRECT = Set("n1", "n2", "n3"),
         BYZANTINE = Set("n0"),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3"),
-        REPLICA_LIST = ["n0", "n1", "n2", "n3"],
         VIEWS = 1.to(6),
         VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
         INVALID_BLOCKS = Set()

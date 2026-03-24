@@ -9,7 +9,6 @@ module tests {
         CORRECT = Set("n0", "n1", "n2", "n3"),
         BYZANTINE = Set("n4"),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3", "n4"->"n4"),
-        REPLICA_LIST = ["n0", "n1", "n2", "n3", "n4"],
         N = 5,
         F = 1,
         Q = 3,
