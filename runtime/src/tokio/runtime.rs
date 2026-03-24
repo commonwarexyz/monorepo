@@ -107,6 +107,10 @@ pub struct NetworkConfig {
     so_linger: Option<Duration>,
 
     /// Read/write timeout for network operations.
+    ///
+    /// Bounds the full `Sink::send` and `Stream::recv` calls rather than each
+    /// individual socket syscall. Larger
+    /// batched writes may therefore require a larger timeout.
     read_write_timeout: Duration,
 }
 
