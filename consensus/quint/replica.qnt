@@ -529,21 +529,39 @@ module replica {
                     on_proposal(id, p)
                 },
                 {
-                    nondet votes = oneOf(powerset(sent_vote))
                     nondet view = VIEWS.oneOf()
                     nondet block = AllBlocks.oneOf()
-                    on_vote_notarize(id, view, block, votes)
+                    val matching = sent_vote.filter(v =>
+                        vote_view(v) == view and is_notarize(v) and vote_block(v) == Some(block)
+                    ).exclude(store_vote.get(id))
+                    all {
+                        matching != Set(),
+                        nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
+                        on_vote_notarize(id, view, block, votes)
+                    }
                 },
                 {
-                    nondet votes = oneOf(powerset(sent_vote))
                     nondet view = VIEWS.oneOf()
                     nondet block = AllBlocks.oneOf()
-                    on_vote_finalize(id, view, block, votes)
+                    val matching = sent_vote.filter(v =>
+                        vote_view(v) == view and is_finalize(v) and vote_block(v) == Some(block)
+                    ).exclude(store_vote.get(id))
+                    all {
+                        matching != Set(),
+                        nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
+                        on_vote_finalize(id, view, block, votes)
+                    }
                 },
                 {
-                    nondet votes = oneOf(powerset(sent_vote))
                     nondet view = VIEWS.oneOf()
-                    on_vote_nullify(id, view, votes)
+                    val matching = sent_vote.filter(v =>
+                        vote_view(v) == view and is_nullify(v)
+                    ).exclude(store_vote.get(id))
+                    all {
+                        matching != Set(),
+                        nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
+                        on_vote_nullify(id, view, votes)
+                    }
                 },
                 all {
                     sent_certificate != Set(),
