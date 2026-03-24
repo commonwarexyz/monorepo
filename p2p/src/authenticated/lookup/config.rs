@@ -52,9 +52,6 @@ pub struct Config<C: Signer> {
 
     /// Maximum number of already-queued outbound messages to combine into one connection write.
     ///
-    /// The transport may segment the bytes into multiple internal chunks if
-    /// the framed bytes would exceed a single network buffer-pool item.
-    ///
     /// Set this to `1` to disable batching.
     pub send_batch_size: NonZeroUsize,
 
