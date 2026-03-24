@@ -538,7 +538,7 @@ module replica {
                     nondet block = AllBlocks.oneOf()
                     val matching = sent_vote.filter(v =>
                         vote_view(v) == view and is_notarize(v) and vote_block(v) == Some(block)
-                    ).exclude(store_vote.get(id))
+                    )
                     all {
                         matching != Set(),
                         nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
@@ -550,7 +550,7 @@ module replica {
                     nondet block = AllBlocks.oneOf()
                     val matching = sent_vote.filter(v =>
                         vote_view(v) == view and is_finalize(v) and vote_block(v) == Some(block)
-                    ).exclude(store_vote.get(id))
+                    )
                     all {
                         matching != Set(),
                         nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
@@ -561,7 +561,7 @@ module replica {
                     nondet view = VIEWS.oneOf()
                     val matching = sent_vote.filter(v =>
                         vote_view(v) == view and is_nullify(v)
-                    ).exclude(store_vote.get(id))
+                    )
                     all {
                         matching != Set(),
                         nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
@@ -1295,12 +1295,24 @@ module replica {
     })
 
     // No view may contain both nullification and finalization certificates.
-    val no_nullification_and_finalization_in_the_same_view = CORRECT.forall(id => {
-        val certs = store_certificate.get(id)
-        val nullified_views = certs.filter(c => is_nullification_cert(c)).map(c => cert_view(c))
-        val finalized_views = certs.filter(c => is_finalization_cert(c)).map(c => cert_view(c))
-        nullified_views.intersect(finalized_views) == Set()
-    })
+    val nullified_views_seen = CORRECT.fold(Set(), (acc, id) =>
+          acc.union(
+              store_certificate.get(id)
+                  .filter(c => is_nullification_cert(c))
+                  .map(c => cert_view(c))
+          )
+      )
+
+      val finalized_views_seen = CORRECT.fold(Set(), (acc, id) =>
+          acc.union(
+              store_certificate.get(id)
+                  .filter(c => is_finalization_cert(c))
+                  .map(c => cert_view(c))
+          )
+      )
+
+      val no_nullification_and_finalization_in_the_same_view =
+          nullified_views_seen.intersect(finalized_views_seen) == Set()
 
     val no_proposal_equivocation = CORRECT.forall(id => {
         or {
@@ -1352,15 +1364,6 @@ module replica {
     val validity = VIEWS.forall(v =>
         finalized_blocks_seen(v).size() <= 1
     )
-
-    // If there is a finalized block in view v, there is no notarization for another block in view v.
-    val no_notarization_in_finalized_view2 = tuples(CORRECT, VIEWS).forall(((id, v)) => {
-        val certs = store_certificate.get(id)
-        AllBlocks.forall(b => or {
-            not(certs.exists(c => is_finalization_cert(c) and cert_view(c) == v and cert_block(c) == Some(b))),
-            not(certs.exists(c => is_notarization_cert(c) and cert_view(c) == v and cert_block(c) != Some(b))),
-        })
-    })
 
     val unique_notarized_or_finalized_block_per_view =
         tuples(CORRECT, VIEWS).forall(((id, v)) => {
