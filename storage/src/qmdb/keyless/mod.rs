@@ -217,7 +217,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
     ///
     /// This rewinds both the operations journal and its MMR to the historical state at `size`.
-    /// The rewind is not restart-stable until a subsequent [`Db::commit`] or [`Db::sync`].
+    /// The rewind is not restart-stable until a subsequent [`Self::commit`] or [`Self::sync`].
     ///
     /// # Errors
     ///
@@ -231,8 +231,8 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     /// before this method finishes updating in-memory rewind state. Callers must drop this
     /// database handle after any `Err` from `rewind` and reopen from storage.
     ///
-    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`].
+    /// A successful rewind is not restart-stable until a subsequent [`Self::commit`] or
+    /// [`Self::sync`].
     pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
