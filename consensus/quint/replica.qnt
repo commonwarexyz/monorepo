@@ -957,10 +957,10 @@ module replica {
                         not(has_sent_nullify(id, cert_view_num)),
                     }
                     val can_send_nullify = and {
-                        or {
-                            not(can_certify(id, cert_block_val)),
-                            parent_conflicted,
-                        },
+                        // Do not immediately nullify on parent conflict.
+                        // Equivocation blocks finalization (see can_send_finalize),
+                        // and the certification timeout handles nullification.
+                        not(can_certify(id, cert_block_val)),
                         self.view == cert_view_num,
                         // NOTE: Model simplification: suppress nullify retries (single-shot nullify per view).
                         // Real implementation may rebroadcast nullify for liveness.

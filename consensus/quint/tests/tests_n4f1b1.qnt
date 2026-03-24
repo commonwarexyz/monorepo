@@ -95,6 +95,70 @@ module tests {
             .expect(all_invariants)
     }
 
+    // Byzantine n3 (leader) equivocates with two proposals having different parents.
+    // Parent conflict does NOT immediately trigger a nullify vote upon notarization.
+    // Finalization is blocked by equivocation; the certification timeout handles nullification.
+    run parentConflictDoesNotImmediatelyNullifyTest = {
+        // Byzantine n3 sends two proposals: same (view, block) but different parents.
+        val proposal_a = {
+            block: "val_b0",
+            view: FIRST_VIEW,
+            view_parent: GENESIS_VIEW,
+            block_parent: GENESIS_BLOCK,
+            sig: sig_of("n3")
+        }
+        val proposal_b = {
+            block: "val_b0",
+            view: FIRST_VIEW,
+            view_parent: GENESIS_VIEW,
+            block_parent: "val_b1",
+            sig: sig_of("n3")
+        }
+
+        initWithLeaderAndCertifyTimeout(
+            Map(0 -> "n1", 1 -> "n2", 2 -> "n3", 3 -> "n0", 4 -> "n1", 5 -> "n2", 6 -> "n3"),
+            CERTIFY_ALL_TRUE
+        )
+            // n0 and n1 see proposal A and notarize.
+            .then(inject_proposal(proposal_a))
+            .then(on_proposal("n0", proposal_a))
+            .then(on_proposal("n1", proposal_a))
+
+            // n2 sees equivocating proposal B -> nullifies (unique_parent is false).
+            .then(inject_proposal(proposal_b))
+            .then(on_proposal("n2", proposal_b))
+            .then(all {
+                assert(sent_vote.exists(v =>
+                    vote_sig(v) == "n2" and vote_view(v) == FIRST_VIEW and is_nullify(v))),
+                unchanged_all,
+            })
+
+            // Byzantine n3 also sent a notarize vote.
+            .then(inject_vote(notarize(FIRST_VIEW, "n3", "val_b0")))
+
+            // n0 receives notarize quorum (n0, n1, n3) -> notarization forms.
+            // parent_conflicted is true but no immediate nullify with the fix.
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n3"))
+
+            .then(all {
+                assert(store_certificate.get("n0").exists(c =>
+                    is_notarization_cert(c) and cert_view(c) == FIRST_VIEW
+                    and cert_block(c) == Some("val_b0"))),
+                // n0 did NOT send nullify despite parent conflict.
+                assert(not(sent_vote.exists(v =>
+                    vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_nullify(v)))),
+                // n0 did NOT send finalize (blocked by parent conflict).
+                assert(not(sent_vote.exists(v =>
+                    vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v)))),
+                // n0 is still in the current view (waiting for timeout).
+                assert(replica_state.get("n0").view == FIRST_VIEW),
+                unchanged_all,
+            })
+            .expect(all_invariants)
+    }
+
     action inject_proposal(proposal: Proposal): bool = all {
         sent_proposal' = sent_proposal.union(Set(proposal)),
         sent_vote' = sent_vote,
