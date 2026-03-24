@@ -63,6 +63,30 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         )
     }
 
+    /// Converts pre-encoded data into an outbound metric/payload pair.
+    fn prepare_data<V>(
+        peer: &C,
+        msg: EncodedData,
+        rate_limits: &HashMap<u64, V>,
+    ) -> (metrics::Message, IoBufs) {
+        let encoded = msg.validate_channel(rate_limits);
+        (
+            metrics::Message::new_data(peer, encoded.channel),
+            encoded.payload,
+        )
+    }
+
+    /// Records the send metric and appends the payload to the batch.
+    fn push_batched(
+        sent_messages: &Family<metrics::Message, Counter>,
+        batch: &mut Vec<IoBufs>,
+        metric: metrics::Message,
+        payload: IoBufs,
+    ) {
+        sent_messages.get_or_create(&metric).inc();
+        batch.push(payload);
+    }
+
     /// Drains already-queued messages into `batch`.
     ///
     /// Priority order: control > high > low. Only consumes messages that are
@@ -86,19 +110,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 }
             }
             if let Ok(msg) = high.try_recv() {
-                let encoded = msg.validate_channel(rate_limits);
-                sent_messages
-                    .get_or_create(&metrics::Message::new_data(peer, encoded.channel))
-                    .inc();
-                batch.push(encoded.payload);
+                let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
+                Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
             }
             if let Ok(msg) = low.try_recv() {
-                let encoded = msg.validate_channel(rate_limits);
-                sent_messages
-                    .get_or_create(&metrics::Message::new_data(peer, encoded.channel))
-                    .inc();
-                batch.push(encoded.payload);
+                let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
+                Self::push_batched(sent_messages, batch, metric, payload);
                 continue;
             }
             break;
@@ -148,10 +166,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         _ = context.sleep_until(deadline) => {
                             // Periodically send a ping to the peer, batching
                             // any already-queued messages into the same write.
-                            self.sent_messages
-                                .get_or_create(&metrics::Message::new_ping(&peer))
-                                .inc();
-                            batch.push(types::Message::Ping.encode_with_pool(&pool).into());
+                            Self::push_batched(
+                                &self.sent_messages,
+                                &mut batch,
+                                metrics::Message::new_ping(&peer),
+                                types::Message::Ping.encode_with_pool(&pool).into(),
+                            );
                             Self::extend_send_many(
                                 &peer, self.send_batch_size, &mut batch,
                                 &mut self.control, &mut self.high, &mut self.low,
@@ -170,11 +190,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                     Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                                 },
                                 Prioritized::Data(encoded) => {
-                                    let encoded = encoded.validate_channel(&rate_limits);
-                                    self.sent_messages
-                                        .get_or_create(&metrics::Message::new_data(&peer, encoded.channel))
-                                        .inc();
-                                    batch.push(encoded.payload);
+                                    let (metric, payload) = Self::prepare_data(&peer, encoded, &rate_limits);
+                                    Self::push_batched(&self.sent_messages, &mut batch, metric, payload);
                                 },
                             }
                             Self::extend_send_many(
