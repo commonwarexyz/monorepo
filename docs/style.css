@@ -369,6 +369,15 @@ details.podcast-episode summary.podcast-title {
     font-size: 1.0em !important;
 }
 
+/* Let long display equations scroll instead of widening the page. */
+.katex-display {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 0.25rem;
+    -webkit-overflow-scrolling: touch;
+}
+
 /* MCP page styles */
 #tool-selector {
     margin: 20px 0;
