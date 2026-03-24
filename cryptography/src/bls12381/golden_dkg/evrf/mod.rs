@@ -23,10 +23,6 @@ use zeroize::Zeroizing;
 
 const SCHNORR_NS: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BANDERSNATCH_SCHNORR";
 
-const SCALAR_LENGTH: usize = 32;
-const POINT_LENGTH: usize = 32;
-const SIGNATURE_LENGTH: usize = POINT_LENGTH + SCALAR_LENGTH;
-
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
     inner: Secret<F>,
@@ -59,13 +55,13 @@ impl crate::Signer for PrivateKey {
         // Derive deterministic nonce from secret key + public transcript state
         let k = self.inner.expose(|x| {
             let mut nonce_t = t.fork(b"nonce");
-            let x_bytes = Zeroizing::new(x.encode_fixed::<SCALAR_LENGTH>());
+            let x_bytes = Zeroizing::new(x.encode_fixed::<{ F::SIZE }>());
             nonce_t.commit(x_bytes.as_slice());
             F::random(&mut nonce_t.noise(b"k"))
         });
 
         let k_big = G::generator() * &k;
-        let k_big_bytes: [u8; POINT_LENGTH] = k_big.encode_fixed();
+        let k_big_bytes: [u8; G::SIZE] = k_big.encode_fixed();
         t.commit(k_big_bytes.as_slice());
         let e = F::random(&mut t.noise(b"challenge"));
 
@@ -76,9 +72,9 @@ impl crate::Signer for PrivateKey {
             k + &ex
         });
 
-        let mut raw = [0u8; SIGNATURE_LENGTH];
-        raw[..POINT_LENGTH].copy_from_slice(&k_big_bytes);
-        raw[POINT_LENGTH..].copy_from_slice(&s.encode_fixed::<SCALAR_LENGTH>());
+        let mut raw = [0u8; Signature::SIZE];
+        raw[..G::SIZE].copy_from_slice(&k_big_bytes);
+        raw[G::SIZE..].copy_from_slice(&s.encode_fixed::<{ F::SIZE }>());
         Signature { raw }
     }
 }
@@ -94,7 +90,7 @@ impl PrivateKey {
             let raw = public.point.clone() * x;
             raw.clear_cofactor()
         });
-        transcript.commit(shared.encode_fixed::<POINT_LENGTH>().as_slice());
+        transcript.commit(shared.encode_fixed::<{ G::SIZE }>().as_slice());
     }
 
     /// Compute the VRF output between ourselves and the receiver, for a given message.
@@ -152,7 +148,7 @@ impl PrivateKey {
 impl Write for PrivateKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.inner
-            .expose(|x| buf.put_slice(&x.encode_fixed::<SCALAR_LENGTH>()));
+            .expose(|x| buf.put_slice(&x.encode_fixed::<{ F::SIZE }>()));
     }
 }
 
@@ -169,7 +165,7 @@ impl Read for PrivateKey {
 }
 
 impl FixedSize for PrivateKey {
-    const SIZE: usize = SCALAR_LENGTH;
+    const SIZE: usize = F::SIZE;
 }
 
 /// A Schnorr signature over the Bandersnatch curve.
@@ -177,7 +173,7 @@ impl FixedSize for PrivateKey {
 /// Consists of a commitment point K and a scalar response s.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
-    raw: [u8; SIGNATURE_LENGTH],
+    raw: [u8; G::SIZE + F::SIZE],
 }
 
 impl Write for Signature {
@@ -190,13 +186,13 @@ impl Read for Signature {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; SIGNATURE_LENGTH]>::read(buf)?;
+        let raw = <[u8; Self::SIZE]>::read(buf)?;
         Ok(Self { raw })
     }
 }
 
 impl FixedSize for Signature {
-    const SIZE: usize = SIGNATURE_LENGTH;
+    const SIZE: usize = G::SIZE + F::SIZE;
 }
 
 impl crate::Signature for Signature {}
@@ -253,13 +249,13 @@ impl Display for Signature {
 /// This can be created using [`PrivateKey::public`].
 #[derive(Clone)]
 pub struct PublicKey {
-    raw: [u8; POINT_LENGTH],
+    raw: [u8; G::SIZE],
     point: G,
 }
 
 impl PublicKey {
     fn from_point(point: G) -> Self {
-        let raw: [u8; POINT_LENGTH] = point.encode_fixed();
+        let raw: [u8; G::SIZE] = point.encode_fixed();
         Self { raw, point }
     }
 }
@@ -268,11 +264,11 @@ impl crate::Verifier for PublicKey {
     type Signature = Signature;
 
     fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
-        let k_big: G = match ReadExt::read(&mut &sig.raw[..POINT_LENGTH]) {
+        let k_big: G = match ReadExt::read(&mut &sig.raw[..G::SIZE]) {
             Ok(p) => p,
             Err(_) => return false,
         };
-        let s: F = match ReadExt::read(&mut &sig.raw[POINT_LENGTH..]) {
+        let s: F = match ReadExt::read(&mut &sig.raw[G::SIZE..]) {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -282,7 +278,7 @@ impl crate::Verifier for PublicKey {
         t.commit(namespace);
         t.commit(msg);
         t.commit(self.raw.as_slice());
-        t.commit(sig.raw[..POINT_LENGTH].as_ref());
+        t.commit(sig.raw[..G::SIZE].as_ref());
         let e = F::random(&mut t.noise(b"challenge"));
 
         // Check: s * G == K + e * X
@@ -304,14 +300,14 @@ impl Read for PublicKey {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let raw = <[u8; POINT_LENGTH]>::read_cfg(buf, &())?;
+        let raw = <[u8; Self::SIZE]>::read(buf)?;
         let point: G = ReadExt::read(&mut raw.as_slice())?;
         Ok(Self { raw, point })
     }
 }
 
 impl FixedSize for PublicKey {
-    const SIZE: usize = POINT_LENGTH;
+    const SIZE: usize = G::SIZE;
 }
 
 impl Span for PublicKey {}
