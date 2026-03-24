@@ -165,9 +165,8 @@ impl Config {
     pub fn new() -> Self {
         let rng = OsRng.next_u64();
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{rng}"));
-        let worker_threads = 2;
         Self {
-            worker_threads,
+            worker_threads: 2,
             max_blocking_threads: 512,
             catch_panics: false,
             storage_directory,
