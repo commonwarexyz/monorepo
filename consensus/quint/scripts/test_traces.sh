@@ -44,7 +44,7 @@ QUINT_BIN="$(which quint)"
 TRACE_SELECTION_STRATEGY="${COMMONWARE_TRACE_SELECTION_STRATEGY:-current}"
 
 case "$TRACE_SELECTION_STRATEGY" in
-    smallscope | short)
+    smallscope | short | lof)
         MAX_SAMPLES=1000
         ;;
     current | default)

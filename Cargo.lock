@@ -1246,6 +1246,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "futures",
+ "kdtree",
  "libfuzzer-sys",
  "proptest",
  "rand 0.8.5",
@@ -3290,6 +3291,16 @@ checksum = "b011eec8cc36da2aab2d5cff675ec18454fad408585853910a202391cf9f8e65"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kdtree"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f0a0e9f770b65bac9aad00f97a67ab5c5319effed07f6da385da3c2115e47ba"
+dependencies = [
+ "num-traits",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

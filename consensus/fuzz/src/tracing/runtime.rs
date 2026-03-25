@@ -30,6 +30,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, IoBuf, Metrics, Runner, Spawner};
 use commonware_utils::{channel::mpsc::Receiver, sync::Mutex, FuzzRng, NZUsize};
 use futures::future::join_all;
+use kdtree::{distance::squared_euclidean, KdTree};
 use sha1::Digest;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -42,11 +43,14 @@ use std::{
 
 const TRACE_SELECTION_STRATEGY_ENV: &str = "COMMONWARE_TRACE_SELECTION_STRATEGY";
 const TRACE_SELECTION_LOG_FILE: &str = "fuzz.log";
+const LOF_NEIGHBORS: usize = 5;
+const LOF_OUTLIER_THRESHOLD: f64 = 1.5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TraceSelectionStrategyName {
     Current,
     SmallScope,
+    Lof,
 }
 
 impl TraceSelectionStrategyName {
@@ -54,8 +58,9 @@ impl TraceSelectionStrategyName {
         match value {
             "current" | "default" => Ok(Self::Current),
             "smallscope" | "short" => Ok(Self::SmallScope),
+            "lof" => Ok(Self::Lof),
             _ => Err(format!(
-                "invalid {}={value}; expected one of: current, smallscope",
+                "invalid {}={value}; expected one of: current, smallscope, lof",
                 TRACE_SELECTION_STRATEGY_ENV
             )),
         }
@@ -76,6 +81,7 @@ impl TraceSelectionStrategyName {
         match self {
             Self::Current => &CURRENT_TRACE_SELECTION_STRATEGY,
             Self::SmallScope => &SMALLSCOPE_TRACE_SELECTION_STRATEGY,
+            Self::Lof => &LOF_TRACE_SELECTION_STRATEGY,
         }
     }
 }
@@ -161,10 +167,47 @@ impl TraceSelectionStrategy for SmallScopeTraceSelectionStrategy {
     }
 }
 
+#[derive(Default)]
+struct LofSelectionStore {
+    seen_signatures: HashSet<TraceSessionSignature>,
+}
+
+fn lof_signature_store() -> &'static StdMutex<LofSelectionStore> {
+    static STORE: OnceLock<StdMutex<LofSelectionStore>> = OnceLock::new();
+    STORE.get_or_init(|| StdMutex::new(LofSelectionStore::default()))
+}
+
+struct LofTraceSelectionStrategy;
+
+impl TraceSelectionStrategy for LofTraceSelectionStrategy {
+    fn name(&self) -> &'static str {
+        "lof"
+    }
+
+    fn writes_logs_to_file(&self) -> bool {
+        true
+    }
+
+    fn is_interesting(&self, metrics: &TraceMetrics) -> bool {
+        let signature = metrics.session_signature();
+        let mut store = lof_signature_store()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+
+        if !store.seen_signatures.insert(signature.clone()) {
+            return false;
+        }
+
+        compute_lof_score(&store.seen_signatures, &signature)
+            .is_some_and(|score| score > LOF_OUTLIER_THRESHOLD)
+    }
+}
+
 static CURRENT_TRACE_SELECTION_STRATEGY: CurrentTraceSelectionStrategy =
     CurrentTraceSelectionStrategy;
 static SMALLSCOPE_TRACE_SELECTION_STRATEGY: SmallScopeTraceSelectionStrategy =
     SmallScopeTraceSelectionStrategy;
+static LOF_TRACE_SELECTION_STRATEGY: LofTraceSelectionStrategy = LofTraceSelectionStrategy;
 
 fn configured_trace_selection_strategy() -> &'static dyn TraceSelectionStrategy {
     static SELECTED: OnceLock<TraceSelectionStrategyName> = OnceLock::new();
@@ -435,6 +478,134 @@ fn format_view_signatures(view_signatures: &[ViewTraceSignature]) -> String {
         .map(|signature| format!("v{}:{:?}", signature.view, signature.vector))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn compute_lof_score(
+    seen_signatures: &HashSet<TraceSessionSignature>,
+    candidate: &TraceSessionSignature,
+) -> Option<f64> {
+    let signatures: Vec<_> = seen_signatures.iter().cloned().collect();
+    let candidate_idx = signatures.iter().position(|signature| signature == candidate)?;
+    let points = flatten_signatures_for_lof(&signatures);
+    let total_points = points.len();
+    let k = LOF_NEIGHBORS.min(total_points.saturating_sub(1));
+    if k < 2 {
+        return None;
+    }
+
+    let mut tree = KdTree::new(points.first()?.len());
+    for (idx, point) in points.iter().enumerate() {
+        tree.add(point.clone(), idx).ok()?;
+    }
+
+    let neighbors: Vec<Vec<(f64, usize)>> = points
+        .iter()
+        .enumerate()
+        .map(|(idx, point)| nearest_neighbors(&tree, point, idx, k))
+        .collect::<Option<_>>()?;
+    let k_distances: Vec<f64> = neighbors
+        .iter()
+        .map(|point_neighbors| point_neighbors.last().map(|(distance, _)| *distance).unwrap_or(0.0))
+        .collect();
+    let lrds: Vec<f64> = neighbors
+        .iter()
+        .map(|point_neighbors| local_reachability_density(point_neighbors, &k_distances))
+        .collect();
+    let candidate_lrd = *lrds.get(candidate_idx)?;
+    let candidate_neighbors = neighbors.get(candidate_idx)?;
+    if candidate_neighbors.is_empty() {
+        return None;
+    }
+
+    let mut ratio_sum = 0.0;
+    for (_, neighbor_idx) in candidate_neighbors {
+        let neighbor_lrd = *lrds.get(*neighbor_idx)?;
+        let ratio = if candidate_lrd.is_infinite() && neighbor_lrd.is_infinite() {
+            1.0
+        } else if candidate_lrd <= f64::EPSILON {
+            f64::INFINITY
+        } else {
+            neighbor_lrd / candidate_lrd
+        };
+        ratio_sum += ratio;
+    }
+
+    Some(ratio_sum / candidate_neighbors.len() as f64)
+}
+
+fn flatten_signatures_for_lof(signatures: &[TraceSessionSignature]) -> Vec<Vec<f64>> {
+    let max_views = signatures
+        .iter()
+        .map(|signature| signature.view_signatures.len())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let max_vector_len = signatures
+        .iter()
+        .flat_map(|signature| signature.view_signatures.iter().map(|view_signature| view_signature.vector.len()))
+        .max()
+        .unwrap_or(0);
+
+    signatures
+        .iter()
+        .map(|signature| flatten_signature(signature, max_views, max_vector_len))
+        .collect()
+}
+
+fn flatten_signature(
+    signature: &TraceSessionSignature,
+    max_views: usize,
+    max_vector_len: usize,
+) -> Vec<f64> {
+    let mut point = Vec::with_capacity(max_views * (1 + max_vector_len));
+    for view_signature in &signature.view_signatures {
+        point.push(view_signature.view as f64);
+        point.extend(view_signature.vector.iter().map(|value| *value as f64));
+        point.extend(std::iter::repeat_n(0.0, max_vector_len.saturating_sub(view_signature.vector.len())));
+    }
+    for _ in signature.view_signatures.len()..max_views {
+        point.push(-1.0);
+        point.extend(std::iter::repeat_n(0.0, max_vector_len));
+    }
+    if point.is_empty() {
+        point.push(-1.0);
+    }
+    point
+}
+
+fn nearest_neighbors(
+    tree: &KdTree<f64, usize, Vec<f64>>,
+    point: &[f64],
+    point_idx: usize,
+    k: usize,
+) -> Option<Vec<(f64, usize)>> {
+    let mut neighbors = Vec::with_capacity(k);
+    for (distance_squared, neighbor_idx) in tree.nearest(point, k + 1, &squared_euclidean).ok()? {
+        let neighbor_idx = *neighbor_idx;
+        if neighbor_idx == point_idx {
+            continue;
+        }
+        neighbors.push((distance_squared.sqrt(), neighbor_idx));
+        if neighbors.len() == k {
+            break;
+        }
+    }
+    Some(neighbors)
+}
+
+fn local_reachability_density(neighbors: &[(f64, usize)], k_distances: &[f64]) -> f64 {
+    if neighbors.is_empty() {
+        return 0.0;
+    }
+    let reachability_sum = neighbors
+        .iter()
+        .map(|(distance, neighbor_idx)| k_distances[*neighbor_idx].max(*distance))
+        .sum::<f64>();
+    if reachability_sum <= f64::EPSILON {
+        f64::INFINITY
+    } else {
+        neighbors.len() as f64 / reachability_sum
+    }
 }
 
 fn append_trace_log_line(path: &Path, line: &str) {

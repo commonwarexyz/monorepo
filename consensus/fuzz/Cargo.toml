@@ -20,6 +20,7 @@ commonware-parallel.workspace = true
 commonware-runtime.workspace = true
 commonware-utils = { workspace = true, features = ["arbitrary"] }
 futures.workspace = true
+kdtree.workspace = true
 libfuzzer-sys.workspace = true
 base64.workspace = true
 reqwest = { workspace = true, features = ["json", "blocking"] }
