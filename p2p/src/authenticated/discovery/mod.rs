@@ -1179,31 +1179,33 @@ mod tests {
 
                         // Send identity to all peers
                         let msg = signer.public_key();
-                        context.with_label("sender").spawn(move |context| async move {
+                        context
+                            .with_label("sender")
+                            .spawn(move |context| async move {
+                                loop {
+                                    let mut recipients = addresses.clone();
+                                    recipients.remove(i);
+                                    recipients.sort();
+
                                     loop {
-                                        let mut recipients = addresses.clone();
-                                        recipients.remove(i);
-                                        recipients.sort();
-
-                                        loop {
-                                            let Ok(mut sent) = sender
-                                                .send(Recipients::All, msg.as_ref().to_vec(), true)
-                                                .await
-                                            else {
-                                                return;
-                                            };
-                                            if sent.len() != recipients.len() {
-                                                context.sleep(Duration::from_millis(100)).await;
-                                                continue;
-                                            }
-                                            sent.sort();
-                                            assert_eq!(sent, recipients);
-                                            break;
+                                        let Ok(mut sent) = sender
+                                            .send(Recipients::All, msg.as_ref().to_vec(), true)
+                                            .await
+                                        else {
+                                            return;
+                                        };
+                                        if sent.len() != recipients.len() {
+                                            context.sleep(Duration::from_millis(100)).await;
+                                            continue;
                                         }
-
-                                        context.sleep(Duration::from_secs(10)).await;
+                                        sent.sort();
+                                        assert_eq!(sent, recipients);
+                                        break;
                                     }
-                        });
+
+                                    context.sleep(Duration::from_secs(10)).await;
+                                }
+                            });
 
                         receiver.await.unwrap();
                     }
@@ -1398,31 +1400,33 @@ mod tests {
                         });
 
                         let msg = signer.public_key();
-                        context.with_label("sender").spawn(move |context| async move {
+                        context
+                            .with_label("sender")
+                            .spawn(move |context| async move {
+                                loop {
+                                    let mut recipients = addresses.clone();
+                                    recipients.remove(i);
+                                    recipients.sort();
+
                                     loop {
-                                        let mut recipients = addresses.clone();
-                                        recipients.remove(i);
-                                        recipients.sort();
-
-                                        loop {
-                                            let Ok(mut sent) = sender
-                                                .send(Recipients::All, msg.as_ref().to_vec(), true)
-                                                .await
-                                            else {
-                                                return;
-                                            };
-                                            if sent.len() != recipients.len() {
-                                                context.sleep(Duration::from_millis(100)).await;
-                                                continue;
-                                            }
-                                            sent.sort();
-                                            assert_eq!(sent, recipients);
-                                            break;
+                                        let Ok(mut sent) = sender
+                                            .send(Recipients::All, msg.as_ref().to_vec(), true)
+                                            .await
+                                        else {
+                                            return;
+                                        };
+                                        if sent.len() != recipients.len() {
+                                            context.sleep(Duration::from_millis(100)).await;
+                                            continue;
                                         }
-
-                                        context.sleep(Duration::from_secs(10)).await;
+                                        sent.sort();
+                                        assert_eq!(sent, recipients);
+                                        break;
                                     }
-                        });
+
+                                    context.sleep(Duration::from_secs(10)).await;
+                                }
+                            });
 
                         receiver.await.unwrap();
                     }

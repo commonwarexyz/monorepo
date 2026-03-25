@@ -1104,34 +1104,36 @@ mod tests {
                         });
 
                         // Send identity to all peers
-                        context.with_label("sender").spawn(move |context| async move {
+                        context
+                            .with_label("sender")
+                            .spawn(move |context| async move {
+                                loop {
+                                    let mut recipients: Vec<_> = peers
+                                        .iter()
+                                        .filter(|(p, _)| p != &pk)
+                                        .map(|(p, _)| p.clone())
+                                        .collect();
+                                    recipients.sort();
+
                                     loop {
-                                        let mut recipients: Vec<_> = peers
-                                            .iter()
-                                            .filter(|(p, _)| p != &pk)
-                                            .map(|(p, _)| p.clone())
-                                            .collect();
-                                        recipients.sort();
-
-                                        loop {
-                                            let Ok(mut sent) = sender
-                                                .send(Recipients::All, pk.as_ref().to_vec(), true)
-                                                .await
-                                            else {
-                                                return;
-                                            };
-                                            if sent.len() != n - 1 {
-                                                context.sleep(Duration::from_millis(100)).await;
-                                                continue;
-                                            }
-                                            sent.sort();
-                                            assert_eq!(sent, recipients);
-                                            break;
+                                        let Ok(mut sent) = sender
+                                            .send(Recipients::All, pk.as_ref().to_vec(), true)
+                                            .await
+                                        else {
+                                            return;
+                                        };
+                                        if sent.len() != n - 1 {
+                                            context.sleep(Duration::from_millis(100)).await;
+                                            continue;
                                         }
-
-                                        context.sleep(Duration::from_secs(10)).await;
+                                        sent.sort();
+                                        assert_eq!(sent, recipients);
+                                        break;
                                     }
-                        });
+
+                                    context.sleep(Duration::from_secs(10)).await;
+                                }
+                            });
 
                         receiver.await.unwrap();
                     }
@@ -1228,34 +1230,36 @@ mod tests {
                         });
 
                         // Send identity to all peers
-                        context.with_label("sender").spawn(move |context| async move {
+                        context
+                            .with_label("sender")
+                            .spawn(move |context| async move {
+                                loop {
+                                    let mut recipients: Vec<_> = peers
+                                        .iter()
+                                        .filter(|(p, _)| p != &pk)
+                                        .map(|(p, _)| p.clone())
+                                        .collect();
+                                    recipients.sort();
+
                                     loop {
-                                        let mut recipients: Vec<_> = peers
-                                            .iter()
-                                            .filter(|(p, _)| p != &pk)
-                                            .map(|(p, _)| p.clone())
-                                            .collect();
-                                        recipients.sort();
-
-                                        loop {
-                                            let Ok(mut sent) = sender
-                                                .send(Recipients::All, pk.as_ref().to_vec(), true)
-                                                .await
-                                            else {
-                                                return;
-                                            };
-                                            if sent.len() != n - 1 {
-                                                context.sleep(Duration::from_millis(100)).await;
-                                                continue;
-                                            }
-                                            sent.sort();
-                                            assert_eq!(sent, recipients);
-                                            break;
+                                        let Ok(mut sent) = sender
+                                            .send(Recipients::All, pk.as_ref().to_vec(), true)
+                                            .await
+                                        else {
+                                            return;
+                                        };
+                                        if sent.len() != n - 1 {
+                                            context.sleep(Duration::from_millis(100)).await;
+                                            continue;
                                         }
-
-                                        context.sleep(Duration::from_secs(10)).await;
+                                        sent.sort();
+                                        assert_eq!(sent, recipients);
+                                        break;
                                     }
-                        });
+
+                                    context.sleep(Duration::from_secs(10)).await;
+                                }
+                            });
 
                         receiver.await.unwrap();
                     }
