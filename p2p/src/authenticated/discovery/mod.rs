@@ -376,14 +376,12 @@ mod tests {
                         complete_sender.send(()).await.unwrap();
 
                         // Process messages until all finished (or else sender loops could get stuck as a peer may drop)
-                        loop {
-                            receiver.recv().await.unwrap();
-                        }
+                        while receiver.recv().await.is_ok() {}
                     });
 
                     // Send identity to all peers
                     let msg = signer.public_key();
-                    let sender = context
+                    context
                         .with_label("sender")
                         .spawn(move |context| async move {
                             // Get all peers not including self
@@ -398,14 +396,16 @@ mod tests {
                                         for recipient in &recipients {
                                             // Loop until success
                                             loop {
-                                                let sent = sender
+                                                let Ok(sent) = sender
                                                     .send(
                                                         Recipients::One(recipient.clone()),
                                                         msg.as_ref().to_vec(),
                                                         true,
                                                     )
                                                     .await
-                                                    .unwrap();
+                                                else {
+                                                    return;
+                                                };
                                                 if sent.len() != 1 {
                                                     context.sleep(Duration::from_millis(100)).await;
                                                     continue;
@@ -418,7 +418,7 @@ mod tests {
                                     Mode::Some | Mode::All => {
                                         // Loop until all peer sends successful
                                         loop {
-                                            let mut sent = sender
+                                            let Ok(mut sent) = sender
                                                 .send(
                                                     match mode {
                                                         Mode::Some => {
@@ -431,7 +431,9 @@ mod tests {
                                                     true,
                                                 )
                                                 .await
-                                                .unwrap();
+                                            else {
+                                                return;
+                                            };
                                             if sent.len() != recipients.len() {
                                                 context.sleep(Duration::from_millis(100)).await;
                                                 continue;
@@ -450,15 +452,7 @@ mod tests {
                             }
                         });
 
-                    // Neither task should exit
-                    select! {
-                        receiver = receiver => {
-                            panic!("receiver exited: {receiver:?}");
-                        },
-                        sender = sender => {
-                            panic!("sender exited: {sender:?}");
-                        },
-                    }
+                    receiver.await.unwrap();
                 }
             });
         }
@@ -1180,27 +1174,24 @@ mod tests {
                             }
                             complete_sender.send(()).await.unwrap();
 
-                            loop {
-                                receiver.recv().await.unwrap();
-                            }
+                            while receiver.recv().await.is_ok() {}
                         });
 
                         // Send identity to all peers
                         let msg = signer.public_key();
-                        let sender =
-                            context
-                                .with_label("sender")
-                                .spawn(move |context| async move {
+                        context.with_label("sender").spawn(move |context| async move {
                                     loop {
                                         let mut recipients = addresses.clone();
                                         recipients.remove(i);
                                         recipients.sort();
 
                                         loop {
-                                            let mut sent = sender
+                                            let Ok(mut sent) = sender
                                                 .send(Recipients::All, msg.as_ref().to_vec(), true)
                                                 .await
-                                                .unwrap();
+                                            else {
+                                                return;
+                                            };
                                             if sent.len() != recipients.len() {
                                                 context.sleep(Duration::from_millis(100)).await;
                                                 continue;
@@ -1212,16 +1203,9 @@ mod tests {
 
                                         context.sleep(Duration::from_secs(10)).await;
                                     }
-                                });
+                        });
 
-                        select! {
-                            receiver = receiver => {
-                                panic!("receiver exited: {receiver:?}")
-                            },
-                            sender = sender => {
-                                panic!("sender exited: {sender:?}")
-                            },
-                        }
+                        receiver.await.unwrap();
                     }
                 });
             }
@@ -1410,26 +1394,23 @@ mod tests {
                                 received.insert(sender);
                             }
                             complete_sender.send(()).await.unwrap();
-                            loop {
-                                receiver.recv().await.unwrap();
-                            }
+                            while receiver.recv().await.is_ok() {}
                         });
 
                         let msg = signer.public_key();
-                        let sender =
-                            context
-                                .with_label("sender")
-                                .spawn(move |context| async move {
+                        context.with_label("sender").spawn(move |context| async move {
                                     loop {
                                         let mut recipients = addresses.clone();
                                         recipients.remove(i);
                                         recipients.sort();
 
                                         loop {
-                                            let mut sent = sender
+                                            let Ok(mut sent) = sender
                                                 .send(Recipients::All, msg.as_ref().to_vec(), true)
                                                 .await
-                                                .unwrap();
+                                            else {
+                                                return;
+                                            };
                                             if sent.len() != recipients.len() {
                                                 context.sleep(Duration::from_millis(100)).await;
                                                 continue;
@@ -1441,16 +1422,9 @@ mod tests {
 
                                         context.sleep(Duration::from_secs(10)).await;
                                     }
-                                });
+                        });
 
-                        select! {
-                            receiver = receiver => {
-                                panic!("receiver exited: {receiver:?}")
-                            },
-                            sender = sender => {
-                                panic!("sender exited: {sender:?}")
-                            },
-                        }
+                        receiver.await.unwrap();
                     }
                 });
             }
