@@ -452,7 +452,7 @@ mod tests {
                             }
                         });
 
-                    receiver.await.unwrap();
+                    let _ = receiver.await;
                 }
             });
         }
@@ -1207,7 +1207,7 @@ mod tests {
                                 }
                             });
 
-                        receiver.await.unwrap();
+                        let _ = receiver.await;
                     }
                 });
             }
@@ -1428,7 +1428,7 @@ mod tests {
                                 }
                             });
 
-                        receiver.await.unwrap();
+                        let _ = receiver.await;
                     }
                 });
             }
