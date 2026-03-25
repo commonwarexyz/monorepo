@@ -452,6 +452,8 @@ mod tests {
                             }
                         });
 
+                    // Once this test has observed all expected peers, runtime shutdown may cancel
+                    // the receiver task while the parent is unwinding.
                     let _ = receiver.await;
                 }
             });
@@ -1207,6 +1209,8 @@ mod tests {
                                 }
                             });
 
+                        // Once this test has observed all expected peers, runtime shutdown may cancel
+                        // the receiver task while the parent is unwinding.
                         let _ = receiver.await;
                     }
                 });
@@ -1428,6 +1432,8 @@ mod tests {
                                 }
                             });
 
+                        // Once this test has observed all expected peers, runtime shutdown may cancel
+                        // the receiver task while the parent is unwinding.
                         let _ = receiver.await;
                     }
                 });
