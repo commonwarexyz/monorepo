@@ -258,7 +258,8 @@ pub(crate) mod test {
         AnyOperation<U>: Codec,
     {
         async fn rewind_to_size(&mut self, size: Location) -> Result<(), Error> {
-            self.rewind(size).await
+            self.rewind(size).await?;
+            Ok(())
         }
     }
 

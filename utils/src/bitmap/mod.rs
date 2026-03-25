@@ -249,6 +249,26 @@ impl<const N: usize> BitMap<N> {
         bit
     }
 
+    /// Shrink the bitmap to `new_len` bits, discarding trailing bits.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `new_len > self.len()`.
+    pub fn truncate(&mut self, new_len: u64) {
+        assert!(new_len <= self.len(), "cannot truncate to a larger size");
+
+        // Pop full chunks from the back when possible.
+        while self.len - new_len >= Self::CHUNK_SIZE_BITS && self.is_chunk_aligned() {
+            self.chunks.pop_back();
+            self.len -= Self::CHUNK_SIZE_BITS;
+        }
+
+        // Pop remaining individual bits.
+        while self.len > new_len {
+            self.pop();
+        }
+    }
+
     /// Remove and return the last complete chunk from the bitmap.
     ///
     /// # Warning
@@ -1144,6 +1164,39 @@ mod tests {
         }
         assert_eq!(bv.len(), 0);
         assert!(bv.is_empty());
+    }
+
+    #[test]
+    fn test_truncate() {
+        let mut bv: BitMap<4> = BitMap::new();
+        let expected: Vec<bool> = (0..70).map(|i| i % 3 == 0).collect();
+        for &bit in &expected {
+            bv.push(bit);
+        }
+
+        bv.truncate(65);
+        assert_eq!(bv.len(), 65);
+        for i in 0..65 {
+            assert_eq!(bv.get(i), expected[i as usize]);
+        }
+
+        bv.truncate(32);
+        assert_eq!(bv.len(), 32);
+        for i in 0..32 {
+            assert_eq!(bv.get(i), expected[i as usize]);
+        }
+
+        bv.truncate(0);
+        assert_eq!(bv.len(), 0);
+        assert!(bv.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot truncate to a larger size")]
+    fn test_truncate_larger_size_panics() {
+        let mut bv: BitMap<4> = BitMap::new();
+        bv.push(true);
+        bv.truncate(2);
     }
 
     #[test]

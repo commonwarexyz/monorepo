@@ -1464,6 +1464,78 @@ pub mod tests {
     }
 
     #[test_traced("INFO")]
+    fn test_current_rewind_small_delta_large_history() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 200;
+
+            let partition = "current-rewind-small-delta";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            let key0 = key(0);
+            let key1 = key(1);
+            let mut history = Vec::new();
+
+            for round in 0..COMMITS {
+                let key0_value = val(40_000 + round);
+                let key1_value = if round % 3 == 1 {
+                    None
+                } else {
+                    Some(val(50_000 + round))
+                };
+
+                commit_writes_with_metadata(
+                    &mut db,
+                    [(key0, Some(key0_value)), (key1, key1_value)],
+                    None,
+                )
+                .await;
+
+                history.push((
+                    db.bounds().await.end,
+                    db.root(),
+                    db.ops_root(),
+                    key0_value,
+                    key1_value,
+                ));
+            }
+
+            let target = *history
+                .get(history.len() - 3)
+                .expect("history should contain at least three commits");
+            let (target_size, target_root, target_ops_root, target_key0, target_key1) = target;
+
+            db.rewind(target_size).await.unwrap();
+            assert_eq!(db.bounds().await.end, target_size);
+            assert_eq!(db.root(), target_root);
+            assert_eq!(db.ops_root(), target_ops_root);
+            assert_eq!(db.get(&key0).await.unwrap(), Some(target_key0));
+            assert_eq!(db.get(&key1).await.unwrap(), target_key1);
+
+            db.commit().await.unwrap();
+            drop(db);
+
+            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen_small_delta"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.bounds().await.end, target_size);
+            assert_eq!(reopened.root(), target_root);
+            assert_eq!(reopened.ops_root(), target_ops_root);
+            assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_key0));
+            assert_eq!(reopened.get(&key1).await.unwrap(), target_key1);
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_current_rewind_pruned_target_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

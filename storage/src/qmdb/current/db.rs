@@ -22,6 +22,7 @@ use crate::{
             operation::{update::Update, Operation},
         },
         current::{
+            batch::BitmapBatch,
             grafting,
             proof::{OperationProof, RangeProof},
         },
@@ -63,9 +64,9 @@ pub struct Db<
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
     ///
-    /// Stored as a [`BitmapBatch`](super::batch::BitmapBatch) so that `apply_batch` can
+    /// Stored as a [`BitmapBatch`] so that `apply_batch` can
     /// push layers in O(changeset) instead of deep-cloning.
-    pub(super) status: super::batch::BitmapBatch<N>,
+    pub(super) status: BitmapBatch<N>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.
     /// See the [grafted leaf formula](super) in the module documentation.
@@ -299,7 +300,7 @@ where
         self.flatten();
 
         // Prune bitmap chunks below the inactivity floor.
-        let super::batch::BitmapBatch::Base(base) = &mut self.status else {
+        let BitmapBatch::Base(base) = &mut self.status else {
             unreachable!("flatten() guarantees Base");
         };
         Arc::make_mut(base).prune_to_bit(*self.any.inactivity_floor_loc);
@@ -426,38 +427,30 @@ where
 
         // Rewind underlying ops log + Any state. If a later overlay rebuild step fails, this
         // handle may be internally diverged and must be dropped by the caller.
-        self.any.rewind(size).await?;
+        let restored_locs = self.any.rewind(size).await?;
 
-        // Rebuild activity bitmap at the new size from the rewound Any state.
-        let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-            .map_err(|_| Error::DataCorrupted("pruned chunks overflow"))?;
+        // Patch bitmap: truncate to rewound size, then mark restored locations as active.
         {
-            let reader = self.any.log.reader().await;
-            let bounds = reader.bounds();
-            for loc in status.len()..bounds.end {
-                let bit = if loc < bounds.start {
-                    false
-                } else {
-                    let loc = Location::new(loc);
-                    match reader.read(*loc).await? {
-                        Operation::Update(update) => self
-                            .any
-                            .snapshot
-                            .get(update.key())
-                            .any(|&active_loc| active_loc == loc),
-                        Operation::Delete(_) => false,
-                        Operation::CommitFloor(_, _) => loc == self.any.last_commit_loc,
-                    }
-                };
-                status.push(bit);
+            let BitmapBatch::Base(base) = &mut self.status else {
+                unreachable!("flatten() guarantees Base");
+            };
+            let status = Arc::get_mut(base).expect("flatten ensures sole owner");
+            status.truncate(rewind_size);
+            for loc in &restored_locs {
+                status.set_bit(**loc, true);
             }
+            status.set_bit(rewind_size - 1, true);
         }
+        let BitmapBatch::Base(status) = &self.status else {
+            unreachable!("flatten() guarantees Base");
+        };
+        let status = status.as_ref();
 
-        // Rebuild grafted MMR and canonical root for the rebuilt bitmap.
+        // Rebuild grafted MMR and canonical root for the patched bitmap.
         let hasher = StandardHasher::<H>::new();
         let grafted_mmr = build_grafted_mmr::<H, N>(
             &hasher,
-            &status,
+            status,
             &pinned_nodes,
             &self.any.log.mmr,
             self.thread_pool.as_ref(),
@@ -465,11 +458,10 @@ where
         .await?;
         let storage =
             grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &self.any.log.mmr);
-        let partial_chunk = partial_chunk(&status);
+        let partial_chunk = partial_chunk(status);
         let ops_root = self.any.log.root();
         let root = compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
 
-        self.status = super::batch::BitmapBatch::Base(Arc::new(status));
         self.grafted_mmr = mmr::batch::MerkleizedBatch::Base(grafted_mmr);
         self.root = root;
 

@@ -230,14 +230,16 @@ where
     /// all in-memory structures are rebuilt. Callers must drop this database handle after any `Err`
     /// from `rewind` and reopen from storage.
     ///
+    /// Returns the list of locations restored to active state in the snapshot.
+    ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
     /// [`Db::sync`].
-    pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
+    pub async fn rewind(&mut self, size: Location) -> Result<Vec<Location>, Error> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
 
         if rewind_size == current_size {
-            return Ok(());
+            return Ok(Vec::new());
         }
         if rewind_size == 0 || rewind_size > current_size {
             return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
@@ -320,6 +322,16 @@ where
         // restart-stable until a later commit/sync boundary.
         self.log.rewind(rewind_size).await?;
 
+        let restored_locs: Vec<Location> = undos
+            .iter()
+            .filter_map(|undo| match undo {
+                SnapshotUndo::Replace { new_loc, .. } | SnapshotUndo::Insert { new_loc, .. } => {
+                    (*new_loc < rewind_size).then_some(*new_loc)
+                }
+                SnapshotUndo::Remove { .. } => None,
+            })
+            .collect();
+
         for undo in undos {
             match undo {
                 SnapshotUndo::Replace {
@@ -343,7 +355,7 @@ where
         self.last_commit_loc = Location::new(rewind_size - 1);
         self.inactivity_floor_loc = rewind_floor;
 
-        Ok(())
+        Ok(restored_locs)
     }
 }
 
