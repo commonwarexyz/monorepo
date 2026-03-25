@@ -1,9 +1,9 @@
 //! Simulation plan: declarative test configuration with select-loop orchestration.
 
 use super::{
+    action::{Action, Crash, Schedule},
     engine::EngineDefinition,
     exit::{ExitCondition, MinimumFinalizations},
-    fault::{Crash, Fault, Schedule},
     property::{FinalizationProperty, Property},
     team::Team,
     tracker::{FinalizationUpdate, ProgressTracker},
@@ -27,7 +27,7 @@ use std::{
 };
 use tracing::{error, info};
 
-/// Command sent from the fault scheduler to the select loop.
+/// Command sent from the action scheduler to the select loop.
 enum ScheduleCmd<P: PublicKey> {
     Crash(P),
     Restart(P),
@@ -44,8 +44,8 @@ pub struct PlanResult<D: EngineDefinition> {
     /// Number of validator crashes that occurred during the simulation.
     pub crashes: u64,
 
-    /// Number of scheduled fault events that were applied.
-    pub scheduled_faults: u64,
+    /// Number of scheduled actions that were applied.
+    pub scheduled_actions: u64,
 
     /// Whether delayed validators were started (if Delay was configured).
     pub delayed_started: bool,
@@ -71,8 +71,8 @@ pub struct Plan<D: EngineDefinition> {
     /// Engine definition (how to wire up each validator).
     pub engine: D,
 
-    /// Crash/fault injection strategies.
-    pub faults: Vec<Crash<D::PublicKey>>,
+    /// Crash/action injection strategies.
+    pub crashes: Vec<Crash<D::PublicKey>>,
 
     /// Number of finalizations required before the simulation stops.
     ///
@@ -102,7 +102,7 @@ pub struct PlanBuilder<D: EngineDefinition> {
     link: Link,
     max_message_size: u32,
     engine: D,
-    faults: Vec<Crash<D::PublicKey>>,
+    crashes: Vec<Crash<D::PublicKey>>,
     required_finalizations: u64,
     exit_condition: Option<Box<dyn ExitCondition<D::PublicKey, D::State>>>,
     timeout: Option<Duration>,
@@ -117,7 +117,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
     /// [`EngineDefinition::participants`].
     ///
     /// Defaults: seed 0, 1MB max message size, good links (10ms latency,
-    /// 5ms jitter, 100% success), no faults, 10 required finalizations,
+    /// 5ms jitter, 100% success), no crashes, 10 required finalizations,
     /// no timeout.
     pub fn new(engine: D) -> Self {
         let participants = engine.participants();
@@ -131,7 +131,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
             },
             max_message_size: 1024 * 1024,
             engine,
-            faults: vec![],
+            crashes: vec![],
             required_finalizations: 10,
             exit_condition: None,
             timeout: None,
@@ -169,21 +169,21 @@ impl<D: EngineDefinition> PlanBuilder<D> {
         match crash {
             Crash::Delay { .. } => assert!(
                 !self
-                    .faults
+                    .crashes
                     .iter()
-                    .any(|fault| matches!(fault, Crash::Delay { .. })),
-                "only one Crash::Delay fault may be configured"
+                    .any(|crash| matches!(crash, Crash::Delay { .. })),
+                "only one Crash::Delay strategy may be configured"
             ),
             Crash::Random { .. } => assert!(
                 !self
-                    .faults
+                    .crashes
                     .iter()
-                    .any(|fault| matches!(fault, Crash::Random { .. })),
-                "only one Crash::Random fault may be configured"
+                    .any(|crash| matches!(crash, Crash::Random { .. })),
+                "only one Crash::Random strategy may be configured"
             ),
             Crash::Schedule(_) => {}
         }
-        self.faults.push(crash);
+        self.crashes.push(crash);
         self
     }
 
@@ -235,7 +235,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
             link: self.link,
             max_message_size: self.max_message_size,
             engine: self.engine,
-            faults: self.faults,
+            crashes: self.crashes,
             required_finalizations: self.required_finalizations,
             exit_condition,
             timeout: self.timeout,
@@ -260,15 +260,15 @@ impl<D: EngineDefinition> PlanBuilder<D> {
 }
 
 impl<D: EngineDefinition> Plan<D> {
-    fn delay_fault(&self) -> Option<(usize, u64)> {
-        self.faults.iter().find_map(|fault| match fault {
+    fn delay_crash(&self) -> Option<(usize, u64)> {
+        self.crashes.iter().find_map(|crash| match crash {
             Crash::Delay { count, after } => Some((*count, *after)),
             _ => None,
         })
     }
 
-    fn random_fault(&self) -> Option<(Duration, Duration, usize)> {
-        self.faults.iter().find_map(|fault| match fault {
+    fn random_crash(&self) -> Option<(Duration, Duration, usize)> {
+        self.crashes.iter().find_map(|crash| match crash {
             Crash::Random {
                 frequency,
                 downtime,
@@ -279,7 +279,7 @@ impl<D: EngineDefinition> Plan<D> {
     }
 
     fn schedules(&self) -> impl Iterator<Item = &Schedule<D::PublicKey>> {
-        self.faults.iter().filter_map(|fault| match fault {
+        self.crashes.iter().filter_map(|crash| match crash {
             Crash::Schedule(schedule) => Some(schedule),
             _ => None,
         })
@@ -287,7 +287,7 @@ impl<D: EngineDefinition> Plan<D> {
 
     /// Determine which participants should be delayed at startup.
     fn delayed_participants(&self) -> HashSet<D::PublicKey> {
-        if let Some((count, _)) = self.delay_fault() {
+        if let Some((count, _)) = self.delay_crash() {
             self.participants.iter().take(count).cloned().collect()
         } else {
             HashSet::new()
@@ -325,7 +325,7 @@ impl<D: EngineDefinition> Plan<D> {
         let (restart_tx, mut restart_rx) = mpsc::channel::<D::PublicKey>(10);
         let (crash_tx, mut crash_rx) = mpsc::channel::<()>(1);
         let (schedule_tx, mut schedule_rx) = mpsc::channel::<ScheduleCmd<D::PublicKey>>(10);
-        let scheduled_faults = Arc::new(AtomicU64::new(0));
+        let scheduled_actions = Arc::new(AtomicU64::new(0));
 
         let delayed = self.delayed_participants();
         team.start(
@@ -338,7 +338,7 @@ impl<D: EngineDefinition> Plan<D> {
         .await;
 
         // Spawn crash ticker for Random crashes.
-        if let Some((frequency, _, _)) = self.random_fault() {
+        if let Some((frequency, _, _)) = self.random_crash() {
             let crash_tx = crash_tx.clone();
             ctx.clone().spawn(move |ctx| async move {
                 loop {
@@ -350,21 +350,21 @@ impl<D: EngineDefinition> Plan<D> {
             });
         }
 
-        // Spawn fault schedule actors.
+        // Spawn action schedule actors.
         for schedule in self.schedules() {
             let schedule = schedule.clone();
             let oracle_clone = oracle.clone();
             let participants = self.participants.clone();
             let schedule_tx_clone = schedule_tx.clone();
-            let scheduled_faults_clone = scheduled_faults.clone();
+            let scheduled_actions_clone = scheduled_actions.clone();
             ctx.clone().spawn(move |ctx| async move {
-                Self::run_fault_scheduler(
+                Self::run_action_scheduler(
                     ctx,
                     schedule,
                     &oracle_clone,
                     &participants,
                     schedule_tx_clone,
-                    scheduled_faults_clone,
+                    scheduled_actions_clone,
                 )
                 .await;
             });
@@ -457,14 +457,14 @@ impl<D: EngineDefinition> Plan<D> {
                             }
                         }
                     }
-                    let scheduled_faults_applied = scheduled_faults.load(Ordering::Relaxed);
+                    let scheduled_actions_applied = scheduled_actions.load(Ordering::Relaxed);
 
                     info!(
                         target: "simulator",
                         required = self.required_finalizations,
                         exit_condition = self.exit_condition.name(),
                         crashes,
-                        scheduled_faults = scheduled_faults_applied,
+                        scheduled_actions = scheduled_actions_applied,
                         delayed_started,
                         "all validators reached required progress"
                     );
@@ -472,7 +472,7 @@ impl<D: EngineDefinition> Plan<D> {
                         state: ctx.auditor().state(),
                         tracker,
                         crashes,
-                        scheduled_faults: scheduled_faults_applied,
+                        scheduled_actions: scheduled_actions_applied,
                         delayed_started,
                     });
                     break;
@@ -480,7 +480,7 @@ impl<D: EngineDefinition> Plan<D> {
 
                 // Start delayed validators after enough progress
                 if !delayed_started {
-                    if let Some((_, after)) = self.delay_fault() {
+                    if let Some((_, after)) = self.delay_crash() {
                         if tracker.min_view() >= after {
                             info!(target: "simulator", "starting delayed participants");
                             for pk in &delayed {
@@ -545,14 +545,14 @@ impl<D: EngineDefinition> Plan<D> {
                         }
                     }
                 }
-                let scheduled_faults_applied = scheduled_faults.load(Ordering::Relaxed);
+                let scheduled_actions_applied = scheduled_actions.load(Ordering::Relaxed);
 
                 info!(
                     target: "simulator",
                     required = self.required_finalizations,
                     exit_condition = self.exit_condition.name(),
                     crashes,
-                    scheduled_faults = scheduled_faults_applied,
+                    scheduled_actions = scheduled_actions_applied,
                     delayed_started,
                     "all validators reached required progress"
                 );
@@ -560,7 +560,7 @@ impl<D: EngineDefinition> Plan<D> {
                     state: ctx.auditor().state(),
                     tracker,
                     crashes,
-                    scheduled_faults: scheduled_faults_applied,
+                    scheduled_actions: scheduled_actions_applied,
                     delayed_started,
                 });
                 break;
@@ -580,7 +580,7 @@ impl<D: EngineDefinition> Plan<D> {
                 }
             },
             _ = crash_rx.recv() => {
-                let Some((_, downtime, count)) = self.random_fault() else {
+                let Some((_, downtime, count)) = self.random_crash() else {
                     continue;
                 };
                 let active = team.active_keys();
@@ -605,9 +605,9 @@ impl<D: EngineDefinition> Plan<D> {
             },
         }
 
-        // Assert that configured faults were actually exercised.
+        // Assert that configured crashes were actually exercised.
         if let Ok(ref r) = result {
-            if self.random_fault().is_some() {
+            if self.random_crash().is_some() {
                 assert!(
                     r.crashes > 0,
                     "Crash::Random configured but no crashes occurred. \
@@ -619,14 +619,14 @@ impl<D: EngineDefinition> Plan<D> {
                 self.schedules().map(|schedule| schedule.events.len()).sum();
             if scheduled_events > 0 {
                 assert!(
-                    r.scheduled_faults > 0,
+                    r.scheduled_actions > 0,
                     "Crash::Schedule configured with {} events but none were applied. \
                      Schedule events may be timed after consensus completes.",
                     scheduled_events
                 );
             }
 
-            if self.delay_fault().is_some() {
+            if self.delay_crash().is_some() {
                 assert!(
                     r.delayed_started,
                     "Crash::Delay configured but delayed validators were never started. \
@@ -638,20 +638,20 @@ impl<D: EngineDefinition> Plan<D> {
         result
     }
 
-    /// Fault schedule executor -- sleeps until each scheduled time and
-    /// applies the fault. Network faults are applied directly via the
-    /// oracle; node faults (crash/restart) are sent as commands to the
+    /// Schedule executor -- sleeps until each scheduled time and
+    /// applies the action. Network actions are applied directly via the
+    /// oracle; node actions (crash/restart) are sent as commands to the
     /// select loop which owns the team.
-    async fn run_fault_scheduler(
+    async fn run_action_scheduler(
         ctx: deterministic::Context,
         schedule: Schedule<D::PublicKey>,
         oracle: &simulated::Oracle<D::PublicKey, deterministic::Context>,
         participants: &[D::PublicKey],
         cmd_tx: mpsc::Sender<ScheduleCmd<D::PublicKey>>,
-        faults_applied: Arc<AtomicU64>,
+        actions_applied: Arc<AtomicU64>,
     ) {
         let start = ctx.current();
-        for (time, fault) in schedule.events {
+        for (time, action) in schedule.events {
             let elapsed = ctx
                 .current()
                 .duration_since(start)
@@ -659,8 +659,8 @@ impl<D: EngineDefinition> Plan<D> {
             if time > elapsed {
                 ctx.sleep(time - elapsed).await;
             }
-            match fault {
-                Fault::Heal(ref link) => {
+            match action {
+                Action::Heal(ref link) => {
                     for v1 in participants {
                         for v2 in participants {
                             if v1 == v2 {
@@ -670,10 +670,10 @@ impl<D: EngineDefinition> Plan<D> {
                             let _ = oracle.add_link(v1.clone(), v2.clone(), link.clone()).await;
                         }
                     }
-                    faults_applied.fetch_add(1, Ordering::Relaxed);
+                    actions_applied.fetch_add(1, Ordering::Relaxed);
                     info!(target: "simulator", "links reset");
                 }
-                Fault::UpdateLink {
+                Action::UpdateLink {
                     ref from,
                     ref to,
                     ref link,
@@ -682,20 +682,20 @@ impl<D: EngineDefinition> Plan<D> {
                     let _ = oracle
                         .add_link(from.clone(), to.clone(), link.clone())
                         .await;
-                    faults_applied.fetch_add(1, Ordering::Relaxed);
+                    actions_applied.fetch_add(1, Ordering::Relaxed);
                     info!(target: "simulator", ?from, ?to, "link updated");
                 }
-                Fault::Crash(ref pk) => {
+                Action::Crash(ref pk) => {
                     if cmd_tx.send(ScheduleCmd::Crash(pk.clone())).await.is_err() {
                         break;
                     }
-                    faults_applied.fetch_add(1, Ordering::Relaxed);
+                    actions_applied.fetch_add(1, Ordering::Relaxed);
                 }
-                Fault::Restart(ref pk) => {
+                Action::Restart(ref pk) => {
                     if cmd_tx.send(ScheduleCmd::Restart(pk.clone())).await.is_err() {
                         break;
                     }
-                    faults_applied.fetch_add(1, Ordering::Relaxed);
+                    actions_applied.fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -830,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn schedule_fault_applied_before_completion_is_counted() {
+    fn schedule_action_applied_before_completion_is_counted() {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(0),
@@ -841,8 +841,8 @@ mod tests {
             .timeout(Duration::from_secs(2))
             .crash(Crash::Schedule(
                 Schedule::new()
-                    .at(Duration::from_millis(1), Fault::Heal(link.clone()))
-                    .at(Duration::from_secs(5), Fault::Heal(link)),
+                    .at(Duration::from_millis(1), Action::Heal(link.clone()))
+                    .at(Duration::from_secs(5), Action::Heal(link)),
             ))
             .run()
             .expect("simulation should complete")
@@ -850,14 +850,14 @@ mod tests {
             .next()
             .expect("expected one result for the default seed");
         assert!(
-            result.scheduled_faults >= 1,
-            "expected at least one applied fault before completion, got {}",
-            result.scheduled_faults
+            result.scheduled_actions >= 1,
+            "expected at least one applied action before completion, got {}",
+            result.scheduled_actions
         );
     }
 
     #[test]
-    fn delay_and_schedule_faults_compose() {
+    fn delay_and_schedule_actions_compose() {
         let link = Link {
             latency: Duration::from_millis(10),
             jitter: Duration::from_millis(0),
@@ -868,7 +868,7 @@ mod tests {
             .timeout(Duration::from_secs(2))
             .crash(Crash::Delay { count: 1, after: 1 })
             .crash(Crash::Schedule(
-                Schedule::new().at(Duration::from_millis(1), Fault::Heal(link)),
+                Schedule::new().at(Duration::from_millis(1), Action::Heal(link)),
             ))
             .run()
             .expect("simulation should complete")
@@ -877,11 +877,11 @@ mod tests {
             .expect("expected one result for the default seed");
         assert!(
             result.delayed_started,
-            "delayed validator should still start when schedule faults are also configured"
+            "delayed validator should still start when schedule crashes are also configured"
         );
         assert!(
-            result.scheduled_faults >= 1,
-            "scheduled faults should still run when delay faults are also configured"
+            result.scheduled_actions >= 1,
+            "scheduled crashes should still run when delay crashes are also configured"
         );
     }
 
