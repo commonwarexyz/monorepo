@@ -98,32 +98,64 @@ impl Metrics {
 /// Tracks running spawned tasks.
 #[derive(Default)]
 struct TaskTracker {
-    live: AtomicUsize,
+    // Current state: bit 0 marks shutdown-closed task registration, the
+    // remaining bits store the live tracked-task count.
+    state: AtomicUsize,
     gate: Mutex<()>,
     idle: Condvar,
 }
 
 impl TaskTracker {
-    /// Reserves a task slot and returns a guard that marks it complete on drop.
-    fn track(self: &Arc<Self>) -> TaskGuard {
-        self.live.fetch_add(1, Ordering::Relaxed);
-        TaskGuard {
-            tracker: self.clone(),
-        }
+    const CLOSED: usize = 1;
+    const LIVE_INCREMENT: usize = 2;
+
+    #[inline]
+    const fn live(state: usize) -> usize {
+        state >> 1
     }
 
-    /// Blocks until all spawned tasks have finished or the timeout expires.
-    fn wait_for_idle(&self, timeout: Duration) -> bool {
-        if self.live.load(Ordering::Acquire) == 0 {
-            return true;
-        }
+    /// Reserves a task slot and returns a guard that releases it on drop.
+    ///
+    /// Returns `None` if shutdown has already closed task registration.
+    fn track(self: &Arc<Self>) -> Option<TaskGuard> {
+        // Atomically increment the live-task count only if shutdown has not
+        // already closed task registration. This single state transition is
+        // the linearization point between "task accepted" and "shutdown
+        // closed registration".
+        self.state
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |state| {
+                if state & Self::CLOSED != 0 {
+                    None
+                } else {
+                    Some(
+                        state
+                            .checked_add(Self::LIVE_INCREMENT)
+                            .expect("task tracker overflow"),
+                    )
+                }
+            })
+            .ok()?;
 
+        Some(TaskGuard {
+            tracker: self.clone(),
+        })
+    }
+
+    /// Closes task registration and waits for all tracked tasks to finish.
+    ///
+    /// Returns `true` if all tracked tasks finish before `timeout`, or `false`
+    /// if shutdown timed out first.
+    fn close(&self, timeout: Duration) -> bool {
         let deadline = Instant::now()
             .checked_add(timeout)
             .expect("shutdown timeout overflow");
 
         let mut gate = self.gate.lock();
-        if self.live.load(Ordering::Acquire) == 0 {
+
+        // Atomically close registration and observe how many tracked tasks were
+        // still live at the moment shutdown started.
+        let state = self.state.fetch_or(Self::CLOSED, Ordering::Relaxed);
+        if Self::live(state) == 0 {
             return true;
         }
 
@@ -139,7 +171,22 @@ impl TaskTracker {
         //
         // https://docs.rs/parking_lot/0.12.5/parking_lot/struct.Condvar.html#differences-from-the-standard-library-condvar
         self.idle.wait_for(&mut gate, remaining);
-        self.live.load(Ordering::Acquire) == 0
+        Self::live(self.state.load(Ordering::Relaxed)) == 0
+    }
+
+    /// Decrements the live task count and wakes a shutdown waiter if this was
+    /// the final tracked task.
+    fn release(&self) {
+        let state = self
+            .state
+            .fetch_sub(Self::LIVE_INCREMENT, Ordering::Relaxed);
+        assert_ne!(Self::live(state), 0, "task tracker underflow");
+        // Only the transition from `closed + 1 live task` to `closed + 0 live
+        // tasks` needs to wake the shutdown waiter.
+        if state == (Self::CLOSED | Self::LIVE_INCREMENT) {
+            let _gate = self.gate.lock();
+            self.idle.notify_one();
+        }
     }
 }
 
@@ -153,12 +200,7 @@ struct TaskGuard {
 
 impl Drop for TaskGuard {
     fn drop(&mut self) {
-        let live = self.tracker.live.fetch_sub(1, Ordering::Release);
-        assert_ne!(live, 0, "task tracker underflow");
-        if live == 1 {
-            let _gate = self.tracker.gate.lock();
-            self.tracker.idle.notify_one();
-        }
+        self.tracker.release();
     }
 }
 
@@ -574,7 +616,7 @@ impl crate::Runner for Runner {
         // If a tracked task does not finish before the timeout (may be a blocking task we
         // cannot cancel), log the slow shutdown and continue returning or resuming
         // the original panic.
-        if !executor.tasks.wait_for_idle(self.cfg.shutdown_timeout) {
+        if !executor.tasks.close(self.cfg.shutdown_timeout) {
             error!("unfinished tasks remaining after shutdown timeout");
         }
         runtime.shutdown_timeout(
@@ -683,7 +725,10 @@ impl crate::Spawner for Context {
     {
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
-        let task_guard = self.executor.tasks.track();
+        let Some(task_guard) = self.executor.tasks.track() else {
+            // Shutdown has started and new tasks can no longer be registered.
+            return Handle::closed(metric);
+        };
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);

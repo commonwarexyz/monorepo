@@ -676,6 +676,7 @@ impl Runner {
         // reference to executor until after we have dropped
         // all tasks (as they may attempt to upgrade their weak
         // reference to the executor during drop).
+        executor.tasks.close();
         executor.sleeping.lock().clear(); // included in tasks
         let tasks = executor.tasks.clear();
         for task in tasks {
@@ -781,6 +782,8 @@ impl ArcWake for TaskWaker {
 struct Tasks {
     /// The next task id.
     counter: Mutex<u128>,
+    /// Whether new work may still be registered.
+    closed: Mutex<bool>,
     /// Tasks ready to be polled.
     ready: Mutex<Vec<u128>>,
     /// All running tasks.
@@ -792,6 +795,7 @@ impl Tasks {
     const fn new() -> Self {
         Self {
             counter: Mutex::new(0),
+            closed: Mutex::new(false),
             ready: Mutex::new(Vec::new()),
             running: Mutex::new(BTreeMap::new()),
         }
@@ -819,11 +823,18 @@ impl Tasks {
     }
 
     /// Register a non-root task to be executed.
+    ///
+    /// Returns `true` if the task was accepted, or `false` if task
+    /// registration has already been closed for shutdown.
     fn register_work(
         arc_self: &Arc<Self>,
         label: Label,
         future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    ) {
+    ) -> bool {
+        let closed = arc_self.closed.lock();
+        if *closed {
+            return false;
+        }
         let id = arc_self.increment();
         let task = Arc::new(Task {
             id,
@@ -831,6 +842,7 @@ impl Tasks {
             mode: Mode::Work(Mutex::new(Some(future))),
         });
         arc_self.register(id, task);
+        true
     }
 
     /// Register a new task to be executed.
@@ -872,6 +884,11 @@ impl Tasks {
     /// Remove a task.
     fn remove(&self, id: u128) {
         self.running.lock().remove(&id);
+    }
+
+    /// Mark task registration as closed for non-root tasks.
+    fn close(&self) {
+        *self.closed.lock() = true;
     }
 
     /// Clear all tasks.
@@ -1187,11 +1204,14 @@ impl crate::Spawner for Context {
         };
         let (f, handle) = Handle::init(
             future,
-            metric,
+            metric.clone(),
             executor.panicker.clone(),
             Arc::clone(&parent),
         );
-        Tasks::register_work(&executor.tasks, label, Box::pin(f));
+        if !Tasks::register_work(&executor.tasks, label, Box::pin(f)) {
+            // Shutdown has started and new tasks can no longer be registered.
+            return Handle::closed(metric);
+        }
 
         // Register the task on the parent
         if let Some(aborter) = handle.aborter() {
