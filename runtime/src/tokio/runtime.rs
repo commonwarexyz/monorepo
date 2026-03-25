@@ -105,7 +105,7 @@ struct TaskTracker {
 }
 
 impl TaskTracker {
-    /// Registers a spawned task and returns a guard that marks it complete on drop.
+    /// Reserves a task slot and returns a guard that marks it complete on drop.
     fn track(self: &Arc<Self>) -> TaskGuard {
         self.live.fetch_add(1, Ordering::Relaxed);
         TaskGuard {
@@ -553,7 +553,7 @@ impl crate::Runner for Runner {
             instrumented: false,
         };
         let result = catch_unwind(AssertUnwindSafe(|| {
-            executor.runtime.block_on(panicked.interrupt(f(context)))
+            executor.runtime.block_on(panicked.monitor(f(context)))
         }));
         tree.abort();
         metric.finish();
@@ -564,7 +564,21 @@ impl crate::Runner for Runner {
         if !executor.tasks.wait_for_idle(self.cfg.shutdown_timeout) {
             error!("unfinished tasks remaining after shutdown timeout");
         }
-        result.unwrap_or_else(|payload| resume_unwind(payload))
+
+        // Resume any root or propagated child panic after cleanup. If the root
+        // returned normally, also check whether a child panicked while we were
+        // waiting for aborted tasks to finish cleaning up.
+        let (result, mut panicked) = result.unwrap_or_else(|payload| resume_unwind(payload));
+        let output = match result {
+            Ok(output) => output,
+            Err(payload) => resume_unwind(payload),
+        };
+        if let Some(panicked) = panicked.as_mut() {
+            if let Ok(payload) = panicked.try_recv() {
+                resume_unwind(payload);
+            }
+        }
+        output
     }
 }
 
@@ -651,6 +665,7 @@ impl crate::Spawner for Context {
     {
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
+        let task_guard = self.executor.tasks.track();
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
@@ -681,7 +696,6 @@ impl crate::Spawner for Context {
             executor.panicker.clone(),
             Arc::clone(&parent),
         );
-        let task_guard = executor.tasks.track();
         let f = async move {
             let _task_guard = task_guard;
             f.await;
@@ -965,6 +979,15 @@ impl crate::BufferPooler for Context {
 mod tests {
     use super::*;
     use crate::BufferPoolThreadCache;
+    use crate::Runner as _;
+    use commonware_utils::channel::oneshot;
+    use std::{
+        future::pending,
+        panic::{catch_unwind, AssertUnwindSafe},
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
 
     #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {
@@ -1004,6 +1027,120 @@ mod tests {
             cfg.resolved_storage_buffer_pool_config()
                 .thread_cache_capacity,
             BufferPoolThreadCache::Disabled
+        );
+    }
+
+    #[test]
+    fn test_shutdown_waits_for_spawn_in_flight() {
+        let (context_tx, context_rx) = mpsc::channel();
+        let (allow_root_return_tx, allow_root_return_rx) = oneshot::channel();
+        let (spawn_entered_tx, spawn_entered_rx) = mpsc::channel();
+        let (release_spawn_tx, release_spawn_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+
+        // Run the root on a separate thread so the test can drive shutdown
+        // while another thread stalls a concurrent spawn call mid-flight.
+        let runner = thread::spawn(move || {
+            let runner = Runner::new(Config::default().with_shutdown_timeout(Duration::from_secs(1)));
+            runner.start(|context| async move {
+                context_tx
+                    .send(context.clone())
+                    .expect("context receiver should stay open");
+                let _ = allow_root_return_rx.await;
+            });
+            finished_tx
+                .send(())
+                .expect("runner completion receiver should stay open");
+        });
+
+        // Reuse a cloned context after the root has started so spawn races with
+        // root shutdown from another thread.
+        let context = context_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("root should publish a cloneable context before returning");
+        let spawn = thread::spawn(move || {
+            let handle = context.spawn(move |_| {
+                // Block inside spawn before it can finish registration.
+                spawn_entered_tx
+                    .send(())
+                    .expect("spawn entry receiver should stay open");
+                release_spawn_rx
+                    .recv()
+                    .expect("spawn release sender should stay open");
+                async move { pending::<()>().await }
+            });
+            drop(handle);
+        });
+
+        // Start shutdown while the concurrent spawn is still in progress. The
+        // regression was that `start()` could return from this state.
+        spawn_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawn should block inside the in-flight window");
+        allow_root_return_tx
+            .send(())
+            .expect("root return gate should stay open");
+        let returned_early = finished_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        release_spawn_tx
+            .send(())
+            .expect("spawn release receiver should stay open");
+
+        assert!(
+            !returned_early,
+            "root shutdown returned while a spawn was still in flight",
+        );
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("runner should finish after the in-flight spawn is released");
+        spawn.join().expect("spawn thread should join cleanly");
+        runner.join().expect("runner thread should join cleanly");
+    }
+
+    #[test]
+    fn test_cleanup_wait_keeps_propagating_panics() {
+        let (root_returning_tx, root_returning_rx) = mpsc::channel();
+        let (panic_now_tx, panic_now_rx) = mpsc::channel();
+
+        // Run the runner on another thread so the test can trigger a child
+        // panic after the root has already entered cleanup.
+        let thread = thread::spawn(move || {
+            catch_unwind(AssertUnwindSafe(|| {
+                let runner =
+                    Runner::new(Config::default().with_shutdown_timeout(Duration::from_secs(1)));
+                runner.start(|context| async move {
+                    let (started_tx, started_rx) = oneshot::channel();
+                    context.shared(true).spawn(move |_| async move {
+                        let _ = started_tx.send(());
+                        // Hold the blocking task until the root has returned,
+                        // then panic while `start()` is waiting for cleanup.
+                        panic_now_rx
+                            .recv()
+                            .expect("panic trigger sender should stay open");
+                        panic!("cleanup panic");
+                    });
+                    let _ = started_rx.await;
+                    root_returning_tx
+                        .send(())
+                        .expect("root return receiver should stay open");
+                });
+            }))
+        });
+
+        // Confirm the root has finished its future and is in the shutdown wait
+        // before letting the child panic.
+        root_returning_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("root should enter cleanup after child startup");
+        panic_now_tx
+            .send(())
+            .expect("panic trigger should stay open until cleanup");
+
+        let result = thread
+            .join()
+            .expect("runner thread should catch its own unwind");
+        assert!(
+            result.is_err(),
+            "cleanup panic should still abort the Tokio runner",
         );
     }
 }
