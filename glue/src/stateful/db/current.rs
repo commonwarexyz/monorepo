@@ -1,0 +1,490 @@
+//! [`ManagedDb`] implementation for QMDB [`current`](commonware_storage::qmdb::current) databases.
+//!
+//! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
+//! read-through to committed state. The glue [`UnmerkleizedTrait`] trait
+//! does not carry a DB reference, so this module provides wrapper types
+//! that capture `Arc<AsyncRwLock<Db>>` alongside the raw batch.
+
+use crate::stateful::db::{
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    Unmerkleized as UnmerkleizedTrait,
+};
+use commonware_codec::{Codec, Read as CodecRead};
+use commonware_cryptography::Hasher;
+use commonware_runtime::{Clock, Metrics, Storage};
+use commonware_storage::{
+    index::{
+        unordered::Index as UnorderedIdx, Ordered as OrderedIndex, Unordered as UnorderedIndex,
+    },
+    journal::contiguous::{
+        fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Contiguous, Mutable,
+    },
+    mmr::Location,
+    qmdb::{
+        any::{
+            operation::{Operation, Update},
+            ordered, unordered,
+            value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
+        },
+        current::{
+            batch::{MerkleizedBatch, UnmerkleizedBatch},
+            db::Db,
+            FixedConfig, VariableConfig,
+        },
+        operation::Key,
+        sync::{self, resolver::Resolver},
+        Error,
+    },
+    translator::Translator,
+    Persistable,
+};
+use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
+use std::sync::Arc;
+
+type CurrentDbHandle<E, C, I, H, U, const N: usize> = Arc<AsyncRwLock<Db<E, C, I, H, U, N>>>;
+
+/// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
+/// database, allowing it to implement the glue [`Unmerkleized`](UnmerkleizedTrait)
+/// trait (which does not carry a DB parameter).
+pub struct CurrentUnmerkleized<E, C, I, H, U, const N: usize>
+where
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<U>>,
+    I: UnorderedIndex<Value = Location>,
+    H: Hasher,
+    Operation<U>: Codec,
+{
+    batch: UnmerkleizedBatch<H, U, N>,
+    db: CurrentDbHandle<E, C, I, H, U, N>,
+}
+
+/// Wraps a QMDB [`MerkleizedBatch`] with a reference to the parent
+/// database, allowing it to implement the glue [`Merkleized`](MerkleizedTrait)
+/// trait.
+pub struct CurrentMerkleized<E, C, I, H, U, const N: usize>
+where
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<U>>,
+    I: UnorderedIndex<Value = Location>,
+    H: Hasher,
+    Operation<U>: Codec,
+{
+    batch: MerkleizedBatch<H::Digest, U, N>,
+    db: CurrentDbHandle<E, C, I, H, U, N>,
+}
+
+impl<E, C, I, H, U, const N: usize> CurrentMerkleized<E, C, I, H, U, N>
+where
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Contiguous<Item = Operation<U>>,
+    I: UnorderedIndex<Value = Location>,
+    H: Hasher,
+    Operation<U>: Codec,
+{
+    /// Ops-only root used by the state sync engine.
+    pub fn ops_root(&self) -> H::Digest {
+        self.batch.ops_root()
+    }
+}
+
+/// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `current` unordered update kind.
+impl<E, C, I, H, K, V, const N: usize>
+    UnmerkleizedTrait for CurrentUnmerkleized<E, C, I, H, unordered::Update<K, V>, N>
+where
+    E: Storage + Clock + Metrics,
+    K: Key + Send,
+    V: ValueEncoding + Send + 'static,
+    C: Mutable<Item = Operation<unordered::Update<K, V>>>
+        + Persistable<Error = commonware_storage::journal::Error>,
+    I: UnorderedIndex<Value = Location> + 'static,
+    H: Hasher,
+    Operation<unordered::Update<K, V>>: Codec,
+{
+    type Key = K;
+    type Value = V::Value;
+    type Merkleized = CurrentMerkleized<E, C, I, H, unordered::Update<K, V>, N>;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
+        let db = self.db.read().await;
+        self.batch.get(key, &*db).await
+    }
+
+    fn write(mut self, key: Self::Key, value: Option<Self::Value>) -> Self {
+        self.batch = self.batch.write(key, value);
+        self
+    }
+
+    async fn merkleize(self) -> Result<Self::Merkleized, Error> {
+        let db = self.db.read().await;
+        let merkleized = self.batch.merkleize(None, &*db).await?;
+        Ok(CurrentMerkleized {
+            batch: merkleized,
+            db: self.db.clone(),
+        })
+    }
+}
+
+/// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `current` ordered update kind.
+impl<E, C, I, H, K, V, const N: usize>
+    UnmerkleizedTrait for CurrentUnmerkleized<E, C, I, H, ordered::Update<K, V>, N>
+where
+    E: Storage + Clock + Metrics,
+    K: Key + Send,
+    V: ValueEncoding + Send + 'static,
+    C: Mutable<Item = Operation<ordered::Update<K, V>>>
+        + Persistable<Error = commonware_storage::journal::Error>,
+    I: OrderedIndex<Value = Location> + 'static,
+    H: Hasher,
+    Operation<ordered::Update<K, V>>: Codec,
+{
+    type Key = K;
+    type Value = V::Value;
+    type Merkleized = CurrentMerkleized<E, C, I, H, ordered::Update<K, V>, N>;
+    type Error = Error;
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
+        let db = self.db.read().await;
+        self.batch.get(key, &*db).await
+    }
+
+    fn write(mut self, key: Self::Key, value: Option<Self::Value>) -> Self {
+        self.batch = self.batch.write(key, value);
+        self
+    }
+
+    async fn merkleize(self) -> Result<Self::Merkleized, Error> {
+        let db = self.db.read().await;
+        let merkleized = self.batch.merkleize(None, &*db).await?;
+        Ok(CurrentMerkleized {
+            batch: merkleized,
+            db: self.db.clone(),
+        })
+    }
+}
+
+/// Implement [`Merkleized`](MerkleizedTrait) for all supported `current` update kinds.
+impl<E, C, I, H, U, const N: usize> MerkleizedTrait for CurrentMerkleized<E, C, I, H, U, N>
+where
+    E: Storage + Clock + Metrics,
+    U: Update,
+    C: Mutable<Item = Operation<U>> + Persistable<Error = commonware_storage::journal::Error>,
+    I: UnorderedIndex<Value = Location> + 'static,
+    H: Hasher,
+    Operation<U>: Codec,
+    CurrentUnmerkleized<E, C, I, H, U, N>: UnmerkleizedTrait,
+{
+    type Digest = H::Digest;
+    type Unmerkleized = CurrentUnmerkleized<E, C, I, H, U, N>;
+
+    fn root(&self) -> H::Digest {
+        self.batch.root()
+    }
+
+    fn sync_root(&self) -> H::Digest {
+        self.batch.ops_root()
+    }
+
+    fn new_batch(&self) -> Self::Unmerkleized {
+        CurrentUnmerkleized {
+            batch: self.batch.new_batch::<H>(),
+            db: self.db.clone(),
+        }
+    }
+}
+
+/// Implement [`ManagedDb`] for unordered current QMDB databases with fixed-size values.
+impl<E, K, V, H, T, const N: usize> ManagedDb<E>
+    for Db<
+        E,
+        FixedJournal<E, Operation<unordered::Update<K, FixedEncoding<V>>>>,
+        UnorderedIdx<T, Location>,
+        H,
+        unordered::Update<K, FixedEncoding<V>>,
+        N,
+    >
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: value::FixedValue + 'static,
+    H: Hasher + 'static,
+    T: Translator,
+{
+    type Unmerkleized = CurrentUnmerkleized<
+        E,
+        FixedJournal<E, Operation<unordered::Update<K, FixedEncoding<V>>>>,
+        UnorderedIdx<T, Location>,
+        H,
+        unordered::Update<K, FixedEncoding<V>>,
+        N,
+    >;
+    type Merkleized = CurrentMerkleized<
+        E,
+        FixedJournal<E, Operation<unordered::Update<K, FixedEncoding<V>>>>,
+        UnorderedIdx<T, Location>,
+        H,
+        unordered::Update<K, FixedEncoding<V>>,
+        N,
+    >;
+    type Error = Error;
+    type Config = FixedConfig<T>;
+    type SyncTarget = sync::Target<H::Digest>;
+
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error> {
+        <Self>::init(context, config).await
+    }
+
+    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        let inner = db.read().await;
+        CurrentUnmerkleized {
+            batch: inner.new_batch(),
+            db: db.clone(),
+        }
+    }
+
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error> {
+        let current_size = *self.bounds().await.end;
+        let changeset = batch.batch.finalize_from(current_size);
+        self.apply_batch(changeset).await?;
+        self.commit().await?;
+        Ok(())
+    }
+
+    async fn sync_target(&self) -> Self::SyncTarget {
+        let bounds = self.bounds().await;
+        sync::Target {
+            root: self.ops_root(),
+            range: non_empty_range!(self.inactivity_floor_loc(), bounds.end),
+        }
+    }
+
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error> {
+        self.rewind(target.range.end()).await?;
+        self.commit().await?;
+
+        let rewound_target = self.sync_target().await;
+        assert_eq!(
+            rewound_target, target,
+            "rewound database target mismatch after rewind",
+        );
+        Ok(())
+    }
+}
+
+/// Workaround for <https://github.com/rust-lang/rust/issues/115188>.
+///
+/// Inside a `ManagedDb` trait impl, `<Self>::init(...)` in a non-async `fn`
+/// resolves to the *trait* method (infinite recursion), while in an
+/// `async fn` it resolves correctly to the inherent method but the compiler
+/// cannot verify the RPITIT future is `Send`. By placing the call in this
+/// module -- which does not import `ManagedDb` -- the compiler
+/// unambiguously picks the inherent `Db::init`.
+mod open {
+    use commonware_codec::{Codec, Read};
+    use commonware_cryptography::Hasher;
+    use commonware_runtime::{Clock, Metrics, Storage};
+    use commonware_storage::qmdb::{
+        any::{
+            operation::Operation,
+            unordered,
+            value::{VariableEncoding, VariableValue},
+        },
+        current::{unordered::variable::Db, VariableConfig},
+        Error,
+    };
+    use commonware_utils::Array;
+
+    pub(super) async fn variable<E, K, V, H, T, const N: usize>(
+        context: E,
+        config: VariableConfig<
+            T,
+            <Operation<unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg,
+        >,
+    ) -> Result<Db<E, K, V, H, T, N>, Error>
+    where
+        E: Storage + Clock + Metrics,
+        K: Array,
+        V: VariableValue + 'static,
+        H: Hasher,
+        T: commonware_storage::translator::Translator,
+        Operation<unordered::Update<K, VariableEncoding<V>>>: Codec,
+    {
+        Db::init(context, config).await
+    }
+}
+
+/// Implement [`ManagedDb`] for unordered current QMDB databases with variable-size values.
+impl<E, K, V, H, T, const N: usize> ManagedDb<E>
+    for Db<
+        E,
+        VariableJournal<E, Operation<unordered::Update<K, VariableEncoding<V>>>>,
+        UnorderedIdx<T, Location>,
+        H,
+        unordered::Update<K, VariableEncoding<V>>,
+        N,
+    >
+where
+    E: Storage + Clock + Metrics,
+    K: Key + Array,
+    V: value::VariableValue + 'static,
+    H: Hasher,
+    T: Translator,
+    Operation<unordered::Update<K, VariableEncoding<V>>>: Codec,
+{
+    type Unmerkleized = CurrentUnmerkleized<
+        E,
+        VariableJournal<E, Operation<unordered::Update<K, VariableEncoding<V>>>>,
+        UnorderedIdx<T, Location>,
+        H,
+        unordered::Update<K, VariableEncoding<V>>,
+        N,
+    >;
+    type Merkleized = CurrentMerkleized<
+        E,
+        VariableJournal<E, Operation<unordered::Update<K, VariableEncoding<V>>>>,
+        UnorderedIdx<T, Location>,
+        H,
+        unordered::Update<K, VariableEncoding<V>>,
+        N,
+    >;
+    type Error = Error;
+    type Config =
+        VariableConfig<T, <Operation<unordered::Update<K, VariableEncoding<V>>> as CodecRead>::Cfg>;
+    type SyncTarget = sync::Target<H::Digest>;
+
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error> {
+        open::variable(context, config).await
+    }
+
+    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        let inner = db.read().await;
+        CurrentUnmerkleized {
+            batch: inner.new_batch(),
+            db: db.clone(),
+        }
+    }
+
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error> {
+        let current_size = *self.bounds().await.end;
+        let changeset = batch.batch.finalize_from(current_size);
+        self.apply_batch(changeset).await?;
+        self.commit().await?;
+        Ok(())
+    }
+
+    async fn sync_target(&self) -> Self::SyncTarget {
+        let bounds = self.bounds().await;
+        sync::Target {
+            root: self.ops_root(),
+            range: non_empty_range!(self.inactivity_floor_loc(), bounds.end),
+        }
+    }
+
+    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error> {
+        self.rewind(target.range.end()).await?;
+        self.commit().await?;
+
+        let rewound_target = self.sync_target().await;
+        assert_eq!(
+            rewound_target, target,
+            "rewound database target mismatch after rewind",
+        );
+        Ok(())
+    }
+}
+
+impl<E, K, V, H, T, R, const N: usize> StateSyncDb<E, R>
+    for Db<
+        E,
+        FixedJournal<E, Operation<unordered::Update<K, FixedEncoding<V>>>>,
+        UnorderedIdx<T, Location>,
+        H,
+        unordered::Update<K, FixedEncoding<V>>,
+        N,
+    >
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: value::FixedValue + 'static,
+    H: Hasher,
+    T: Translator,
+    R: Resolver<Op = Operation<unordered::Update<K, FixedEncoding<V>>>, Digest = H::Digest>,
+{
+    type SyncError = sync::Error<R::Error, H::Digest>;
+
+    async fn sync_db(
+        context: E,
+        config: Self::Config,
+        resolver: R,
+        target: Self::SyncTarget,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        finish: Option<mpsc::Receiver<()>>,
+        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        sync_config: SyncEngineConfig,
+    ) -> Result<Self, Self::SyncError> {
+        sync::sync(sync::engine::Config {
+            context,
+            resolver,
+            target,
+            max_outstanding_requests: sync_config.max_outstanding_requests,
+            fetch_batch_size: sync_config.fetch_batch_size,
+            apply_batch_size: sync_config.apply_batch_size,
+            db_config: config,
+            update_rx: Some(tip_updates),
+            finish_rx: finish,
+            reached_target_tx: reached_target,
+            max_retained_roots: sync_config.max_retained_roots,
+        })
+        .await
+    }
+}
+
+impl<E, K, V, H, T, R, const N: usize> StateSyncDb<E, R>
+    for Db<
+        E,
+        VariableJournal<E, Operation<unordered::Update<K, VariableEncoding<V>>>>,
+        UnorderedIdx<T, Location>,
+        H,
+        unordered::Update<K, VariableEncoding<V>>,
+        N,
+    >
+where
+    E: Storage + Clock + Metrics,
+    K: Key + Array,
+    V: value::VariableValue + 'static,
+    H: Hasher,
+    T: Translator,
+    Operation<unordered::Update<K, VariableEncoding<V>>>: Codec,
+    R: Resolver<Op = Operation<unordered::Update<K, VariableEncoding<V>>>, Digest = H::Digest>,
+{
+    type SyncError = sync::Error<R::Error, H::Digest>;
+
+    async fn sync_db(
+        context: E,
+        config: Self::Config,
+        resolver: R,
+        target: Self::SyncTarget,
+        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        finish: Option<mpsc::Receiver<()>>,
+        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        sync_config: SyncEngineConfig,
+    ) -> Result<Self, Self::SyncError> {
+        sync::sync(sync::engine::Config {
+            context,
+            resolver,
+            target,
+            max_outstanding_requests: sync_config.max_outstanding_requests,
+            fetch_batch_size: sync_config.fetch_batch_size,
+            apply_batch_size: sync_config.apply_batch_size,
+            db_config: config,
+            update_rx: Some(tip_updates),
+            finish_rx: finish,
+            reached_target_tx: reached_target,
+            max_retained_roots: sync_config.max_retained_roots,
+        })
+        .await
+    }
+}

@@ -74,6 +74,7 @@ use std::{
 };
 
 pub mod any;
+pub mod current;
 pub mod p2p;
 
 /// Mutable batch state before merkleization.
@@ -121,8 +122,18 @@ pub trait Merkleized: Sized + Send + Sync {
     /// The unmerkleized batch type produced by [`new_batch`](Self::new_batch).
     type Unmerkleized: Unmerkleized;
 
-    /// The committed state root after merkleization.
+    /// The canonical state root committed in block headers.
     fn root(&self) -> Self::Digest;
+
+    /// The root used for state-sync targeting.
+    ///
+    /// Defaults to [`root`](Self::root). Override when the sync engine
+    /// operates on a different tree than the consensus root (e.g. the
+    /// ops-only MMR in a `current` database, which lacks the activity
+    /// bitmap incorporated into the canonical root).
+    fn sync_root(&self) -> Self::Digest {
+        self.root()
+    }
 
     /// Create a child unmerkleized batch that reads through this batch's
     /// pending changes before falling back to the committed database state.
