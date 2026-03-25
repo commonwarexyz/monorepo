@@ -517,6 +517,8 @@ struct DbSyncChannels<T> {
     target_rx: mpsc::Receiver<T>,
     finish_tx: mpsc::Sender<()>,
     finish_rx: mpsc::Receiver<()>,
+    generation_tx: mpsc::Sender<(usize, T)>,
+    generation_rx: mpsc::Receiver<(usize, T)>,
     reached_tx: mpsc::Sender<T>,
     reached_rx: mpsc::Receiver<T>,
 }
@@ -525,12 +527,15 @@ impl<T> DbSyncChannels<T> {
     fn new(update_channel_size: usize) -> Self {
         let (target_tx, target_rx) = mpsc::channel(update_channel_size);
         let (finish_tx, finish_rx) = mpsc::channel(1);
+        let (generation_tx, generation_rx) = mpsc::channel(update_channel_size);
         let (reached_tx, reached_rx) = mpsc::channel(1);
         Self {
             target_tx,
             target_rx,
             finish_tx,
             finish_rx,
+            generation_tx,
+            generation_rx,
             reached_tx,
             reached_rx,
         }
@@ -540,6 +545,7 @@ impl<T> DbSyncChannels<T> {
 struct CoordinatorSyncSenders<T> {
     target_tx: mpsc::Sender<T>,
     finish_tx: mpsc::Sender<()>,
+    generation_tx: mpsc::Sender<(usize, T)>,
 }
 
 macro_rules! impl_state_sync_set {
@@ -573,6 +579,14 @@ macro_rules! impl_state_sync_set {
                     CoordinatorSyncSenders {
                         target_tx: db_channels.$idx.target_tx.clone(),
                         finish_tx: db_channels.$idx.finish_tx.clone(),
+                        generation_tx: db_channels.$idx.generation_tx.clone(),
+                    },
+                )+);
+                let coordinator_owned_senders = ($(
+                    CoordinatorSyncSenders {
+                        target_tx: db_channels.$idx.target_tx,
+                        finish_tx: db_channels.$idx.finish_tx,
+                        generation_tx: db_channels.$idx.generation_tx,
                     },
                 )+);
                 let (reached_event_tx, mut reached_event_rx) = mpsc::channel(16);
@@ -584,6 +598,9 @@ macro_rules! impl_state_sync_set {
                 let finish_coordinator = {
                     let coordinator_result = coordinator_result.clone();
                     async move {
+                        // Keep ownership of the original per-database senders inside this task so
+                        // they are dropped as soon as the coordinator exits.
+                        let coordinator_owned_senders = coordinator_owned_senders;
                         let mut tip_updates = Some(tip_updates);
                         let mut state = CoordinatorState::new(db_count, anchor, coordinator_targets);
 
@@ -591,7 +608,7 @@ macro_rules! impl_state_sync_set {
                             // Phase 1: Drain reached events.
                             loop {
                                 match reached_event_rx.try_recv() {
-                                    Ok(idx) => state.record_reached(idx),
+                                    Ok((idx, generation)) => state.record_reached(idx, generation),
                                     Err(mpsc::error::TryRecvError::Empty) => break,
                                     Err(mpsc::error::TryRecvError::Disconnected) => return,
                                 }
@@ -620,15 +637,27 @@ macro_rules! impl_state_sync_set {
                                     *coordinator_result.lock() = Some(anchor);
                                     return;
                                 }
-                                CoordinatorAction::Dispatch(dispatch_targets) => {
+                                CoordinatorAction::Dispatch {
+                                    generation,
+                                    targets: dispatch_targets,
+                                } => {
                                     $(
-                                        if state.should_dispatch($idx)
-                                            && !coordinator_senders.$idx
-                                                .target_tx
-                                                .send_lossy(dispatch_targets.$idx.clone())
+                                        if state.should_dispatch($idx) {
+                                            let dispatch_target = dispatch_targets.$idx.clone();
+                                            if !coordinator_senders.$idx
+                                                .generation_tx
+                                                .send_lossy((generation, dispatch_target.clone()))
                                                 .await
-                                        {
-                                            return;
+                                            {
+                                                return;
+                                            }
+                                            if !coordinator_senders.$idx
+                                                .target_tx
+                                                .send_lossy(dispatch_target)
+                                                .await
+                                            {
+                                                return;
+                                            }
                                         }
                                     )+
                                     continue;
@@ -643,12 +672,16 @@ macro_rules! impl_state_sync_set {
                             );
                             select! {
                                 reached_event = reached_event_rx.recv() => {
-                                    let Some(idx) = reached_event else {
+                                    let Some((idx, generation)) = reached_event else {
                                         return;
                                     };
-                                    state.record_reached(idx);
+                                    state.record_reached(idx, generation);
                                 },
                                 _ = completion_rx.recv() => {
+                                    // A database task completed (success or failure). Close all
+                                    // outstanding per-database channels immediately so peers
+                                    // waiting on `finish_rx` or `target_rx` can terminate.
+                                    drop(coordinator_owned_senders);
                                     return;
                                 },
                                 update = update_future => {
@@ -666,6 +699,9 @@ macro_rules! impl_state_sync_set {
                     $(
                         async {
                             let mut reached_target_rx = db_channels.$idx.reached_rx;
+                            let mut generation_rx = Some(db_channels.$idx.generation_rx);
+                            let mut current_generation = 0usize;
+                            let mut current_target = targets.$idx.clone();
                             let reached_event_sender = reached_event_tx.clone();
                             let completion_signal = completion_tx.clone();
                             let sync = $T::sync_db(
@@ -679,10 +715,70 @@ macro_rules! impl_state_sync_set {
                                 sync_config,
                             );
                             let forward_reached = async move {
-                                while reached_target_rx.recv().await.is_some() {
-                                    if !reached_event_sender.send_lossy($idx).await {
-                                        return;
+                                loop {
+                                    if let Some(updates) = generation_rx.as_mut() {
+                                        loop {
+                                            match updates.try_recv() {
+                                                Ok((generation, target)) => {
+                                                    current_generation = generation;
+                                                    current_target = target;
+                                                }
+                                                Err(mpsc::error::TryRecvError::Empty) => break,
+                                                Err(mpsc::error::TryRecvError::Disconnected) => {
+                                                    generation_rx = None;
+                                                    break;
+                                                }
+                                            }
+                                        }
                                     }
+
+                                    let update_future = generation_rx.as_mut().map_or_else(
+                                        || Either::Right(pending()),
+                                        |updates| Either::Left(updates.recv()),
+                                    );
+                                    select! {
+                                        reached_target = reached_target_rx.recv() => {
+                                            let Some(reached_target) = reached_target else {
+                                                return;
+                                            };
+
+                                            if reached_target != current_target {
+                                                if let Some(updates) = generation_rx.as_mut() {
+                                                    loop {
+                                                        match updates.try_recv() {
+                                                            Ok((generation, target)) => {
+                                                                current_generation = generation;
+                                                                current_target = target;
+                                                            }
+                                                            Err(mpsc::error::TryRecvError::Empty) => break,
+                                                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                                                generation_rx = None;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if reached_target != current_target {
+                                                    continue;
+                                                }
+                                            }
+
+                                            if !reached_event_sender
+                                                .send_lossy(($idx, current_generation))
+                                                .await
+                                            {
+                                                return;
+                                            }
+                                        },
+                                        update = update_future => {
+                                            let Some((generation, target)) = update else {
+                                                generation_rx = None;
+                                                continue;
+                                            };
+                                            current_generation = generation;
+                                            current_target = target;
+                                        },
+                                    };
                                 }
                             };
                             let (sync_result, _) = join!(sync, forward_reached);
@@ -763,8 +859,8 @@ impl DbSyncState {
 enum CoordinatorAction<D: Digest, T> {
     /// Nothing to do; wait for the next event.
     Wait,
-    /// Dispatch targets to non-reached databases.
-    Dispatch(T),
+    /// Dispatch targets to non-reached databases for `generation`.
+    Dispatch { generation: usize, targets: T },
     /// All databases converged on the same generation.
     Converged(Anchor<D>),
 }
@@ -796,12 +892,17 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
         }
     }
 
-    /// Record that database `idx` reached its assigned target. Idempotent.
-    fn record_reached(&mut self, idx: usize) {
+    /// Record that database `idx` reached `generation`.
+    ///
+    /// Reached events can arrive late. If the database has already been
+    /// re-assigned to a newer generation, stale events are ignored.
+    fn record_reached(&mut self, idx: usize, generation: usize) {
+        if self.dbs[idx].generation() != generation {
+            return;
+        }
         if self.dbs[idx].is_reached() {
             return;
         }
-        let generation = self.dbs[idx].generation();
         self.dbs[idx] = DbSyncState::Reached { generation };
     }
 
@@ -856,7 +957,10 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
                 }
             }
             self.prune_generations();
-            return CoordinatorAction::Dispatch(targets);
+            return CoordinatorAction::Dispatch {
+                generation: max_gen,
+                targets,
+            };
         }
 
         // Not all reached. If there's a pending tip, dispatch it.
@@ -876,7 +980,10 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
         self.last_dispatched_anchor = anchor;
 
         self.prune_generations();
-        CoordinatorAction::Dispatch(targets)
+        CoordinatorAction::Dispatch {
+            generation,
+            targets,
+        }
     }
 
     /// Retain only generations referenced by at least one database.
@@ -1011,8 +1118,9 @@ impl_attachable_resolver_set!(
 #[cfg(test)]
 mod tests {
     use super::{
-        Anchor, AttachableResolver, AttachableResolverSet, DatabaseSet, ManagedDb, Merkleized,
-        StateSyncDb, StateSyncSet, SyncEngineConfig, Unmerkleized,
+        Anchor, AttachableResolver, AttachableResolverSet, CoordinatorAction, CoordinatorState,
+        DatabaseSet, ManagedDb, Merkleized, StateSyncDb, StateSyncSet, SyncEngineConfig,
+        Unmerkleized,
     };
     use commonware_consensus::types::Height;
     use commonware_cryptography::sha256;
@@ -2071,6 +2179,90 @@ mod tests {
                 "error should include failing database type: {err}"
             );
         });
+    }
+
+    #[test]
+    fn tuple_state_sync_returns_db_error_when_other_database_waits_for_finish() {
+        deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
+            let (_tip_tx, tip_rx) = mpsc::channel(1);
+            let release = Arc::new(AtomicBool::new(true));
+
+            let result = <(
+                Arc<AsyncRwLock<SlowSyncDb>>,
+                Arc<AsyncRwLock<FailingStateSyncDb>>,
+            ) as StateSyncSet<
+                deterministic::Context,
+                (Arc<AtomicBool>, ()),
+                sha256::Digest,
+            >>::sync(
+                context,
+                ((), ()),
+                (release, ()),
+                anchor(0),
+                (0, 0),
+                tip_rx,
+                SyncEngineConfig {
+                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                    apply_batch_size: 1,
+                    max_outstanding_requests: 1,
+                    update_channel_size: NonZeroUsize::new(1).unwrap(),
+                    max_retained_roots: 0,
+                },
+            )
+            .await;
+
+            let err = match result {
+                Ok(_) => panic!("tuple state sync should return the database sync error"),
+                Err(err) => err,
+            };
+            assert!(
+                err.contains("state sync failed (index 1, db"),
+                "error should include failing database index: {err}"
+            );
+            assert!(
+                err.contains("FailingStateSyncDb"),
+                "error should include failing database type: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn coordinator_rejects_stale_reached_event_from_older_generation() {
+        let mut state = CoordinatorState::new(2, anchor(0), (0u64, 0u64));
+
+        state.record_tip_update(anchor(1), (1, 1));
+        match state.next_action() {
+            CoordinatorAction::Dispatch {
+                generation,
+                targets: (left, right),
+            } => {
+                assert_eq!(generation, 1, "coordinator should dispatch generation 1");
+                assert_eq!((left, right), (1, 1));
+            }
+            CoordinatorAction::Wait => panic!("coordinator should dispatch the newer tip"),
+            CoordinatorAction::Converged(anchor) => {
+                panic!("coordinator converged too early at {anchor:?}")
+            }
+        }
+
+        // This reached event belongs to generation 0 but arrives after the
+        // coordinator has already advanced the database to generation 1.
+        state.record_reached(1, 0);
+
+        // Only database 0 has actually reached generation 1 so far.
+        state.record_reached(0, 1);
+
+        match state.next_action() {
+            CoordinatorAction::Wait => {}
+            CoordinatorAction::Dispatch { targets, .. } => {
+                panic!(
+                    "coordinator should wait for a fresh reached event, got dispatch {targets:?}"
+                )
+            }
+            CoordinatorAction::Converged(anchor) => {
+                panic!("stale reached event must not allow convergence at {anchor:?}")
+            }
+        }
     }
 
     #[test]
