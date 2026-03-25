@@ -1,10 +1,13 @@
-TRACES_ROOT ?= ../fuzz/artifacts/traces
+FUZZ_TRACES_ROOT ?= ../fuzz/artifacts/traces
+FUZZ_CORPUS ?= ../fuzz/corpus
 TEST_DIR ?= traces
 
-FUZZ_RUNS ?= 300
-TRACE_SELECTION_STRATEGY ?= short
+FUZZ_RUNS ?= -1
+TRACE_SELECTION_STRATEGY ?= smallscope
+MIN_REQUIRED_CONTAINERS ?= 3
+MAX_REQUIRED_CONTAINERS ?= 5
 
-.PHONY: test typecheck repl check clean get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces tv generate_itf convert_itf replay_itf clean_mbt_traces conformance_roundtrip ist
+.PHONY: test typecheck repl check clean get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces tv tv_live tv_live_fuzz tv_live_watch generate_itf convert_itf replay_itf clean_mbt_traces conformance_roundtrip ist
 
 typecheck:
 	quint typecheck types.qnt
@@ -44,10 +47,12 @@ run:
 
 get_fuzz_traces:
 	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
+	COMMONWARE_MIN_REQUIRED_CONTAINERS=$(MIN_REQUIRED_CONTAINERS) \
+	COMMONWARE_MAX_REQUIRED_CONTAINERS=$(MAX_REQUIRED_CONTAINERS) \
 	cargo +nightly fuzz run simplex_ed25519_quint_disrupter -- -runs=$(FUZZ_RUNS)
 
 build_quint_tests_from_fuzz_traces:
-	@for dir in $(TRACES_ROOT)/*/; do \
+	@for dir in $(FUZZ_TRACES_ROOT)/*/; do \
 		[ -d "$$dir" ] || continue; \
 		echo "Converting traces from $$dir"; \
 		cargo run -p commonware-consensus-fuzz --bin trace_to_quint -- "$$dir" $(TEST_DIR); \
@@ -58,10 +63,55 @@ test_traces:
 	./scripts/test_traces.sh
 
 clean_fuzz_traces:
-	rm -rf $(TRACES_ROOT)
-	rm -rf $(TEST_DIR)/trace_*.qnt
+	rm -rf $(FUZZ_TRACES_ROOT)
+	rm -rf $(FUZZ_CORPUS)
 
-tv: clean_fuzz_traces get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces
+clean_traces:
+	rm -rf $(TEST_DIR)/trace_*.qnt
+	rm -rf $(TEST_DIR)/.live_state
+
+tv: clean_fuzz_traces clean_traces get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces
+
+tv_live: clean_fuzz_traces clean_traces
+	@bash -eu -o pipefail -c '\
+		COMMONWARE_TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
+		./scripts/watch_new_traces.sh "$(TEST_DIR)" "$(FUZZ_TRACES_ROOT)" & \
+		watcher=$$!; \
+		cleanup() { \
+			kill $$watcher 2>/dev/null || true; \
+			wait $$watcher 2>/dev/null || true; \
+		}; \
+		trap cleanup EXIT INT TERM; \
+		COMMONWARE_TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
+		COMMONWARE_MIN_REQUIRED_CONTAINERS="$(MIN_REQUIRED_CONTAINERS)" \
+		COMMONWARE_MAX_REQUIRED_CONTAINERS="$(MAX_REQUIRED_CONTAINERS)" \
+		cargo +nightly fuzz run simplex_ed25519_quint_disrupter -- -runs=$(FUZZ_RUNS) & \
+		fuzz=$$!; \
+		while kill -0 $$watcher 2>/dev/null && kill -0 $$fuzz 2>/dev/null; do \
+			sleep 1; \
+		done; \
+		if ! kill -0 $$watcher 2>/dev/null; then \
+			status=0; \
+			wait $$watcher || status=$$?; \
+			kill $$fuzz 2>/dev/null || true; \
+			wait $$fuzz 2>/dev/null || true; \
+			exit $$status; \
+		fi; \
+		status=0; \
+		wait $$fuzz || status=$$?; \
+		exit $$status; \
+	'
+
+tv_live_fuzz:
+	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
+	COMMONWARE_MIN_REQUIRED_CONTAINERS=$(MIN_REQUIRED_CONTAINERS) \
+	COMMONWARE_MAX_REQUIRED_CONTAINERS=$(MAX_REQUIRED_CONTAINERS) \
+	cargo +nightly fuzz run simplex_ed25519_quint_disrupter
+
+tv_live_watch: clean_traces
+	rm -rf
+	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
+	./scripts/watch_new_traces.sh "$(TEST_DIR)" "$(FUZZ_TRACES_ROOT)"
 
 ITF_DIR ?= itf_traces
 ITF_SAMPLES ?= 50
@@ -120,7 +170,7 @@ mbt_replay: convert_itf replay_itf
 
 generate_itf_test:
 	@mkdir -p $(ITF_DIR)
-	@for dir in $(TRACES_ROOT)/*/; do \
+	@for dir in $(FUZZ_TRACES_ROOT)/*/; do \
 		quint test --main=itf_main --max-steps=$(ITF_STEPS) \
 			--out-itf=$(ITF_DIR)/trace_$$i.itf.json \
 			--invariant=all_invariants itf_n4f1b1.qnt || true; \

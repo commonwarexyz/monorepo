@@ -32,6 +32,18 @@ fn is_byzantine_node(node: &str, faults: usize) -> bool {
     false
 }
 
+fn normalize_vote_sig_for_sender(sender: &str, sig: &str, cfg: &EncoderConfig) -> String {
+    if !is_byzantine_node(sender, cfg.faults) || cfg.n == 0 {
+        return sig.to_string();
+    }
+    if let Some(idx_str) = sig.strip_prefix('n') {
+        if let Ok(idx) = idx_str.parse::<usize>() {
+            return format!("n{}", idx % cfg.n);
+        }
+    }
+    sig.to_string()
+}
+
 /// Kind of vote delivery action. Used to group votes between barriers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VoteKind {
@@ -85,8 +97,86 @@ struct ViewProposal {
     correct_notarizers: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum VoteReplayKey {
+    Notarize {
+        view: u64,
+        sig: String,
+        block: String,
+    },
+    Nullify {
+        view: u64,
+        sig: String,
+    },
+    Finalize {
+        view: u64,
+        sig: String,
+        block: String,
+    },
+}
+
+fn vote_replay_key(vote: &TracedVote, sig: String) -> VoteReplayKey {
+    match vote {
+        TracedVote::Notarize { view, block, .. } => VoteReplayKey::Notarize {
+            view: *view,
+            sig,
+            block: block.clone(),
+        },
+        TracedVote::Nullify { view, .. } => VoteReplayKey::Nullify { view: *view, sig },
+        TracedVote::Finalize { view, block, .. } => VoteReplayKey::Finalize {
+            view: *view,
+            sig,
+            block: block.clone(),
+        },
+    }
+}
+
+fn collect_honest_votes(entries: &[TraceEntry], cfg: &EncoderConfig) -> HashSet<VoteReplayKey> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TraceEntry::Vote { sender, vote, .. } if !is_byzantine_node(sender, cfg.faults) => {
+                let sig = match vote {
+                    TracedVote::Notarize { sig, .. }
+                    | TracedVote::Nullify { sig, .. }
+                    | TracedVote::Finalize { sig, .. } => sig.clone(),
+                };
+                Some(vote_replay_key(vote, sig))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn filter_invalid_byzantine_votes(
+    entries: &[TraceEntry],
+    cfg: &EncoderConfig,
+    honest_votes: &HashSet<VoteReplayKey>,
+) -> Vec<TraceEntry> {
+    entries
+        .iter()
+        .filter(|entry| match entry {
+            TraceEntry::Vote { sender, vote, .. } if is_byzantine_node(sender, cfg.faults) => {
+                let sig = match vote {
+                    TracedVote::Notarize { sig, .. }
+                    | TracedVote::Nullify { sig, .. }
+                    | TracedVote::Finalize { sig, .. } => {
+                        normalize_vote_sig_for_sender(sender, sig, cfg)
+                    }
+                };
+                is_byzantine_node(&sig, cfg.faults)
+                    || honest_votes.contains(&vote_replay_key(vote, sig))
+            }
+            _ => true,
+        })
+        .cloned()
+        .collect()
+}
+
 /// Encodes trace entries into a quint test module.
 pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
+    let honest_votes = collect_honest_votes(entries, cfg);
+
     // Filter out entries where the receiver is Byzantine (no state in quint model)
     let correct_entries: Vec<TraceEntry> = entries
         .iter()
@@ -99,6 +189,7 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
         })
         .cloned()
         .collect();
+    let correct_entries = filter_invalid_byzantine_votes(&correct_entries, cfg, &honest_votes);
 
     let block_map = build_block_map(&correct_entries);
     let leader_map = build_leader_map_to(cfg, cfg.max_view);
@@ -198,7 +289,7 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     writeln!(out).unwrap();
 
     // Generate actions in original trace order, then group vote deliveries
-    let vote_blocks = build_correct_vote_blocks(&correct_entries, &block_map, cfg.faults);
+    let vote_blocks = build_correct_vote_blocks(&correct_entries, &block_map, cfg);
     let action_items = build_actions(
         &correct_entries,
         &block_map,
@@ -325,21 +416,29 @@ fn ensure_proposal_and_on_proposal(
 fn build_correct_vote_blocks(
     entries: &[TraceEntry],
     block_map: &[(String, String)],
-    faults: usize,
+    cfg: &EncoderConfig,
 ) -> HashMap<(String, u64, String), HashSet<String>> {
     let mut map: HashMap<(String, u64, String), HashSet<String>> = HashMap::new();
     for entry in entries {
-        if let TraceEntry::Vote { vote, .. } = entry {
+        if let TraceEntry::Vote { sender, vote, .. } = entry {
             match vote {
-                TracedVote::Notarize { view, sig, block } if !is_byzantine_node(sig, faults) => {
+                TracedVote::Notarize { view, sig, block } => {
+                    let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
+                    if is_byzantine_node(&sig, cfg.faults) {
+                        continue;
+                    }
                     let bn = map_block(block, block_map);
-                    map.entry((sig.clone(), *view, "notarize".into()))
+                    map.entry((sig, *view, "notarize".into()))
                         .or_default()
                         .insert(bn);
                 }
-                TracedVote::Finalize { view, sig, block } if !is_byzantine_node(sig, faults) => {
+                TracedVote::Finalize { view, sig, block } => {
+                    let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
+                    if is_byzantine_node(&sig, cfg.faults) {
+                        continue;
+                    }
                     let bn = map_block(block, block_map);
-                    map.entry((sig.clone(), *view, "finalize".into()))
+                    map.entry((sig, *view, "finalize".into()))
                         .or_default()
                         .insert(bn);
                 }
@@ -444,21 +543,26 @@ fn build_actions(
 
     for entry in entries {
         match entry {
-            TraceEntry::Vote { receiver, vote, .. } => match vote {
+            TraceEntry::Vote {
+                sender,
+                receiver,
+                vote,
+            } => match vote {
                 TracedVote::Notarize { view, sig, block } => {
+                    let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
                     let bn = map_block(block, block_map);
                     let is_leader =
                         leader_lookup.get(view).map(|l| l.as_str()) == Some(sig.as_str());
 
                     // Ensure on_proposal for the correct notarize signer (puts their
                     // vote in sent_vote). Triggered when we first see their vote.
-                    if !is_byzantine_node(sig, cfg.faults)
+                    if !is_byzantine_node(&sig, cfg.faults)
                         && proposals
                             .get(view)
-                            .map_or(false, |p| p.correct_notarizers.contains(sig))
+                            .map_or(false, |p| p.correct_notarizers.contains(&sig))
                     {
                         ensure_proposal_and_on_proposal(
-                            sig,
+                            &sig,
                             *view,
                             &bn,
                             &mut proposal_injected,
@@ -488,7 +592,7 @@ fn build_actions(
                     }
 
                     // Byzantine notarize: inject into sent_vote
-                    if is_byzantine_node(sig, cfg.faults)
+                    if is_byzantine_node(&sig, cfg.faults)
                         && injected_votes.insert((
                             sig.clone(),
                             *view,
@@ -512,10 +616,11 @@ fn build_actions(
                     });
                 }
                 TracedVote::Finalize { view, sig, block } => {
+                    let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
                     let bn = map_block(block, block_map);
 
                     // Correct finalize: self-delivery (node counts its own finalize)
-                    if !is_byzantine_node(sig, cfg.faults)
+                    if !is_byzantine_node(&sig, cfg.faults)
                         && self_delivered.insert((sig.clone(), *view, "finalize".into()))
                     {
                         actions.push(ActionItem::VoteDelivery {
@@ -528,7 +633,7 @@ fn build_actions(
                     }
 
                     // Byzantine finalize: inject into sent_vote
-                    if is_byzantine_node(sig, cfg.faults)
+                    if is_byzantine_node(&sig, cfg.faults)
                         && injected_votes.insert((
                             sig.clone(),
                             *view,
@@ -552,11 +657,12 @@ fn build_actions(
                     });
                 }
                 TracedVote::Nullify { view, sig } => {
+                    let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
                     // Correct nullify: inject if not produced by on_proposal
-                    if !is_byzantine_node(sig, cfg.faults) {
+                    if !is_byzantine_node(&sig, cfg.faults) {
                         let needs_inject = proposals
                             .get(view)
-                            .map_or(true, |p| !p.correct_notarizers.contains(sig));
+                            .map_or(true, |p| !p.correct_notarizers.contains(&sig));
                         if needs_inject
                             && injected_votes.insert((
                                 sig.clone(),
@@ -583,7 +689,7 @@ fn build_actions(
                     }
 
                     // Byzantine nullify: inject into sent_vote
-                    if is_byzantine_node(sig, cfg.faults)
+                    if is_byzantine_node(&sig, cfg.faults)
                         && injected_votes.insert((
                             sig.clone(),
                             *view,
@@ -947,19 +1053,21 @@ fn build_view_proposals(
 
     for entry in entries {
         if let TraceEntry::Vote {
+            sender,
             vote: TracedVote::Notarize { view, sig, block },
             ..
         } = entry
         {
+            let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
             // Only use correct nodes' votes for the block hash to avoid
             // picking a byzantine node's equivocating block.
-            if !is_byzantine_node(sig, cfg.faults) {
+            if !is_byzantine_node(&sig, cfg.faults) {
                 view_block_hash
                     .entry(*view)
                     .or_insert_with(|| block.clone());
                 let notarizers = view_correct_notarizers.entry(*view).or_default();
-                if !notarizers.contains(sig) {
-                    notarizers.push(sig.clone());
+                if !notarizers.contains(&sig) {
+                    notarizers.push(sig);
                 }
             }
         }

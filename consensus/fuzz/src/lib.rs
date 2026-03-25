@@ -56,11 +56,12 @@ pub use simplex::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     num::{NonZeroU16, NonZeroUsize},
     panic,
-    path::PathBuf,
-    sync::{Arc, OnceLock},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex as StdMutex, OnceLock},
     time::Duration,
 };
 use commonware_consensus::simplex::mocks::twins;
@@ -71,8 +72,10 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 const FAULT_INJECTION_RATIO: u64 = 5;
 const MIN_NUMBER_OF_FAULTS: u64 = 2;
-const MIN_REQUIRED_CONTAINERS: u64 = 5;
-const MAX_REQUIRED_CONTAINERS: u64 = 50;
+const DEFAULT_MIN_REQUIRED_CONTAINERS: u64 = 5;
+const DEFAULT_MAX_REQUIRED_CONTAINERS: u64 = 50;
+const MIN_REQUIRED_CONTAINERS_ENV: &str = "COMMONWARE_MIN_REQUIRED_CONTAINERS";
+const MAX_REQUIRED_CONTAINERS_ENV: &str = "COMMONWARE_MAX_REQUIRED_CONTAINERS";
 const MAX_SLEEP_DURATION: Duration = Duration::from_secs(10);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
@@ -165,8 +168,9 @@ impl Arbitrary<'_> for FuzzInput {
             && configuration == N4F1C3
             && u.int_in_range(0..=99)? == 1;
 
+        let required_containers_range = configured_required_containers_range();
         let required_containers =
-            u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
+            u.int_in_range(required_containers_range.min..=required_containers_range.max)?;
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -731,20 +735,66 @@ impl FuzzMode for Twinable {
 }
 
 const TRACE_SELECTION_STRATEGY_ENV: &str = "COMMONWARE_TRACE_SELECTION_STRATEGY";
+const TRACE_SELECTION_LOG_FILE: &str = "fuzz.log";
+
+#[derive(Clone, Copy, Debug)]
+struct RequiredContainersRange {
+    min: u64,
+    max: u64,
+}
+
+impl RequiredContainersRange {
+    fn from_env() -> Result<Self, String> {
+        let min = parse_u64_env(
+            MIN_REQUIRED_CONTAINERS_ENV,
+            DEFAULT_MIN_REQUIRED_CONTAINERS,
+        )?;
+        let max = parse_u64_env(
+            MAX_REQUIRED_CONTAINERS_ENV,
+            DEFAULT_MAX_REQUIRED_CONTAINERS,
+        )?;
+        if min == 0 {
+            return Err(format!("{MIN_REQUIRED_CONTAINERS_ENV} must be at least 1"));
+        }
+        if min > max {
+            return Err(format!(
+                "{MIN_REQUIRED_CONTAINERS_ENV}={min} exceeds {MAX_REQUIRED_CONTAINERS_ENV}={max}"
+            ));
+        }
+        Ok(Self { min, max })
+    }
+}
+
+fn configured_required_containers_range() -> &'static RequiredContainersRange {
+    static RANGE: OnceLock<RequiredContainersRange> = OnceLock::new();
+    RANGE.get_or_init(|| {
+        RequiredContainersRange::from_env().unwrap_or_else(|msg| panic!("{msg}"))
+    })
+}
+
+fn parse_u64_env(name: &str, default: u64) -> Result<u64, String> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse::<u64>()
+            .map_err(|err| format!("failed to parse {name}={value}: {err}")),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(err) => Err(format!("failed to read {name}: {err}")),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TraceSelectionStrategyName {
     Current,
-    Short,
+    SmallScope,
 }
 
 impl TraceSelectionStrategyName {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "current" | "default" => Ok(Self::Current),
-            "short" => Ok(Self::Short),
+            "smallscope" | "short" => Ok(Self::SmallScope),
             _ => Err(format!(
-                "invalid {}={value}; expected one of: current, short",
+                "invalid {}={value}; expected one of: current, smallscope",
                 TRACE_SELECTION_STRATEGY_ENV
             )),
         }
@@ -764,7 +814,7 @@ impl TraceSelectionStrategyName {
     fn as_strategy(self) -> &'static dyn TraceSelectionStrategy {
         match self {
             Self::Current => &CURRENT_TRACE_SELECTION_STRATEGY,
-            Self::Short => &SHORT_TRACE_SELECTION_STRATEGY,
+            Self::SmallScope => &SMALLSCOPE_TRACE_SELECTION_STRATEGY,
         }
     }
 }
@@ -773,6 +823,10 @@ trait TraceSelectionStrategy {
     fn name(&self) -> &'static str;
 
     fn is_interesting(&self, metrics: &TraceMetrics) -> bool;
+
+    fn writes_logs_to_file(&self) -> bool {
+        false
+    }
 }
 
 struct CurrentTraceSelectionStrategy;
@@ -792,22 +846,46 @@ impl TraceSelectionStrategy for CurrentTraceSelectionStrategy {
     }
 }
 
-struct ShortTraceSelectionStrategy;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TraceSessionSignature {
+    nullify_votes: u64,
+    notarize_votes: u64,
+    finalize_votes: u64,
+    nullification_certificates: u64,
+    notarization_certificates: u64,
+    finalization_certificates: u64,
+    max_view: u64,
+}
 
-impl TraceSelectionStrategy for ShortTraceSelectionStrategy {
+fn session_signature_store() -> &'static StdMutex<HashSet<TraceSessionSignature>> {
+    static STORE: OnceLock<StdMutex<HashSet<TraceSessionSignature>>> = OnceLock::new();
+    STORE.get_or_init(|| StdMutex::new(HashSet::new()))
+}
+
+struct SmallScopeTraceSelectionStrategy;
+
+impl TraceSelectionStrategy for SmallScopeTraceSelectionStrategy {
     fn name(&self) -> &'static str {
-        "short"
+        "smallscope"
+    }
+
+    fn writes_logs_to_file(&self) -> bool {
+        true
     }
 
     fn is_interesting(&self, metrics: &TraceMetrics) -> bool {
-        metrics.max_view <= 10 && metrics.committed_blocks >= 5
+        let signature = metrics.session_signature();
+        let mut seen = session_signature_store()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        seen.insert(signature)
     }
 }
 
 static CURRENT_TRACE_SELECTION_STRATEGY: CurrentTraceSelectionStrategy =
     CurrentTraceSelectionStrategy;
-static SHORT_TRACE_SELECTION_STRATEGY: ShortTraceSelectionStrategy =
-    ShortTraceSelectionStrategy;
+static SMALLSCOPE_TRACE_SELECTION_STRATEGY: SmallScopeTraceSelectionStrategy =
+    SmallScopeTraceSelectionStrategy;
 
 fn configured_trace_selection_strategy() -> &'static dyn TraceSelectionStrategy {
     static SELECTED: OnceLock<TraceSelectionStrategyName> = OnceLock::new();
@@ -824,6 +902,12 @@ struct TraceMetrics {
     unique_blocks: usize,
     committed_blocks: u64,
     max_view: u64,
+    notarize_votes: u64,
+    nullify_votes: u64,
+    finalize_votes: u64,
+    notarization_certificates: u64,
+    nullification_certificates: u64,
+    finalization_certificates: u64,
     notarize_by_n0: u64,
     nullify_by_n0: u64,
     finalize_by_n0: u64,
@@ -838,6 +922,12 @@ impl TraceMetrics {
 
         let mut vote_entries = 0;
         let mut certificate_entries = 0;
+        let mut notarize_votes = 0;
+        let mut nullify_votes = 0;
+        let mut finalize_votes = 0;
+        let mut notarization_certificates = 0;
+        let mut nullification_certificates = 0;
+        let mut finalization_certificates = 0;
         let mut notarize_by_n0 = 0;
         let mut nullify_by_n0 = 0;
         let mut finalize_by_n0 = 0;
@@ -851,17 +941,26 @@ impl TraceMetrics {
                     vote_entries += 1;
                     match vote {
                         TracedVote::Notarize { sig, block, .. } => {
+                            if sig != "n0" {
+                                notarize_votes += 1;
+                            }
                             unique_blocks.insert(block.clone());
                             if sig == "n0" {
                                 notarize_by_n0 += 1;
                             }
                         }
                         TracedVote::Nullify { sig, .. } => {
+                            if sig != "n0" {
+                                nullify_votes += 1;
+                            }
                             if sig == "n0" {
                                 nullify_by_n0 += 1;
                             }
                         }
                         TracedVote::Finalize { sig, block, .. } => {
+                            if sig != "n0" {
+                                finalize_votes += 1;
+                            }
                             unique_blocks.insert(block.clone());
                             if sig == "n0" {
                                 finalize_by_n0 += 1;
@@ -876,10 +975,20 @@ impl TraceMetrics {
                     }
                     match cert {
                         TracedCert::Notarization { block, .. } => {
+                            if sender != "n0" {
+                                notarization_certificates += 1;
+                            }
                             unique_blocks.insert(block.clone());
                         }
-                        TracedCert::Nullification { .. } => {}
+                        TracedCert::Nullification { .. } => {
+                            if sender != "n0" {
+                                nullification_certificates += 1;
+                            }
+                        }
                         TracedCert::Finalization { view, block, .. } => {
+                            if sender != "n0" {
+                                finalization_certificates += 1;
+                            }
                             unique_blocks.insert(block.clone());
                             finalized_views.insert(*view);
                         }
@@ -908,6 +1017,12 @@ impl TraceMetrics {
             unique_blocks: unique_blocks.len(),
             committed_blocks: finalized_views.len() as u64,
             max_view,
+            notarize_votes,
+            nullify_votes,
+            finalize_votes,
+            notarization_certificates,
+            nullification_certificates,
+            finalization_certificates,
             notarize_by_n0,
             nullify_by_n0,
             finalize_by_n0,
@@ -916,16 +1031,53 @@ impl TraceMetrics {
             byzantine_distance,
         }
     }
+
+    fn session_signature(&self) -> TraceSessionSignature {
+        TraceSessionSignature {
+            nullify_votes: self.nullify_votes,
+            notarize_votes: self.notarize_votes,
+            finalize_votes: self.finalize_votes,
+            nullification_certificates: self.nullification_certificates,
+            notarization_certificates: self.notarization_certificates,
+            finalization_certificates: self.finalization_certificates,
+            max_view: self.max_view,
+        }
+    }
+}
+
+fn append_trace_log_line(path: &Path, line: &str) {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("failed to open trace log file");
+    writeln!(file, "{line}").expect("failed to append trace log line");
+}
+
+fn emit_trace_log(
+    strategy: &'static dyn TraceSelectionStrategy,
+    artifacts_dir: &Path,
+    line: &str,
+) {
+    if strategy.writes_logs_to_file() {
+        append_trace_log_line(&artifacts_dir.join(TRACE_SELECTION_LOG_FILE), line);
+    } else {
+        println!("{line}");
+    }
 }
 
 fn log_trace_selection(
     strategy: &'static dyn TraceSelectionStrategy,
+    artifacts_dir: &Path,
     metrics: &TraceMetrics,
     selected: bool,
 ) {
+    if strategy.writes_logs_to_file() && !selected {
+        return;
+    }
     let verdict = if selected { "selected" } else { "skipping" };
-    println!(
-        "{verdict} trace (strategy={}, entries={}, votes={}, certs={}, unique_blocks={}, committed_blocks={}, max_view={}, distance={:.2}, vote_types={}, notarize_n0={}, nullify_n0={}, finalize_n0={}, certs_n0={})",
+    let line = format!(
+        "{verdict} trace (strategy={}, entries={}, votes={}, certs={}, unique_blocks={}, committed_blocks={}, max_view={}, vote_signature=[nullify={}, notarize={}, finalize={}], cert_signature=[nullification={}, notarization={}, finalization={}], distance={:.2}, vote_types={}, notarize_n0={}, nullify_n0={}, finalize_n0={}, certs_n0={})",
         strategy.name(),
         metrics.entry_count,
         metrics.vote_entries,
@@ -933,6 +1085,12 @@ fn log_trace_selection(
         metrics.unique_blocks,
         metrics.committed_blocks,
         metrics.max_view,
+        metrics.nullify_votes,
+        metrics.notarize_votes,
+        metrics.finalize_votes,
+        metrics.nullification_certificates,
+        metrics.notarization_certificates,
+        metrics.finalization_certificates,
         metrics.byzantine_distance,
         metrics.byzantine_vote_types,
         metrics.notarize_by_n0,
@@ -940,14 +1098,11 @@ fn log_trace_selection(
         metrics.finalize_by_n0,
         metrics.certs_by_n0,
     );
+    emit_trace_log(strategy, artifacts_dir, &line);
 }
 
 fn trace_artifacts_dir(base_dir: &str, strategy_name: &str) -> PathBuf {
-    let dir_name = if strategy_name == "current" {
-        base_dir.to_string()
-    } else {
-        format!("{base_dir}_{strategy_name}")
-    };
+    let dir_name = format!("{base_dir}_{strategy_name}");
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("artifacts/traces")
         .join(dir_name)
@@ -956,23 +1111,24 @@ fn trace_artifacts_dir(base_dir: &str, strategy_name: &str) -> PathBuf {
 fn persist_trace_if_selected(base_dir: &str, hash_hex: &str, trace_data: &TraceData) -> bool {
     let strategy = configured_trace_selection_strategy();
     let metrics = TraceMetrics::from_entries(&trace_data.entries, trace_data.max_view);
+    let artifacts_dir = trace_artifacts_dir(base_dir, strategy.name());
     let selected = strategy.is_interesting(&metrics);
-    log_trace_selection(strategy, &metrics, selected);
     if !selected {
         return false;
     }
 
-    let artifacts_dir = trace_artifacts_dir(base_dir, strategy.name());
     fs::create_dir_all(&artifacts_dir).expect("failed to create artifacts directory");
+    log_trace_selection(strategy, &artifacts_dir, &metrics, selected);
 
     let json = serde_json::to_string_pretty(trace_data).expect("failed to serialize trace");
     let json_path = artifacts_dir.join(format!("{hash_hex}.json"));
     fs::write(&json_path, &json).expect("failed to write trace JSON");
-    println!(
+    let line = format!(
         "wrote {} trace entries to {}",
         trace_data.entries.len(),
         json_path.display()
     );
+    emit_trace_log(strategy, &artifacts_dir, &line);
     true
 }
 

@@ -1,40 +1,50 @@
 #!/usr/bin/env bash
 # Run quint model checker on generated trace files.
 # On failure, copies the .qnt test and its source .json trace
-# into ../fuzz/crashes/traces/<corpus_hash>/.
+# into tracing_crashes/ under the quint directory.
 #
 # Usage:
-#   ./scripts/test_traces.sh [test_dir [traces_root]]
+#   ./scripts/test_traces.sh [test_dir_or_file [traces_root]]
 #
 # Environment:
 #   OUT_ITF_DIR  - if set, emit ITF traces to this directory
 #                  (file: $OUT_ITF_DIR/trace_roundtrip_test_<corpus>.itf.json)
 #
 # Defaults:
-#   test_dir    = traces
-#   traces_root = ../fuzz/artifacts/traces
+#   test_dir_or_file = traces
+#   traces_root      = ../fuzz/artifacts/traces
 
 set -euo pipefail
 
-TEST_DIR="${1:-traces}"
+TEST_TARGET="${1:-traces}"
 TRACES_ROOT="${2:-../fuzz/artifacts/traces}"
-CRASHES_DIR="../fuzz/artifacts/tracing_crashes/"
 MAX_LINES=1900
 PASS=0
 FAIL=0
 SKIP=0
 TOTAL=0
 
-if [ ! -d "$TEST_DIR" ]; then
-    echo "Error: directory $TEST_DIR does not exist"
+if [ -f "$TEST_TARGET" ]; then
+    TEST_FILES=("$TEST_TARGET")
+elif [ -d "$TEST_TARGET" ]; then
+    TEST_FILES=("$TEST_TARGET"/trace_*.qnt)
+else
+    echo "Error: $TEST_TARGET does not exist"
     exit 1
 fi
+
+if [ -d "$TEST_TARGET" ]; then
+    TRACE_ROOT_DIR="$TEST_TARGET"
+else
+    TRACE_ROOT_DIR="$(dirname "$TEST_TARGET")"
+fi
+CRASHES_DIR="${TRACE_ROOT_DIR}/crashes"
 
 QUINT_BIN="$(which quint)"
 TRACE_SELECTION_STRATEGY="${COMMONWARE_TRACE_SELECTION_STRATEGY:-current}"
 
 case "$TRACE_SELECTION_STRATEGY" in
-    short)
+    smallscope | short)
         MAX_SAMPLES=1000
         ;;
     current | default)
@@ -46,7 +56,7 @@ case "$TRACE_SELECTION_STRATEGY" in
         ;;
 esac
 
-for qnt_file in "$TEST_DIR"/trace_*.qnt; do
+for qnt_file in "${TEST_FILES[@]}"; do
     [ -f "$qnt_file" ] || continue
     TOTAL=$((TOTAL + 1))
     lines=$(wc -l < "$qnt_file")
@@ -68,6 +78,9 @@ for qnt_file in "$TEST_DIR"/trace_*.qnt; do
     cmd+=("$qnt_file")
     if NODE_OPTIONS="--max-old-space-size=$heap_mb" "${cmd[@]}"; then
         PASS=$((PASS + 1))
+        if [ "$(dirname "$qnt_file")" = "$TRACE_ROOT_DIR" ]; then
+            rm -f "$qnt_file"
+        fi
     else
         FAIL=$((FAIL + 1))
         echo "FAIL: $qnt_file"
@@ -76,16 +89,16 @@ for qnt_file in "$TEST_DIR"/trace_*.qnt; do
         basename=$(basename "$qnt_file" .qnt)
         corpus_hash="${basename#trace_}"
 
-        # Copy failed .qnt and source .json to crashes directory
-        crash_dir="$CRASHES_DIR/$corpus_hash"
-        mkdir -p "$crash_dir"
-        cp "$qnt_file" "$crash_dir/"
+        # Move failed .qnt and copy source .json into traces/crashes so the
+        # relative imports in the qnt file still resolve from consensus/quint.
+        mkdir -p "$CRASHES_DIR"
+        mv "$qnt_file" "$CRASHES_DIR/"
 
         # Find the source JSON in any subdirectory of traces_root
         json_file=$(find "$TRACES_ROOT" -name "${corpus_hash}.json" 2>/dev/null | head -1)
         if [ -n "$json_file" ]; then
-            cp "$json_file" "$crash_dir/"
-            echo "Copied crash artifacts to $crash_dir"
+            cp "$json_file" "$CRASHES_DIR/"
+            echo "Copied crash artifacts to $CRASHES_DIR"
         else
             echo "Warning: source JSON not found for $corpus_hash"
         fi
@@ -93,7 +106,7 @@ for qnt_file in "$TEST_DIR"/trace_*.qnt; do
 done
 
 if [ "$TOTAL" -eq 0 ]; then
-    echo "No trace_*.qnt files found in $TEST_DIR"
+    echo "No trace_*.qnt files found in $TEST_TARGET"
     exit 0
 fi
 
