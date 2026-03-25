@@ -124,20 +124,19 @@ impl TaskTracker {
             .expect("shutdown timeout overflow");
 
         let mut gate = self.gate.lock();
-        loop {
-            if self.live.load(Ordering::Acquire) == 0 {
-                return true;
-            }
-
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                return false;
-            };
-            if remaining.is_zero() {
-                return false;
-            }
-
-            self.idle.wait_for(&mut gate, remaining);
+        if self.live.load(Ordering::Acquire) == 0 {
+            return true;
         }
+
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return false;
+        };
+        if remaining.is_zero() {
+            return false;
+        }
+
+        self.idle.wait_for(&mut gate, remaining);
+        self.live.load(Ordering::Acquire) == 0
     }
 }
 
