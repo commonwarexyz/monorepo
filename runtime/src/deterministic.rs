@@ -553,7 +553,8 @@ impl Runner {
         let mut root = Box::pin(panicked.interrupt(f(context)));
         let label = Label::root();
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
-        let metric = MetricHandle::new(executor.metrics.tasks_running.get_or_create(&label).clone());
+        let metric =
+            MetricHandle::new(executor.metrics.tasks_running.get_or_create(&label).clone());
 
         // Register the root task
         Tasks::register_root(&executor.tasks);

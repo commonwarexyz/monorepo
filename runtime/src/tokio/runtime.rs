@@ -531,7 +531,8 @@ impl crate::Runner for Runner {
         // Get metrics
         let label = Label::root();
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
-        let metric = MetricHandle::new(executor.metrics.tasks_running.get_or_create(&label).clone());
+        let metric =
+            MetricHandle::new(executor.metrics.tasks_running.get_or_create(&label).clone());
 
         // Build the root context and run the future.
         //
