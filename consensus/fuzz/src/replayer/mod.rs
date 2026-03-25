@@ -13,6 +13,7 @@ use crate::{
 use commonware_consensus::{
     simplex::{
         config,
+        config::ForwardingPolicy,
         elector::RoundRobin,
         mocks::{application, relay, reporter},
         scheme::ed25519,
@@ -33,7 +34,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use commonware_consensus::simplex::config::ForwardingPolicy;
 
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -158,7 +158,10 @@ pub fn replay_trace(trace: &TraceData) -> Vec<ReplayedReplicaState> {
         for entry in &trace.entries {
             // Skip self-votes: the engine generates its own votes internally
             // via constructed(), so injecting them again causes duplicates.
-            if let TraceEntry::Vote { sender, receiver, .. } = entry {
+            if let TraceEntry::Vote {
+                sender, receiver, ..
+            } = entry
+            {
                 if sender == receiver {
                     continue;
                 }

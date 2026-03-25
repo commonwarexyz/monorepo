@@ -32,17 +32,11 @@ fn main() {
         match args[i].as_str() {
             "--spec" => {
                 i += 1;
-                cfg.spec_path = args
-                    .get(i)
-                    .expect("--spec requires a path")
-                    .clone();
+                cfg.spec_path = args.get(i).expect("--spec requires a path").clone();
             }
             "--main" => {
                 i += 1;
-                cfg.main_module = args
-                    .get(i)
-                    .expect("--main requires a module name")
-                    .clone();
+                cfg.main_module = args.get(i).expect("--main requires a module name").clone();
             }
             "--steps" => {
                 i += 1;
@@ -53,10 +47,7 @@ fn main() {
             }
             "--url" => {
                 i += 1;
-                cfg.apalache_url = args
-                    .get(i)
-                    .expect("--url requires a URL")
-                    .clone();
+                cfg.apalache_url = args.get(i).expect("--url requires a URL").clone();
             }
             "--compact" => {
                 i += 1;
@@ -67,11 +58,7 @@ fn main() {
             }
             "--tla" => {
                 i += 1;
-                cfg.tla_path = Some(
-                    args.get(i)
-                        .expect("--tla requires a path")
-                        .clone(),
-                );
+                cfg.tla_path = Some(args.get(i).expect("--tla requires a path").clone());
             }
             "--help" | "-h" => {
                 print_usage();

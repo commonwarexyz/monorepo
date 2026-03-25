@@ -36,13 +36,35 @@ pub struct ExpectedState {
 /// A single mismatch between expected and actual state.
 #[derive(Debug)]
 pub enum Mismatch {
-    MissingNotarization { node: String, view: u64 },
-    ExtraNotarization { node: String, view: u64 },
-    MissingNullification { node: String, view: u64 },
-    ExtraNullification { node: String, view: u64 },
-    MissingFinalization { node: String, view: u64 },
-    ExtraFinalization { node: String, view: u64 },
-    LastFinalizedMismatch { node: String, expected: u64, actual: u64 },
+    MissingNotarization {
+        node: String,
+        view: u64,
+    },
+    ExtraNotarization {
+        node: String,
+        view: u64,
+    },
+    MissingNullification {
+        node: String,
+        view: u64,
+    },
+    ExtraNullification {
+        node: String,
+        view: u64,
+    },
+    MissingFinalization {
+        node: String,
+        view: u64,
+    },
+    ExtraFinalization {
+        node: String,
+        view: u64,
+    },
+    LastFinalizedMismatch {
+        node: String,
+        expected: u64,
+        actual: u64,
+    },
     VoteSignerMismatch {
         node: String,
         view: u64,
@@ -168,11 +190,7 @@ fn compare_signers(
     expected: &BTreeMap<u64, BTreeSet<String>>,
     actual: &HashMap<u64, BTreeSet<String>>,
 ) {
-    let all_views: BTreeSet<u64> = expected
-        .keys()
-        .chain(actual.keys())
-        .copied()
-        .collect();
+    let all_views: BTreeSet<u64> = expected.keys().chain(actual.keys()).copied().collect();
 
     for view in all_views {
         // Skip GENESIS_VIEW: no consensus votes at view 0.

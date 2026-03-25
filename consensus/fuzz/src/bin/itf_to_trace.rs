@@ -41,15 +41,11 @@ fn main() {
     }
 
     let Some(itf_path) = itf_path else {
-        eprintln!(
-            "Usage: itf_to_trace <trace.itf.json> <output_dir> [--n N] [--faults F]"
-        );
+        eprintln!("Usage: itf_to_trace <trace.itf.json> <output_dir> [--n N] [--faults F]");
         process::exit(1);
     };
     let Some(output_dir) = output_dir else {
-        eprintln!(
-            "Usage: itf_to_trace <trace.itf.json> <output_dir> [--n N] [--faults F]"
-        );
+        eprintln!("Usage: itf_to_trace <trace.itf.json> <output_dir> [--n N] [--faults F]");
         process::exit(1);
     };
 

@@ -298,11 +298,7 @@ impl ApalacheClient {
     }
 
     /// Compacts the solver state by concretizing the symbolic trace.
-    pub fn compact(
-        &self,
-        session_id: &str,
-        snapshot_id: u64,
-    ) -> Result<u64, Error> {
+    pub fn compact(&self, session_id: &str, snapshot_id: u64) -> Result<u64, Error> {
         let result = self.call(
             "compact",
             json!({

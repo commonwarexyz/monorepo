@@ -23,6 +23,8 @@
 
 use crate::{
     apalache::{ApalacheClient, TransitionStatus},
+    config::ForwardingPolicy,
+    invariants,
     replayer::{
         compare,
         injected::{self, NullBlocker, NullSender, PendingReceiver},
@@ -36,9 +38,7 @@ use crate::{
         },
         sniffer::{TraceEntry, TracedCert},
     },
-    invariants,
 };
-use crate::config::ForwardingPolicy;
 use commonware_consensus::{
     simplex::{
         config,
@@ -54,7 +54,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner};
-use commonware_utils::{NZU16, NZUsize};
+use commonware_utils::{NZUsize, NZU16};
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -97,14 +97,7 @@ impl From<crate::apalache::Error> for Error {
 /// Compiles a Quint spec to TLA+ using `quint compile --target tlaplus`.
 pub fn compile_quint_to_tla(spec_path: &str, main: &str) -> Result<String, Error> {
     let output = Command::new("quint")
-        .args([
-            "compile",
-            "--target",
-            "tlaplus",
-            "--main",
-            main,
-            spec_path,
-        ])
+        .args(["compile", "--target", "tlaplus", "--main", main, spec_path])
         .output()
         .map_err(|e| Error::Quint(format!("failed to run quint: {e}")))?;
 
@@ -224,10 +217,7 @@ fn normalize_state(state: &Value) -> Value {
     let mut normalized = serde_json::Map::new();
     for (key, val) in obj {
         // Strip known prefixes: "itf_main_r_", or any "module_r_" pattern
-        let short = key
-            .find("_r_")
-            .map(|pos| &key[pos + 3..])
-            .unwrap_or(key);
+        let short = key.find("_r_").map(|pos| &key[pos + 3..]).unwrap_or(key);
         normalized.insert(short.to_string(), val.clone());
     }
     Value::Object(normalized)
@@ -273,7 +263,10 @@ fn get_tla_source(cfg: &IstConfig) -> Result<String, Error> {
         compile_quint_to_tla(&cfg.spec_path, &cfg.main_module)?
     };
     let tla_source = fix_tla_precedence(&tla_source);
-    println!("TLA+ source: {} bytes (after precedence fixup)", tla_source.len());
+    println!(
+        "TLA+ source: {} bytes (after precedence fixup)",
+        tla_source.len()
+    );
     Ok(tla_source)
 }
 
@@ -289,7 +282,10 @@ fn inject_entry(
     parents: &HashMap<u64, commonware_consensus::types::View>,
 ) {
     // Skip self-votes
-    if let TraceEntry::Vote { sender, receiver, .. } = entry {
+    if let TraceEntry::Vote {
+        sender, receiver, ..
+    } = entry
+    {
         if sender == receiver {
             return;
         }
@@ -382,9 +378,7 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
     let epoch = compute_epoch(&leader_map, n)
         .map_err(|e| Error::Setup(format!("epoch computation: {e}")))?;
 
-    println!(
-        "config: n={n}, faults={faults}, epoch={epoch}, correct={correct_nodes:?}"
-    );
+    println!("config: n={n}, faults={faults}, epoch={epoch}, correct={correct_nodes:?}");
 
     // --- Inside runtime: interactive loop ---
     let executor = deterministic::Runner::timed(Duration::from_secs(600));

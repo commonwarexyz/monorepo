@@ -743,17 +743,10 @@ fn build_actions(
                                 signers_sorted.join(",")
                             )
                         }
-                        TracedCert::Nullification {
-                            view, signers, ..
-                        } => {
+                        TracedCert::Nullification { view, signers, .. } => {
                             signers_sorted = signers.clone();
                             signers_sorted.sort();
-                            format!(
-                                "{}:U:{}:{}",
-                                receiver,
-                                view,
-                                signers_sorted.join(",")
-                            )
+                            format!("{}:U:{}:{}", receiver, view, signers_sorted.join(","))
                         }
                         TracedCert::Finalization {
                             view,
@@ -813,8 +806,12 @@ fn build_actions(
                                 .get(view)
                                 .map_or(true, |p| !p.correct_notarizers.contains(sig));
                             if needs_inject
-                                && injected_votes
-                                    .insert((sig.clone(), *view, "nullify".into(), String::new()))
+                                && injected_votes.insert((
+                                    sig.clone(),
+                                    *view,
+                                    "nullify".into(),
+                                    String::new(),
+                                ))
                             {
                                 actions.push(ActionItem::Barrier(format!(
                                     "inject_vote(nullify({}, \"{}\"))",
@@ -1144,9 +1141,7 @@ fn inject_byzantine_cert_votes(
                 }
             }
         }
-        TracedCert::Nullification {
-            view, signers, ..
-        } => {
+        TracedCert::Nullification { view, signers, .. } => {
             for sig in signers {
                 if !is_byzantine_node(sig, cfg.faults) {
                     continue;
@@ -1211,16 +1206,8 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    writeln!(
-        out,
-        "    action inject_vote(vote: Vote): bool = all {{"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "        sent_vote' = sent_vote.union(Set(vote)),"
-    )
-    .unwrap();
+    writeln!(out, "    action inject_vote(vote: Vote): bool = all {{").unwrap();
+    writeln!(out, "        sent_vote' = sent_vote.union(Set(vote)),").unwrap();
     writeln!(out, "        sent_proposal' = sent_proposal,").unwrap();
     writeln!(out, "        sent_certificate' = sent_certificate,").unwrap();
     writeln!(out, "        store_vote' = store_vote,").unwrap();

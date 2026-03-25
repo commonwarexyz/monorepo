@@ -2,8 +2,10 @@
 //! `quint run --out-itf` into [`TraceData`] and [`ExpectedState`]
 //! for replay against the Rust simplex engine.
 
-use super::data::TraceData;
-use super::sniffer::{TraceEntry, TracedCert, TracedVote};
+use super::{
+    data::TraceData,
+    sniffer::{TraceEntry, TracedCert, TracedVote},
+};
 use crate::replayer::compare::{ExpectedNodeState, ExpectedState};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -144,10 +146,7 @@ pub fn extract_leader_map(state: &Value) -> BTreeMap<u64, String> {
 
 /// Computes the epoch from a round-robin leader map.
 /// Returns an error if the map is not compatible with round-robin.
-pub fn compute_epoch(
-    leader_map: &BTreeMap<u64, String>,
-    n: usize,
-) -> Result<u64, DecodeError> {
+pub fn compute_epoch(leader_map: &BTreeMap<u64, String>, n: usize) -> Result<u64, DecodeError> {
     let (&first_view, first_leader) = leader_map
         .iter()
         .find(|(&v, _)| v >= 1)
@@ -178,10 +177,7 @@ pub fn compute_epoch(
 }
 
 /// Parses a Quint Vote variant into a [`TracedVote`].
-pub fn parse_itf_vote(
-    v: &Value,
-    block_map: &mut HashMap<String, String>,
-) -> Option<TracedVote> {
+pub fn parse_itf_vote(v: &Value, block_map: &mut HashMap<String, String>) -> Option<TracedVote> {
     let tag = v.get("tag")?.as_str()?;
     let inner = v.get("value")?;
     match tag {
@@ -209,10 +205,7 @@ pub fn parse_itf_vote(
 }
 
 /// Parses a Quint Certificate variant into a [`TracedCert`].
-pub fn parse_itf_cert(
-    v: &Value,
-    block_map: &mut HashMap<String, String>,
-) -> Option<TracedCert> {
+pub fn parse_itf_cert(v: &Value, block_map: &mut HashMap<String, String>) -> Option<TracedCert> {
     let tag = v.get("tag")?.as_str()?;
     let inner = v.get("value")?;
     match tag {
@@ -396,17 +389,25 @@ fn extract_vote_signers(
     // Votes received from the network
     if let Some(votes) = store_vote_map.get(node) {
         for vote_val in votes {
-            insert_vote_signer(vote_val, &mut notarize_signers, &mut nullify_signers, &mut finalize_signers);
+            insert_vote_signer(
+                vote_val,
+                &mut notarize_signers,
+                &mut nullify_signers,
+                &mut finalize_signers,
+            );
         }
     }
 
     // Node's own sent votes (self-delivery)
     for vote_val in sent_votes {
-        let sig = vote_val
-            .get("value")
-            .and_then(|v| v["sig"].as_str());
+        let sig = vote_val.get("value").and_then(|v| v["sig"].as_str());
         if sig == Some(node) {
-            insert_vote_signer(vote_val, &mut notarize_signers, &mut nullify_signers, &mut finalize_signers);
+            insert_vote_signer(
+                vote_val,
+                &mut notarize_signers,
+                &mut nullify_signers,
+                &mut finalize_signers,
+            );
         }
     }
 
