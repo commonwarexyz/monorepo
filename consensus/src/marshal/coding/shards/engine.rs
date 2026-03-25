@@ -429,10 +429,11 @@ where
                     subscribers.retain(|tx| !tx.is_closed());
                     !subscribers.is_empty()
                 });
-                self.assigned_shard_verified_subscriptions.retain(|_, subscribers| {
-                    subscribers.retain(|tx| !tx.is_closed());
-                    !subscribers.is_empty()
-                });
+                self.assigned_shard_verified_subscriptions
+                    .retain(|_, subscribers| {
+                        subscribers.retain(|tx| !tx.is_closed());
+                        !subscribers.is_empty()
+                    });
             },
             on_stopped => {
                 debug!("received shutdown signal, stopping shard engine");

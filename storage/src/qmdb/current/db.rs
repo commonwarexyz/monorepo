@@ -6,7 +6,7 @@ use super::batch::BitmapRead;
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher as _, storage::Storage as MerkleStorage},
@@ -22,9 +22,11 @@ use crate::{
             operation::{update::Update, Operation},
         },
         current::{
+            batch::BitmapBatch,
             grafting,
             proof::{OperationProof, RangeProof},
         },
+        operation::Operation as _,
         Error,
     },
     Context, Persistable,
@@ -61,9 +63,9 @@ pub struct Db<
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
     ///
-    /// Stored as a [`BitmapBatch`](super::batch::BitmapBatch) so that `apply_batch` can
+    /// Stored as a [`BitmapBatch`] so that `apply_batch` can
     /// push layers in O(changeset) instead of deep-cloning.
-    pub(super) status: super::batch::BitmapBatch<N>,
+    pub(super) status: BitmapBatch<N>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.
     /// See the [grafted leaf formula](super) in the module documentation.
@@ -297,7 +299,7 @@ where
         self.flatten();
 
         // Prune bitmap chunks below the inactivity floor.
-        let super::batch::BitmapBatch::Base(base) = &mut self.status else {
+        let BitmapBatch::Base(base) = &mut self.status else {
             unreachable!("flatten() guarantees Base");
         };
         Arc::make_mut(base).prune_to_bit(*self.any.inactivity_floor_loc);
@@ -348,6 +350,121 @@ where
         self.sync_metadata().await?;
 
         self.any.prune(prune_loc).await
+    }
+
+    /// Rewind the database to `size` operations, where `size` is the location of the next append.
+    ///
+    /// This rewinds the underlying Any database and rebuilds the Current overlay state (bitmap,
+    /// grafted MMR, and canonical root) for the rewound size.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when:
+    /// - `size` is not a valid rewind target
+    /// - the target's required logical range is not fully retained (for Current, this includes the
+    ///   underlying Any inactivity-floor boundary and bitmap pruning boundary)
+    /// - `size - 1` is not a commit operation
+    /// - `size` is below the bitmap pruning boundary
+    ///
+    /// Any error from this method is fatal for this handle. Rewind may mutate state in the
+    /// underlying Any database before this Current overlay finishes rebuilding. Callers must drop
+    /// this database handle after any `Err` from `rewind` and reopen from storage.
+    ///
+    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
+    /// [`Db::sync`].
+    pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
+        self.flatten();
+
+        let rewind_size = *size;
+        let current_size = *self.any.last_commit_loc + 1;
+        if rewind_size == current_size {
+            return Ok(());
+        }
+        if rewind_size == 0 || rewind_size > current_size {
+            return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
+        }
+
+        let pruned_chunks = self.status.pruned_chunks();
+        let pruned_bits = (pruned_chunks as u64)
+            .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
+            .ok_or_else(|| Error::DataCorrupted("pruned ops leaves overflow"))?;
+        if rewind_size < pruned_bits {
+            return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
+        }
+
+        // Ensure the target commit's logical range is fully representable with the current
+        // bitmap pruning boundary. Even if the ops log still retains older entries, rewinding
+        // to a commit with floor below `pruned_bits` would require bitmap chunks we've already
+        // discarded.
+        {
+            let reader = self.any.log.reader().await;
+            let rewind_last_loc = Location::new(rewind_size - 1);
+            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            let Some(rewind_floor) = rewind_last_op.has_floor() else {
+                return Err(Error::UnexpectedData(rewind_last_loc));
+            };
+            if *rewind_floor < pruned_bits {
+                return Err(Error::Journal(JournalError::ItemPruned(*rewind_floor)));
+            }
+        }
+
+        // Extract pinned nodes for the existing pruning boundary from the in-memory grafted MMR.
+        let pinned_nodes = if pruned_chunks > 0 {
+            let mmr_size = Location::new(pruned_chunks as u64);
+            let mut pinned_nodes = Vec::new();
+            for pos in nodes_to_pin(mmr_size) {
+                let digest = self
+                    .grafted_mmr
+                    .get_node(pos)
+                    .ok_or(mmr::Error::MissingNode(pos))?;
+                pinned_nodes.push(digest);
+            }
+            pinned_nodes
+        } else {
+            Vec::new()
+        };
+
+        // Rewind underlying ops log + Any state. If a later overlay rebuild step fails, this
+        // handle may be internally diverged and must be dropped by the caller.
+        let restored_locs = self.any.rewind(size).await?;
+
+        // Patch bitmap: truncate to rewound size, then mark restored locations as active.
+        {
+            let BitmapBatch::Base(base) = &mut self.status else {
+                unreachable!("flatten() guarantees Base");
+            };
+            let status = Arc::get_mut(base).expect("flatten ensures sole owner");
+            status.truncate(rewind_size);
+            for loc in &restored_locs {
+                status.set_bit(**loc, true);
+            }
+            status.set_bit(rewind_size - 1, true);
+        }
+        let BitmapBatch::Base(status) = &self.status else {
+            unreachable!("flatten() guarantees Base");
+        };
+        let status = status.as_ref();
+
+        // Rebuild grafted MMR and canonical root for the patched bitmap.
+        let hasher = StandardHasher::<H>::new();
+        let grafted_mmr = build_grafted_mmr::<H, N>(
+            &hasher,
+            status,
+            &pinned_nodes,
+            &self.any.log.mmr,
+            self.thread_pool.as_ref(),
+        )
+        .await?;
+        let storage =
+            grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &self.any.log.mmr);
+        let partial_chunk = partial_chunk(status);
+        let ops_root = self.any.log.root();
+        let root = compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
+
+        self.grafted_mmr = mmr::batch::MerkleizedBatch::Base(grafted_mmr);
+        self.root = root;
+
+        Ok(())
     }
 
     /// Sync the metadata to disk.

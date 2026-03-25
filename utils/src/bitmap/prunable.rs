@@ -194,6 +194,19 @@ impl<const N: usize> Prunable<N> {
         self.bitmap.pop()
     }
 
+    /// Shrink the bitmap to `new_len` total bits (including pruned bits).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `new_len > self.len()` or `new_len < self.pruned_bits()`.
+    pub fn truncate(&mut self, new_len: u64) {
+        assert!(
+            new_len >= self.pruned_bits(),
+            "cannot truncate into pruned region"
+        );
+        self.bitmap.truncate(new_len - self.pruned_bits());
+    }
+
     /// Add a byte to the bitmap.
     ///
     /// # Warning
@@ -818,6 +831,40 @@ mod tests {
         }
 
         assert!(prunable.is_empty());
+    }
+
+    #[test]
+    fn test_truncate() {
+        let mut prunable: Prunable<4> = Prunable::new();
+        let expected: Vec<bool> = (0..96).map(|i| i % 3 == 0).collect();
+        for &bit in &expected {
+            prunable.push(bit);
+        }
+
+        prunable.truncate(65);
+        assert_eq!(prunable.len(), 65);
+        for i in 0..65 {
+            assert_eq!(prunable.get_bit(i), expected[i as usize]);
+        }
+
+        prunable.prune_to_bit(32);
+        assert_eq!(prunable.pruned_bits(), 32);
+
+        prunable.truncate(64);
+        assert_eq!(prunable.len(), 64);
+        for i in 32..64 {
+            assert_eq!(prunable.get_bit(i), expected[i as usize]);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot truncate into pruned region")]
+    fn test_truncate_into_pruned_region_panics() {
+        let mut prunable: Prunable<4> = Prunable::new();
+        prunable.push_chunk(&[0xFF; 4]);
+        prunable.push_chunk(&[0xFF; 4]);
+        prunable.prune_to_bit(32);
+        prunable.truncate(31);
     }
 
     #[test]

@@ -55,7 +55,7 @@ use crate::{
         authenticated,
         contiguous::{
             variable::{Config as JournalConfig, Journal as ContiguousJournal},
-            Contiguous, Reader,
+            Contiguous, Mutable, Reader,
         },
     },
     mmr::{journaled::Config as MmrConfig, Location, Proof},
@@ -214,6 +214,58 @@ impl<E: Context, V: VariableValue, H: Hasher> Keyless<E, V, H> {
         Ok(())
     }
 
+    /// Rewind the database to `size` operations, where `size` is the location of the next append.
+    ///
+    /// This rewinds both the operations journal and its MMR to the historical state at `size`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when:
+    /// - `size` is not a valid rewind target
+    /// - the target's required logical range is not fully retained (for keyless, this means the
+    ///   oldest retained location is already beyond the rewind boundary)
+    /// - `size - 1` is not a commit operation
+    ///
+    /// Any error from this method is fatal for this handle. Rewind may mutate journal state
+    /// before this method finishes updating in-memory rewind state. Callers must drop this
+    /// database handle after any `Err` from `rewind` and reopen from storage.
+    ///
+    /// A successful rewind is not restart-stable until a subsequent [`Self::commit`] or
+    /// [`Self::sync`].
+    pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
+        let rewind_size = *size;
+        let current_size = *self.last_commit_loc + 1;
+        if rewind_size == current_size {
+            return Ok(());
+        }
+        if rewind_size == 0 || rewind_size > current_size {
+            return Err(Error::Journal(crate::journal::Error::InvalidRewind(
+                rewind_size,
+            )));
+        }
+
+        let rewind_last_loc = Location::new(rewind_size - 1);
+        {
+            let reader = self.journal.reader().await;
+            let bounds = reader.bounds();
+            if rewind_size <= bounds.start {
+                return Err(Error::Journal(crate::journal::Error::ItemPruned(
+                    *rewind_last_loc,
+                )));
+            }
+            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            if !matches!(rewind_last_op, Operation::Commit(_)) {
+                return Err(Error::UnexpectedData(rewind_last_loc));
+            }
+        }
+
+        // Journal rewind happens before in-memory commit-location updates. If a later step fails,
+        // this handle may be internally diverged and must be dropped by the caller.
+        self.journal.rewind(rewind_size).await?;
+        self.last_commit_loc = rewind_last_loc;
+        Ok(())
+    }
+
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
@@ -324,6 +376,21 @@ mod test {
     async fn open_db(context: deterministic::Context) -> Db {
         let cfg = db_config("partition", &context);
         Db::init(context, cfg).await.unwrap()
+    }
+
+    async fn commit_appends(
+        db: &mut Db,
+        values: impl IntoIterator<Item = Vec<u8>>,
+        metadata: Option<Vec<u8>>,
+    ) -> core::ops::Range<Location> {
+        let mut batch = db.new_batch();
+        for value in values {
+            batch = batch.append(value);
+        }
+        let finalized = batch.merkleize(metadata).finalize();
+        let range = db.apply_batch(finalized).await.unwrap();
+        db.commit().await.unwrap();
+        range
     }
 
     #[test_traced("INFO")]
@@ -1111,6 +1178,135 @@ mod test {
         });
     }
 
+    #[test_traced("INFO")]
+    fn test_keyless_db_rewind_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+            let initial_root = db.root();
+            let initial_size = db.bounds().await.end;
+
+            let value_a = vec![1u8; 12];
+            let value_b = vec![2u8; 16];
+            let metadata_a = vec![3u8; 20];
+            let first_range = commit_appends(
+                &mut db,
+                [value_a.clone(), value_b.clone()],
+                Some(metadata_a.clone()),
+            )
+            .await;
+
+            let root_before = db.root();
+            let size_before = db.bounds().await.end;
+            let commit_before = db.last_commit_loc();
+            assert_eq!(size_before, first_range.end);
+
+            let value_c = vec![4u8; 24];
+            let metadata_b = vec![5u8; 8];
+            let second_range =
+                commit_appends(&mut db, [value_c.clone()], Some(metadata_b.clone())).await;
+            assert_eq!(second_range.start, size_before);
+            assert_ne!(db.root(), root_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_b));
+
+            db.rewind(size_before).await.unwrap();
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.bounds().await.end, size_before);
+            assert_eq!(db.last_commit_loc(), commit_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a.clone()));
+            assert_eq!(db.get(Location::new(1)).await.unwrap(), Some(value_a));
+            assert_eq!(db.get(Location::new(2)).await.unwrap(), Some(value_b));
+            assert!(
+                matches!(
+                    db.get(Location::new(4)).await,
+                    Err(Error::LocationOutOfBounds(_, size)) if size == size_before
+                ),
+                "rewound append should be out of bounds",
+            );
+
+            db.commit().await.unwrap();
+            drop(db);
+            let mut db = open_db(context.with_label("reopen")).await;
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.bounds().await.end, size_before);
+            assert_eq!(db.last_commit_loc(), commit_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
+            assert_eq!(db.get(Location::new(1)).await.unwrap(), Some(vec![1u8; 12]));
+            assert_eq!(db.get(Location::new(2)).await.unwrap(), Some(vec![2u8; 16]));
+            assert!(matches!(
+                db.get(Location::new(4)).await,
+                Err(Error::LocationOutOfBounds(_, size)) if size == size_before
+            ));
+
+            db.rewind(initial_size).await.unwrap();
+            assert_eq!(db.root(), initial_root);
+            assert_eq!(db.bounds().await.end, initial_size);
+            assert_eq!(db.get_metadata().await.unwrap(), None);
+            assert!(matches!(
+                db.get(Location::new(1)).await,
+                Err(Error::LocationOutOfBounds(_, size)) if size == initial_size
+            ));
+
+            db.commit().await.unwrap();
+            drop(db);
+            let db = open_db(context.with_label("reopen_initial_boundary")).await;
+            assert_eq!(db.root(), initial_root);
+            assert_eq!(db.bounds().await.end, initial_size);
+            assert_eq!(db.get_metadata().await.unwrap(), None);
+            assert!(matches!(
+                db.get(Location::new(1)).await,
+                Err(Error::LocationOutOfBounds(_, size)) if size == initial_size
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_db_rewind_pruned_target_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            let first_range =
+                commit_appends(&mut db, (0..16).map(|i| vec![i as u8; 8]), None).await;
+
+            let mut round = 0u64;
+            loop {
+                round += 1;
+                assert!(
+                    round <= 64,
+                    "failed to prune enough history for rewind test"
+                );
+
+                commit_appends(&mut db, (0..16).map(|i| vec![(round + i) as u8; 8]), None).await;
+                db.prune(db.last_commit_loc()).await.unwrap();
+
+                if db.bounds().await.start > first_range.start {
+                    break;
+                }
+            }
+
+            let oldest_retained = db.bounds().await.start;
+            let boundary_err = db.rewind(oldest_retained).await.unwrap_err();
+            assert!(
+                matches!(
+                    boundary_err,
+                    Error::Journal(crate::journal::Error::ItemPruned(_))
+                ),
+                "unexpected rewind error at retained boundary: {boundary_err:?}"
+            );
+
+            let err = db.rewind(first_range.start).await.unwrap_err();
+            assert!(
+                matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+                "unexpected rewind error: {err:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
@@ -1119,6 +1315,7 @@ mod test {
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.sync());
         is_send(db.get(loc));
+        is_send(db.rewind(loc));
     }
 
     /// batch.get() reads pending appends and falls through to base DB.

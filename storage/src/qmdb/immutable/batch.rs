@@ -107,8 +107,8 @@ where
 
     /// Set a key to a value.
     ///
-    /// The key must not already exist in the database or in any ancestor batch
-    /// in the chain. Setting a key that already exists causes undefined behavior.
+    /// Duplicate keys are not supported. The key must not already exist in the database or in any
+    /// ancestor batch in the chain. Setting a key that already exists is undefined behavior.
     pub fn set(mut self, key: K, value: V) -> Self {
         self.mutations.insert(key, value);
         self
