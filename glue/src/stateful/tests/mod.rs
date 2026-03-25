@@ -1,9 +1,9 @@
 //! E2E tests for `stateful`
 
 use crate::simulate::{
+    action::{Action, Crash, Schedule},
     engine::EngineDefinition,
     exit::{ExitCondition, ProcessedHeightAtLeast},
-    fault::{Crash, Fault, Schedule},
     plan::PlanBuilder,
     processed::ProcessedHeight,
     property::Property,
@@ -168,8 +168,11 @@ where
         .seeds(0..5)
         .crash(Crash::Schedule(
             Schedule::new()
-                .at(Duration::from_millis(2500), Fault::Crash(validator.clone()))
-                .at(Duration::from_millis(5000), Fault::Restart(validator)),
+                .at(
+                    Duration::from_millis(2500),
+                    Action::Crash(validator.clone()),
+                )
+                .at(Duration::from_millis(5000), Action::Restart(validator)),
         ))
         .exit_condition(ProcessedHeightAtLeast::new(50))
         .property(BlockAgreementAtHeight::new(50))

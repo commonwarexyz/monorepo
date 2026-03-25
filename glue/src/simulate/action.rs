@@ -1,10 +1,10 @@
-//! Fault injection types for simulation testing.
+//! Simulation action types for testing.
 
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::Link;
 use std::time::Duration;
 
-/// Fault injection strategy for a simulation run.
+/// Crash strategy for a simulation run.
 #[derive(Clone)]
 pub enum Crash<P: PublicKey> {
     /// Periodically crash random validators and restart them after
@@ -26,15 +26,15 @@ pub enum Crash<P: PublicKey> {
         after: u64,
     },
 
-    /// Time-indexed fault schedule for precise control.
+    /// Time-indexed action schedule for precise control.
     Schedule(Schedule<P>),
 }
 
-/// A time-ordered sequence of fault injections.
+/// A time-ordered sequence of simulation actions.
 #[derive(Clone)]
 pub struct Schedule<P: PublicKey> {
-    /// Time-indexed fault events.
-    pub events: Vec<(Duration, Fault<P>)>,
+    /// Time-indexed actions.
+    pub events: Vec<(Duration, Action<P>)>,
 }
 
 impl<P: PublicKey> Schedule<P> {
@@ -43,9 +43,9 @@ impl<P: PublicKey> Schedule<P> {
         Self { events: vec![] }
     }
 
-    /// Add a fault at the given simulation time.
-    pub fn at(mut self, time: Duration, fault: Fault<P>) -> Self {
-        self.events.push((time, fault));
+    /// Add an action at the given simulation time.
+    pub fn at(mut self, time: Duration, action: Action<P>) -> Self {
+        self.events.push((time, action));
         self
     }
 }
@@ -56,9 +56,9 @@ impl<P: PublicKey> Default for Schedule<P> {
     }
 }
 
-/// A single fault to inject at a specific time.
+/// A single simulation action to apply at a specific time.
 #[derive(Clone)]
-pub enum Fault<P: PublicKey> {
+pub enum Action<P: PublicKey> {
     /// Reset all directed links, restoring full connectivity with the given link.
     Heal(Link),
 
