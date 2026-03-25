@@ -1,9 +1,10 @@
 //! [`ManagedDb`] implementation for QMDB [`any`](commonware_storage::qmdb::any) databases.
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
-//! read-through to committed state. The glue [`UnmerkleizedTrait`] trait
-//! does not carry a DB reference, so this module provides wrapper types
-//! that capture `Arc<AsyncRwLock<Db>>` alongside the raw batch.
+//! read-through to committed state. This module provides wrapper types
+//! that capture `Arc<AsyncRwLock<Db>>` alongside the raw batch so the
+//! [`Unmerkleized`](super::Unmerkleized) and [`Merkleized`](super::Merkleized)
+//! traits can be implemented without a DB parameter.
 
 use crate::stateful::db::{
     ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
@@ -42,8 +43,7 @@ use std::sync::Arc;
 type AnyDbHandle<E, C, I, H, U> = Arc<AsyncRwLock<Db<E, C, I, H, U>>>;
 
 /// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
-/// database, allowing it to implement the glue [`Unmerkleized`](UnmerkleizedTrait)
-/// trait (which does not carry a DB parameter).
+/// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
 pub struct AnyUnmerkleized<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
@@ -58,8 +58,7 @@ where
 }
 
 /// Wraps a QMDB [`MerkleizedBatch`] with a reference to the parent
-/// database, allowing it to implement the glue [`Merkleized`](MerkleizedTrait)
-/// trait.
+/// database, implementing the [`Merkleized`](super::Merkleized) trait.
 pub struct AnyMerkleized<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,

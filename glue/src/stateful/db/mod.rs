@@ -6,7 +6,7 @@
 //! # Batch Lifecycle
 //!
 //! Normal execution has three stages:
-//! 1. [`Unmerkleized`]: mutable, in-progress reads and writes.
+//! 1. [`Unmerkleized`]: mutable, in-progress batch (concrete types expose reads and writes).
 //! 2. [`Merkleized`]: a sealed batch with a computed root.
 //! 3. Finalization: persist the sealed batch via [`ManagedDb::finalize`].
 //!
@@ -75,10 +75,15 @@ use std::{
 
 pub mod any;
 pub mod current;
+pub mod immutable;
 pub mod keyless;
 pub mod p2p;
 
 /// Mutable batch state before merkleization.
+///
+/// Concrete types provide key-value operations (`get`, `write`, `set`,
+/// `append`, etc.) as inherent methods; the generic wrapper only needs
+/// [`merkleize`](Self::merkleize).
 pub trait Unmerkleized: Sized + Send {
     /// The merkleized batch produced by [`merkleize`](Self::merkleize).
     type Merkleized: Merkleized;
