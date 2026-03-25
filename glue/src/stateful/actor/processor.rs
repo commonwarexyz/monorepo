@@ -36,12 +36,27 @@ use commonware_macros::select;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand::Rng;
-use std::{collections::HashMap, future::Future};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    future::Future,
+};
 use tracing::{debug, warn};
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
-type PendingMap<A, E> = HashMap<PendingDigest<A, E>, (Round, PendingBatches<A, E>)>;
+
+/// Cached speculative state for a block digest.
+struct PendingEntry<A, E>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    round: Round,
+    parent: PendingDigest<A, E>,
+    merkleized: PendingBatches<A, E>,
+}
+
+type PendingMap<A, E> = HashMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 
 /// Errors while preparing parent-relative batches for propose/verify.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,7 +182,14 @@ where
             response.send_lossy(None);
             return;
         };
-        self.pending.insert(block.digest(), (round, merkleized));
+        self.pending.insert(
+            block.digest(),
+            PendingEntry {
+                round,
+                parent: parent_digest,
+                merkleized,
+            },
+        );
         response.send_lossy(Some(block));
     }
 
@@ -259,7 +281,14 @@ where
             response.send_lossy(false);
             return;
         };
-        self.pending.insert(block_digest, (round, merkleized));
+        self.pending.insert(
+            block_digest,
+            PendingEntry {
+                round,
+                parent: parent_digest,
+                merkleized,
+            },
+        );
         response.send_lossy(true);
     }
 
@@ -293,8 +322,10 @@ where
         &mut self,
         parent: &<A::Block as Digestible>::Digest,
     ) -> Result<<A::Databases as DatabaseSet<E>>::Unmerkleized, PrepareBatchesError> {
-        if let Some((_, merkleized)) = self.pending.get(parent) {
-            return Ok(<A::Databases as DatabaseSet<E>>::fork_batches(merkleized));
+        if let Some(entry) = self.pending.get(parent) {
+            return Ok(<A::Databases as DatabaseSet<E>>::fork_batches(
+                &entry.merkleized,
+            ));
         }
         if &self.last_processed.digest == parent {
             return Ok(self.databases.new_batches().await);
@@ -390,7 +421,14 @@ where
                 return Err(PrepareBatchesError::Cancelled);
             };
 
-            self.pending.insert(digest, (round, merkleized));
+            self.pending.insert(
+                digest,
+                PendingEntry {
+                    round,
+                    parent: parent_digest,
+                    merkleized,
+                },
+            );
         }
 
         Ok(())
@@ -406,7 +444,7 @@ where
         // Marshal finalization is ordered. A pending miss means we can safely
         // apply this block on top of finalized state.
         let batch = match self.pending.remove(&digest) {
-            Some((_, merkleized)) => merkleized,
+            Some(entry) => entry.merkleized,
             None => {
                 let batches = self.databases.new_batches().await;
                 self.app
@@ -417,10 +455,50 @@ where
 
         let round = Round::new(block.context().epoch(), block.context().view());
         self.databases.finalize(batch).await;
-        self.pending.retain(|_, (r, _)| *r > round);
+        self.prune_pending_after_finalize(&digest, round);
         self.last_processed = Anchor { height, digest };
 
         FinalizeStatus::Persisted { height }
+    }
+
+    /// Remove pending state that is not compatible with the finalized winner.
+    ///
+    /// A pending block is kept only when:
+    /// - it is a descendant of `finalized_digest`, and
+    /// - it was created after `finalized_round`.
+    fn prune_pending_after_finalize(
+        &mut self,
+        finalized_digest: &<A::Block as Digestible>::Digest,
+        finalized_round: Round,
+    ) {
+        let mut children_by_parent = HashMap::new();
+        for (candidate_digest, entry) in &self.pending {
+            children_by_parent
+                .entry(entry.parent)
+                .or_insert_with(Vec::new)
+                .push(*candidate_digest);
+        }
+
+        let mut compatible = HashSet::new();
+        compatible.insert(*finalized_digest);
+
+        let mut to_visit = VecDeque::new();
+        to_visit.push_back(*finalized_digest);
+        while let Some(parent) = to_visit.pop_front() {
+            let Some(children) = children_by_parent.get(&parent) else {
+                continue;
+            };
+
+            for &child in children {
+                if compatible.insert(child) {
+                    to_visit.push_back(child);
+                }
+            }
+        }
+
+        self.pending.retain(|candidate_digest, entry| {
+            entry.round > finalized_round && compatible.contains(candidate_digest)
+        });
     }
 }
 
@@ -440,7 +518,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{FinalizeStatus, PrepareBatchesError, Processor};
+    use super::{FinalizeStatus, PendingEntry, PrepareBatchesError, Processor};
     use crate::stateful::{
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
         Application, Proposed,
@@ -781,9 +859,14 @@ mod tests {
                 range: non_empty_range!(Location::new(0), Location::new(1)),
             };
             let round = Round::new(Epoch::zero(), view);
-            self.processor
-                .pending
-                .insert(block.digest(), (round, merkleized));
+            self.processor.pending.insert(
+                block.digest(),
+                PendingEntry {
+                    round,
+                    parent: parent.digest(),
+                    merkleized,
+                },
+            );
             self.provider.insert(block.clone());
             block
         }
@@ -895,6 +978,45 @@ mod tests {
             );
             assert_eq!(harness.processor.last_processed.digest, winner.digest());
             assert_eq!(harness.height_value(Height::new(2)).await, Some(3));
+        });
+    }
+
+    #[test]
+    fn execution_finalization_prunes_losing_fork_descendants() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let loser = harness.stage_pending_child(&block1, View::new(2)).await;
+            let winner = harness.stage_pending_child(&block1, View::new(3)).await;
+            let loser_child = harness.stage_pending_child(&loser, View::new(4)).await;
+
+            assert!(harness.processor.pending.contains_key(&winner.digest()));
+            assert!(harness.processor.pending.contains_key(&loser.digest()));
+            assert!(harness
+                .processor
+                .pending
+                .contains_key(&loser_child.digest()));
+
+            let status = harness.finalize(winner.clone()).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(2)
+                },
+                "finalization should persist winner state",
+            );
+            assert!(
+                !harness.processor.pending.contains_key(&loser.digest()),
+                "losing fork at finalized round should be pruned",
+            );
+            assert!(
+                !harness
+                    .processor
+                    .pending
+                    .contains_key(&loser_child.digest()),
+                "descendants of the losing fork should also be pruned",
+            );
         });
     }
 
