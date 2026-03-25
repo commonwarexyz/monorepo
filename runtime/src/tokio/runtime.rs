@@ -559,11 +559,11 @@ impl crate::Runner for Runner {
         tree.abort();
         metric.finish();
 
-        // This wait is best-effort. If a tracked task does not finish before
-        // the timeout, log the slow shutdown and continue returning or resuming
+        // If a tracked task does not finish before the timeout (may be a blocking task we
+        // cannot cancel), log the slow shutdown and continue returning or resuming
         // the original panic.
         if !executor.tasks.wait_for_idle(self.cfg.shutdown_timeout) {
-            error!("timed out waiting for tasks to finish during tokio runtime shutdown");
+            error!("unfinished tasks remaining after shutdown timeout");
         }
         result.unwrap_or_else(|payload| resume_unwind(payload))
     }
