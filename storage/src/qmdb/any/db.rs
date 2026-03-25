@@ -11,16 +11,37 @@ use crate::{
         Error as JournalError,
     },
     mmr::{iterator::nodes_to_pin, Location, Proof},
-    qmdb::{build_snapshot_from_log, operation::Operation as OperationTrait, Error},
+    qmdb::{
+        build_snapshot_from_log, delete_known_loc, operation::Operation as OperationTrait,
+        update_known_loc, Error,
+    },
     Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::NonZeroU64;
+use std::collections::HashMap;
 
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<E, C, H> = authenticated::Journal<E, C, H>;
+
+/// Snapshot mutation needed to undo one operation while rewinding.
+enum SnapshotUndo<K> {
+    Replace {
+        key: K,
+        old_loc: Location,
+        new_loc: Location,
+    },
+    Remove {
+        key: K,
+        old_loc: Location,
+    },
+    Insert {
+        key: K,
+        new_loc: Location,
+    },
+}
 
 /// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:
@@ -190,6 +211,152 @@ where
     ) -> Result<(Proof<H::Digest>, Vec<Operation<U>>), Error> {
         self.historical_proof(self.log.size().await, loc, max_ops)
             .await
+    }
+
+    /// Rewind the database to `size` operations, where `size` is the location of the next append.
+    ///
+    /// This rewinds both the authenticated log and the in-memory snapshot, then restores metadata
+    /// (`last_commit_loc`, `inactivity_floor_loc`, `active_keys`) for the new tip commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when:
+    /// - `size` is not a valid rewind target
+    /// - the target's required logical range is not fully retained (for example, the target
+    ///   inactivity floor is pruned)
+    /// - `size - 1` is not a commit operation
+    ///
+    /// Any error from this method is fatal for this handle. Rewind may mutate journal state before
+    /// all in-memory structures are rebuilt. Callers must drop this database handle after any `Err`
+    /// from `rewind` and reopen from storage.
+    ///
+    /// Returns the list of locations restored to active state in the snapshot.
+    ///
+    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
+    /// [`Db::sync`].
+    pub async fn rewind(&mut self, size: Location) -> Result<Vec<Location>, Error> {
+        let rewind_size = *size;
+        let current_size = *self.last_commit_loc + 1;
+
+        if rewind_size == current_size {
+            return Ok(Vec::new());
+        }
+        if rewind_size == 0 || rewind_size > current_size {
+            return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
+        }
+
+        // Read everything needed for rewind before mutating storage.
+        let (rewind_floor, undos, active_keys_delta) = {
+            let reader = self.log.reader().await;
+            let bounds = reader.bounds();
+            let rewind_last_loc = Location::new(rewind_size - 1);
+            if rewind_size <= bounds.start {
+                return Err(Error::Journal(JournalError::ItemPruned(*rewind_last_loc)));
+            }
+            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            let Some(rewind_floor) = rewind_last_op.has_floor() else {
+                return Err(Error::UnexpectedData(rewind_last_loc));
+            };
+            if *rewind_floor < bounds.start {
+                return Err(Error::Journal(JournalError::ItemPruned(*rewind_floor)));
+            }
+
+            let mut undos = Vec::with_capacity((current_size - rewind_size) as usize);
+            let mut active_keys_delta = 0isize;
+            let mut prior_state_by_key: HashMap<U::Key, Option<Location>> = HashMap::new();
+
+            // Reconstruct key state once in a single pass from the rewind floor.
+            for loc in *rewind_floor..current_size {
+                let op = reader.read(loc).await?;
+                let op_loc = Location::new(loc);
+                match op {
+                    Operation::CommitFloor(_, _) => {}
+                    Operation::Update(update) => {
+                        let key = update.key().clone();
+                        let previous_loc = prior_state_by_key.get(&key).copied().flatten();
+
+                        if loc >= rewind_size {
+                            if let Some(previous_loc) = previous_loc {
+                                undos.push(SnapshotUndo::Replace {
+                                    key: key.clone(),
+                                    old_loc: op_loc,
+                                    new_loc: previous_loc,
+                                });
+                            } else {
+                                active_keys_delta -= 1;
+                                undos.push(SnapshotUndo::Remove {
+                                    key: key.clone(),
+                                    old_loc: op_loc,
+                                });
+                            }
+                        }
+
+                        prior_state_by_key.insert(key, Some(op_loc));
+                    }
+                    Operation::Delete(key) => {
+                        let previous_loc = prior_state_by_key.get(&key).copied().flatten();
+
+                        if loc >= rewind_size {
+                            if let Some(previous_loc) = previous_loc {
+                                active_keys_delta += 1;
+                                undos.push(SnapshotUndo::Insert {
+                                    key: key.clone(),
+                                    new_loc: previous_loc,
+                                });
+                            }
+                        }
+
+                        prior_state_by_key.insert(key, None);
+                    }
+                }
+            }
+
+            // Undo operations must run from newest to oldest removed operation.
+            undos.reverse();
+
+            (rewind_floor, undos, active_keys_delta)
+        };
+
+        // Journal rewind happens before in-memory undo application. If any later step fails, this
+        // handle may be internally diverged and must be dropped by the caller. This step is not
+        // restart-stable until a later commit/sync boundary.
+        self.log.rewind(rewind_size).await?;
+
+        let mut restored_locs = Vec::new();
+        for undo in undos {
+            match undo {
+                SnapshotUndo::Replace {
+                    key,
+                    old_loc,
+                    new_loc,
+                } => {
+                    if new_loc < rewind_size {
+                        restored_locs.push(new_loc);
+                    }
+                    update_known_loc(&mut self.snapshot, &key, old_loc, new_loc);
+                }
+                SnapshotUndo::Remove { key, old_loc } => {
+                    delete_known_loc(&mut self.snapshot, &key, old_loc)
+                }
+                SnapshotUndo::Insert { key, new_loc } => {
+                    if new_loc < rewind_size {
+                        restored_locs.push(new_loc);
+                    }
+                    self.snapshot.insert(&key, new_loc);
+                }
+            }
+        }
+
+        self.active_keys = self
+            .active_keys
+            .checked_add_signed(active_keys_delta)
+            .ok_or(Error::DataCorrupted(
+                "active_keys underflow while rewinding",
+            ))?;
+        self.last_commit_loc = Location::new(rewind_size - 1);
+        self.inactivity_floor_loc = rewind_floor;
+
+        Ok(restored_locs)
     }
 }
 
