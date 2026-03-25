@@ -309,9 +309,9 @@ mod tests {
         // Test Set with variable-length key
         let set_op = Operation::Set(key, U64::new(42));
         let encoded = set_op.encode();
-        let decoded = Operation::<Vec<u8>, U64>::decode_cfg(encoded.clone(), &cfg).unwrap();
-        assert_eq!(set_op, decoded);
         assert_eq!(encoded.len(), set_op.encode_size());
+        let decoded = Operation::<Vec<u8>, U64>::decode_cfg(encoded, &cfg).unwrap();
+        assert_eq!(set_op, decoded);
 
         // Test Commit (key-independent, should work the same)
         let commit_op = Operation::<Vec<u8>, U64>::Commit(Some(U64::new(42)));
