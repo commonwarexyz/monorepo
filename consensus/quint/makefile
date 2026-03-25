@@ -103,13 +103,13 @@ tv_live: clean_fuzz_traces clean_traces
 	'
 
 tv_live_fuzz:
+	rm -rf $(FUZZ_TRACES_ROOT)
 	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
 	COMMONWARE_MIN_REQUIRED_CONTAINERS=$(MIN_REQUIRED_CONTAINERS) \
 	COMMONWARE_MAX_REQUIRED_CONTAINERS=$(MAX_REQUIRED_CONTAINERS) \
 	cargo +nightly fuzz run simplex_ed25519_quint_disrupter
 
 tv_live_watch: clean_traces
-	rm -rf
 	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
 	./scripts/watch_new_traces.sh "$(TEST_DIR)" "$(FUZZ_TRACES_ROOT)"
 

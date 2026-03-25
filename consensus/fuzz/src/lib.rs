@@ -846,11 +846,17 @@ impl TraceSelectionStrategy for CurrentTraceSelectionStrategy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct TraceSessionSignature {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CorrectNodeVoteSignature {
+    node: String,
     nullify_votes: u64,
     notarize_votes: u64,
     finalize_votes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TraceSessionSignature {
+    vote_signatures: Vec<CorrectNodeVoteSignature>,
     nullification_certificates: u64,
     notarization_certificates: u64,
     finalization_certificates: u64,
@@ -900,11 +906,9 @@ struct TraceMetrics {
     vote_entries: u64,
     certificate_entries: u64,
     unique_blocks: usize,
-    committed_blocks: u64,
+    last_finalized_view: u64,
     max_view: u64,
-    notarize_votes: u64,
-    nullify_votes: u64,
-    finalize_votes: u64,
+    vote_signatures: Vec<CorrectNodeVoteSignature>,
     notarization_certificates: u64,
     nullification_certificates: u64,
     finalization_certificates: u64,
@@ -917,14 +921,16 @@ struct TraceMetrics {
 }
 
 impl TraceMetrics {
-    fn from_entries(entries: &[tracing::sniffer::TraceEntry], max_view: u64) -> Self {
+    fn from_entries(
+        entries: &[tracing::sniffer::TraceEntry],
+        faults: usize,
+        n: usize,
+        max_view: u64,
+    ) -> Self {
         use tracing::sniffer::{TraceEntry, TracedCert, TracedVote};
 
         let mut vote_entries = 0;
         let mut certificate_entries = 0;
-        let mut notarize_votes = 0;
-        let mut nullify_votes = 0;
-        let mut finalize_votes = 0;
         let mut notarization_certificates = 0;
         let mut nullification_certificates = 0;
         let mut finalization_certificates = 0;
@@ -932,8 +938,16 @@ impl TraceMetrics {
         let mut nullify_by_n0 = 0;
         let mut finalize_by_n0 = 0;
         let mut certs_by_n0 = 0;
-        let mut finalized_views = HashSet::new();
+        let mut last_finalized_view = 0;
         let mut unique_blocks = HashSet::new();
+        let mut vote_signatures: Vec<CorrectNodeVoteSignature> = (faults..n)
+            .map(|i| CorrectNodeVoteSignature {
+                node: format!("n{i}"),
+                nullify_votes: 0,
+                notarize_votes: 0,
+                finalize_votes: 0,
+            })
+            .collect();
 
         for entry in entries {
             match entry {
@@ -941,8 +955,10 @@ impl TraceMetrics {
                     vote_entries += 1;
                     match vote {
                         TracedVote::Notarize { sig, block, .. } => {
-                            if sig != "n0" {
-                                notarize_votes += 1;
+                            if let Some(node_signature) =
+                                vote_signature_for_signer(&mut vote_signatures, sig, faults)
+                            {
+                                node_signature.notarize_votes += 1;
                             }
                             unique_blocks.insert(block.clone());
                             if sig == "n0" {
@@ -950,16 +966,20 @@ impl TraceMetrics {
                             }
                         }
                         TracedVote::Nullify { sig, .. } => {
-                            if sig != "n0" {
-                                nullify_votes += 1;
+                            if let Some(node_signature) =
+                                vote_signature_for_signer(&mut vote_signatures, sig, faults)
+                            {
+                                node_signature.nullify_votes += 1;
                             }
                             if sig == "n0" {
                                 nullify_by_n0 += 1;
                             }
                         }
                         TracedVote::Finalize { sig, block, .. } => {
-                            if sig != "n0" {
-                                finalize_votes += 1;
+                            if let Some(node_signature) =
+                                vote_signature_for_signer(&mut vote_signatures, sig, faults)
+                            {
+                                node_signature.finalize_votes += 1;
                             }
                             unique_blocks.insert(block.clone());
                             if sig == "n0" {
@@ -990,7 +1010,7 @@ impl TraceMetrics {
                                 finalization_certificates += 1;
                             }
                             unique_blocks.insert(block.clone());
-                            finalized_views.insert(*view);
+                            last_finalized_view = last_finalized_view.max(*view);
                         }
                     }
                 }
@@ -1015,11 +1035,9 @@ impl TraceMetrics {
             vote_entries,
             certificate_entries,
             unique_blocks: unique_blocks.len(),
-            committed_blocks: finalized_views.len() as u64,
+            last_finalized_view,
             max_view,
-            notarize_votes,
-            nullify_votes,
-            finalize_votes,
+            vote_signatures,
             notarization_certificates,
             nullification_certificates,
             finalization_certificates,
@@ -1034,15 +1052,39 @@ impl TraceMetrics {
 
     fn session_signature(&self) -> TraceSessionSignature {
         TraceSessionSignature {
-            nullify_votes: self.nullify_votes,
-            notarize_votes: self.notarize_votes,
-            finalize_votes: self.finalize_votes,
+            vote_signatures: self.vote_signatures.clone(),
             nullification_certificates: self.nullification_certificates,
             notarization_certificates: self.notarization_certificates,
             finalization_certificates: self.finalization_certificates,
             max_view: self.max_view,
         }
     }
+}
+
+fn vote_signature_for_signer<'a>(
+    vote_signatures: &'a mut [CorrectNodeVoteSignature],
+    sig: &str,
+    faults: usize,
+) -> Option<&'a mut CorrectNodeVoteSignature> {
+    let idx = sig.strip_prefix('n')?.parse::<usize>().ok()?;
+    let offset = idx.checked_sub(faults)?;
+    vote_signatures.get_mut(offset)
+}
+
+fn format_vote_signatures(vote_signatures: &[CorrectNodeVoteSignature]) -> String {
+    vote_signatures
+        .iter()
+        .map(|signature| {
+            format!(
+                "{}:[nullify={}, notarize={}, finalize={}]",
+                signature.node,
+                signature.nullify_votes,
+                signature.notarize_votes,
+                signature.finalize_votes
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn append_trace_log_line(path: &Path, line: &str) {
@@ -1077,17 +1119,15 @@ fn log_trace_selection(
     }
     let verdict = if selected { "selected" } else { "skipping" };
     let line = format!(
-        "{verdict} trace (strategy={}, entries={}, votes={}, certs={}, unique_blocks={}, committed_blocks={}, max_view={}, vote_signature=[nullify={}, notarize={}, finalize={}], cert_signature=[nullification={}, notarization={}, finalization={}], distance={:.2}, vote_types={}, notarize_n0={}, nullify_n0={}, finalize_n0={}, certs_n0={})",
+        "{verdict} trace (strategy={}, entries={}, votes={}, certs={}, unique_blocks={}, last_finalized_view={}, max_view={}, vote_signature=[{}], cert_signature=[nullification={}, notarization={}, finalization={}], distance={:.2}, vote_types={}, notarize_n0={}, nullify_n0={}, finalize_n0={}, certs_n0={})",
         strategy.name(),
         metrics.entry_count,
         metrics.vote_entries,
         metrics.certificate_entries,
         metrics.unique_blocks,
-        metrics.committed_blocks,
+        metrics.last_finalized_view,
         metrics.max_view,
-        metrics.nullify_votes,
-        metrics.notarize_votes,
-        metrics.finalize_votes,
+        format_vote_signatures(&metrics.vote_signatures),
         metrics.nullification_certificates,
         metrics.notarization_certificates,
         metrics.finalization_certificates,
@@ -1110,7 +1150,12 @@ fn trace_artifacts_dir(base_dir: &str, strategy_name: &str) -> PathBuf {
 
 fn persist_trace_if_selected(base_dir: &str, hash_hex: &str, trace_data: &TraceData) -> bool {
     let strategy = configured_trace_selection_strategy();
-    let metrics = TraceMetrics::from_entries(&trace_data.entries, trace_data.max_view);
+    let metrics = TraceMetrics::from_entries(
+        &trace_data.entries,
+        trace_data.faults,
+        trace_data.n,
+        trace_data.max_view,
+    );
     let artifacts_dir = trace_artifacts_dir(base_dir, strategy.name());
     let selected = strategy.is_interesting(&metrics);
     if !selected {
