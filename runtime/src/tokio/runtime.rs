@@ -1,3 +1,7 @@
+#[cfg(any(feature = "iouring-network", feature = "iouring-storage"))]
+use crate::iouring;
+#[cfg(feature = "iouring-network")]
+use crate::network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork};
 #[cfg(not(feature = "iouring-network"))]
 use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
 #[cfg(feature = "iouring-storage")]
@@ -6,11 +10,6 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 #[cfg(feature = "external")]
 use crate::Pacer;
-#[cfg(feature = "iouring-network")]
-use crate::{
-    iouring,
-    network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
-};
 use crate::{
     network::metered::Network as MeteredNetwork,
     process::metered::Metrics as MeteredProcess,
