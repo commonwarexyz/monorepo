@@ -57,7 +57,7 @@ use crate::{
         add_attribute,
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker, Registry, ScopeGuard,
+        MetricHandle, Panicker, Registry, ScopeGuard,
     },
     validate_label, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf,
     Metrics as _, Panicked, Spawner as _, METRICS_PREFIX,
@@ -553,8 +553,7 @@ impl Runner {
         let mut root = Box::pin(panicked.interrupt(f(context)));
         let label = Label::root();
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
-        let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
-        gauge.inc();
+        let metric = MetricHandle::new(executor.metrics.tasks_running.get_or_create(&label).clone());
 
         // Register the root task
         Tasks::register_root(&executor.tasks);
@@ -695,7 +694,7 @@ impl Runner {
             Arc::weak_count(&executor) == 0,
             "executor still has weak references"
         );
-        gauge.dec();
+        metric.finish();
 
         // Handle the result — resume the original panic after cleanup if one was caught.
         let output = match result {

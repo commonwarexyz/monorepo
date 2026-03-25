@@ -17,7 +17,10 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard},
+    utils::{
+        add_attribute, signal::Stopper, supervision::Tree, MetricHandle, Panicker, Registry,
+        ScopeGuard,
+    },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
 };
@@ -528,8 +531,7 @@ impl crate::Runner for Runner {
         // Get metrics
         let label = Label::root();
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
-        let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
-        gauge.inc();
+        let metric = MetricHandle::new(executor.metrics.tasks_running.get_or_create(&label).clone());
 
         // Build the root context and run the future.
         //
@@ -554,7 +556,7 @@ impl crate::Runner for Runner {
             executor.runtime.block_on(panicked.interrupt(f(context)))
         }));
         tree.abort();
-        gauge.dec();
+        metric.finish();
 
         // This wait is best-effort. If a tracked task does not finish before
         // the timeout, log the slow shutdown and continue returning or resuming
