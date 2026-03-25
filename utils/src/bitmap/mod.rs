@@ -257,10 +257,14 @@ impl<const N: usize> BitMap<N> {
     pub fn truncate(&mut self, new_len: u64) {
         assert!(new_len <= self.len(), "cannot truncate to a larger size");
 
-        // Pop full chunks from the back when possible.
-        while self.len - new_len >= Self::CHUNK_SIZE_BITS && self.is_chunk_aligned() {
-            self.chunks.pop_back();
-            self.len -= Self::CHUNK_SIZE_BITS;
+        // Pop single bits until we can remove full chunks.
+        while self.len > new_len && !self.is_chunk_aligned() {
+            self.pop();
+        }
+
+        // Pop full chunks from the back.
+        while self.len - new_len >= Self::CHUNK_SIZE_BITS {
+            self.pop_chunk();
         }
 
         // Pop remaining individual bits.

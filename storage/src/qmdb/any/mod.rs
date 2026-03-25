@@ -1969,6 +1969,55 @@ pub(crate) mod test {
         });
     }
 
+    /// Rewinding rejects out-of-range targets and keeps state unchanged.
+    #[test_traced("INFO")]
+    fn test_any_rewind_invalid_target_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariable =
+                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("ri", &ctx))
+                    .await
+                    .unwrap();
+
+            let root_before = db.root();
+            let size_before = db.size().await;
+            let no_op_locs = db.rewind(size_before).await.unwrap();
+            assert!(
+                no_op_locs.is_empty(),
+                "expected no-op rewind to return no restored locations"
+            );
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.size().await, size_before);
+
+            let zero_err = db.rewind(Location::new(0)).await.unwrap_err();
+            assert!(
+                matches!(
+                    zero_err,
+                    crate::qmdb::Error::Journal(crate::journal::Error::InvalidRewind(0))
+                ),
+                "unexpected rewind error: {zero_err:?}"
+            );
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.size().await, size_before);
+
+            let too_large_target = Location::new(*size_before + 1);
+            let too_large_err = db.rewind(too_large_target).await.unwrap_err();
+            assert!(
+                matches!(
+                    too_large_err,
+                    crate::qmdb::Error::Journal(crate::journal::Error::InvalidRewind(size))
+                    if size == *too_large_target
+                ),
+                "unexpected rewind error: {too_large_err:?}"
+            );
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.size().await, size_before);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Rewinding fails when the target commit's inactivity floor has been pruned, even if the
     /// target commit location is still retained.
     #[test_traced("INFO")]

@@ -217,7 +217,6 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
     ///
     /// This rewinds both the operations journal and its MMR to the historical state at `size`.
-    /// The rewind is not restart-stable until a subsequent [`Self::commit`] or [`Self::sync`].
     ///
     /// # Errors
     ///

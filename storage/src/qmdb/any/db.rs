@@ -322,27 +322,28 @@ where
         // restart-stable until a later commit/sync boundary.
         self.log.rewind(rewind_size).await?;
 
-        let restored_locs: Vec<Location> = undos
-            .iter()
-            .filter_map(|undo| match undo {
-                SnapshotUndo::Replace { new_loc, .. } | SnapshotUndo::Insert { new_loc, .. } => {
-                    (*new_loc < rewind_size).then_some(*new_loc)
-                }
-                SnapshotUndo::Remove { .. } => None,
-            })
-            .collect();
-
+        let mut restored_locs = Vec::new();
         for undo in undos {
             match undo {
                 SnapshotUndo::Replace {
                     key,
                     old_loc,
                     new_loc,
-                } => update_known_loc(&mut self.snapshot, &key, old_loc, new_loc),
+                } => {
+                    if new_loc < rewind_size {
+                        restored_locs.push(new_loc);
+                    }
+                    update_known_loc(&mut self.snapshot, &key, old_loc, new_loc);
+                }
                 SnapshotUndo::Remove { key, old_loc } => {
                     delete_known_loc(&mut self.snapshot, &key, old_loc)
                 }
-                SnapshotUndo::Insert { key, new_loc } => self.snapshot.insert(&key, new_loc),
+                SnapshotUndo::Insert { key, new_loc } => {
+                    if new_loc < rewind_size {
+                        restored_locs.push(new_loc);
+                    }
+                    self.snapshot.insert(&key, new_loc);
+                }
             }
         }
 
