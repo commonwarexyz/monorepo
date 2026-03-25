@@ -224,14 +224,44 @@ pub(crate) mod test {
     }
 
     use crate::{
+        index::Unordered as UnorderedIndex,
+        journal::contiguous::Mutable,
         mmr::Location,
-        qmdb::any::traits::{DbAny, MerkleizedBatch as _, Provable, UnmerkleizedBatch as _},
+        qmdb::any::{
+            db::Db as AnyDb,
+            operation::{update::Update as UpdateTrait, Operation as AnyOperation},
+            traits::{DbAny, MerkleizedBatch as _, Provable, UnmerkleizedBatch as _},
+        },
     };
     use commonware_codec::{Codec, CodecShared};
-    use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic::Context, BufferPooler};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Clock, Metrics, Storage,
+    };
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
+
+    pub(crate) trait RewindableDb {
+        fn rewind_to_size(
+            &mut self,
+            size: Location,
+        ) -> impl Future<Output = Result<(), Error>> + Send;
+    }
+
+    impl<E, U, C, I, H> RewindableDb for AnyDb<E, C, I, H, U>
+    where
+        E: Storage + Clock + Metrics,
+        U: UpdateTrait,
+        C: Mutable<Item = AnyOperation<U>>,
+        I: UnorderedIndex<Value = Location>,
+        H: Hasher,
+        AnyOperation<U>: Codec,
+    {
+        async fn rewind_to_size(&mut self, size: Location) -> Result<(), Error> {
+            self.rewind(size).await?;
+            Ok(())
+        }
+    }
 
     /// Test recovery on non-empty db.
     pub(crate) async fn test_any_db_non_empty_recovery<D, V: Clone + CodecShared>(
@@ -404,6 +434,165 @@ pub(crate) mod test {
         let db = reopen_db(context.with_label("reopen5")).await;
         assert!(db.size().await > 1);
         assert_ne!(db.root(), root);
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Test rewinding to a prior committed state and recovering that state after reopen.
+    pub(crate) async fn test_any_db_rewind_recovery<D, V>(
+        context: Context,
+        mut db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> V,
+    ) where
+        D: DbAny<Key = Digest, Value = V, Digest = Digest> + RewindableDb,
+        V: Clone + CodecShared + Eq + std::fmt::Debug,
+    {
+        let key0 = Sha256::hash(&0u64.to_be_bytes());
+        let key1 = Sha256::hash(&1u64.to_be_bytes());
+        let key2 = Sha256::hash(&2u64.to_be_bytes());
+        let initial_root = db.root();
+        let initial_size = db.size().await;
+        let initial_floor = db.inactivity_floor_loc().await;
+
+        // Empty-batch rewind on an otherwise empty DB should apply no snapshot undos.
+        let empty_finalized = db
+            .new_batch()
+            .merkleize(None, &db)
+            .await
+            .unwrap()
+            .finalize();
+        let empty_range = db.apply_batch(empty_finalized).await.unwrap();
+        db.commit().await.unwrap();
+        assert_eq!(empty_range.start, initial_size);
+        assert_eq!(db.size().await, empty_range.end);
+        db.rewind_to_size(initial_size).await.unwrap();
+        assert_eq!(db.root(), initial_root);
+        assert_eq!(db.size().await, initial_size);
+        assert_eq!(db.inactivity_floor_loc().await, initial_floor);
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+
+        let value0_a = make_value(10);
+        let value1_a = make_value(11);
+        let metadata_a = make_value(12);
+
+        let finalized_a = db
+            .new_batch()
+            .write(key0, Some(value0_a.clone()))
+            .write(key1, Some(value1_a.clone()))
+            .merkleize(Some(metadata_a.clone()), &db)
+            .await
+            .unwrap()
+            .finalize();
+        let range_a = db.apply_batch(finalized_a).await.unwrap();
+        db.commit().await.unwrap();
+
+        let root_a = db.root();
+        let size_a = db.size().await;
+        let floor_a = db.inactivity_floor_loc().await;
+        assert_eq!(size_a, range_a.end);
+
+        let value0_b = make_value(20);
+        let value2_b = make_value(21);
+        let metadata_b = make_value(22);
+
+        let finalized_b = db
+            .new_batch()
+            .write(key0, Some(value0_b))
+            .write(key1, None)
+            .write(key2, Some(value2_b))
+            .merkleize(Some(metadata_b), &db)
+            .await
+            .unwrap()
+            .finalize();
+        let range_b = db.apply_batch(finalized_b).await.unwrap();
+        db.commit().await.unwrap();
+        assert_eq!(range_b.start, size_a);
+        assert_ne!(db.root(), root_a);
+
+        let value0_c = make_value(30);
+        let value1_c = make_value(31);
+        let metadata_c = make_value(32);
+        let finalized_c = db
+            .new_batch()
+            .write(key0, Some(value0_c))
+            .write(key1, Some(value1_c))
+            .write(key2, None)
+            .merkleize(Some(metadata_c), &db)
+            .await
+            .unwrap()
+            .finalize();
+        db.apply_batch(finalized_c).await.unwrap();
+        db.commit().await.unwrap();
+
+        // Rewind across a tail where:
+        // - the same key (`key0`) was updated multiple times
+        // - `key1` was deleted then recreated (exercises net-zero active_keys_delta path)
+        db.rewind_to_size(size_a).await.unwrap();
+        assert_eq!(db.root(), root_a);
+        assert_eq!(db.size().await, size_a);
+        assert_eq!(db.inactivity_floor_loc().await, floor_a);
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a.clone()));
+        assert_eq!(db.get(&key0).await.unwrap(), Some(value0_a));
+        assert_eq!(db.get(&key1).await.unwrap(), Some(value1_a));
+        assert_eq!(db.get(&key2).await.unwrap(), None);
+
+        db.commit().await.unwrap();
+        drop(db);
+        let mut db = reopen_db(context.with_label("reopen_after_rewind")).await;
+        assert_eq!(db.root(), root_a);
+        assert_eq!(db.size().await, size_a);
+        assert_eq!(db.inactivity_floor_loc().await, floor_a);
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
+        assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
+        assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
+        assert_eq!(db.get(&key2).await.unwrap(), None);
+
+        // Fresh writes from the rewound tip should produce a correct new chain and persist
+        // across reopen.
+        let value2_d = make_value(40);
+        let metadata_d = make_value(41);
+        let finalized_d = db
+            .new_batch()
+            .write(key2, Some(value2_d.clone()))
+            .merkleize(Some(metadata_d.clone()), &db)
+            .await
+            .unwrap()
+            .finalize();
+        db.apply_batch(finalized_d).await.unwrap();
+        db.commit().await.unwrap();
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_d.clone()));
+        assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
+        assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
+        assert_eq!(db.get(&key2).await.unwrap(), Some(value2_d.clone()));
+
+        drop(db);
+        let mut db = reopen_db(context.with_label("reopen_after_rewind_new_writes")).await;
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_d));
+        assert_eq!(db.get(&key0).await.unwrap(), Some(make_value(10)));
+        assert_eq!(db.get(&key1).await.unwrap(), Some(make_value(11)));
+        assert_eq!(db.get(&key2).await.unwrap(), Some(value2_d));
+
+        // Rewind all the way to the initial commit boundary (`first_commit_loc + 1`).
+        db.rewind_to_size(initial_size).await.unwrap();
+        assert_eq!(db.root(), initial_root);
+        assert_eq!(db.size().await, initial_size);
+        assert_eq!(db.inactivity_floor_loc().await, initial_floor);
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+        assert_eq!(db.get(&key0).await.unwrap(), None);
+        assert_eq!(db.get(&key1).await.unwrap(), None);
+        assert_eq!(db.get(&key2).await.unwrap(), None);
+
+        db.commit().await.unwrap();
+        drop(db);
+        let db = reopen_db(context.with_label("reopen_initial_boundary")).await;
+        assert_eq!(db.root(), initial_root);
+        assert_eq!(db.size().await, initial_size);
+        assert_eq!(db.inactivity_floor_loc().await, initial_floor);
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+        assert_eq!(db.get(&key0).await.unwrap(), None);
+        assert_eq!(db.get(&key1).await.unwrap(), None);
+        assert_eq!(db.get(&key2).await.unwrap(), None);
 
         db.destroy().await.unwrap();
     }
@@ -1023,6 +1212,15 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             for_all_variants!(context, "er", with_reopen: test_any_db_empty_recovery);
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced("WARN")]
+    fn test_all_variants_rewind_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for_all_variants!(context, "rr", with_reopen: test_any_db_rewind_recovery);
         });
     }
 
@@ -1709,6 +1907,183 @@ pub(crate) mod test {
             assert_eq!(reopened.get(&key(0)).await.unwrap(), None);
 
             reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// Rewinding to a pruned target returns an error.
+    #[test_traced("INFO")]
+    fn test_any_rewind_pruned_target_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const KEYS: u64 = 64;
+
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariable =
+                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("rp", &ctx))
+                    .await
+                    .unwrap();
+
+            let initial: Vec<_> = (0..KEYS).map(|i| (key(i), Some(val(i)))).collect();
+            let first_range = commit_writes(&mut db, initial, None).await;
+
+            let mut round = 0u64;
+            loop {
+                round += 1;
+                assert!(
+                    round <= 64,
+                    "failed to prune enough history for rewind test"
+                );
+
+                let updates: Vec<_> = (0..KEYS)
+                    .map(|i| (key(i), Some(val(1000 + round * KEYS + i))))
+                    .collect();
+                commit_writes(&mut db, updates, None).await;
+
+                db.prune(db.inactivity_floor_loc()).await.unwrap();
+                let bounds = db.bounds().await;
+                if bounds.start > first_range.start {
+                    break;
+                }
+            }
+
+            let oldest_retained = db.bounds().await.start;
+            let boundary_err = db.rewind(oldest_retained).await.unwrap_err();
+            assert!(
+                matches!(
+                    boundary_err,
+                    crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
+                ),
+                "unexpected rewind error at retained boundary: {boundary_err:?}"
+            );
+
+            let err = db.rewind(first_range.start).await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
+                ),
+                "unexpected rewind error: {err:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Rewinding rejects out-of-range targets and keeps state unchanged.
+    #[test_traced("INFO")]
+    fn test_any_rewind_invalid_target_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariable =
+                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("ri", &ctx))
+                    .await
+                    .unwrap();
+
+            let root_before = db.root();
+            let size_before = db.size().await;
+            let no_op_locs = db.rewind(size_before).await.unwrap();
+            assert!(
+                no_op_locs.is_empty(),
+                "expected no-op rewind to return no restored locations"
+            );
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.size().await, size_before);
+
+            let zero_err = db.rewind(Location::new(0)).await.unwrap_err();
+            assert!(
+                matches!(
+                    zero_err,
+                    crate::qmdb::Error::Journal(crate::journal::Error::InvalidRewind(0))
+                ),
+                "unexpected rewind error: {zero_err:?}"
+            );
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.size().await, size_before);
+
+            let too_large_target = Location::new(*size_before + 1);
+            let too_large_err = db.rewind(too_large_target).await.unwrap_err();
+            assert!(
+                matches!(
+                    too_large_err,
+                    crate::qmdb::Error::Journal(crate::journal::Error::InvalidRewind(size))
+                    if size == *too_large_target
+                ),
+                "unexpected rewind error: {too_large_err:?}"
+            );
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.size().await, size_before);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Rewinding fails when the target commit's inactivity floor has been pruned, even if the
+    /// target commit location is still retained.
+    #[test_traced("INFO")]
+    fn test_any_rewind_rejects_target_with_pruned_floor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const KEYS: u64 = 64;
+
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariable =
+                UnorderedVariableDb::init(ctx.clone(), variable_db_config::<OneCap>("rf", &ctx))
+                    .await
+                    .unwrap();
+
+            commit_writes(&mut db, (0..KEYS).map(|i| (key(i), Some(val(i)))), None).await;
+            commit_writes(
+                &mut db,
+                (0..KEYS).map(|i| (key(i), Some(val(1_000 + i)))),
+                None,
+            )
+            .await;
+
+            let rewind_target = db.size().await;
+            let target_floor = db.inactivity_floor_loc();
+            let prune_loc = Location::new(*target_floor + (KEYS / 2));
+            assert!(
+                rewind_target > *prune_loc,
+                "test setup expected target size > prune_loc; target={rewind_target:?}, floor={target_floor:?}"
+            );
+
+            let mut round = 0u64;
+            while db.inactivity_floor_loc() < prune_loc {
+                round += 1;
+                assert!(
+                    round <= 8,
+                    "failed to advance inactivity floor enough for floor-pruned rewind test"
+                );
+                commit_writes(
+                    &mut db,
+                    (0..KEYS).map(|i| (key(i), Some(val(10_000 + round * KEYS + i)))),
+                    None,
+                )
+                .await;
+            }
+
+            db.prune(prune_loc).await.unwrap();
+            let bounds = db.bounds().await;
+            assert!(
+                bounds.start > *target_floor,
+                "test setup expected pruned start beyond target floor; bounds={bounds:?}, target_floor={target_floor:?}"
+            );
+            assert!(
+                rewind_target > bounds.start,
+                "test setup expected target commit retained; target={rewind_target:?}, bounds={bounds:?}"
+            );
+
+            let err = db.rewind(rewind_target).await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    crate::qmdb::Error::Journal(crate::journal::Error::ItemPruned(_))
+                ),
+                "unexpected rewind error: {err:?}"
+            );
+
+            db.destroy().await.unwrap();
         });
     }
 
