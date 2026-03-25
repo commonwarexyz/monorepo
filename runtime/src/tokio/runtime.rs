@@ -55,7 +55,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime},
 };
-use tokio::runtime::{Builder, Runtime};
+use tokio::runtime::{Builder, Handle as TokioHandle};
 use tracing::{error, info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -382,7 +382,7 @@ impl Default for Config {
 pub struct Executor {
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
-    runtime: Runtime,
+    handle: TokioHandle,
     shutdown: Mutex<Stopper>,
     tasks: Arc<TaskTracker>,
     panicker: Panicker,
@@ -456,7 +456,10 @@ impl crate::Runner for Runner {
                     IoUringStorage::start(
                         IoUringConfig {
                             storage_directory: self.cfg.storage_directory.clone(),
-                            iouring_config: Default::default(),
+                            iouring_config: iouring::Config {
+                                shutdown_timeout: Some(self.cfg.shutdown_timeout),
+                                ..Default::default()
+                            },
                         },
                         iouring_registry,
                         storage_buffer_pool.clone(),
@@ -490,7 +493,7 @@ impl crate::Runner for Runner {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
                         size: IOURING_NETWORK_SIZE,
                         max_op_timeout: self.cfg.network_cfg.read_write_timeout,
-                        shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                        shutdown_timeout: Some(self.cfg.shutdown_timeout),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -521,7 +524,7 @@ impl crate::Runner for Runner {
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             metrics,
-            runtime,
+            handle: runtime.handle().clone(),
             shutdown: Mutex::new(Stopper::default()),
             tasks: Arc::new(TaskTracker::default()),
             panicker,
@@ -553,10 +556,17 @@ impl crate::Runner for Runner {
             instrumented: false,
         };
         let result = catch_unwind(AssertUnwindSafe(|| {
-            executor.runtime.block_on(panicked.monitor(f(context)))
+            runtime.block_on(panicked.monitor(f(context)))
         }));
         tree.abort();
         metric.finish();
+
+        // Enforce the shutdown timeout once across both our own task-tracker wait and
+        // Tokio's runtime teardown. Reusing the full timeout for both phases would
+        // allow shutdown to exceed the configured bound.
+        let shutdown_deadline = Instant::now()
+            .checked_add(self.cfg.shutdown_timeout)
+            .expect("shutdown timeout overflow");
 
         // If a tracked task does not finish before the timeout (may be a blocking task we
         // cannot cancel), log the slow shutdown and continue returning or resuming
@@ -564,6 +574,11 @@ impl crate::Runner for Runner {
         if !executor.tasks.wait_for_idle(self.cfg.shutdown_timeout) {
             error!("unfinished tasks remaining after shutdown timeout");
         }
+        runtime.shutdown_timeout(
+            shutdown_deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO),
+        );
 
         // Resume any root or propagated child panic after cleanup. If the root
         // returned normally, also check whether a child panicked while we were
@@ -704,21 +719,21 @@ impl crate::Spawner for Context {
         if matches!(past, Execution::Dedicated) {
             thread::spawn({
                 // Ensure the task can access the tokio runtime
-                let handle = executor.runtime.handle().clone();
+                let handle = executor.handle.clone();
                 move || {
                     handle.block_on(f);
                 }
             });
         } else if matches!(past, Execution::Shared(true)) {
-            executor.runtime.spawn_blocking({
+            executor.handle.spawn_blocking({
                 // Ensure the task can access the tokio runtime
-                let handle = executor.runtime.handle().clone();
+                let handle = executor.handle.clone();
                 move || {
                     handle.block_on(f);
                 }
             });
         } else {
-            executor.runtime.spawn(f);
+            executor.handle.spawn(f);
         }
 
         // Register the task on the parent
@@ -985,7 +1000,7 @@ mod tests {
         panic::{catch_unwind, AssertUnwindSafe},
         sync::mpsc,
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     #[test]
@@ -1142,5 +1157,51 @@ mod tests {
             result.is_err(),
             "cleanup panic should still abort the Tokio runner",
         );
+    }
+
+    #[test]
+    fn test_shutdown_timeout_uses_remaining_runtime_budget() {
+        let shutdown_timeout = Duration::from_millis(300);
+        let (root_returned_tx, root_returned_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+
+        let runner = thread::spawn(move || {
+            let runner = Runner::new(Config::default().with_shutdown_timeout(shutdown_timeout));
+            runner.start(|context| async move {
+                let (started_tx, started_rx) = oneshot::channel();
+                drop(context.shared(true).spawn(move |_| async move {
+                    started_tx
+                        .send(())
+                        .expect("startup receiver should stay open");
+
+                    // Block forever on the spawn_blocking thread while still owning the sender
+                    // so shutdown must rely on Tokio's timeout rather than task completion.
+                    let (_never_send_tx, never_send_rx) = mpsc::channel::<()>();
+                    never_send_rx
+                        .recv()
+                        .expect("sender should stay open while blocking forever");
+                }));
+                started_rx.await.expect("blocking task should start");
+                root_returned_tx
+                    .send(Instant::now())
+                    .expect("root return receiver should stay open");
+            });
+            finished_tx
+                .send(Instant::now())
+                .expect("runner completion receiver should stay open");
+        });
+
+        let root_returned_at = root_returned_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("root should enter shutdown after child startup");
+        let finished_at = finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("runner should honor the shutdown timeout");
+
+        assert!(
+            finished_at.duration_since(root_returned_at) < Duration::from_millis(450),
+            "shutdown exceeded the configured budget by reusing the full timeout for Tokio teardown",
+        );
+        runner.join().expect("runner thread should join cleanly");
     }
 }
