@@ -155,7 +155,7 @@ impl Drop for TaskGuard {
         assert_ne!(live, 0, "task tracker underflow");
         if live == 1 {
             let _gate = self.tracker.gate.lock();
-            self.tracker.idle.notify_all();
+            self.tracker.idle.notify_one();
         }
     }
 }
