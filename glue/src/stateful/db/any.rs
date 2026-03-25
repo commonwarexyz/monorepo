@@ -93,6 +93,56 @@ where
     }
 }
 
+/// Key-value operations for the `any` unordered update kind.
+impl<E, C, I, H, K, V> AnyUnmerkleized<E, C, I, H, unordered::Update<K, V>>
+where
+    E: Storage + Clock + Metrics,
+    K: Key + Send,
+    V: ValueEncoding + Send + 'static,
+    C: Mutable<Item = Operation<unordered::Update<K, V>>>
+        + Persistable<Error = commonware_storage::journal::Error>,
+    I: UnorderedIndex<Value = Location> + 'static,
+    H: Hasher,
+    Operation<unordered::Update<K, V>>: Codec,
+{
+    /// Read a value by key, falling back to committed state.
+    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
+        let db = self.db.read().await;
+        self.batch.get(key, &*db).await
+    }
+
+    /// Record a mutation. `Some(value)` for upsert, `None` for delete.
+    pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
+        self.batch = self.batch.write(key, value);
+        self
+    }
+}
+
+/// Key-value operations for the `any` ordered update kind.
+impl<E, C, I, H, K, V> AnyUnmerkleized<E, C, I, H, ordered::Update<K, V>>
+where
+    E: Storage + Clock + Metrics,
+    K: Key + Send,
+    V: ValueEncoding + Send + 'static,
+    C: Mutable<Item = Operation<ordered::Update<K, V>>>
+        + Persistable<Error = commonware_storage::journal::Error>,
+    I: OrderedIndex<Value = Location> + 'static,
+    H: Hasher,
+    Operation<ordered::Update<K, V>>: Codec,
+{
+    /// Read a value by key, falling back to committed state.
+    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
+        let db = self.db.read().await;
+        self.batch.get(key, &*db).await
+    }
+
+    /// Record a mutation. `Some(value)` for upsert, `None` for delete.
+    pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
+        self.batch = self.batch.write(key, value);
+        self
+    }
+}
+
 /// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `any` unordered update kind.
 impl<E, C, I, H, K, V> UnmerkleizedTrait for AnyUnmerkleized<E, C, I, H, unordered::Update<K, V>>
 where
@@ -105,20 +155,8 @@ where
     H: Hasher,
     Operation<unordered::Update<K, V>>: Codec,
 {
-    type Key = K;
-    type Value = V::Value;
     type Merkleized = AnyMerkleized<E, C, I, H, unordered::Update<K, V>>;
     type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
-        let db = self.db.read().await;
-        self.batch.get(key, &*db).await
-    }
-
-    fn write(mut self, key: Self::Key, value: Option<Self::Value>) -> Self {
-        self.batch = self.batch.write(key, value);
-        self
-    }
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error> {
         let db = self.db.read().await;
@@ -142,20 +180,8 @@ where
     H: Hasher,
     Operation<ordered::Update<K, V>>: Codec,
 {
-    type Key = K;
-    type Value = V::Value;
     type Merkleized = AnyMerkleized<E, C, I, H, ordered::Update<K, V>>;
     type Error = Error;
-
-    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Error> {
-        let db = self.db.read().await;
-        self.batch.get(key, &*db).await
-    }
-
-    fn write(mut self, key: Self::Key, value: Option<Self::Value>) -> Self {
-        self.batch = self.batch.write(key, value);
-        self
-    }
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error> {
         let db = self.db.read().await;

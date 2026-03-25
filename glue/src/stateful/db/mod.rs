@@ -78,33 +78,12 @@ pub mod current;
 pub mod p2p;
 
 /// Mutable batch state before merkleization.
-///
-/// Callers read with [`get`](Self::get), record writes with
-/// [`write`](Self::write), then seal with [`merkleize`](Self::merkleize).
 pub trait Unmerkleized: Sized + Send {
-    /// The key type for this database.
-    type Key: Send;
-
-    /// The value type for this database.
-    type Value: Send;
-
     /// The merkleized batch produced by [`merkleize`](Self::merkleize).
     type Merkleized: Merkleized;
 
     /// The error type returned by fallible operations.
     type Error: Send;
-
-    /// Read a value by key.
-    ///
-    /// Returns the most recent mutation in this batch's chain, falling back
-    /// to the committed database state.
-    fn get(
-        &self,
-        key: &Self::Key,
-    ) -> impl Future<Output = Result<Option<Self::Value>, Self::Error>> + Send;
-
-    /// Record a mutation. `Some(value)` for upsert, `None` for delete.
-    fn write(self, key: Self::Key, value: Option<Self::Value>) -> Self;
 
     /// Resolve all mutations, compute the new state root, and produce a
     /// merkleized batch.
@@ -1054,18 +1033,8 @@ mod tests {
     struct TestMerkleized;
 
     impl Unmerkleized for TestUnmerkleized {
-        type Key = ();
-        type Value = ();
         type Merkleized = TestMerkleized;
         type Error = Infallible;
-
-        async fn get(&self, _key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-            Ok(None)
-        }
-
-        fn write(self, _key: Self::Key, _value: Option<Self::Value>) -> Self {
-            self
-        }
 
         async fn merkleize(self) -> Result<Self::Merkleized, Self::Error> {
             Ok(TestMerkleized)
