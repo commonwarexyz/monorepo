@@ -978,8 +978,7 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BufferPoolThreadCache;
-    use crate::Runner as _;
+    use crate::{BufferPoolThreadCache, Runner as _};
     use commonware_utils::channel::oneshot;
     use std::{
         future::pending,
@@ -1041,7 +1040,8 @@ mod tests {
         // Run the root on a separate thread so the test can drive shutdown
         // while another thread stalls a concurrent spawn call mid-flight.
         let runner = thread::spawn(move || {
-            let runner = Runner::new(Config::default().with_shutdown_timeout(Duration::from_secs(1)));
+            let runner =
+                Runner::new(Config::default().with_shutdown_timeout(Duration::from_secs(1)));
             runner.start(|context| async move {
                 context_tx
                     .send(context.clone())
