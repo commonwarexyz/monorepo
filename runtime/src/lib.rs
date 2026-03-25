@@ -998,6 +998,22 @@ mod tests {
         }
     }
 
+    fn test_root_completion_waits_for_direct_child_cleanup<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner,
+    {
+        test_root_exit_waits_for_direct_child_cleanup(runner, false);
+    }
+
+    fn test_root_panic_waits_for_direct_child_cleanup_before_unwind<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner,
+    {
+        test_root_exit_waits_for_direct_child_cleanup(runner, true);
+    }
+
     fn root_tasks_running_value(metrics: &str) -> Option<i64> {
         metrics.lines().find_map(|line| {
             if line.starts_with("runtime_tasks_running{") && line.contains("kind=\"Root\"") {
@@ -1007,14 +1023,6 @@ mod tests {
                 None
             }
         })
-    }
-
-    fn test_root_completion_waits_for_direct_child_cleanup<R>(runner: R)
-    where
-        R: Runner + Send + 'static,
-        R::Context: Spawner,
-    {
-        test_root_exit_waits_for_direct_child_cleanup(runner, false);
     }
 
     fn test_root_tasks_running_is_one_while_running<R>(runner: R)
@@ -1030,14 +1038,6 @@ mod tests {
                 "root tasks_running gauge should be 1 while root is running: {metrics}",
             );
         });
-    }
-
-    fn test_root_panic_waits_for_direct_child_cleanup_before_unwind<R>(runner: R)
-    where
-        R: Runner + Send + 'static,
-        R::Context: Spawner,
-    {
-        test_root_exit_waits_for_direct_child_cleanup(runner, true);
     }
 
     fn test_spawn_after_abort<R>(runner: R)
@@ -3276,15 +3276,15 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_root_tasks_running_is_one_while_running() {
-        let executor = deterministic::Runner::default();
-        test_root_tasks_running_is_one_while_running(executor);
-    }
-
-    #[test]
     fn test_deterministic_root_panic_waits_for_direct_child_cleanup_before_unwind() {
         let executor = deterministic::Runner::default();
         test_root_panic_waits_for_direct_child_cleanup_before_unwind(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_tasks_running_is_one_while_running() {
+        let executor = deterministic::Runner::default();
+        test_root_tasks_running_is_one_while_running(executor);
     }
 
     #[test]
@@ -3638,16 +3638,16 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_root_tasks_running_is_one_while_running() {
-        let executor = tokio::Runner::default();
-        test_root_tasks_running_is_one_while_running(executor);
-    }
-
-    #[test]
     fn test_tokio_root_panic_waits_for_direct_child_cleanup_before_unwind() {
         let cfg = tokio::Config::default().with_shutdown_timeout(Duration::from_secs(1));
         let executor = tokio::Runner::new(cfg);
         test_root_panic_waits_for_direct_child_cleanup_before_unwind(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_tasks_running_is_one_while_running() {
+        let executor = tokio::Runner::default();
+        test_root_tasks_running_is_one_while_running(executor);
     }
 
     #[test]
