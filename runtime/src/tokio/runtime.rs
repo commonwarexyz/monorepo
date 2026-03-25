@@ -741,7 +741,7 @@ impl Clock for Context {
 
     fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
         let duration_until_deadline = deadline
-            .duration_since(SystemTime::now())
+            .duration_since(self.current())
             .unwrap_or_default();
         tokio::time::sleep(duration_until_deadline)
     }
