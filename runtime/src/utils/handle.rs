@@ -253,6 +253,7 @@ impl Panicked {
     }
 
     /// Attempts to receive a panic without waiting.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn try_recv(&mut self) -> Result<Panic, oneshot::error::TryRecvError> {
         self.receiver.try_recv()
     }
