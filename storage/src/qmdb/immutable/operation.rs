@@ -47,7 +47,7 @@ impl<K: Key, V: VariableValue> Operation<K, V> {
     }
 }
 
-impl<K: Key + EncodeSize, V: VariableValue> EncodeSize for Operation<K, V> {
+impl<K: Key, V: VariableValue> EncodeSize for Operation<K, V> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Set(k, v) => k.encode_size() + v.encode_size(),
@@ -78,7 +78,7 @@ impl<K: Key, V: VariableValue> OperationTrait for Operation<K, V> {
     }
 }
 
-impl<K: Key + Write, V: VariableValue> Write for Operation<K, V> {
+impl<K: Key, V: VariableValue> Write for Operation<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Set(k, v) => {
@@ -94,7 +94,7 @@ impl<K: Key + Write, V: VariableValue> Write for Operation<K, V> {
     }
 }
 
-impl<K: Key + Read, V: VariableValue> Read for Operation<K, V> {
+impl<K: Key, V: VariableValue> Read for Operation<K, V> {
     type Cfg = (<K as Read>::Cfg, <V as Read>::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {

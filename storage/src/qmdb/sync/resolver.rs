@@ -207,7 +207,7 @@ impl_resolver!(OrderedFixedDb, OrderedFixedOperation, FixedValue);
 // Ordered Variable
 impl_resolver!(OrderedVariableDb, OrderedVariableOperation, VariableValue);
 
-// Immutable (uses Key instead of Array for variable-length key support)
+// Immutable
 impl_resolver!(Immutable, ImmutableOp, VariableValue, Key);
 
 #[cfg(test)]
