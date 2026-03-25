@@ -5,11 +5,14 @@
 
 use crate::{
     mmr::Location,
-    qmdb::{any::VariableValue, operation::Operation as OperationTrait},
+    qmdb::{
+        any::VariableValue,
+        operation::{Key, Operation as OperationTrait},
+    },
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut};
-use commonware_utils::{hex, Array};
+use commonware_utils::hex;
 use core::fmt::Display;
 
 // Context byte prefixes for identifying the operation type.
@@ -21,7 +24,7 @@ const COMMIT_CONTEXT: u8 = 1;
 /// Unlike mutable database operations, immutable operations only support
 /// setting new values and committing - no updates or deletions.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Operation<K: Array, V: VariableValue> {
+pub enum Operation<K: Key, V: VariableValue> {
     /// Set a key to a value. The key must not already exist.
     Set(K, V),
 
@@ -29,7 +32,7 @@ pub enum Operation<K: Array, V: VariableValue> {
     Commit(Option<V>),
 }
 
-impl<K: Array, V: VariableValue> Operation<K, V> {
+impl<K: Key, V: VariableValue> Operation<K, V> {
     /// If this is an operation involving a key, returns the key. Otherwise, returns None.
     pub const fn key(&self) -> Option<&K> {
         match self {
@@ -44,16 +47,16 @@ impl<K: Array, V: VariableValue> Operation<K, V> {
     }
 }
 
-impl<K: Array, V: VariableValue> EncodeSize for Operation<K, V> {
+impl<K: Key + EncodeSize, V: VariableValue> EncodeSize for Operation<K, V> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Set(_, v) => K::SIZE + v.encode_size(),
+            Self::Set(k, v) => k.encode_size() + v.encode_size(),
             Self::Commit(v) => v.encode_size(),
         }
     }
 }
 
-impl<K: Array, V: VariableValue> OperationTrait for Operation<K, V> {
+impl<K: Key, V: VariableValue> OperationTrait for Operation<K, V> {
     type Key = K;
 
     fn key(&self) -> Option<&Self::Key> {
@@ -75,7 +78,7 @@ impl<K: Array, V: VariableValue> OperationTrait for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: VariableValue> Write for Operation<K, V> {
+impl<K: Key + Write, V: VariableValue> Write for Operation<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Set(k, v) => {
@@ -91,26 +94,28 @@ impl<K: Array, V: VariableValue> Write for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: VariableValue> Read for Operation<K, V> {
-    type Cfg = <V as Read>::Cfg;
+impl<K: Key + Read, V: VariableValue> Read for Operation<K, V> {
+    type Cfg = (<K as Read>::Cfg, <V as Read>::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             SET_CONTEXT => {
-                let key = K::read(buf)?;
-                let value = V::read_cfg(buf, cfg)?;
+                let key = K::read_cfg(buf, &cfg.0)?;
+                let value = V::read_cfg(buf, &cfg.1)?;
                 Ok(Self::Set(key, value))
             }
-            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
+            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, &cfg.1)?)),
             e => Err(CodecError::InvalidEnum(e)),
         }
     }
 }
 
-impl<K: Array, V: VariableValue> Display for Operation<K, V> {
+impl<K: Key, V: VariableValue> Display for Operation<K, V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Set(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
+            Self::Set(key, value) => {
+                write!(f, "[key:{} value:{}]", hex(key), hex(&value.encode()))
+            }
             Self::Commit(value) => {
                 if let Some(value) = value {
                     write!(f, "[commit {}]", hex(&value.encode()))
@@ -123,7 +128,7 @@ impl<K: Array, V: VariableValue> Display for Operation<K, V> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Array, V: VariableValue> arbitrary::Arbitrary<'_> for Operation<K, V>
+impl<K: Key, V: VariableValue> arbitrary::Arbitrary<'_> for Operation<K, V>
 where
     K: for<'a> arbitrary::Arbitrary<'a>,
     V: for<'a> arbitrary::Arbitrary<'a>,
@@ -145,7 +150,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode, EncodeSize, FixedSize as _};
+    use commonware_codec::{DecodeExt, Encode, EncodeSize};
     use commonware_utils::sequence::U64;
 
     #[test]
@@ -208,8 +213,9 @@ mod tests {
         let value = U64::new(56789);
 
         // Test Set operation
+        let expected_size = 1 + key.encode_size() + value.encode_size();
         let set_op = Operation::Set(key, value.clone());
-        assert_eq!(set_op.encode_size(), 1 + U64::SIZE + value.encode_size());
+        assert_eq!(set_op.encode_size(), expected_size);
         assert_eq!(set_op.encode().len(), set_op.encode_size());
 
         // Test Commit operation with value
@@ -235,7 +241,7 @@ mod tests {
         let set_op = Operation::Set(key.clone(), value.clone());
         assert_eq!(
             format!("{set_op}"),
-            format!("[key:{key} value:{}]", hex(&value.encode()))
+            format!("[key:{} value:{}]", hex(&key), hex(&value.encode()))
         );
 
         // Test Commit operation with value
@@ -293,13 +299,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_operation_variable_key_roundtrip() {
+        use commonware_codec::Decode as _;
+
+        let key = vec![1u8, 2, 3, 4, 5];
+        let cfg = ((commonware_codec::RangeCfg::from(0..=100usize), ()), ());
+
+        // Test Set with variable-length key
+        let set_op = Operation::Set(key, U64::new(42));
+        let encoded = set_op.encode();
+        let decoded = Operation::<Vec<u8>, U64>::decode_cfg(encoded.clone(), &cfg).unwrap();
+        assert_eq!(set_op, decoded);
+        assert_eq!(encoded.len(), set_op.encode_size());
+
+        // Test Commit (key-independent, should work the same)
+        let commit_op = Operation::<Vec<u8>, U64>::Commit(Some(U64::new(42)));
+        let encoded = commit_op.encode();
+        let decoded = Operation::<Vec<u8>, U64>::decode_cfg(encoded, &cfg).unwrap();
+        assert_eq!(commit_op, decoded);
+
+        // Test empty key
+        let empty_key_op = Operation::Set(vec![], U64::new(99));
+        let encoded = empty_key_op.encode();
+        let decoded = Operation::<Vec<u8>, U64>::decode_cfg(encoded, &cfg).unwrap();
+        assert_eq!(empty_key_op, decoded);
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Operation<U64, U64>>
+            CodecConformance<Operation<U64, U64>>,
+            CodecConformance<Operation<Vec<u8>, U64>>
         }
     }
 }

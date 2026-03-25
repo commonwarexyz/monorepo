@@ -63,13 +63,12 @@ use crate::{
         },
     },
     mmr::{iterator::nodes_to_pin, journaled::Config as MmrConfig, Location, Proof},
-    qmdb::{any::VariableValue, build_snapshot_from_log, Error},
+    qmdb::{any::VariableValue, build_snapshot_from_log, operation::Key, Error},
     translator::Translator,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-use commonware_utils::Array;
 use std::{num::NonZeroU64, ops::Range};
 use tracing::warn;
 
@@ -98,7 +97,7 @@ pub struct Config<T: Translator, C> {
 /// deletions), where values can have varying sizes.
 pub struct Immutable<
     E: RStorage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: VariableValue,
     H: CHasher,
     T: Translator,
@@ -118,7 +117,7 @@ pub struct Immutable<
 }
 
 // Shared read-only functionality.
-impl<E: RStorage + Clock + Metrics, K: Array, V: VariableValue, H: CHasher, T: Translator>
+impl<E: RStorage + Clock + Metrics, K: Key, V: VariableValue, H: CHasher, T: Translator>
     Immutable<E, K, V, H, T>
 {
     /// Return the Location of the next operation appended to this db.
@@ -398,7 +397,7 @@ pub(super) mod test {
     pub(crate) fn db_config(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
+    ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             mmr: MmrConfig {
@@ -413,7 +412,7 @@ pub(super) mod test {
                 partition: format!("log-{suffix}"),
                 items_per_section: NZU64!(ITEMS_PER_SECTION),
                 compression: None,
-                codec_config: ((0..=10000).into(), ()),
+                codec_config: ((), ((0..=10000).into(), ())),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },

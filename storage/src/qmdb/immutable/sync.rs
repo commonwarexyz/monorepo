@@ -9,20 +9,21 @@ use crate::{
         any::VariableValue,
         build_snapshot_from_log,
         immutable::{self, Operation},
+        operation::Key,
         sync::{self},
         Error,
     },
     translator::Translator,
 };
+use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
 use std::ops::Range;
 
 impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: VariableValue,
     H: Hasher,
     T: Translator,
@@ -30,7 +31,7 @@ where
     type Op = Operation<K, V>;
     type Journal = variable::Journal<E, Self::Op>;
     type Hasher = H;
-    type Config = immutable::Config<T, V::Cfg>;
+    type Config = immutable::Config<T, <Operation<K, V> as Read>::Cfg>;
     type Digest = H::Digest;
     type Context = E;
 
@@ -159,7 +160,7 @@ mod tests {
     fn create_sync_config(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> immutable::Config<crate::translator::TwoCap, ()> {
+    ) -> immutable::Config<crate::translator::TwoCap, ((), ())> {
         const PAGE_SIZE: NonZeroU16 = NZU16!(77);
         const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
@@ -178,7 +179,7 @@ mod tests {
                 partition: format!("log-{suffix}"),
                 items_per_section: ITEMS_PER_SECTION,
                 compression: None,
-                codec_config: (),
+                codec_config: ((), ()),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },

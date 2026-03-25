@@ -158,6 +158,10 @@ hash = "a3fbb5f749fa5b73a684e9f0bebd8973c456e5ee43a0a3db75a99aa550dee302"
 n_cases = 65536
 hash = "fdca5df62d243b28676ee15034663694cd219d5ef80749079126b0ed73effe0d"
 
+["commonware_storage::qmdb::immutable::operation::tests::conformance::CodecConformance<Operation<Vec<u8>,U64>>"]
+n_cases = 65536
+hash = "cce5f888e506282f861e0e49e176b26c65f92e457f0c5f5353fc9b7196f07478"
+
 ["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<U64>>"]
 n_cases = 65536
 hash = "b41d6c6ec560bde9caf2e206526864c618a0721af367585a1719617ca7ce9291"

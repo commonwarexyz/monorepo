@@ -4,12 +4,11 @@ use super::Immutable;
 use crate::{
     journal::authenticated,
     mmr::{Location, Position},
-    qmdb::{any::VariableValue, immutable::operation::Operation, Error},
+    qmdb::{any::VariableValue, immutable::operation::Operation, operation::Key, Error},
     translator::Translator,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_runtime::{Clock, Metrics, Storage as RStorage};
-use commonware_utils::Array;
 use std::{collections::BTreeMap, sync::Arc};
 
 /// What happened to a key in this batch.
@@ -32,7 +31,7 @@ pub(crate) enum SnapshotDiff<K> {
 /// Methods that need the committed DB (e.g. [`get`](Self::get)) accept it as a parameter.
 pub struct UnmerkleizedBatch<H, K, V>
 where
-    K: Array,
+    K: Key,
     V: VariableValue,
     H: CHasher,
 {
@@ -55,7 +54,7 @@ where
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
-pub struct MerkleizedBatch<D: Digest, K: Array, V: VariableValue> {
+pub struct MerkleizedBatch<D: Digest, K: Key, V: VariableValue> {
     /// Journal batch (MMR state + accumulated operation segments).
     journal: authenticated::MerkleizedBatch<D, Operation<K, V>>,
 
@@ -70,7 +69,7 @@ pub struct MerkleizedBatch<D: Digest, K: Array, V: VariableValue> {
 }
 
 /// An owned changeset that can be applied to the database.
-pub struct Changeset<K: Array, D: Digest, V: VariableValue> {
+pub struct Changeset<K: Key, D: Digest, V: VariableValue> {
     /// The finalized authenticated journal batch (MMR changeset + item chain).
     pub(super) journal_finalized: authenticated::Changeset<D, Operation<K, V>>,
 
@@ -86,7 +85,7 @@ pub struct Changeset<K: Array, D: Digest, V: VariableValue> {
 
 impl<H, K, V> UnmerkleizedBatch<H, K, V>
 where
-    K: Array,
+    K: Key,
     V: VariableValue,
     H: CHasher,
 {
@@ -178,7 +177,7 @@ where
     }
 }
 
-impl<D: Digest, K: Array, V: VariableValue> MerkleizedBatch<D, K, V> {
+impl<D: Digest, K: Key, V: VariableValue> MerkleizedBatch<D, K, V> {
     /// Return the speculative root.
     pub fn root(&self) -> D {
         self.journal.root()
@@ -279,7 +278,7 @@ impl<D: Digest, K: Array, V: VariableValue> MerkleizedBatch<D, K, V> {
 impl<E, K, V, H, T> Immutable<E, K, V, H, T>
 where
     E: RStorage + Clock + Metrics,
-    K: Array,
+    K: Key,
     V: VariableValue,
     H: CHasher,
     T: Translator,

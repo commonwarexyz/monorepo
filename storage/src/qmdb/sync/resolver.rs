@@ -14,6 +14,7 @@ use crate::{
             FixedValue, VariableValue,
         },
         immutable::{Immutable, Operation as ImmutableOp},
+        operation::Key,
     },
     translator::Translator,
 };
@@ -77,10 +78,13 @@ pub trait Resolver: Send + Sync + Clone + 'static {
 
 macro_rules! impl_resolver {
     ($db:ident, $op:ident, $val_bound:ident) => {
+        impl_resolver!($db, $op, $val_bound, Array);
+    };
+    ($db:ident, $op:ident, $val_bound:ident, $($key_bound:tt)+) => {
         impl<E, K, V, H, T> Resolver for Arc<$db<E, K, V, H, T>>
         where
             E: Storage + Clock + Metrics,
-            K: Array,
+            K: $($key_bound)+,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
             T: Translator + Send + Sync + 'static,
@@ -117,7 +121,7 @@ macro_rules! impl_resolver {
         impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<E, K, V, H, T>>>
         where
             E: Storage + Clock + Metrics,
-            K: Array,
+            K: $($key_bound)+,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
             T: Translator + Send + Sync + 'static,
@@ -154,7 +158,7 @@ macro_rules! impl_resolver {
         impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<E, K, V, H, T>>>>
         where
             E: Storage + Clock + Metrics,
-            K: Array,
+            K: $($key_bound)+,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
             T: Translator + Send + Sync + 'static,
@@ -203,8 +207,8 @@ impl_resolver!(OrderedFixedDb, OrderedFixedOperation, FixedValue);
 // Ordered Variable
 impl_resolver!(OrderedVariableDb, OrderedVariableOperation, VariableValue);
 
-// Immutable
-impl_resolver!(Immutable, ImmutableOp, VariableValue);
+// Immutable (uses Key instead of Array for variable-length key support)
+impl_resolver!(Immutable, ImmutableOp, VariableValue, Key);
 
 #[cfg(test)]
 pub(crate) mod tests {
