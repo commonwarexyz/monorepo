@@ -27,8 +27,7 @@ use std::sync::Arc;
 type KeylessDbHandle<E, V, H> = Arc<AsyncRwLock<Keyless<E, V, H>>>;
 
 /// Wraps a keyless [`UnmerkleizedBatch`] with a reference to the parent
-/// database, allowing it to implement the glue [`Unmerkleized`](UnmerkleizedTrait)
-/// trait.
+/// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
 pub struct KeylessUnmerkleized<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
     batch: UnmerkleizedBatch<H, V>,
     db: KeylessDbHandle<E, V, H>,
@@ -61,8 +60,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> KeylessUnmerklei
 }
 
 /// Wraps a keyless [`MerkleizedBatch`] with a reference to the parent
-/// database, allowing it to implement the glue [`Merkleized`](MerkleizedTrait)
-/// trait.
+/// database, implementing the [`Merkleized`](super::Merkleized) trait.
 pub struct KeylessMerkleized<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
     batch: MerkleizedBatch<H::Digest, V>,
     db: KeylessDbHandle<E, V, H>,
