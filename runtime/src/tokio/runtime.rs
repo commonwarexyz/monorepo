@@ -134,6 +134,10 @@ impl TaskTracker {
             return false;
         }
 
+        // Unlike `std`, `parking_lot`'s `Condvar` does not wake up spuriously,
+        // so we don't need to loop here:
+        //
+        // https://docs.rs/parking_lot/0.12.5/parking_lot/struct.Condvar.html#differences-from-the-standard-library-condvar
         self.idle.wait_for(&mut gate, remaining);
         self.live.load(Ordering::Acquire) == 0
     }
