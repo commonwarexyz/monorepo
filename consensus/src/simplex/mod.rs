@@ -416,10 +416,10 @@ mod tests {
         types::{Epoch, Round},
         Monitor, Viewable,
     };
-    use commonware_codec::{Decode, DecodeExt, Encode};
+    use commonware_codec::{types::lazy::Lazy, Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
-        certificate::mocks::Fixture,
+        certificate::{mocks::Fixture, Attestation, Verification},
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Digest as D},
         Hasher as _, Sha256, Signer as _,
@@ -435,7 +435,7 @@ mod tests {
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
     };
-    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, Participant, NZU16};
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _, SeedableRng};
@@ -451,6 +451,274 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Behavior {
+        Honest,
+        CorruptSignature,
+    }
+
+    #[derive(Clone, Debug)]
+    struct WrappedScheme<S> {
+        inner: S,
+        behavior: Behavior,
+    }
+
+    #[derive(Clone, Debug)]
+    struct WrappedElector<E, S> {
+        inner: E,
+        _phantom: std::marker::PhantomData<S>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct WrappedConfig<L>(L);
+
+    impl<S> WrappedScheme<S> {
+        const fn new(inner: S, behavior: Behavior) -> Self {
+            Self { inner, behavior }
+        }
+
+        fn to_inner_attestation(attestation: &Attestation<Self>) -> Attestation<S>
+        where
+            S: commonware_cryptography::certificate::Scheme,
+        {
+            Attestation {
+                signer: attestation.signer,
+                signature: attestation.signature.clone(),
+            }
+        }
+
+        fn from_inner_attestation(attestation: Attestation<S>) -> Attestation<Self>
+        where
+            S: commonware_cryptography::certificate::Scheme,
+        {
+            Attestation {
+                signer: attestation.signer,
+                signature: attestation.signature,
+            }
+        }
+
+        fn corrupt_signature<D>(
+            inner: &S,
+            subject: <S as commonware_cryptography::certificate::Scheme>::Subject<'_, D>,
+            signer: Participant,
+            signature: &<S as commonware_cryptography::certificate::Scheme>::Signature,
+        ) -> Lazy<<S as commonware_cryptography::certificate::Scheme>::Signature>
+        where
+            S: commonware_cryptography::certificate::Scheme,
+            D: commonware_cryptography::Digest,
+        {
+            let encoded = signature.encode().to_vec();
+            let mut hasher = Sha256::default();
+            hasher.update(&signer.encode());
+            hasher.update(&encoded);
+            let digest = hasher.finalize();
+            let start = usize::from(digest.as_ref()[0]) % (encoded.len() * 8);
+
+            for offset in 0..(encoded.len() * 8) {
+                let flip = (start + offset) % (encoded.len() * 8);
+                let byte = flip / 8;
+                let bit = flip % 8;
+                let mut corrupted = encoded.clone();
+                corrupted[byte] ^= 1 << bit;
+                let lazy = Lazy::deferred(&mut corrupted.as_slice(), ());
+                let attestation = Attestation {
+                    signer,
+                    signature: lazy.clone(),
+                };
+                if !inner.verify_attestation(
+                    &mut test_rng(),
+                    subject.clone(),
+                    &attestation,
+                    &Sequential,
+                ) {
+                    return lazy;
+                }
+            }
+
+            panic!("expected at least one invalid signature mutation");
+        }
+    }
+
+    impl<S, L> elector::Config<WrappedScheme<S>> for WrappedConfig<L>
+    where
+        S: commonware_cryptography::certificate::Scheme,
+        L: elector::Config<S>,
+    {
+        type Elector = WrappedElector<L::Elector, S>;
+
+        fn build(
+            self,
+            participants: &commonware_utils::ordered::Set<
+                <WrappedScheme<S> as commonware_cryptography::certificate::Scheme>::PublicKey,
+            >,
+        ) -> Self::Elector {
+            WrappedElector {
+                inner: self.0.build(participants),
+                _phantom: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl<S, E> elector::Elector<WrappedScheme<S>> for WrappedElector<E, S>
+    where
+        S: commonware_cryptography::certificate::Scheme,
+        E: elector::Elector<S>,
+    {
+        fn elect(
+            &self,
+            round: Round,
+            certificate: Option<
+                &<WrappedScheme<S> as commonware_cryptography::certificate::Scheme>::Certificate,
+            >,
+        ) -> Participant {
+            self.inner.elect(round, certificate)
+        }
+    }
+
+    impl<S> commonware_cryptography::certificate::Scheme for WrappedScheme<S>
+    where
+        S: commonware_cryptography::certificate::Scheme,
+    {
+        type Subject<'a, D: commonware_cryptography::Digest> = S::Subject<'a, D>;
+        type PublicKey = S::PublicKey;
+        type Signature = S::Signature;
+        type Certificate = S::Certificate;
+
+        fn me(&self) -> Option<Participant> {
+            self.inner.me()
+        }
+
+        fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
+            self.inner.participants()
+        }
+
+        fn sign<D: commonware_cryptography::Digest>(
+            &self,
+            subject: Self::Subject<'_, D>,
+        ) -> Option<Attestation<Self>> {
+            let attestation = self.inner.sign(subject.clone())?;
+            let signature = match self.behavior {
+                Behavior::Honest => attestation.signature,
+                Behavior::CorruptSignature => {
+                    let signature = attestation
+                        .signature
+                        .get()
+                        .expect("fresh signature should decode");
+                    Self::corrupt_signature(&self.inner, subject, attestation.signer, signature)
+                }
+            };
+
+            Some(Attestation {
+                signer: attestation.signer,
+                signature,
+            })
+        }
+
+        fn verify_attestation<R, D>(
+            &self,
+            rng: &mut R,
+            subject: Self::Subject<'_, D>,
+            attestation: &Attestation<Self>,
+            strategy: &impl commonware_parallel::Strategy,
+        ) -> bool
+        where
+            R: rand_core::CryptoRngCore,
+            D: commonware_cryptography::Digest,
+        {
+            self.inner.verify_attestation(
+                rng,
+                subject,
+                &Self::to_inner_attestation(attestation),
+                strategy,
+            )
+        }
+
+        fn verify_attestations<R, D, I>(
+            &self,
+            rng: &mut R,
+            subject: Self::Subject<'_, D>,
+            attestations: I,
+            strategy: &impl commonware_parallel::Strategy,
+        ) -> Verification<Self>
+        where
+            R: rand_core::CryptoRngCore,
+            D: commonware_cryptography::Digest,
+            I: IntoIterator<Item = Attestation<Self>>,
+            I::IntoIter: Send,
+        {
+            let verification = self.inner.verify_attestations(
+                rng,
+                subject,
+                attestations.into_iter().map(|attestation| Attestation {
+                    signer: attestation.signer,
+                    signature: attestation.signature,
+                }),
+                strategy,
+            );
+
+            Verification::new(
+                verification
+                    .verified
+                    .into_iter()
+                    .map(Self::from_inner_attestation)
+                    .collect(),
+                verification.invalid,
+            )
+        }
+
+        fn assemble<I, M>(
+            &self,
+            attestations: I,
+            strategy: &impl commonware_parallel::Strategy,
+        ) -> Option<Self::Certificate>
+        where
+            I: IntoIterator<Item = Attestation<Self>>,
+            I::IntoIter: Send,
+            M: Faults,
+        {
+            self.inner.assemble::<_, M>(
+                attestations.into_iter().map(|attestation| Attestation {
+                    signer: attestation.signer,
+                    signature: attestation.signature,
+                }),
+                strategy,
+            )
+        }
+
+        fn verify_certificate<R, D, M>(
+            &self,
+            rng: &mut R,
+            subject: Self::Subject<'_, D>,
+            certificate: &Self::Certificate,
+            strategy: &impl commonware_parallel::Strategy,
+        ) -> bool
+        where
+            R: rand_core::CryptoRngCore,
+            D: commonware_cryptography::Digest,
+            M: Faults,
+        {
+            self.inner
+                .verify_certificate::<_, _, M>(rng, subject, certificate, strategy)
+        }
+
+        fn is_attributable() -> bool {
+            S::is_attributable()
+        }
+
+        fn is_batchable() -> bool {
+            S::is_batchable()
+        }
+
+        fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+            self.inner.certificate_codec_config()
+        }
+
+        fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg
+        {
+            S::certificate_codec_config_unbounded()
+        }
+    }
 
     #[test]
     fn test_interesting() {
@@ -796,8 +1064,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
 
                 // Ensure certificates for all views
@@ -1065,8 +1335,10 @@ mod tests {
                     assert!(faults.is_empty());
                 }
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
 
                 // Ensure no blocked connections
@@ -1699,8 +1971,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
 
                 // Ensure offline node is never active
@@ -1947,8 +2221,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
 
                 // Ensure the slow validator never emits notarize or finalize
@@ -2171,8 +2447,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
 
                 // Ensure quick recovery.
@@ -2397,8 +2675,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
             }
 
@@ -2560,8 +2840,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
             }
 
@@ -2841,8 +3123,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
             }
             assert!(count_conflicting > 0);
@@ -2886,7 +3170,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(30)));
+            .with_timeout(Some(Duration::from_secs(5)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
@@ -2909,11 +3193,18 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            // Create scheme with wrong namespace for byzantine node (index 0)
-            let Fixture {
-                schemes: wrong_schemes,
-                ..
-            } = fixture(&mut context, b"wrong-namespace", n);
+            let schemes: Vec<_> = schemes
+                .into_iter()
+                .enumerate()
+                .map(|(idx, scheme)| {
+                    let behavior = if idx == 0 {
+                        Behavior::CorruptSignature
+                    } else {
+                        Behavior::Honest
+                    };
+                    WrappedScheme::new(scheme, behavior)
+                })
+                .collect();
 
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
@@ -2926,20 +3217,14 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
+            let elector = WrappedConfig(L::default());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
                 // Create scheme context
                 let context = context.with_label(&format!("validator_{}", *validator));
 
-                // Byzantine node (idx 0) uses wrong namespace scheme to produce invalid signatures
-                // Honest nodes use correct namespace schemes
-                let scheme = if idx_scheme == 0 {
-                    wrong_schemes[idx_scheme].clone()
-                } else {
-                    schemes[idx_scheme].clone()
-                };
+                let scheme = schemes[idx_scheme].clone();
 
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
@@ -2965,13 +3250,6 @@ mod tests {
                 );
                 actor.start();
                 let blocker = oracle.control(validator.clone());
-                let leader_timeout = if idx_scheme == 0 {
-                    // Force the wrong-namespace byzantine node to timeout quickly so
-                    // honest nodes deterministically observe at least one invalid vote.
-                    Duration::from_millis(100)
-                } else {
-                    Duration::from_secs(1)
-                };
                 let cfg = config::Config {
                     scheme,
                     elector: elector.clone(),
@@ -2983,7 +3261,7 @@ mod tests {
                     partition: validator.clone().to_string(),
                     mailbox_size: 1024,
                     epoch: Epoch::new(333),
-                    leader_timeout,
+                    leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
@@ -3002,9 +3280,9 @@ mod tests {
                 engine.start(pending, recovered, resolver);
             }
 
-            // Wait for honest engines to finish (skip byzantine node at index 0)
+            // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut().skip(1) {
+            for reporter in reporters.iter_mut() {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
@@ -3014,34 +3292,30 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Check honest reporters (reporters[1..]) for correct activity
-            let mut invalid_count = 0;
-            for reporter in reporters.iter().skip(1) {
+            // Check all reporters for activity
+            for (i, reporter) in reporters.iter().enumerate() {
                 // Ensure no faults
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                assert_eq!(reporter.faults.lock().len(), 0);
 
-                // Count invalid signatures
-                {
-                    let invalid = reporter.invalid.lock();
-                    if *invalid > 0 {
-                        invalid_count += 1;
-                    }
+                // All nodes see invalid signatures since the honest reporters get unfiltered votes
+                // once they pass the view.
+                assert!(*reporter.invalid_votes.lock() > 0);
+
+                // Only the byzantine node sees invalid certificates since it constructs them from
+                // its own invalid vote. The honest nodes reject them before reaching the reporter.
+                if i == 0 {
+                    debug!("byzantine node sees invalid certificates: {}", *reporter.invalid_certificates.lock());
+                } else {
+                    assert_eq!(*reporter.invalid_certificates.lock(), 0);
                 }
             }
 
-            // All honest nodes should see invalid signatures from the byzantine node
-            assert_eq!(invalid_count, n - 1);
-
             // Ensure byzantine node is blocked by honest nodes
             let blocked = oracle.blocked().await.unwrap();
-            assert!(!blocked.is_empty());
-            for (a, b) in blocked {
-                if a != participants[0] {
-                    assert_eq!(b, participants[0]);
-                }
+            assert_eq!(blocked.len(), participants.len() - 1);
+            let byz = &participants[0];
+            for (_, b) in blocked {
+                assert_eq!(&b, byz);
             }
         });
     }
@@ -3184,11 +3458,12 @@ mod tests {
 
             // Wait for all engines to finish
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
+                        panic!("latest: {latest}");
                     }
                 }));
             }
@@ -3205,8 +3480,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
             }
 
@@ -3225,13 +3502,6 @@ mod tests {
     fn test_impersonator() {
         for seed in 0..5 {
             impersonator::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
-            impersonator::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
-            impersonator::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinPk, _>);
-            impersonator::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinSig, _>);
-            impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
-            impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
-            impersonator::<_, _, RoundRobin>(seed, ed25519::fixture);
-            impersonator::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
@@ -3709,8 +3979,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
             }
 
@@ -3891,8 +4163,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
             }
             assert!(count_nullify_and_finalize > 0);
@@ -4062,8 +4336,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
             }
 
@@ -4219,8 +4495,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
             }
 
@@ -4627,8 +4905,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0, "No invalid signatures");
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0, "No invalid votes");
+                    assert_eq!(*invalid_certificates, 0, "No invalid certificates");
                 }
 
                 // Check that we have certificates reported
@@ -5050,8 +5330,10 @@ mod tests {
                     assert!(faults.is_empty());
                 }
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
             }
             let blocked = oracle.blocked().await.unwrap();
@@ -5451,8 +5733,10 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0);
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0);
+                    assert_eq!(*invalid_certificates, 0);
                 }
 
                 // Ensure no forks
@@ -6057,8 +6341,10 @@ mod tests {
 
                 // Verify no invalid signatures were observed by honest replicas.
                 for reporter in reporters.iter().skip(honest_start) {
-                    let invalid = reporter.invalid.lock();
-                    assert_eq!(*invalid, 0, "invalid signatures detected");
+                    let invalid_votes = reporter.invalid_votes.lock();
+                    let invalid_certificates = reporter.invalid_certificates.lock();
+                    assert_eq!(*invalid_votes, 0, "invalid votes detected");
+                    assert_eq!(*invalid_certificates, 0, "invalid certificates detected");
                 }
 
                 // Ensure no honest signer appears under multiple payloads for the same view.

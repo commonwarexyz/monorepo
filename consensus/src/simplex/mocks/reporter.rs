@@ -59,7 +59,8 @@ pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest>
     pub finalizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
     pub finalizations: Arc<Mutex<HashMap<View, Finalization<S, D>>>>,
     pub faults: Arc<Mutex<Faults<S, D>>>,
-    pub invalid: Arc<Mutex<usize>>,
+    pub invalid_votes: Arc<Mutex<usize>>,
+    pub invalid_certificates: Arc<Mutex<usize>>,
 
     latest: Arc<Mutex<View>>,
     subscribers: Arc<Mutex<Vec<Sender<View>>>>,
@@ -90,7 +91,8 @@ where
             finalizes: Arc::new(Mutex::new(HashMap::new())),
             finalizations: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(HashMap::new())),
-            invalid: Arc::new(Mutex::new(0)),
+            invalid_votes: Arc::new(Mutex::new(0)),
+            invalid_certificates: Arc::new(Mutex::new(0)),
             latest: Arc::new(Mutex::new(View::zero())),
             subscribers: Arc::new(Mutex::new(Vec::new())),
         }
@@ -123,12 +125,10 @@ where
         // We check signatures for all messages to ensure that the prover is working correctly
         // but in production this isn't necessary (as signatures are already verified in
         // consensus).
-        let verified = activity.verified();
         match &activity {
             Activity::Notarize(notarize) => {
                 if !notarize.verify(&mut self.context, &self.scheme, &Sequential) {
-                    assert!(!verified);
-                    *self.invalid.lock() += 1;
+                    *self.invalid_votes.lock() += 1;
                     return;
                 }
                 let encoded = notarize.encode();
@@ -153,8 +153,7 @@ where
                     &notarization.certificate,
                     &Sequential,
                 ) {
-                    assert!(!verified);
-                    *self.invalid.lock() += 1;
+                    *self.invalid_certificates.lock() += 1;
                     return;
                 }
                 let encoded = notarization.encode();
@@ -165,8 +164,7 @@ where
             }
             Activity::Nullify(nullify) => {
                 if !nullify.verify(&mut self.context, &self.scheme, &Sequential) {
-                    assert!(!verified);
-                    *self.invalid.lock() += 1;
+                    *self.invalid_votes.lock() += 1;
                     return;
                 }
                 let encoded = nullify.encode();
@@ -189,8 +187,7 @@ where
                     &nullification.certificate,
                     &Sequential,
                 ) {
-                    assert!(!verified);
-                    *self.invalid.lock() += 1;
+                    *self.invalid_certificates.lock() += 1;
                     return;
                 }
                 let encoded = nullification.encode();
@@ -203,8 +200,7 @@ where
             }
             Activity::Finalize(finalize) => {
                 if !finalize.verify(&mut self.context, &self.scheme, &Sequential) {
-                    assert!(!verified);
-                    *self.invalid.lock() += 1;
+                    *self.invalid_votes.lock() += 1;
                     return;
                 }
                 let encoded = finalize.encode();
@@ -229,8 +225,7 @@ where
                     &finalization.certificate,
                     &Sequential,
                 ) {
-                    assert!(!verified);
-                    *self.invalid.lock() += 1;
+                    *self.invalid_certificates.lock() += 1;
                     return;
                 }
                 let encoded = finalization.encode();
@@ -249,8 +244,7 @@ where
             Activity::ConflictingNotarize(conflicting) => {
                 let view = conflicting.view();
                 if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
-                    assert!(!verified);
-                    *self.invalid.lock() += 1;
+                    *self.invalid_votes.lock() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
@@ -267,8 +261,7 @@ where
             Activity::ConflictingFinalize(conflicting) => {
                 let view = conflicting.view();
                 if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
-                    assert!(!verified);
-                    *self.invalid.lock() += 1;
+                    *self.invalid_votes.lock() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
@@ -285,8 +278,7 @@ where
             Activity::NullifyFinalize(conflicting) => {
                 let view = conflicting.view();
                 if !conflicting.verify(&mut self.context, &self.scheme, &Sequential) {
-                    assert!(!verified);
-                    *self.invalid.lock() += 1;
+                    *self.invalid_votes.lock() += 1;
                     return;
                 }
                 let encoded = conflicting.encode();
