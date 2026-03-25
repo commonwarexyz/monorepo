@@ -560,7 +560,8 @@ impl Runner {
         Tasks::register_root(&executor.tasks);
 
         // Process tasks until root task completes or progress stalls.
-        // Wrap the loop in catch_unwind to ensure task cleanup runs even if the loop or a task panics.
+        // Catch root panics and propagated child panics so task cleanup still
+        // runs before the original unwind is resumed.
         let result = catch_unwind(AssertUnwindSafe(|| loop {
             // Ensure we have not exceeded our deadline
             {

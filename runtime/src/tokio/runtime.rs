@@ -217,7 +217,7 @@ pub struct Config {
     /// operations that require blocking (like `fs` and writing to `Stdout`).
     max_blocking_threads: usize,
 
-    /// Whether or not to catch panics.
+    /// Whether spawned tasks should catch panics instead of propagating them.
     catch_panics: bool,
 
     /// Maximum time to wait for spawned tasks to finish after shutdown begins.
@@ -536,9 +536,9 @@ impl crate::Runner for Runner {
 
         // Build the root context and run the future.
         //
-        // Handle root task panic so that shutdown cleanup still happens. We
-        // still resume the original panic after aborting descendants and
-        // waiting for tracked tasks.
+        // Catch root panics and propagated child panics so we can still abort
+        // descendants, finish metrics, and wait for task cleanup before
+        // resuming the original unwind.
         let tree = Tree::root();
         let context = Context {
             storage,
