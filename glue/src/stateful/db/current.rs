@@ -90,8 +90,7 @@ where
 }
 
 /// Key-value operations for the `current` unordered update kind.
-impl<E, C, I, H, K, V, const N: usize>
-    CurrentUnmerkleized<E, C, I, H, unordered::Update<K, V>, N>
+impl<E, C, I, H, K, V, const N: usize> CurrentUnmerkleized<E, C, I, H, unordered::Update<K, V>, N>
 where
     E: Storage + Clock + Metrics,
     K: Key + Send,
@@ -116,8 +115,7 @@ where
 }
 
 /// Key-value operations for the `current` ordered update kind.
-impl<E, C, I, H, K, V, const N: usize>
-    CurrentUnmerkleized<E, C, I, H, ordered::Update<K, V>, N>
+impl<E, C, I, H, K, V, const N: usize> CurrentUnmerkleized<E, C, I, H, ordered::Update<K, V>, N>
 where
     E: Storage + Clock + Metrics,
     K: Key + Send,
@@ -142,8 +140,8 @@ where
 }
 
 /// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `current` unordered update kind.
-impl<E, C, I, H, K, V, const N: usize>
-    UnmerkleizedTrait for CurrentUnmerkleized<E, C, I, H, unordered::Update<K, V>, N>
+impl<E, C, I, H, K, V, const N: usize> UnmerkleizedTrait
+    for CurrentUnmerkleized<E, C, I, H, unordered::Update<K, V>, N>
 where
     E: Storage + Clock + Metrics,
     K: Key + Send,
@@ -168,8 +166,8 @@ where
 }
 
 /// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `current` ordered update kind.
-impl<E, C, I, H, K, V, const N: usize>
-    UnmerkleizedTrait for CurrentUnmerkleized<E, C, I, H, ordered::Update<K, V>, N>
+impl<E, C, I, H, K, V, const N: usize> UnmerkleizedTrait
+    for CurrentUnmerkleized<E, C, I, H, ordered::Update<K, V>, N>
 where
     E: Storage + Clock + Metrics,
     K: Key + Send,
@@ -324,12 +322,12 @@ mod open {
     };
     use commonware_utils::Array;
 
+    type VConfig<T, K, V> =
+        VariableConfig<T, <Operation<unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg>;
+
     pub(super) async fn variable<E, K, V, H, T, const N: usize>(
         context: E,
-        config: VariableConfig<
-            T,
-            <Operation<unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg,
-        >,
+        config: VConfig<T, K, V>,
     ) -> Result<Db<E, K, V, H, T, N>, Error>
     where
         E: Storage + Clock + Metrics,

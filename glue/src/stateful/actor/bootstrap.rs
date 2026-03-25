@@ -18,6 +18,8 @@
 //!   them with the databases' committed targets.
 //! - If they differ, bootstrap rewinds every database in the set to those
 //!   processed-block targets.
+//! - This reconciliation assumes databases were not manually rolled back or
+//!   replaced out-of-band.
 //! - Any rewind failure is fatal and causes a panic.
 //! - Bootstrap then transitions to processing mode via
 //!   [`ApplicationMailbox::sync_complete`] at marshal's processed anchor.
