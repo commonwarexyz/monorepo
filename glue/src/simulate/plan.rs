@@ -111,14 +111,17 @@ pub struct PlanBuilder<D: EngineDefinition> {
 }
 
 type ExitConditionFactory<D> = Box<
-    dyn Fn() -> Box<dyn ExitCondition<<D as EngineDefinition>::PublicKey, <D as EngineDefinition>::State>>,
+    dyn Fn() -> Box<
+        dyn ExitCondition<<D as EngineDefinition>::PublicKey, <D as EngineDefinition>::State>,
+    >,
 >;
 
 type FinalizationPropertyFactory<D> =
     Box<dyn Fn() -> Box<dyn FinalizationProperty<<D as EngineDefinition>::State>>>;
 
 type PropertyFactory<D> = Box<
-    dyn Fn() -> Box<dyn Property<<D as EngineDefinition>::PublicKey, <D as EngineDefinition>::State>>,
+    dyn Fn()
+        -> Box<dyn Property<<D as EngineDefinition>::PublicKey, <D as EngineDefinition>::State>>,
 >;
 
 impl<D: EngineDefinition> PlanBuilder<D> {
@@ -276,9 +279,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
         let mut results = Vec::with_capacity(self.seeds.len());
         for &seed in &self.seeds {
             let plan = self.build_with_seed(seed);
-            let result = plan
-                .run()
-                .map_err(|e| format!("seed {seed}: {e}"))?;
+            let result = plan.run().map_err(|e| format!("seed {seed}: {e}"))?;
             results.push(result);
         }
         Ok(results)
@@ -887,7 +888,10 @@ mod tests {
                 if previous == 0 {
                     return Ok(());
                 }
-                Err(format!("property reused across runs: call {}", previous + 1))
+                Err(format!(
+                    "property reused across runs: call {}",
+                    previous + 1
+                ))
             })
         }
     }

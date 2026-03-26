@@ -516,23 +516,6 @@ where
     let metrics = ProcessorMetrics::new(context.clone());
     let mut processor = Processor::new(app, databases, last_processed, metrics);
 
-    // In case any finalizations were delivered after the floor was updated,
-    // process them now to ensure we progress marshal.
-    for HeldFinalization {
-        block,
-        acknowledgement,
-    } in syncing.held_finalizations.drain(..)
-    {
-        if block.height() <= last_processed.height {
-            // Block is already persisted at or below the reconciled floor.
-            // The acknowledgement can be dropped, since marshal cancels
-            // pending acks when the floor is updated.
-            continue;
-        }
-        processor.finalize(context, block).await;
-        acknowledgement.acknowledge();
-    }
-
     // In case any verification requests were delivered after the floor was updated,
     // process them now to ensure we progress consensus.
     for HeldVerify {
@@ -550,6 +533,23 @@ where
                 response,
             )
             .await;
+    }
+
+    // In case any finalizations were delivered after the floor was updated,
+    // process them now to ensure we progress marshal.
+    for HeldFinalization {
+        block,
+        acknowledgement,
+    } in syncing.held_finalizations.drain(..)
+    {
+        if block.height() <= last_processed.height {
+            // Block is already persisted at or below the reconciled floor.
+            // The acknowledgement can be dropped, since marshal cancels
+            // pending acks when the floor is updated.
+            continue;
+        }
+        processor.finalize(context, block).await;
+        acknowledgement.acknowledge();
     }
 
     info!("sync complete, database attached to processor");
