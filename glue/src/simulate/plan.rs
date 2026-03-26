@@ -571,8 +571,9 @@ impl<D: EngineDefinition> Plan<D> {
             Some(cmd) = schedule_rx.recv() else break => {
                 match cmd {
                     ScheduleCmd::Crash(pk) => {
-                        team.crash(&pk);
-                        crashes += 1;
+                        if team.crash(&pk) {
+                            crashes += 1;
+                        }
                     }
                     ScheduleCmd::Restart(pk) => {
                         team.restart(&ctx, &oracle, pk, monitor_tx.clone()).await;
@@ -882,6 +883,30 @@ mod tests {
         assert!(
             result.scheduled_actions >= 1,
             "scheduled crashes should still run when delay crashes are also configured"
+        );
+    }
+
+    #[test]
+    fn schedule_double_crash_before_restart_counts_one_crash() {
+        let pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let result = PlanBuilder::new(FinalizingEngine::new(1, Duration::from_millis(50), 1))
+            .required_finalizations(1)
+            .timeout(Duration::from_secs(2))
+            .crash(Crash::Schedule(
+                Schedule::new()
+                    .at(Duration::from_millis(1), Action::Crash(pk.clone()))
+                    .at(Duration::from_millis(2), Action::Crash(pk.clone()))
+                    .at(Duration::from_millis(3), Action::Restart(pk)),
+            ))
+            .run()
+            .expect("simulation should complete")
+            .into_iter()
+            .next()
+            .expect("expected one result for the default seed");
+
+        assert_eq!(
+            result.crashes, 1,
+            "second crash before restart should be a no-op and not counted"
         );
     }
 

@@ -59,7 +59,7 @@ use commonware_macros::select;
 use commonware_runtime::{Metrics, Spawner};
 use commonware_storage::qmdb::sync::SyncProgress;
 use commonware_utils::{
-    channel::{fallible::AsyncFallibleExt, mpsc},
+    channel::{fallible::AsyncFallibleExt, mpsc, ring},
     sync::AsyncRwLock,
 };
 use futures::{
@@ -323,7 +323,7 @@ where
         resolvers: R,
         anchor: Anchor<D>,
         targets: Self::SyncTargets,
-        tip_updates: mpsc::Receiver<(Anchor<D>, Self::SyncTargets)>,
+        tip_updates: ring::Receiver<(Anchor<D>, Self::SyncTargets)>,
         sync_config: SyncEngineConfig,
     ) -> impl Future<Output = Result<(Self, Anchor<D>), Self::Error>> + Send;
 }
@@ -381,7 +381,7 @@ where
         resolver: R,
         anchor: Anchor<D>,
         target: Self::SyncTargets,
-        tip_updates: mpsc::Receiver<(Anchor<D>, Self::SyncTargets)>,
+        tip_updates: ring::Receiver<(Anchor<D>, Self::SyncTargets)>,
         sync_config: SyncEngineConfig,
     ) -> Result<(Self, Anchor<D>), Self::Error> {
         let (target_tx, target_rx) = mpsc::channel(sync_config.update_channel_size.get());
@@ -577,7 +577,7 @@ macro_rules! impl_state_sync_set {
                 resolvers: ($($R,)+),
                 anchor: Anchor<D>,
                 targets: Self::SyncTargets,
-                tip_updates: mpsc::Receiver<(Anchor<D>, Self::SyncTargets)>,
+                tip_updates: ring::Receiver<(Anchor<D>, Self::SyncTargets)>,
                 sync_config: SyncEngineConfig,
             ) -> Result<(Self, Anchor<D>), Self::Error> {
                 let sync_metrics = sync_metrics::SyncMetrics::new(&context);
@@ -635,8 +635,8 @@ macro_rules! impl_state_sync_set {
                                 loop {
                                     match updates.try_recv() {
                                         Ok((a, t)) => state.record_tip_update(a, t),
-                                        Err(mpsc::error::TryRecvError::Empty) => break,
-                                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                                        Err(ring::TryRecvError::Empty) => break,
+                                        Err(ring::TryRecvError::Disconnected) => {
                                             tip_updates = None;
                                             break;
                                         }
@@ -964,6 +964,22 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
             let max_gen = self.dbs.iter().map(|db| db.generation()).max().unwrap();
 
             if min_gen == max_gen {
+                if let Some((anchor, targets)) = self.latest_tip.take() {
+                    let generation = self.current_generation + 1;
+                    self.current_generation = generation;
+                    for db in &mut self.dbs {
+                        *db = DbSyncState::Seeking { generation };
+                    }
+                    self.generation_state
+                        .insert(generation, (anchor, targets.clone()));
+                    self.last_dispatched_anchor = anchor;
+                    self.prune_generations();
+                    return CoordinatorAction::Dispatch {
+                        generation,
+                        targets,
+                    };
+                }
+
                 let (anchor, _) = self
                     .generation_state
                     .get(&min_gen)
@@ -1156,10 +1172,10 @@ mod tests {
     use commonware_macros::select;
     use commonware_runtime::{deterministic, Clock, Metrics as _, Runner as _, Spawner as _};
     use commonware_utils::{
-        channel::{mpsc, oneshot},
+        channel::{mpsc, oneshot, ring},
         sync::AsyncRwLock,
     };
-    use futures::{pin_mut, FutureExt};
+    use futures::{pin_mut, FutureExt, SinkExt};
     use std::{
         convert::Infallible,
         num::{NonZeroU64, NonZeroUsize},
@@ -1958,7 +1974,7 @@ mod tests {
     #[test]
     fn single_state_sync_handles_closed_tip_updates_channel() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (tip_tx, tip_rx) = mpsc::channel(1);
+            let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let release = Arc::new(AtomicBool::new(false));
             let release_for_sync = release.clone();
 
@@ -2001,7 +2017,7 @@ mod tests {
     #[test]
     fn single_state_sync_ignores_backward_tip_updates() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (tip_tx, tip_rx) = mpsc::channel(4);
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
             let release = Arc::new(AtomicBool::new(true));
             let resolver = SlowSyncController {
                 release: release.clone(),
@@ -2055,7 +2071,7 @@ mod tests {
     #[test]
     fn tuple_state_sync_converges_before_finish() {
         deterministic::Runner::default().start(|context| async move {
-            let (tip_tx, tip_rx) = mpsc::channel(4);
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
             let slow_release = Arc::new(AtomicBool::new(false));
             let fast_done = Arc::new(AtomicBool::new(false));
 
@@ -2114,7 +2130,7 @@ mod tests {
     #[test]
     fn tuple_state_sync_ignores_backward_tip_updates() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (tip_tx, tip_rx) = mpsc::channel(8);
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(8).unwrap());
             let slow_release = Arc::new(AtomicBool::new(false));
             let fast_done = Arc::new(AtomicBool::new(false));
 
@@ -2179,7 +2195,7 @@ mod tests {
     #[test]
     fn tuple_state_sync_returns_db_error_instead_of_panicking_when_anchor_missing() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let (_tip_tx, tip_rx) = mpsc::channel(1);
+            let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
 
             let result = <(
                 Arc<AsyncRwLock<ImmediateStateSyncDb>>,
@@ -2219,7 +2235,7 @@ mod tests {
     #[test]
     fn tuple_state_sync_returns_db_error_when_other_database_waits_for_finish() {
         deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
-            let (_tip_tx, tip_rx) = mpsc::channel(1);
+            let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let release = Arc::new(AtomicBool::new(true));
 
             let result = <(
@@ -2301,6 +2317,44 @@ mod tests {
     }
 
     #[test]
+    fn coordinator_dispatches_pending_tip_before_converging() {
+        let mut state = CoordinatorState::new(2, anchor(0), (0u64, 0u64));
+
+        state.record_tip_update(anchor(1), (1, 1));
+        match state.next_action() {
+            CoordinatorAction::Dispatch {
+                generation,
+                targets: (left, right),
+            } => {
+                assert_eq!(generation, 1, "coordinator should dispatch generation 1");
+                assert_eq!((left, right), (1, 1));
+            }
+            CoordinatorAction::Wait => panic!("coordinator should dispatch the newer tip"),
+            CoordinatorAction::Converged(anchor) => {
+                panic!("coordinator converged too early at {anchor:?}")
+            }
+        }
+
+        state.record_reached(0, 1);
+        state.record_reached(1, 1);
+        state.record_tip_update(anchor(2), (2, 2));
+
+        match state.next_action() {
+            CoordinatorAction::Dispatch {
+                generation,
+                targets: (left, right),
+            } => {
+                assert_eq!(generation, 2, "coordinator should advance to generation 2");
+                assert_eq!((left, right), (2, 2));
+            }
+            CoordinatorAction::Wait => panic!("coordinator should dispatch the pending tip"),
+            CoordinatorAction::Converged(anchor) => {
+                panic!("coordinator should not converge with a pending tip: {anchor:?}")
+            }
+        }
+    }
+
+    #[test]
     #[should_panic(expected = "missing state for dispatch generation 1")]
     fn coordinator_anchor_height_panics_on_missing_generation_state() {
         let mut state = CoordinatorState::new(2, anchor(0), (0u64, 0u64));
@@ -2317,7 +2371,7 @@ mod tests {
     #[test]
     fn tuple_state_sync_stops_updates_after_reached_until_regroup() {
         deterministic::Runner::default().start(|context| async move {
-            let (tip_tx, tip_rx) = mpsc::channel(32);
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(32).unwrap());
             let slow_release = Arc::new(AtomicBool::new(true));
             let fast_ready = Arc::new(AtomicBool::new(false));
             let fast_update_count = Arc::new(AtomicUsize::new(0));
@@ -2390,7 +2444,7 @@ mod tests {
     #[test]
     fn tuple_state_sync_allows_noop_database_while_other_catches_up() {
         deterministic::Runner::default().start(|context| async move {
-            let (tip_tx, tip_rx) = mpsc::channel(4);
+            let (tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
             let slow_release = Arc::new(AtomicBool::new(false));
             let fast_ready = Arc::new(AtomicBool::new(false));
             let fast_update_count = Arc::new(AtomicUsize::new(0));

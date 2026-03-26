@@ -74,7 +74,7 @@ use commonware_consensus::{
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{Config as MetadataConfig, Metadata};
-use commonware_utils::{channel::mpsc, sequence::U64};
+use commonware_utils::{channel::ring, sequence::U64};
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
 
@@ -114,7 +114,7 @@ where
         /// The block whose embedded targets seed the initial sync pass.
         block: A::Block,
         /// Channel of anchored target updates as new blocks finalize during sync.
-        target_updates: mpsc::Receiver<AnchoredUpdate<A, E>>,
+        target_updates: ring::Receiver<AnchoredUpdate<A, E>>,
     },
 }
 
