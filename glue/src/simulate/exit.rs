@@ -36,6 +36,7 @@ pub trait ExitCondition<P: PublicKey, S>: Send + Sync {
 
 /// Exit once at least `target_count` validators have finalized `required`
 /// views.
+#[derive(Clone)]
 pub struct MinimumFinalizations {
     required: u64,
 }
@@ -63,6 +64,7 @@ impl<P: PublicKey, S> ExitCondition<P, S> for MinimumFinalizations {
 
 /// Exit once at least `target_count` validators have processed up to
 /// `required` application height.
+#[derive(Clone)]
 pub struct ProcessedHeightAtLeast {
     required: u64,
 }

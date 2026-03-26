@@ -5,6 +5,7 @@ use commonware_cryptography::{ed25519, sha256, Digestible};
 use std::{future::Future, pin::Pin};
 
 /// Post-run property: all validators agree on the finalized block at `height`.
+#[derive(Clone, Copy)]
 pub(crate) struct BlockAgreementAtHeight {
     height: u64,
 }
@@ -57,6 +58,7 @@ where
 }
 
 /// Post-run property: at least one node used startup state sync and then advanced further.
+#[derive(Clone, Copy)]
 pub(crate) struct LateJoinerStateSyncHandoff;
 
 impl<V> Property<ed25519::PublicKey, MockValidatorState<V>> for LateJoinerStateSyncHandoff
