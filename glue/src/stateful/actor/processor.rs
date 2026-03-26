@@ -450,8 +450,11 @@ where
         let block_context = block.context();
         let round = Round::new(block_context.epoch(), block_context.view());
 
-        // Marshal finalization is ordered. A pending miss means we can safely
-        // apply this block on top of finalized state.
+        // Marshal finalization is ordered. A pending miss means we can replay
+        // this block on top of finalized state.
+        //
+        // Safety contract: replayed `Application::apply` output must match the
+        // block commitments previously enforced by `Application::verify`.
         let batch = match self.pending.remove(&digest) {
             Some(entry) => entry.merkleized,
             None => {
