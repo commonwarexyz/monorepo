@@ -36,9 +36,7 @@ pub mod tests {
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
                 ValueEncoding,
             },
-            current::{
-                batch::BitmapRead, proof::RangeProof, tests::apply_random_ops, BitmapPrunedBits,
-            },
+            current::{proof::RangeProof, tests::apply_random_ops, BitmapPrunedBits},
             store::tests::{TestKey, TestValue},
             Error,
         },
@@ -51,7 +49,10 @@ pub mod tests {
         deterministic::{self, Context},
         Metrics as _, Runner as _,
     };
-    use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
+    use commonware_utils::{
+        bitmap::{Prunable as BitMap, Readable},
+        NZU64,
+    };
     use core::future::Future;
     use rand::RngCore;
 

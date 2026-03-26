@@ -2,7 +2,6 @@
 //!
 //! The impl blocks in this file define shared functionality across all Current QMDB variants.
 
-use super::batch::BitmapRead;
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
@@ -34,7 +33,11 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
-use commonware_utils::{bitmap::Prunable as BitMap, sequence::prefixed_u64::U64, sync::AsyncMutex};
+use commonware_utils::{
+    bitmap::{Prunable as BitMap, Readable},
+    sequence::prefixed_u64::U64,
+    sync::AsyncMutex,
+};
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use rayon::prelude::*;
@@ -603,9 +606,7 @@ where
 
 /// Returns `Some((last_chunk, next_bit))` if the bitmap has an incomplete trailing chunk, or
 /// `None` if all bits fall on complete chunk boundaries.
-pub(super) fn partial_chunk<B: super::batch::BitmapRead<N>, const N: usize>(
-    bitmap: &B,
-) -> Option<([u8; N], u64)> {
+pub(super) fn partial_chunk<B: Readable<N>, const N: usize>(bitmap: &B) -> Option<([u8; N], u64)> {
     let (last_chunk, next_bit) = bitmap.last_chunk();
     if next_bit == BitMap::<N>::CHUNK_SIZE_BITS {
         None

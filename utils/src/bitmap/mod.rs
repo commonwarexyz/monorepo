@@ -545,6 +545,11 @@ impl<const N: usize> BitMap<N> {
         }
     }
 
+    /// Returns an iterator over the indices of set bits.
+    pub fn ones_iter(&self) -> OnesIter<'_, Self, N> {
+        Readable::ones_iter_from(self, 0)
+    }
+
     /* Bitwise Operations */
 
     /// Helper for binary operations
@@ -905,6 +910,101 @@ impl<const N: usize> iter::Iterator for Iterator<'_, N> {
 }
 
 impl<const N: usize> ExactSizeIterator for Iterator<'_, N> {}
+
+/// Read-only access to a bitmap's chunks and metadata.
+pub trait Readable<const N: usize> {
+    /// Return the number of complete (fully filled) chunks.
+    fn complete_chunks(&self) -> usize;
+    /// Return the chunk data at the given absolute chunk index.
+    fn get_chunk(&self, chunk: usize) -> [u8; N];
+    /// Return the last chunk and its size in bits.
+    fn last_chunk(&self) -> ([u8; N], u64);
+    /// Return the number of pruned chunks.
+    fn pruned_chunks(&self) -> usize;
+    /// Return the total number of bits.
+    fn len(&self) -> u64;
+    /// Returns true if the bitmap is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// Return the number of pruned bits (i.e. pruned chunks * bits per chunk).
+    fn pruned_bits(&self) -> u64 {
+        (self.pruned_chunks() as u64) * BitMap::<N>::CHUNK_SIZE_BITS
+    }
+    /// Return the value of a single bit.
+    fn get_bit(&self, bit: u64) -> bool {
+        let chunk = self.get_chunk(BitMap::<N>::to_chunk_index(bit));
+        BitMap::<N>::get_bit_from_chunk(&chunk, bit % BitMap::<N>::CHUNK_SIZE_BITS)
+    }
+
+    /// Returns an iterator over the indices of set bits starting from `pos`.
+    fn ones_iter_from(&self, pos: u64) -> OnesIter<'_, Self, N>
+    where
+        Self: Sized,
+    {
+        OnesIter { bitmap: self, pos }
+    }
+}
+
+impl<const N: usize> Readable<N> for BitMap<N> {
+    fn complete_chunks(&self) -> usize {
+        self.chunks_len()
+            .saturating_sub(if self.is_chunk_aligned() { 0 } else { 1 })
+    }
+    fn get_chunk(&self, chunk: usize) -> [u8; N] {
+        *BitMap::get_chunk(self, chunk)
+    }
+    fn last_chunk(&self) -> ([u8; N], u64) {
+        let (c, n) = BitMap::last_chunk(self);
+        (*c, n)
+    }
+    fn pruned_chunks(&self) -> usize {
+        0
+    }
+    fn len(&self) -> u64 {
+        self.len
+    }
+}
+
+/// Iterator over the indices of set (1) bits in a bitmap.
+pub struct OnesIter<'a, B: ?Sized, const N: usize> {
+    bitmap: &'a B,
+    pos: u64,
+}
+
+impl<B: Readable<N> + ?Sized, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<u64> {
+        let len = self.bitmap.len();
+        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        while self.pos < len {
+            let chunk_idx = BitMap::<N>::to_chunk_index(self.pos);
+            let chunk = self.bitmap.get_chunk(chunk_idx);
+            let chunk_start = chunk_idx as u64 * chunk_bits;
+            let rel = (self.pos - chunk_start) as usize;
+            let mut byte_idx = rel / 8;
+            let mut bit_in_byte = rel % 8;
+            while byte_idx < N {
+                let masked = chunk[byte_idx] >> bit_in_byte;
+                if masked != 0 {
+                    let found = chunk_start
+                        + (byte_idx * 8 + bit_in_byte) as u64
+                        + masked.trailing_zeros() as u64;
+                    if found >= len {
+                        return None;
+                    }
+                    self.pos = found + 1;
+                    return Some(found);
+                }
+                byte_idx += 1;
+                bit_in_byte = 0;
+            }
+            self.pos = chunk_start + chunk_bits;
+        }
+        None
+    }
+}
 
 #[cfg(feature = "arbitrary")]
 impl<const N: usize> arbitrary::Arbitrary<'_> for BitMap<N> {
