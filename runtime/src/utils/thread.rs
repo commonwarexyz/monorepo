@@ -2,7 +2,7 @@
 
 use std::{sync::OnceLock, thread};
 
-/// Cached stack size used for runtime-owned spawned threads.
+/// Cached default system stack size for spawned threads.
 static SYSTEM_DEFAULT_STACK_SIZE: OnceLock<usize> = OnceLock::new();
 
 /// Rust's default stack size for spawned threads when no explicit size is set.
