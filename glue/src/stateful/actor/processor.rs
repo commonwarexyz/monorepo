@@ -127,17 +127,17 @@ where
     /// build a new block proposal. The resulting block and its merkleized
     /// state are cached in `pending`. Sends `None` on `response` if the
     /// ancestry is invalid or the application declines to propose.
-    pub(super) async fn propose<P, BP>(
+    pub(super) async fn propose<P1, P2>(
         &mut self,
         context: &E,
-        provider: P,
+        provider: P1,
         (runtime_context, consensus_context): (E, A::Context),
-        ancestry: AncestorStream<BP, A::Block>,
+        ancestry: AncestorStream<P2, A::Block>,
         input_provider: &mut A::InputProvider,
         mut response: oneshot::Sender<Option<A::Block>>,
     ) where
-        P: BlockProvider<Block = A::Block> + Clone,
-        BP: BlockProvider<Block = A::Block>,
+        P1: BlockProvider<Block = A::Block> + Clone,
+        P2: BlockProvider<Block = A::Block>,
     {
         let timer = self.metrics.propose_duration.timer();
 
@@ -208,16 +208,16 @@ where
     /// Prepare parent-relative batches and delegate to the application to
     /// verify a received block. On success the block's merkleized state is
     /// cached in `pending` and `true` is sent on `response`.
-    pub(super) async fn verify<P, BP>(
+    pub(super) async fn verify<P1, P2>(
         &mut self,
         context: &E,
-        provider: P,
+        provider: P1,
         (runtime_context, consensus_context): (E, A::Context),
-        ancestry: AncestorStream<BP, A::Block>,
+        ancestry: AncestorStream<P2, A::Block>,
         mut response: oneshot::Sender<bool>,
     ) where
-        P: BlockProvider<Block = A::Block> + Clone,
-        BP: BlockProvider<Block = A::Block>,
+        P1: BlockProvider<Block = A::Block> + Clone,
+        P2: BlockProvider<Block = A::Block>,
     {
         let timer = self.metrics.verify_duration.timer();
 
