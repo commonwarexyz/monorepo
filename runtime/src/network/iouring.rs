@@ -119,6 +119,7 @@ impl Network {
     /// The io_uring `size` should be a multiple of the number of expected connections.
     pub(crate) fn start(
         mut cfg: Config,
+        thread_stack_size: usize,
         registry: &mut Registry,
         pool: BufferPool,
     ) -> Result<Self, Error> {
@@ -136,13 +137,13 @@ impl Network {
         let sender_registry = registry.sub_registry_with_prefix("iouring_sender");
         let (send_submitter, send_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config.clone(), sender_registry);
-        utils::thread::spawn(move || send_loop.run());
+        utils::thread::spawn(thread_stack_size, move || send_loop.run());
 
         // Create an io_uring instance to handle receive operations.
         let receiver_registry = registry.sub_registry_with_prefix("iouring_receiver");
         let (recv_submitter, recv_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config, receiver_registry);
-        utils::thread::spawn(move || recv_loop.run());
+        utils::thread::spawn(thread_stack_size, move || recv_loop.run());
 
         Ok(Self {
             tcp_nodelay: cfg.tcp_nodelay,
@@ -666,7 +667,8 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
-        BufferPool, BufferPoolConfig, Error, Listener as _, Network as _, Sink as _, Stream as _,
+        thread, BufferPool, BufferPoolConfig, Error, Listener as _, Network as _, Sink as _,
+        Stream as _,
     };
     use commonware_macros::{select, test_group};
     use prometheus_client::registry::Registry;
@@ -682,8 +684,13 @@ mod tests {
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
-            Network::start(Config::default(), &mut Registry::default(), test_pool())
-                .expect("Failed to start io_uring")
+            Network::start(
+                Config::default(),
+                thread::system_default_stack_size(),
+                &mut Registry::default(),
+                test_pool(),
+            )
+            .expect("Failed to start io_uring")
         })
         .await;
     }
@@ -700,6 +707,7 @@ mod tests {
                     },
                     ..Default::default()
                 },
+                thread::system_default_stack_size(),
                 &mut Registry::default(),
                 test_pool(),
             )
@@ -710,8 +718,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_small_send_read_quickly() {
-        let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
-            .expect("Failed to start io_uring");
+        let network = Network::start(
+            Config::default(),
+            thread::system_default_stack_size(),
+            &mut Registry::default(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
 
         // Bind a listener
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -746,6 +759,7 @@ mod tests {
                 read_write_timeout: op_timeout,
                 ..Default::default()
             },
+            thread::system_default_stack_size(),
             &mut Registry::default(),
             test_pool(),
         )
@@ -788,6 +802,7 @@ mod tests {
                 read_buffer_size: 0,
                 ..Default::default()
             },
+            thread::system_default_stack_size(),
             &mut Registry::default(),
             test_pool(),
         )
@@ -841,6 +856,7 @@ mod tests {
                 read_write_timeout: op_timeout,
                 ..Default::default()
             },
+            thread::system_default_stack_size(),
             &mut Registry::default(),
             test_pool(),
         )
@@ -880,8 +896,13 @@ mod tests {
     #[tokio::test]
     async fn test_peek_with_buffered_data() {
         // Use default buffer size to enable buffering
-        let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
-            .expect("Failed to start io_uring");
+        let network = Network::start(
+            Config::default(),
+            thread::system_default_stack_size(),
+            &mut Registry::default(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();

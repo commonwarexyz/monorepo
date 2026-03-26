@@ -2,12 +2,22 @@
 
 use std::{sync::OnceLock, thread};
 
-static SYSTEM_DEFAULT_STACK_SIZE: OnceLock<Option<usize>> = OnceLock::new();
+/// Cached stack size used for runtime-owned spawned threads.
+static SYSTEM_DEFAULT_STACK_SIZE: OnceLock<usize> = OnceLock::new();
 
-/// Returns the operating system's default stack size for spawned threads when
-/// that value can be queried on the current platform.
-pub(crate) fn system_default_stack_size() -> Option<usize> {
-    *SYSTEM_DEFAULT_STACK_SIZE.get_or_init(system_default_stack_size_impl)
+/// Rust's default stack size for spawned threads when no explicit size is set.
+///
+/// See <https://doc.rust-lang.org/std/thread/#stack-size>.
+pub(crate) const RUST_DEFAULT_STACK_SIZE: usize = 2 * 1024 * 1024;
+
+/// Returns the system default stack size for spawned threads.
+///
+/// This uses the operating system's default spawned-thread stack size when it
+/// can be queried, and otherwise falls back to Rust's default spawned-thread
+/// stack size.
+pub(crate) fn system_default_stack_size() -> usize {
+    *SYSTEM_DEFAULT_STACK_SIZE
+        .get_or_init(|| system_default_stack_size_impl().unwrap_or(RUST_DEFAULT_STACK_SIZE))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -66,18 +76,16 @@ const fn system_default_stack_size_impl() -> Option<usize> {
     None
 }
 
-/// Spawns a thread with the operating system's default stack size when the
-/// platform exposes it. Falls back to Rust's default thread configuration.
-pub(crate) fn spawn<F, T>(f: F) -> thread::JoinHandle<T>
+/// Spawns a thread with an explicit stack size.
+pub(crate) fn spawn<F, T>(stack_size: usize, f: F) -> thread::JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    let mut builder = thread::Builder::new();
-    if let Some(stack_size) = system_default_stack_size() {
-        builder = builder.stack_size(stack_size);
-    }
-    builder.spawn(f).expect("failed to spawn thread")
+    thread::Builder::new()
+        .stack_size(stack_size)
+        .spawn(f)
+        .expect("failed to spawn thread")
 }
 
 #[cfg(test)]
@@ -86,14 +94,14 @@ mod tests {
 
     #[test]
     fn test_system_default_stack_size_is_positive_when_available() {
-        assert!(system_default_stack_size().is_none_or(|stack_size| stack_size > 0));
+        assert!(system_default_stack_size() > 0);
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn test_spawn_uses_system_default_stack_size() {
-        let expected = system_default_stack_size().expect("expected Linux default stack size");
-        let observed = spawn(|| {
+        let expected = system_default_stack_size();
+        let observed = spawn(expected, || {
             let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
 
             // SAFETY: `pthread_self` returns the current thread handle, and `attr`

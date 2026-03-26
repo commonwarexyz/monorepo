@@ -144,6 +144,12 @@ pub struct Config {
     /// operations that require blocking (like `fs` and writing to `Stdout`).
     max_blocking_threads: usize,
 
+    /// Stack size to use for runtime-owned threads.
+    ///
+    /// Defaults to the system stack size when the current platform exposes it,
+    /// and otherwise falls back to Rust's default spawned-thread stack size.
+    thread_stack_size: usize,
+
     /// Whether or not to catch panics.
     catch_panics: bool,
 
@@ -173,6 +179,7 @@ impl Config {
         Self {
             worker_threads: 2,
             max_blocking_threads: 512,
+            thread_stack_size: utils::thread::system_default_stack_size(),
             catch_panics: false,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
@@ -191,6 +198,11 @@ impl Config {
     /// See [Config]
     pub const fn with_max_blocking_threads(mut self, n: usize) -> Self {
         self.max_blocking_threads = n;
+        self
+    }
+    /// See [Config]
+    pub const fn with_thread_stack_size(mut self, n: usize) -> Self {
+        self.thread_stack_size = n;
         self
     }
     /// See [Config]
@@ -242,6 +254,10 @@ impl Config {
     /// See [Config]
     pub const fn max_blocking_threads(&self) -> usize {
         self.max_blocking_threads
+    }
+    /// See [Config]
+    pub const fn thread_stack_size(&self) -> usize {
+        self.thread_stack_size
     }
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
@@ -298,6 +314,7 @@ pub struct Executor {
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
+    thread_stack_size: usize,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
 }
@@ -334,15 +351,13 @@ impl crate::Runner for Runner {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
-        let mut builder = Builder::new_multi_thread();
-        builder
+        let runtime = Builder::new_multi_thread()
             .worker_threads(self.cfg.worker_threads)
             .max_blocking_threads(self.cfg.max_blocking_threads)
-            .enable_all();
-        if let Some(stack_size) = utils::thread::system_default_stack_size() {
-            builder.thread_stack_size(stack_size);
-        }
-        let runtime = builder.build().expect("failed to create Tokio runtime");
+            .thread_stack_size(self.cfg.thread_stack_size)
+            .enable_all()
+            .build()
+            .expect("failed to create Tokio runtime");
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
@@ -375,6 +390,7 @@ impl crate::Runner for Runner {
                             storage_directory: self.cfg.storage_directory.clone(),
                             iouring_config: Default::default(),
                         },
+                        self.cfg.thread_stack_size,
                         iouring_registry,
                         storage_buffer_pool.clone(),
                     ),
@@ -415,6 +431,7 @@ impl crate::Runner for Runner {
                 let network = MeteredNetwork::new(
                     IoUringNetwork::start(
                         config,
+                        self.cfg.thread_stack_size,
                         iouring_registry,
                         network_buffer_pool.clone(),
                     )
@@ -439,6 +456,7 @@ impl crate::Runner for Runner {
             registry: Mutex::new(registry),
             metrics,
             runtime,
+            thread_stack_size: self.cfg.thread_stack_size,
             shutdown: Mutex::new(Stopper::default()),
             panicker,
         });
@@ -584,7 +602,7 @@ impl crate::Spawner for Context {
         );
 
         if matches!(past, Execution::Dedicated) {
-            utils::thread::spawn({
+            utils::thread::spawn(executor.thread_stack_size, {
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
                 move || {
@@ -872,6 +890,21 @@ mod tests {
                 .thread_cache_capacity,
             BufferPoolThreadCache::ForParallelism(NZUsize!(8))
         );
+    }
+
+    #[test]
+    fn test_default_thread_stack_size_uses_system_default() {
+        let cfg = Config::new();
+        assert_eq!(
+            cfg.thread_stack_size(),
+            utils::thread::system_default_stack_size()
+        );
+    }
+
+    #[test]
+    fn test_thread_stack_size_override() {
+        let cfg = Config::new().with_thread_stack_size(4 * 1024 * 1024);
+        assert_eq!(cfg.thread_stack_size(), 4 * 1024 * 1024);
     }
 
     #[test]

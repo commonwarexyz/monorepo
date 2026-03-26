@@ -80,7 +80,12 @@ pub struct Storage {
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub fn start(mut cfg: Config, registry: &mut Registry, pool: BufferPool) -> Self {
+    pub fn start(
+        mut cfg: Config,
+        thread_stack_size: usize,
+        registry: &mut Registry,
+        pool: BufferPool,
+    ) -> Self {
         // Optimize performance by hinting the kernel that a single task will
         // submit requests. This is safe because each iouring instance runs in a
         // dedicated thread, which guarantees that the same thread that creates
@@ -95,7 +100,7 @@ impl Storage {
             pool,
         };
 
-        utils::thread::spawn(move || iouring_loop.run());
+        utils::thread::spawn(thread_stack_size, move || iouring_loop.run());
         storage
     }
 }
@@ -579,7 +584,8 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        storage::tests::run_storage_tests, Blob, BufferPool, BufferPoolConfig, Storage as _,
+        storage::tests::run_storage_tests, utils::thread, Blob, BufferPool, BufferPoolConfig,
+        Storage as _,
     };
     use rand::{Rng as _, SeedableRng as _};
     use std::env;
@@ -596,6 +602,7 @@ mod tests {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
             },
+            thread::system_default_stack_size(),
             &mut Registry::default(),
             pool,
         );
