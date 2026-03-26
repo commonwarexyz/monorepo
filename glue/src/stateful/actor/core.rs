@@ -25,9 +25,10 @@ use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_utils::{
     acknowledgement::Exact,
-    channel::{fallible::OneshotExt, mpsc, oneshot},
+    channel::{fallible::OneshotExt, mpsc, oneshot, ring},
     Acknowledgement,
 };
+use futures::SinkExt;
 use rand::Rng;
 use tracing::{debug, info};
 
@@ -111,7 +112,7 @@ where
     app: A,
 
     /// Anchored target updates forwarded to the bootstrap sync task.
-    tip_sender: mpsc::Sender<AnchoredUpdate<A, E>>,
+    tip_sender: ring::Sender<AnchoredUpdate<A, E>>,
 
     /// Resolver set attached once sync completes.
     sync_resolvers: R,
@@ -136,7 +137,7 @@ where
 {
     const fn new(
         app: A,
-        tip_sender: mpsc::Sender<AnchoredUpdate<A, E>>,
+        tip_sender: ring::Sender<AnchoredUpdate<A, E>>,
         sync_resolvers: R,
     ) -> Self {
         Self {
@@ -264,8 +265,7 @@ where
         P: BlockProvider<Block = A::Block> + Into<MarshalMailbox<S, V>>,
         R: AttachableResolverSet<A::Databases>,
     {
-        let (tip_sender, target_updates) =
-            mpsc::channel(self.sync_config.update_channel_size.get());
+        let (tip_sender, target_updates) = ring::channel(self.sync_config.update_channel_size);
         let bootstrap_mode = match self.startup {
             StartupMode::MarshalSync => BootstrapMode::MarshalSync,
             StartupMode::StateSync { block } => BootstrapMode::StateSync {
@@ -483,10 +483,10 @@ async fn handle_tip<E, A, P, R>(
     };
 
     let anchored_update = (Anchor { height, digest }, A::sync_targets(&block));
-    if syncing.tip_sender.try_send(anchored_update).is_err() {
+    if syncing.tip_sender.send(anchored_update).await.is_err() {
         debug!(
             height = height.get(),
-            "tip update channel unavailable, keeping existing sync target"
+            "tip update channel unavailable, skipping target update"
         );
     }
 }
