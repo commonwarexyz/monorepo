@@ -3061,6 +3061,202 @@ mod tests {
         }
     }
 
+    fn received_certificates_are_reported<S, F, L>(seed: u64, mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: Elector<S>,
+    {
+        let n = 4;
+        let required_containers = View::new(10);
+        let activity_timeout = ViewDelta::new(10);
+        let skip_timeout = ViewDelta::new(5);
+        let namespace = b"consensus".to_vec();
+        let cfg = deterministic::Config::new()
+            .with_seed(seed)
+            .with_timeout(Some(Duration::from_secs(30)));
+        let executor = deterministic::Runner::new(cfg);
+        executor.start(|mut context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: false,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+
+            // Link all honest nodes. Only link node 0 to node 1.
+            //
+            // Node 0 cannot locally form a certificate because it only sees itself plus one honest
+            // peer, but it should still receive the certificates relayed by that peer.
+            let link = Link {
+                latency: Duration::from_millis(100),
+                jitter: Duration::from_millis(1),
+                success_rate: 1.0,
+            };
+            fn link_graph(_: usize, i: usize, j: usize) -> bool {
+                if i == 0 || j == 0 {
+                    return i == 1 || j == 1;
+                }
+                true
+            }
+            link_validators(
+                &mut oracle,
+                &participants,
+                Action::Link(link),
+                Some(link_graph),
+            )
+            .await;
+
+            let elector = L::default();
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            for (idx_scheme, validator) in participants.iter().enumerate() {
+                let context = context.with_label(&format!("validator_{}", *validator));
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+
+                let application_cfg = mocks::application::Config {
+                    hasher: Sha256::default(),
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (10.0, 5.0),
+                    verify_latency: (10.0, 5.0),
+                    certify_latency: (10.0, 5.0),
+                    should_certify: mocks::application::Certifier::Sometimes,
+                };
+                let (actor, application) = mocks::application::Application::new(
+                    context.with_label("application"),
+                    application_cfg,
+                );
+                actor.start();
+                let blocker = oracle.control(validator.clone());
+                let cfg = config::Config {
+                    scheme: schemes[idx_scheme].clone(),
+                    elector: elector.clone(),
+                    blocker,
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.clone().to_string(),
+                    mailbox_size: 1024,
+                    epoch: Epoch::new(333),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    activity_timeout,
+                    skip_timeout,
+                    fetch_concurrent: 4,
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forwarding: ForwardingPolicy::Disabled,
+                };
+                let engine = Engine::new(context.with_label("engine"), cfg);
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine.start(pending, recovered, resolver);
+            }
+            // Wait for an honest node to observe the finalizations
+            let excluded_reporter = reporters[0].clone();
+            let mut honest_reporter = reporters[1].clone();
+            let (mut honest_latest, mut honest_monitor) = honest_reporter.subscribe().await;
+            while honest_latest < required_containers {
+                honest_latest = honest_monitor.recv().await.expect("event missing");
+            }
+
+            // Wait for all in-flight certificates to arrive at excluded node and be reported.
+            context.sleep(Duration::from_secs(1)).await;
+
+            // It should have received similar certificates to the honest node (with some
+            // tolerance for initial views in which may not have yet been connected).
+            let honest_notarized = {
+                let notarizations = honest_reporter.notarizations.lock();
+                View::range(View::new(1), required_containers.next())
+                    .filter(|view| notarizations.contains_key(view))
+                    .count()
+            };
+            let excluded_notarized = {
+                let notarizations = excluded_reporter.notarizations.lock();
+                View::range(View::new(1), required_containers.next())
+                    .filter(|view| notarizations.contains_key(view))
+                    .count()
+            };
+            assert!(
+                excluded_notarized >= honest_notarized.saturating_sub(2),
+                "honest_notarized: {honest_notarized}, excluded_notarized: {excluded_notarized}"
+            );
+
+            let honest_finalized = {
+                let finalizations = honest_reporter.finalizations.lock();
+                View::range(View::new(1), required_containers.next())
+                    .filter(|view| finalizations.contains_key(view))
+                    .count()
+            };
+            let excluded_finalized = {
+                let finalizations = excluded_reporter.finalizations.lock();
+                View::range(View::new(1), required_containers.next())
+                    .filter(|view| finalizations.contains_key(view))
+                    .count()
+            };
+            assert!(
+                excluded_finalized >= honest_finalized.saturating_sub(2),
+                "honest_finalized: {honest_finalized}, excluded_finalized: {excluded_finalized}"
+            );
+        });
+    }
+
+    // Test that when a node receives finalizations, it reports them.
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_received_certificates_are_reported() {
+        received_certificates_are_reported::<_, _, Random>(
+            0,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        received_certificates_are_reported::<_, _, Random>(
+            0,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        received_certificates_are_reported::<_, _, RoundRobin>(
+            0,
+            bls12381_threshold_std::fixture::<MinPk, _>,
+        );
+        received_certificates_are_reported::<_, _, RoundRobin>(
+            0,
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        received_certificates_are_reported::<_, _, RoundRobin>(
+            0,
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        received_certificates_are_reported::<_, _, RoundRobin>(
+            0,
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        received_certificates_are_reported::<_, _, RoundRobin>(0, ed25519::fixture);
+        received_certificates_are_reported::<_, _, RoundRobin>(0, secp256r1::fixture);
+    }
+
     fn impersonator<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
