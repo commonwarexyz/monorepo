@@ -155,7 +155,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     type Error: Debug + Send;
 
     /// Configuration needed to construct a new database instance.
-    type Config: Clone + Send;
+    type Config: Send;
 
     /// Sync target type for state sync of this database.
     ///
@@ -217,7 +217,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// - Single database sets use that database's [`ManagedDb::Config`].
     /// - Multi-database tuple sets use a tuple of per-database configs
     ///   `(Db1::Config, Db2::Config, ...)`.
-    type Config: Clone + Send;
+    type Config: Send;
 
     /// Per-database sync targets extracted from a finalized block.
     ///

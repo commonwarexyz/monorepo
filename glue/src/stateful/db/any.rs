@@ -62,8 +62,8 @@ where
 impl<E, C, I, H, K, V> AnyUnmerkleized<E, C, I, H, unordered::Update<K, V>>
 where
     E: Storage + Clock + Metrics,
-    K: Key + Send,
-    V: ValueEncoding + Send + 'static,
+    K: Key,
+    V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<unordered::Update<K, V>>>
         + Persistable<Error = commonware_storage::journal::Error>,
     I: UnorderedIndex<Value = Location> + 'static,
@@ -141,8 +141,8 @@ where
 impl<E, C, I, H, K, V> AnyUnmerkleized<E, C, I, H, ordered::Update<K, V>>
 where
     E: Storage + Clock + Metrics,
-    K: Key + Send,
-    V: ValueEncoding + Send + 'static,
+    K: Key,
+    V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<ordered::Update<K, V>>>
         + Persistable<Error = commonware_storage::journal::Error>,
     I: OrderedIndex<Value = Location> + 'static,
@@ -166,8 +166,8 @@ where
 impl<E, C, I, H, K, V> UnmerkleizedTrait for AnyUnmerkleized<E, C, I, H, unordered::Update<K, V>>
 where
     E: Storage + Clock + Metrics,
-    K: Key + Send,
-    V: ValueEncoding + Send + 'static,
+    K: Key,
+    V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<unordered::Update<K, V>>>
         + Persistable<Error = commonware_storage::journal::Error>,
     I: UnorderedIndex<Value = Location> + 'static,
@@ -191,8 +191,8 @@ where
 impl<E, C, I, H, K, V> UnmerkleizedTrait for AnyUnmerkleized<E, C, I, H, ordered::Update<K, V>>
 where
     E: Storage + Clock + Metrics,
-    K: Key + Send,
-    V: ValueEncoding + Send + 'static,
+    K: Key,
+    V: ValueEncoding + 'static,
     C: Mutable<Item = Operation<ordered::Update<K, V>>>
         + Persistable<Error = commonware_storage::journal::Error>,
     I: OrderedIndex<Value = Location> + 'static,
