@@ -694,8 +694,8 @@ fn persist_trace_if_selected(base_dir: &str, hash_hex: &str, trace_data: &TraceD
     true
 }
 
-/// Run consensus with a Byzantine twin- and disruptor-node and quint tracing, capturing messages as JSON.
-pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
+/// Run consensus with a Byzantine twin and quint tracing, capturing messages as JSON.
+pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);

@@ -142,8 +142,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "simplex_ed25519_quint"
-path = "fuzz_targets/simplex_ed25519_quint.rs"
+name = "simplex_ed25519_quint_twins"
+path = "fuzz_targets/simplex_ed25519_quint_twins.rs"
 test = false
 doc = false
 bench = false

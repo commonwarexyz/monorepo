@@ -780,8 +780,8 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(input: FuzzInput) {
     }
 }
 
-pub fn run_quint_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
-    tracing::run_quint_tracing(input, corpus_bytes);
+pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
+    tracing::run_quint_twins_tracing(input, corpus_bytes);
 }
 
 pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {

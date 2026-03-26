@@ -68,7 +68,7 @@ enum ActionItem {
         receiver: String,
         view: u64,
         block: String,
-        /// Individual vote constructor, e.g. `notarize(2, "n0", "val_b0")`.
+        /// Individual vote constructor, e.g. `notarize(proposal_v2_val_b0, "n0")`.
         vote: String,
     },
 }
@@ -89,12 +89,16 @@ pub struct EncoderConfig {
 
 /// Proposal information reconstructed from trace data.
 struct ViewProposal {
-    block_name: String,
     leader: String,
     view_parent: u64,
-    block_parent_name: String,
     /// Correct nodes that sent notarize votes for this view.
     correct_notarizers: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct ProposalKey {
+    view: u64,
+    block_name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -129,6 +133,21 @@ fn vote_replay_key(vote: &TracedVote, sig: String) -> VoteReplayKey {
             block: block.clone(),
         },
     }
+}
+
+fn proposal_key(view: u64, block_name: &str) -> ProposalKey {
+    ProposalKey {
+        view,
+        block_name: block_name.to_string(),
+    }
+}
+
+fn proposal_var_name(key: &ProposalKey) -> String {
+    format!("proposal_v{}_{}", key.view, key.block_name)
+}
+
+fn proposal_ref(view: u64, block_name: &str) -> String {
+    proposal_var_name(&proposal_key(view, block_name))
 }
 
 fn collect_honest_votes(entries: &[TraceEntry], cfg: &EncoderConfig) -> HashSet<VoteReplayKey> {
@@ -199,8 +218,11 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     let f = (cfg.n - 1) / 3;
     let q = cfg.n - f;
 
-    // Build view proposals from notarize votes
-    let proposals = build_view_proposals(&correct_entries, &block_map, &leader_map, cfg);
+    let vote_blocks = build_correct_vote_blocks(&correct_entries, &block_map, cfg);
+
+    // Build view proposals from notarize votes and authentic certificates
+    let proposals =
+        build_view_proposals(&correct_entries, &block_map, &leader_map, &vote_blocks, cfg);
 
     let mut out = String::new();
 
@@ -241,17 +263,17 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
 
     writeln!(out, "        VIEWS = 1.to({}),", cfg.max_view).unwrap();
 
-    // VALID_BLOCKS
-    write!(out, "        VALID_BLOCKS = Set(").unwrap();
+    // VALID_PAYLOADS
+    write!(out, "        VALID_PAYLOADS = Set(").unwrap();
     write!(out, "{}", all_blocks.join(", ")).unwrap();
     writeln!(out, "),").unwrap();
-    writeln!(out, "        INVALID_BLOCKS = Set()").unwrap();
+    writeln!(out, "        INVALID_PAYLOADS = Set()").unwrap();
     writeln!(out, "    ).* from \"../replica\"").unwrap();
     writeln!(out).unwrap();
 
     // Certify policy: derive from block hash using Certifier::Sometimes logic
     writeln!(out, "    pure val CERTIFY_POLICY = Map(").unwrap();
-    writeln!(out, "        GENESIS_BLOCK -> true,").unwrap();
+    writeln!(out, "        GENESIS_PAYLOAD -> true,").unwrap();
     for (hash, name) in &block_map {
         let certifiable = is_certifiable(hash);
         writeln!(out, "        \"{}\" -> {},", name, certifiable).unwrap();
@@ -265,31 +287,29 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     writeln!(out).unwrap();
 
     // Emit proposal val declarations
-    let mut sorted_views: Vec<u64> = proposals.keys().cloned().collect();
-    sorted_views.sort();
-    for &view in &sorted_views {
-        let p = &proposals[&view];
-        let vp_str = if p.view_parent == 0 {
+    let mut sorted_proposals: Vec<ProposalKey> = proposals.keys().cloned().collect();
+    sorted_proposals.sort();
+    for key in &sorted_proposals {
+        let p = &proposals[key];
+        let parent_str = if p.view_parent == 0 {
             "GENESIS_VIEW".to_string()
         } else {
             p.view_parent.to_string()
         };
-        let bp_str = if p.view_parent == 0 {
-            "GENESIS_BLOCK".to_string()
-        } else {
-            format!("\"{}\"", p.block_parent_name)
-        };
         writeln!(
             out,
-            "    pure val proposal_v{} = {{ block: \"{}\", view: {}, view_parent: {}, block_parent: {}, sig: sig_of(\"{}\") }}",
-            view, p.block_name, view, vp_str, bp_str, p.leader
+            "    pure val {} = {{ payload: \"{}\", view: {}, parent: {}, sig: sig_of(\"{}\") }}",
+            proposal_var_name(key),
+            key.block_name,
+            key.view,
+            parent_str,
+            p.leader
         )
         .unwrap();
     }
     writeln!(out).unwrap();
 
     // Generate actions in original trace order, then group vote deliveries
-    let vote_blocks = build_correct_vote_blocks(&correct_entries, &block_map, cfg);
     let action_items = build_actions(
         &correct_entries,
         &block_map,
@@ -378,35 +398,45 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
 /// self-delivery (once per node+view) if not already done.
 fn ensure_proposal_and_on_proposal(
     node: &str,
-    view: u64,
-    block_name: &str,
-    proposal_injected: &mut HashSet<u64>,
+    proposal: &ProposalKey,
+    proposal_injected: &mut HashSet<ProposalKey>,
     on_proposal_done: &mut HashSet<(String, u64)>,
     self_delivered: &mut HashSet<(String, u64, String)>,
     actions: &mut Vec<ActionItem>,
 ) {
-    if proposal_injected.insert(view) {
+    if proposal_injected.insert(proposal.clone()) {
         actions.push(ActionItem::Barrier(format!(
-            "inject_proposal(proposal_v{})",
-            view
+            "inject_proposal({})",
+            proposal_var_name(proposal)
         )));
     }
-    if on_proposal_done.insert((node.to_string(), view)) {
+    if on_proposal_done.insert((node.to_string(), proposal.view)) {
         actions.push(ActionItem::Barrier(format!(
-            "on_proposal(\"{}\", proposal_v{})",
-            node, view
+            "on_proposal(\"{}\", {})",
+            node,
+            proposal_var_name(proposal)
         )));
         // Self-delivery: node receives its own notarize vote
-        if self_delivered.insert((node.to_string(), view, "notarize".to_string())) {
+        if self_delivered.insert((node.to_string(), proposal.view, "notarize".to_string())) {
             actions.push(ActionItem::VoteDelivery {
                 kind: VoteKind::Notarize,
                 receiver: node.to_string(),
-                view,
-                block: block_name.to_string(),
-                vote: format!("notarize({}, \"{}\", \"{}\")", view, node, block_name),
+                view: proposal.view,
+                block: proposal.block_name.clone(),
+                vote: format!("notarize({}, \"{}\")", proposal_var_name(proposal), node),
             });
         }
     }
+}
+
+fn is_correct_notarizer_for_view(
+    proposals: &HashMap<ProposalKey, ViewProposal>,
+    view: u64,
+    sig: &str,
+) -> bool {
+    proposals
+        .iter()
+        .any(|(key, proposal)| key.view == view && proposal.correct_notarizers.iter().any(|s| s == sig))
 }
 
 /// Pre-scans the trace to build a map of blocks that correct nodes actually
@@ -520,13 +550,13 @@ fn is_authentic_cert(
 fn build_actions(
     entries: &[TraceEntry],
     block_map: &[(String, String)],
-    proposals: &HashMap<u64, ViewProposal>,
+    proposals: &HashMap<ProposalKey, ViewProposal>,
     cfg: &EncoderConfig,
     leader_lookup: &HashMap<u64, String>,
     vote_blocks: &HashMap<(String, u64, String), HashSet<String>>,
 ) -> Vec<ActionItem> {
     let mut actions: Vec<ActionItem> = Vec::new();
-    let mut proposal_injected: HashSet<u64> = HashSet::new();
+    let mut proposal_injected: HashSet<ProposalKey> = HashSet::new();
     let mut on_proposal_done: HashSet<(String, u64)> = HashSet::new();
     // Keys include block name for notarize/finalize to handle byzantine equivocation
     // (same signer, same view, different blocks).
@@ -551,6 +581,7 @@ fn build_actions(
                 TracedVote::Notarize { view, sig, block } => {
                     let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
                     let bn = map_block(block, block_map);
+                    let proposal = proposal_key(*view, &bn);
                     let is_leader =
                         leader_lookup.get(view).map(|l| l.as_str()) == Some(sig.as_str());
 
@@ -558,13 +589,12 @@ fn build_actions(
                     // vote in sent_vote). Triggered when we first see their vote.
                     if !is_byzantine_node(&sig, cfg.faults)
                         && proposals
-                            .get(view)
+                            .get(&proposal)
                             .map_or(false, |p| p.correct_notarizers.contains(&sig))
                     {
                         ensure_proposal_and_on_proposal(
                             &sig,
-                            *view,
-                            &bn,
+                            &proposal,
                             &mut proposal_injected,
                             &mut on_proposal_done,
                             &mut self_delivered,
@@ -577,13 +607,12 @@ fn build_actions(
                     if is_leader
                         && !is_byzantine_node(receiver, cfg.faults)
                         && proposals
-                            .get(view)
+                            .get(&proposal)
                             .map_or(false, |p| p.correct_notarizers.contains(receiver))
                     {
                         ensure_proposal_and_on_proposal(
                             receiver,
-                            *view,
-                            &bn,
+                            &proposal,
                             &mut proposal_injected,
                             &mut on_proposal_done,
                             &mut self_delivered,
@@ -601,8 +630,9 @@ fn build_actions(
                         ))
                     {
                         actions.push(ActionItem::Barrier(format!(
-                            "inject_vote(notarize({}, \"{}\", \"{}\"))",
-                            view, sig, bn
+                            "inject_vote(notarize({}, \"{}\"))",
+                            proposal_ref(*view, &bn),
+                            sig
                         )));
                     }
 
@@ -612,7 +642,7 @@ fn build_actions(
                         receiver: receiver.clone(),
                         view: *view,
                         block: bn.clone(),
-                        vote: format!("notarize({}, \"{}\", \"{}\")", view, sig, bn),
+                        vote: format!("notarize({}, \"{}\")", proposal_ref(*view, &bn), sig),
                     });
                 }
                 TracedVote::Finalize { view, sig, block } => {
@@ -628,7 +658,7 @@ fn build_actions(
                             receiver: sig.clone(),
                             view: *view,
                             block: bn.clone(),
-                            vote: format!("finalize({}, \"{}\", \"{}\")", view, sig, bn),
+                            vote: format!("finalize({}, \"{}\")", proposal_ref(*view, &bn), sig),
                         });
                     }
 
@@ -642,8 +672,9 @@ fn build_actions(
                         ))
                     {
                         actions.push(ActionItem::Barrier(format!(
-                            "inject_vote(finalize({}, \"{}\", \"{}\"))",
-                            view, sig, bn
+                            "inject_vote(finalize({}, \"{}\"))",
+                            proposal_ref(*view, &bn),
+                            sig
                         )));
                     }
 
@@ -653,16 +684,14 @@ fn build_actions(
                         receiver: receiver.clone(),
                         view: *view,
                         block: bn.clone(),
-                        vote: format!("finalize({}, \"{}\", \"{}\")", view, sig, bn),
+                        vote: format!("finalize({}, \"{}\")", proposal_ref(*view, &bn), sig),
                     });
                 }
                 TracedVote::Nullify { view, sig } => {
                     let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
                     // Correct nullify: inject if not produced by on_proposal
                     if !is_byzantine_node(&sig, cfg.faults) {
-                        let needs_inject = proposals
-                            .get(view)
-                            .map_or(true, |p| !p.correct_notarizers.contains(&sig));
+                        let needs_inject = !is_correct_notarizer_for_view(proposals, *view, &sig);
                         if needs_inject
                             && injected_votes.insert((
                                 sig.clone(),
@@ -779,16 +808,16 @@ fn build_actions(
                 } = cert
                 {
                     let bn = map_block(block, block_map);
+                    let proposal = proposal_key(*view, &bn);
                     for sig in signers {
                         if !is_byzantine_node(sig, cfg.faults)
                             && proposals
-                                .get(view)
+                                .get(&proposal)
                                 .map_or(false, |p| p.correct_notarizers.contains(sig))
                         {
                             ensure_proposal_and_on_proposal(
                                 sig,
-                                *view,
-                                &bn,
+                                &proposal,
                                 &mut proposal_injected,
                                 &mut on_proposal_done,
                                 &mut self_delivered,
@@ -802,9 +831,8 @@ fn build_actions(
                 if let TracedCert::Nullification { view, signers, .. } = cert {
                     for sig in signers {
                         if !is_byzantine_node(sig, cfg.faults) {
-                            let needs_inject = proposals
-                                .get(view)
-                                .map_or(true, |p| !p.correct_notarizers.contains(sig));
+                            let needs_inject =
+                                !is_correct_notarizer_for_view(proposals, *view, sig);
                             if needs_inject
                                 && injected_votes.insert((
                                     sig.clone(),
@@ -994,9 +1022,8 @@ fn encode_cert(cert: &TracedCert, block_map: &[(String, String)]) -> String {
             let block_name = map_block(block, block_map);
             let sigs: Vec<String> = signers.iter().map(|s| format!("\"{}\"", s)).collect();
             format!(
-                "notarization({}, \"{}\", Set({}), \"{}\")",
-                view,
-                block_name,
+                "notarization({}, Set({}), \"{}\")",
+                proposal_ref(*view, &block_name),
                 sigs.join(", "),
                 ghost_sender
             )
@@ -1023,9 +1050,8 @@ fn encode_cert(cert: &TracedCert, block_map: &[(String, String)]) -> String {
             let block_name = map_block(block, block_map);
             let sigs: Vec<String> = signers.iter().map(|s| format!("\"{}\"", s)).collect();
             format!(
-                "finalization({}, \"{}\", Set({}), \"{}\")",
-                view,
-                block_name,
+                "finalization({}, Set({}), \"{}\")",
+                proposal_ref(*view, &block_name),
                 sigs.join(", "),
                 ghost_sender
             )
@@ -1033,80 +1059,139 @@ fn encode_cert(cert: &TracedCert, block_map: &[(String, String)]) -> String {
     }
 }
 
-/// Builds view proposals from notarize votes in the trace.
+/// Builds proposals from block-carrying entries in the trace.
 ///
-/// For each view with notarize votes, determines the block, leader, parent
-/// references, and which correct nodes sent notarize. Parent references form
-/// a chain: each view's parent is the most recently notarized (view, block).
+/// Twins traces may contain multiple Byzantine proposals in the same view, so
+/// proposals are reconstructed per `(view, block)`. All proposals within a
+/// given view share the same parent view, and the parent for the next view is
+/// chosen from the latest authentic certifiable certificate.
 fn build_view_proposals(
     entries: &[TraceEntry],
     block_map: &[(String, String)],
     leader_map: &[(u64, String)],
+    vote_blocks: &HashMap<(String, u64, String), HashSet<String>>,
     cfg: &EncoderConfig,
-) -> HashMap<u64, ViewProposal> {
-    // Collect views with notarize votes from correct nodes
-    let mut view_block_hash: HashMap<u64, String> = HashMap::new();
-    let mut view_correct_notarizers: HashMap<u64, Vec<String>> = HashMap::new();
+) -> HashMap<ProposalKey, ViewProposal> {
+    let mut per_view_blocks: HashMap<u64, HashMap<String, (Vec<String>, usize)>> = HashMap::new();
+    let mut certified_blocks: HashMap<u64, HashMap<String, usize>> = HashMap::new();
 
-    for entry in entries {
-        if let TraceEntry::Vote {
-            sender,
-            vote: TracedVote::Notarize { view, sig, block },
-            ..
-        } = entry
-        {
-            let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
-            // Only use correct nodes' votes for the block hash to avoid
-            // picking a byzantine node's equivocating block.
-            if !is_byzantine_node(&sig, cfg.faults) {
-                view_block_hash
+    for (idx, entry) in entries.iter().enumerate() {
+        match entry {
+            TraceEntry::Vote {
+                sender,
+                vote: TracedVote::Notarize { view, sig, block },
+                ..
+            } => {
+                let block_name = map_block(block, block_map);
+                let block_entry = per_view_blocks
                     .entry(*view)
-                    .or_insert_with(|| block.clone());
-                let notarizers = view_correct_notarizers.entry(*view).or_default();
-                if !notarizers.contains(&sig) {
-                    notarizers.push(sig);
+                    .or_default()
+                    .entry(block_name)
+                    .or_insert_with(|| (Vec::new(), idx));
+                block_entry.1 = idx;
+
+                let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
+                if !is_byzantine_node(&sig, cfg.faults) {
+                    if !block_entry.0.contains(&sig) {
+                        block_entry.0.push(sig);
+                    }
                 }
             }
+            TraceEntry::Vote {
+                vote: TracedVote::Finalize { view, block, .. },
+                ..
+            } => {
+                let block_name = map_block(block, block_map);
+                let block_entry = per_view_blocks
+                    .entry(*view)
+                    .or_default()
+                    .entry(block_name)
+                    .or_insert_with(|| (Vec::new(), idx));
+                block_entry.1 = idx;
+            }
+            TraceEntry::Certificate { cert, .. } if is_authentic_cert(
+                cert,
+                vote_blocks,
+                block_map,
+                cfg.faults,
+            ) =>
+            {
+                match cert {
+                    TracedCert::Notarization { view, block, .. }
+                    | TracedCert::Finalization { view, block, .. } => {
+                        let block_name = map_block(block, block_map);
+                        per_view_blocks
+                            .entry(*view)
+                            .or_default()
+                            .entry(block_name.clone())
+                            .or_insert_with(|| (Vec::new(), idx))
+                            .1 = idx;
+                        if is_certifiable(block) {
+                            certified_blocks
+                                .entry(*view)
+                                .or_default()
+                                .insert(block_name, idx);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
         }
     }
 
-    // Sort views to build parent chain
-    let mut views: Vec<u64> = view_block_hash.keys().cloned().collect();
+    let mut views: Vec<u64> = per_view_blocks.keys().cloned().collect();
     views.sort();
 
-    let leader_lookup: HashMap<u64, &str> =
-        leader_map.iter().map(|(v, l)| (*v, l.as_str())).collect();
+    let leader_lookup: HashMap<u64, String> = leader_map.iter().cloned().collect();
 
     let mut last_parent_view: u64 = 0;
-    let mut last_parent_block_name = String::new();
 
     let mut proposals = HashMap::new();
     for &view in &views {
-        let block_hash = &view_block_hash[&view];
-        let block_name = map_block(block_hash, block_map);
-        let leader = leader_lookup.get(&view).unwrap_or(&"").to_string();
-        let correct_notarizers = view_correct_notarizers
-            .get(&view)
-            .cloned()
-            .unwrap_or_default();
+        let mut view_blocks: Vec<(ProposalKey, Vec<String>, usize)> = per_view_blocks[&view]
+            .iter()
+            .map(|(block_name, (correct_notarizers, last_seen_idx))| {
+                (
+                    proposal_key(view, block_name),
+                    correct_notarizers.clone(),
+                    *last_seen_idx,
+                )
+            })
+            .collect();
+        view_blocks.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.block_name.cmp(&b.0.block_name)));
 
-        proposals.insert(
-            view,
-            ViewProposal {
-                block_name: block_name.clone(),
-                leader,
-                view_parent: last_parent_view,
-                block_parent_name: last_parent_block_name.clone(),
-                correct_notarizers,
-            },
-        );
+        for (key, correct_notarizers, _) in &view_blocks {
+            proposals.insert(
+                key.clone(),
+                ViewProposal {
+                    leader: leader_lookup.get(&view).cloned().unwrap_or_default(),
+                    view_parent: last_parent_view,
+                    correct_notarizers: correct_notarizers.clone(),
+                },
+            );
+        }
 
-        // Only update parent chain if the block is certifiable.
-        // Uncertifiable blocks get nullified and cannot serve as a valid
-        // parent (valid_parent requires finalized or notarized+certified).
-        if is_certifiable(block_hash) {
-            last_parent_view = view;
-            last_parent_block_name = block_name;
+        if let Some(view_certified_blocks) = certified_blocks.get(&view) {
+            let support = |key: &ProposalKey| {
+                per_view_blocks
+                    .get(&view)
+                    .and_then(|blocks| blocks.get(&key.block_name))
+                    .map_or(0, |(correct_notarizers, _)| correct_notarizers.len())
+            };
+
+            if view_certified_blocks
+                .iter()
+                .max_by(|a, b| {
+                    support(&proposal_key(view, a.0))
+                        .cmp(&support(&proposal_key(view, b.0)))
+                        .then_with(|| a.1.cmp(b.1))
+                        .then_with(|| a.0.cmp(b.0))
+                })
+                .is_some()
+            {
+                last_parent_view = view;
+            }
         }
     }
 
@@ -1135,8 +1220,9 @@ fn inject_byzantine_cert_votes(
                 }
                 if injected.insert((sig.clone(), *view, "notarize".into(), bn.clone())) {
                     actions.push(ActionItem::Barrier(format!(
-                        "inject_vote(notarize({}, \"{}\", \"{}\"))",
-                        view, sig, bn
+                        "inject_vote(notarize({}, \"{}\"))",
+                        proposal_ref(*view, &bn),
+                        sig
                     )));
                 }
             }
@@ -1167,8 +1253,9 @@ fn inject_byzantine_cert_votes(
                 }
                 if injected.insert((sig.clone(), *view, "finalize".into(), bn.clone())) {
                     actions.push(ActionItem::Barrier(format!(
-                        "inject_vote(finalize({}, \"{}\", \"{}\"))",
-                        view, sig, bn
+                        "inject_vote(finalize({}, \"{}\"))",
+                        proposal_ref(*view, &bn),
+                        sig
                     )));
                 }
             }
@@ -1193,7 +1280,6 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "        store_vote' = store_vote,").unwrap();
     writeln!(out, "        store_certificate' = store_certificate,").unwrap();
     writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
-    writeln!(out, "        parent_refs' = parent_refs,").unwrap();
     writeln!(
         out,
         "        ghost_committed_blocks' = ghost_committed_blocks,"
@@ -1213,7 +1299,6 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "        store_vote' = store_vote,").unwrap();
     writeln!(out, "        store_certificate' = store_certificate,").unwrap();
     writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
-    writeln!(out, "        parent_refs' = parent_refs,").unwrap();
     writeln!(
         out,
         "        ghost_committed_blocks' = ghost_committed_blocks,"
