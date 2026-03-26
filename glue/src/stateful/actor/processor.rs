@@ -456,7 +456,9 @@ where
             Some(entry) => entry.merkleized,
             None => {
                 let batches = self.databases.new_batches().await;
-                self.app.apply((context.clone(), block_context), &block, batches).await
+                self.app
+                    .apply((context.clone(), block_context), &block, batches)
+                    .await
             }
         };
 
