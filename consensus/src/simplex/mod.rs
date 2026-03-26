@@ -3061,7 +3061,7 @@ mod tests {
         }
     }
 
-    fn received_finalizations_are_reported<S, F, L>(seed: u64, mut fixture: F)
+    fn received_certificates_are_reported<S, F, L>(seed: u64, mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -3228,33 +3228,33 @@ mod tests {
     // Test that when a node receives finalizations, it reports them.
     #[test_group("slow")]
     #[test_traced]
-    fn test_received_finalizations_are_reported() {
-        received_finalizations_are_reported::<_, _, Random>(
+    fn test_received_certificates_are_reported() {
+        received_certificates_are_reported::<_, _, Random>(
             0,
             bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
-        received_finalizations_are_reported::<_, _, Random>(
+        received_certificates_are_reported::<_, _, Random>(
             0,
             bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
-        received_finalizations_are_reported::<_, _, RoundRobin>(
+        received_certificates_are_reported::<_, _, RoundRobin>(
             0,
             bls12381_threshold_std::fixture::<MinPk, _>,
         );
-        received_finalizations_are_reported::<_, _, RoundRobin>(
+        received_certificates_are_reported::<_, _, RoundRobin>(
             0,
             bls12381_threshold_std::fixture::<MinSig, _>,
         );
-        received_finalizations_are_reported::<_, _, RoundRobin>(
+        received_certificates_are_reported::<_, _, RoundRobin>(
             0,
             bls12381_multisig::fixture::<MinPk, _>,
         );
-        received_finalizations_are_reported::<_, _, RoundRobin>(
+        received_certificates_are_reported::<_, _, RoundRobin>(
             0,
             bls12381_multisig::fixture::<MinSig, _>,
         );
-        received_finalizations_are_reported::<_, _, RoundRobin>(0, ed25519::fixture);
-        received_finalizations_are_reported::<_, _, RoundRobin>(0, secp256r1::fixture);
+        received_certificates_are_reported::<_, _, RoundRobin>(0, ed25519::fixture);
+        received_certificates_are_reported::<_, _, RoundRobin>(0, secp256r1::fixture);
     }
 
     fn impersonator<S, F, L>(seed: u64, mut fixture: F)
