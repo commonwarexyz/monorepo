@@ -398,6 +398,7 @@ mod tests {
             mocks::{
                 scheme as scheme_mocks,
                 twins::{self, Elector as TwinsElector},
+                wrapped_scheme::{Behavior, WrappedConfig, WrappedScheme},
             },
             scheme::{
                 bls12381_multisig,
@@ -416,10 +417,10 @@ mod tests {
         types::{Epoch, Round},
         Monitor, Viewable,
     };
-    use commonware_codec::{types::lazy::Lazy, Decode, DecodeExt, Encode};
+    use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
-        certificate::{mocks::Fixture, Attestation, Verification},
+        certificate::mocks::Fixture,
         ed25519::{PrivateKey, PublicKey},
         sha256::{Digest as Sha256Digest, Digest as D},
         Hasher as _, Sha256, Signer as _,
@@ -435,7 +436,7 @@ mod tests {
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
     };
-    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, Participant, NZU16};
+    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _, SeedableRng};
@@ -451,276 +452,6 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum Behavior {
-        Honest,
-        CorruptSignature,
-    }
-
-    #[derive(Clone, Debug)]
-    struct WrappedScheme<S> {
-        inner: S,
-        behavior: Behavior,
-    }
-
-    #[derive(Clone, Debug)]
-    struct WrappedElector<E, S> {
-        inner: E,
-        _phantom: std::marker::PhantomData<S>,
-    }
-
-    #[derive(Clone, Debug, Default)]
-    struct WrappedConfig<L>(L);
-
-    impl<S> WrappedScheme<S> {
-        const fn new(inner: S, behavior: Behavior) -> Self {
-            Self { inner, behavior }
-        }
-
-        fn to_inner_attestation(attestation: &Attestation<Self>) -> Attestation<S>
-        where
-            S: commonware_cryptography::certificate::Scheme,
-        {
-            Attestation {
-                signer: attestation.signer,
-                signature: attestation.signature.clone(),
-            }
-        }
-
-        fn from_inner_attestation(attestation: Attestation<S>) -> Attestation<Self>
-        where
-            S: commonware_cryptography::certificate::Scheme,
-        {
-            Attestation {
-                signer: attestation.signer,
-                signature: attestation.signature,
-            }
-        }
-
-        fn corrupt_signature<D>(
-            inner: &S,
-            subject: <S as commonware_cryptography::certificate::Scheme>::Subject<'_, D>,
-            signer: Participant,
-            signature: &<S as commonware_cryptography::certificate::Scheme>::Signature,
-        ) -> Lazy<<S as commonware_cryptography::certificate::Scheme>::Signature>
-        where
-            S: commonware_cryptography::certificate::Scheme,
-            D: commonware_cryptography::Digest,
-        {
-            let encoded = signature.encode().to_vec();
-            let mut hasher = Sha256::default();
-            hasher.update(&signer.encode());
-            hasher.update(&encoded);
-            let digest = hasher.finalize();
-            let start = usize::from(digest.as_ref()[0]) % (encoded.len() * 8);
-
-            for offset in 0..(encoded.len() * 8) {
-                let flip = (start + offset) % (encoded.len() * 8);
-                let byte = flip / 8;
-                let bit = flip % 8;
-                let mut corrupted = encoded.clone();
-                corrupted[byte] ^= 1 << bit;
-                let lazy = Lazy::deferred(&mut corrupted.as_slice(), ());
-                let attestation = Attestation {
-                    signer,
-                    signature: lazy.clone(),
-                };
-                if lazy.get().is_some()
-                    && !inner.verify_attestation(
-                        &mut test_rng(),
-                        subject.clone(),
-                        &attestation,
-                        &Sequential,
-                    )
-                {
-                    return lazy;
-                }
-            }
-
-            panic!("expected at least one invalid but decodable signature mutation");
-        }
-    }
-
-    impl<S, L> elector::Config<WrappedScheme<S>> for WrappedConfig<L>
-    where
-        S: commonware_cryptography::certificate::Scheme,
-        L: elector::Config<S>,
-    {
-        type Elector = WrappedElector<L::Elector, S>;
-
-        fn build(
-            self,
-            participants: &commonware_utils::ordered::Set<
-                <WrappedScheme<S> as commonware_cryptography::certificate::Scheme>::PublicKey,
-            >,
-        ) -> Self::Elector {
-            WrappedElector {
-                inner: self.0.build(participants),
-                _phantom: std::marker::PhantomData,
-            }
-        }
-    }
-
-    impl<S, E> elector::Elector<WrappedScheme<S>> for WrappedElector<E, S>
-    where
-        S: commonware_cryptography::certificate::Scheme,
-        E: elector::Elector<S>,
-    {
-        fn elect(
-            &self,
-            round: Round,
-            certificate: Option<
-                &<WrappedScheme<S> as commonware_cryptography::certificate::Scheme>::Certificate,
-            >,
-        ) -> Participant {
-            self.inner.elect(round, certificate)
-        }
-    }
-
-    impl<S> commonware_cryptography::certificate::Scheme for WrappedScheme<S>
-    where
-        S: commonware_cryptography::certificate::Scheme,
-    {
-        type Subject<'a, D: commonware_cryptography::Digest> = S::Subject<'a, D>;
-        type PublicKey = S::PublicKey;
-        type Signature = S::Signature;
-        type Certificate = S::Certificate;
-
-        fn me(&self) -> Option<Participant> {
-            self.inner.me()
-        }
-
-        fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
-            self.inner.participants()
-        }
-
-        fn sign<D: commonware_cryptography::Digest>(
-            &self,
-            subject: Self::Subject<'_, D>,
-        ) -> Option<Attestation<Self>> {
-            let attestation = self.inner.sign(subject.clone())?;
-            let signature = match self.behavior {
-                Behavior::Honest => attestation.signature,
-                Behavior::CorruptSignature => {
-                    let signature = attestation
-                        .signature
-                        .get()
-                        .expect("fresh signature should decode");
-                    Self::corrupt_signature(&self.inner, subject, attestation.signer, signature)
-                }
-            };
-
-            Some(Attestation {
-                signer: attestation.signer,
-                signature,
-            })
-        }
-
-        fn verify_attestation<R, D>(
-            &self,
-            rng: &mut R,
-            subject: Self::Subject<'_, D>,
-            attestation: &Attestation<Self>,
-            strategy: &impl commonware_parallel::Strategy,
-        ) -> bool
-        where
-            R: rand_core::CryptoRngCore,
-            D: commonware_cryptography::Digest,
-        {
-            self.inner.verify_attestation(
-                rng,
-                subject,
-                &Self::to_inner_attestation(attestation),
-                strategy,
-            )
-        }
-
-        fn verify_attestations<R, D, I>(
-            &self,
-            rng: &mut R,
-            subject: Self::Subject<'_, D>,
-            attestations: I,
-            strategy: &impl commonware_parallel::Strategy,
-        ) -> Verification<Self>
-        where
-            R: rand_core::CryptoRngCore,
-            D: commonware_cryptography::Digest,
-            I: IntoIterator<Item = Attestation<Self>>,
-            I::IntoIter: Send,
-        {
-            let verification = self.inner.verify_attestations(
-                rng,
-                subject,
-                attestations.into_iter().map(|attestation| Attestation {
-                    signer: attestation.signer,
-                    signature: attestation.signature,
-                }),
-                strategy,
-            );
-
-            Verification::new(
-                verification
-                    .verified
-                    .into_iter()
-                    .map(Self::from_inner_attestation)
-                    .collect(),
-                verification.invalid,
-            )
-        }
-
-        fn assemble<I, M>(
-            &self,
-            attestations: I,
-            strategy: &impl commonware_parallel::Strategy,
-        ) -> Option<Self::Certificate>
-        where
-            I: IntoIterator<Item = Attestation<Self>>,
-            I::IntoIter: Send,
-            M: Faults,
-        {
-            self.inner.assemble::<_, M>(
-                attestations.into_iter().map(|attestation| Attestation {
-                    signer: attestation.signer,
-                    signature: attestation.signature,
-                }),
-                strategy,
-            )
-        }
-
-        fn verify_certificate<R, D, M>(
-            &self,
-            rng: &mut R,
-            subject: Self::Subject<'_, D>,
-            certificate: &Self::Certificate,
-            strategy: &impl commonware_parallel::Strategy,
-        ) -> bool
-        where
-            R: rand_core::CryptoRngCore,
-            D: commonware_cryptography::Digest,
-            M: Faults,
-        {
-            self.inner
-                .verify_certificate::<_, _, M>(rng, subject, certificate, strategy)
-        }
-
-        fn is_attributable() -> bool {
-            S::is_attributable()
-        }
-
-        fn is_batchable() -> bool {
-            S::is_batchable()
-        }
-
-        fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-            self.inner.certificate_codec_config()
-        }
-
-        fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg
-        {
-            S::certificate_codec_config_unbounded()
-        }
-    }
 
     #[test]
     fn test_interesting() {
