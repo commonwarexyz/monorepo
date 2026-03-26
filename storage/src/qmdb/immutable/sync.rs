@@ -300,6 +300,7 @@ mod tests {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
+                progress_tx: None,
             };
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -381,6 +382,7 @@ mod tests {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
+                progress_tx: None,
             };
             let got_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -433,6 +435,7 @@ mod tests {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
+                progress_tx: None,
             };
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -520,6 +523,7 @@ mod tests {
                     finish_rx: None,
                     reached_target_tx: None,
                     max_retained_roots: 1,
+                    progress_tx: None,
                 };
                 let mut client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
                 loop {
@@ -611,6 +615,7 @@ mod tests {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
+                progress_tx: None,
             };
             let synced_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -675,6 +680,7 @@ mod tests {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
+                progress_tx: None,
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -735,6 +741,7 @@ mod tests {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 8,
+                progress_tx: None,
             };
             let sync_db: ImmutableSyncTest = sync::sync(config).await.unwrap();
 
@@ -784,6 +791,7 @@ mod tests {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 1,
+                progress_tx: None,
             };
             let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
 
@@ -847,6 +855,7 @@ mod tests {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 1,
+                progress_tx: None,
             };
             let client: Engine<ImmutableSyncTest, _> = Engine::new(config).await.unwrap();
 
@@ -928,6 +937,7 @@ mod tests {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 1,
+                progress_tx: None,
             };
 
             // Send target update with increased upper bound
@@ -989,6 +999,7 @@ mod tests {
                 finish_rx: None,
                 reached_target_tx: None,
                 max_retained_roots: 1,
+                progress_tx: None,
             };
 
             // Complete the sync

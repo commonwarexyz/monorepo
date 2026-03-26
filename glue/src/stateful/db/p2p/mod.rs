@@ -24,6 +24,8 @@ pub use mailbox::{Mailbox, ResponseDropped};
 
 mod handler;
 
+mod metrics;
+
 impl<Op, D, DB> AttachableResolver<DB> for Mailbox<Op, D, DB>
 where
     Op: commonware_codec::Read<Cfg = ()> + Send + Sync + Clone + 'static,

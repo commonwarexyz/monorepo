@@ -6,4 +6,6 @@ pub use mailbox::Mailbox;
 
 mod bootstrap;
 
+mod metrics;
+
 mod processor;
