@@ -41,8 +41,6 @@ module types {
         view: ViewNumber,
         // The view of the parent proposal that this one builds upon
         parent: ViewNumber,
-        // Leader's identity
-        sig: Signature
     }
 
     type NotarizeVote = {

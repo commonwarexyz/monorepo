@@ -784,6 +784,10 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
     tracing::run_quint_twins_tracing(input, corpus_bytes);
 }
 
+pub fn run_quint_twins_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
+    tracing::run_quint_twins_disrupter_tracing(input, corpus_bytes);
+}
+
 pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
     tracing::run_quint_disrupter_tracing(input, corpus_bytes);
 }

@@ -47,7 +47,6 @@ fn normalize_vote_sig_for_sender(sender: &str, sig: &str, cfg: &EncoderConfig) -
 /// Kind of vote delivery action. Used to group votes between barriers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VoteKind {
-    Notarize,
     Finalize,
     Nullify,
 }
@@ -58,8 +57,8 @@ enum VoteKind {
 /// a combined `Set(...)`, reducing the number of quint evaluation steps.
 #[derive(Clone)]
 enum ActionItem {
-    /// Non-reorderable action: inject_proposal, on_proposal, inject_vote,
-    /// on_certificate. Acts as a barrier for vote grouping.
+    /// Non-reorderable action: on_notarize, inject_vote, on_certificate.
+    /// Acts as a barrier for vote grouping.
     Barrier(String),
     /// Vote delivery that can be merged with others sharing the same
     /// (receiver, kind, view, block) key.
@@ -89,7 +88,6 @@ pub struct EncoderConfig {
 
 /// Proposal information reconstructed from trace data.
 struct ViewProposal {
-    leader: String,
     view_parent: u64,
     /// Correct nodes that sent notarize votes for this view.
     correct_notarizers: Vec<String>,
@@ -222,7 +220,7 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
 
     // Build view proposals from notarize votes and authentic certificates
     let proposals =
-        build_view_proposals(&correct_entries, &block_map, &leader_map, &vote_blocks, cfg);
+        build_view_proposals(&correct_entries, &block_map, &vote_blocks, cfg);
 
     let mut out = String::new();
 
@@ -298,12 +296,11 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
         };
         writeln!(
             out,
-            "    pure val {} = {{ payload: \"{}\", view: {}, parent: {}, sig: sig_of(\"{}\") }}",
+            "    pure val {} = {{ payload: \"{}\", view: {}, parent: {} }}",
             proposal_var_name(key),
             key.block_name,
             key.view,
-            parent_str,
-            p.leader
+            parent_str
         )
         .unwrap();
     }
@@ -319,9 +316,9 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
         &vote_blocks,
     );
 
-    // Group vote deliveries between barriers: votes to the same
-    // (receiver, kind, view, block) are merged into a single on_vote_*
-    // call with a combined Set, reducing quint evaluation steps.
+    // Group finalize/nullify deliveries between barriers: votes to the same
+    // (receiver, kind, view, block) are merged into a single on_* call
+    // with a combined Set, reducing quint evaluation steps.
     let grouped = group_vote_deliveries(action_items);
 
     // Deduplicate while preserving order
@@ -394,41 +391,6 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     out
 }
 
-/// Emits `inject_proposal` (once per view) and `on_proposal` + notarize
-/// self-delivery (once per node+view) if not already done.
-fn ensure_proposal_and_on_proposal(
-    node: &str,
-    proposal: &ProposalKey,
-    proposal_injected: &mut HashSet<ProposalKey>,
-    on_proposal_done: &mut HashSet<(String, u64)>,
-    self_delivered: &mut HashSet<(String, u64, String)>,
-    actions: &mut Vec<ActionItem>,
-) {
-    if proposal_injected.insert(proposal.clone()) {
-        actions.push(ActionItem::Barrier(format!(
-            "inject_proposal({})",
-            proposal_var_name(proposal)
-        )));
-    }
-    if on_proposal_done.insert((node.to_string(), proposal.view)) {
-        actions.push(ActionItem::Barrier(format!(
-            "on_proposal(\"{}\", {})",
-            node,
-            proposal_var_name(proposal)
-        )));
-        // Self-delivery: node receives its own notarize vote
-        if self_delivered.insert((node.to_string(), proposal.view, "notarize".to_string())) {
-            actions.push(ActionItem::VoteDelivery {
-                kind: VoteKind::Notarize,
-                receiver: node.to_string(),
-                view: proposal.view,
-                block: proposal.block_name.clone(),
-                vote: format!("notarize({}, \"{}\")", proposal_var_name(proposal), node),
-            });
-        }
-    }
-}
-
 fn is_correct_notarizer_for_view(
     proposals: &HashMap<ProposalKey, ViewProposal>,
     view: u64,
@@ -436,7 +398,9 @@ fn is_correct_notarizer_for_view(
 ) -> bool {
     proposals
         .iter()
-        .any(|(key, proposal)| key.view == view && proposal.correct_notarizers.iter().any(|s| s == sig))
+        .any(|(key, proposal)| {
+            key.view == view && proposal.correct_notarizers.iter().any(|s| s == sig)
+        })
 }
 
 /// Pre-scans the trace to build a map of blocks that correct nodes actually
@@ -536,12 +500,12 @@ fn is_authentic_cert(
 
 /// Builds the full action list, processing entries in original trace order.
 ///
-/// For each notarize vote from the leader delivered to a correct node,
-/// emits `on_proposal` (which adds the receiver's notarize to `sent_vote`)
-/// followed by a notarize self-delivery. For correct non-leader notarize
-/// signers, ensures `on_proposal` was called before their vote is used.
-/// Byzantine votes are injected via `inject_vote`. All vote deliveries
-/// use direct `on_vote_*` calls.
+/// For notarize votes, leader proposal handling is driven directly through
+/// `on_notarize(receiver, vote)`. The encoder synthesizes a single
+/// self-delivery for a correct leader so the leader's own sent/local vote
+/// is represented even when the trace only shows network deliveries to
+/// other replicas. Byzantine votes are injected via `inject_vote`.
+/// Finalize/nullify deliveries continue to use grouped `on_*` calls.
 ///
 /// Returns structured `ActionItem`s: barriers (non-reorderable) and vote
 /// deliveries (groupable). The caller runs `group_vote_deliveries` to
@@ -556,12 +520,11 @@ fn build_actions(
     vote_blocks: &HashMap<(String, u64, String), HashSet<String>>,
 ) -> Vec<ActionItem> {
     let mut actions: Vec<ActionItem> = Vec::new();
-    let mut proposal_injected: HashSet<ProposalKey> = HashSet::new();
-    let mut on_proposal_done: HashSet<(String, u64)> = HashSet::new();
     // Keys include block name for notarize/finalize to handle byzantine equivocation
     // (same signer, same view, different blocks).
     let mut injected_votes: HashSet<(String, u64, String, String)> = HashSet::new();
     let mut self_delivered: HashSet<(String, u64, String)> = HashSet::new();
+    let mut leader_self_processed: HashSet<ProposalKey> = HashSet::new();
     // Dedup cert deliveries per receiver. In the Rust execution, each node
     // broadcasts its assembled cert to all peers, producing up to N^2 total
     // deliveries (N senders x N receivers). In the quint model, the first
@@ -585,39 +548,18 @@ fn build_actions(
                     let is_leader =
                         leader_lookup.get(view).map(|l| l.as_str()) == Some(sig.as_str());
 
-                    // Ensure on_proposal for the correct notarize signer (puts their
-                    // vote in sent_vote). Triggered when we first see their vote.
-                    if !is_byzantine_node(&sig, cfg.faults)
-                        && proposals
-                            .get(&proposal)
-                            .map_or(false, |p| p.correct_notarizers.contains(&sig))
-                    {
-                        ensure_proposal_and_on_proposal(
-                            &sig,
-                            &proposal,
-                            &mut proposal_injected,
-                            &mut on_proposal_done,
-                            &mut self_delivered,
-                            &mut actions,
-                        );
-                    }
-
-                    // If leader's notarize, also trigger on_proposal for the correct
-                    // receiver (the leader's notarize IS the proposal delivery).
+                    // The trace typically does not contain a self-delivery for the
+                    // correct leader's own proposal vote, so synthesize one once.
                     if is_leader
-                        && !is_byzantine_node(receiver, cfg.faults)
-                        && proposals
-                            .get(&proposal)
-                            .map_or(false, |p| p.correct_notarizers.contains(receiver))
+                        && !is_byzantine_node(&sig, cfg.faults)
+                        && leader_self_processed.insert(proposal.clone())
                     {
-                        ensure_proposal_and_on_proposal(
-                            receiver,
-                            &proposal,
-                            &mut proposal_injected,
-                            &mut on_proposal_done,
-                            &mut self_delivered,
-                            &mut actions,
-                        );
+                        actions.push(ActionItem::Barrier(format!(
+                            "on_notarize(\"{}\", {{ proposal: {}, sig: \"{}\" }})",
+                            sig,
+                            proposal_var_name(&proposal),
+                            sig
+                        )));
                     }
 
                     // Byzantine notarize: inject into sent_vote
@@ -637,13 +579,12 @@ fn build_actions(
                     }
 
                     // Deliver vote to receiver
-                    actions.push(ActionItem::VoteDelivery {
-                        kind: VoteKind::Notarize,
-                        receiver: receiver.clone(),
-                        view: *view,
-                        block: bn.clone(),
-                        vote: format!("notarize({}, \"{}\")", proposal_ref(*view, &bn), sig),
-                    });
+                    actions.push(ActionItem::Barrier(format!(
+                        "on_notarize(\"{}\", {{ proposal: {}, sig: \"{}\" }})",
+                        receiver,
+                        proposal_ref(*view, &bn),
+                        sig
+                    )));
                 }
                 TracedVote::Finalize { view, sig, block } => {
                     let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
@@ -689,7 +630,8 @@ fn build_actions(
                 }
                 TracedVote::Nullify { view, sig } => {
                     let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
-                    // Correct nullify: inject if not produced by on_proposal
+                    // Correct nullify: inject if it was not already produced by
+                    // leader proposal processing for that signer/view.
                     if !is_byzantine_node(&sig, cfg.faults) {
                         let needs_inject = !is_correct_notarizer_for_view(proposals, *view, &sig);
                         if needs_inject
@@ -799,40 +741,11 @@ fn build_actions(
                     continue;
                 }
 
-                // Ensure correct notarize signers have on_proposal (for notarization certs)
-                if let TracedCert::Notarization {
-                    view,
-                    block,
-                    signers,
-                    ..
-                } = cert
-                {
-                    let bn = map_block(block, block_map);
-                    let proposal = proposal_key(*view, &bn);
-                    for sig in signers {
-                        if !is_byzantine_node(sig, cfg.faults)
-                            && proposals
-                                .get(&proposal)
-                                .map_or(false, |p| p.correct_notarizers.contains(sig))
-                        {
-                            ensure_proposal_and_on_proposal(
-                                sig,
-                                &proposal,
-                                &mut proposal_injected,
-                                &mut on_proposal_done,
-                                &mut self_delivered,
-                                &mut actions,
-                            );
-                        }
-                    }
-                }
-
                 // Ensure correct nullify signers are injected (for nullification certs)
                 if let TracedCert::Nullification { view, signers, .. } = cert {
                     for sig in signers {
                         if !is_byzantine_node(sig, cfg.faults) {
-                            let needs_inject =
-                                !is_correct_notarizer_for_view(proposals, *view, sig);
+                            let needs_inject = !is_correct_notarizer_for_view(proposals, *view, sig);
                             if needs_inject
                                 && injected_votes.insert((
                                     sig.clone(),
@@ -901,7 +814,7 @@ fn group_vote_deliveries(items: Vec<ActionItem>) -> Vec<String> {
 }
 
 /// Flushes pending vote deliveries by grouping them by (receiver, kind,
-/// view, block) and rendering each group as a single `on_vote_*` call.
+/// view, block) and rendering each group as a single `on_*` call.
 /// Preserves first-appearance order for deterministic output.
 fn flush_vote_group(pending: &mut Vec<ActionItem>, result: &mut Vec<String>) {
     if pending.is_empty() {
@@ -938,16 +851,12 @@ fn flush_vote_group(pending: &mut Vec<ActionItem>, result: &mut Vec<String>) {
     for (receiver, kind, view, block, votes) in groups {
         let vote_set = votes.join(", ");
         let s = match kind {
-            VoteKind::Notarize => format!(
-                "on_vote_notarize(\"{}\", {}, \"{}\", Set({}))",
-                receiver, view, block, vote_set
-            ),
             VoteKind::Finalize => format!(
-                "on_vote_finalize(\"{}\", {}, \"{}\", Set({}))",
+                "on_finalize(\"{}\", {}, \"{}\", Set({}))",
                 receiver, view, block, vote_set
             ),
             VoteKind::Nullify => format!(
-                "on_vote_nullify(\"{}\", {}, Set({}))",
+                "on_nullify(\"{}\", {}, Set({}))",
                 receiver, view, vote_set
             ),
         };
@@ -1068,7 +977,6 @@ fn encode_cert(cert: &TracedCert, block_map: &[(String, String)]) -> String {
 fn build_view_proposals(
     entries: &[TraceEntry],
     block_map: &[(String, String)],
-    leader_map: &[(u64, String)],
     vote_blocks: &HashMap<(String, u64, String), HashSet<String>>,
     cfg: &EncoderConfig,
 ) -> HashMap<ProposalKey, ViewProposal> {
@@ -1143,8 +1051,6 @@ fn build_view_proposals(
     let mut views: Vec<u64> = per_view_blocks.keys().cloned().collect();
     views.sort();
 
-    let leader_lookup: HashMap<u64, String> = leader_map.iter().cloned().collect();
-
     let mut last_parent_view: u64 = 0;
 
     let mut proposals = HashMap::new();
@@ -1165,7 +1071,6 @@ fn build_view_proposals(
             proposals.insert(
                 key.clone(),
                 ViewProposal {
-                    leader: leader_lookup.get(&view).cloned().unwrap_or_default(),
                     view_parent: last_parent_view,
                     correct_notarizers: correct_notarizers.clone(),
                 },
@@ -1265,33 +1170,6 @@ fn inject_byzantine_cert_votes(
 
 /// Writes the standard helper actions used by test modules.
 fn write_helpers(out: &mut String) {
-    writeln!(
-        out,
-        "    action inject_proposal(proposal: Proposal): bool = all {{"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "        sent_proposal' = sent_proposal.union(Set(proposal)),"
-    )
-    .unwrap();
-    writeln!(out, "        sent_vote' = sent_vote,").unwrap();
-    writeln!(out, "        sent_certificate' = sent_certificate,").unwrap();
-    writeln!(out, "        store_vote' = store_vote,").unwrap();
-    writeln!(out, "        store_certificate' = store_certificate,").unwrap();
-    writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
-    writeln!(
-        out,
-        "        ghost_committed_blocks' = ghost_committed_blocks,"
-    )
-    .unwrap();
-    writeln!(out, "        leader' = leader,").unwrap();
-    writeln!(out, "        replica_state' = replica_state,").unwrap();
-    writeln!(out, "        certify_policy' = certify_policy,").unwrap();
-    writeln!(out, "        lastAction' = \"inject_proposal\",").unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out).unwrap();
-
     writeln!(out, "    action inject_vote(vote: Vote): bool = all {{").unwrap();
     writeln!(out, "        sent_vote' = sent_vote.union(Set(vote)),").unwrap();
     writeln!(out, "        sent_proposal' = sent_proposal,").unwrap();

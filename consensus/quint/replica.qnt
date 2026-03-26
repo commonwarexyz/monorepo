@@ -40,7 +40,7 @@ module replica {
     var leader: ViewNumber -> ReplicaId
 
     // proposals sent by the replicas, correct and byzantine
-    var sent_proposal: Set[Proposal]
+    var sent_proposal: Set[(Signature, Proposal)]
     // votes sent by the replicas, correct and byzantine
     var sent_vote: Set[Vote]
     // certificates sent by the replicas, correct and byzantine
@@ -209,7 +209,7 @@ module replica {
 
     def has_participated_in_view(id: ReplicaId, view: ViewNumber): bool = or {
         sent_vote.exists(v => vote_sig(v) == sig_of(id) and vote_view(v) == view),
-        sent_proposal.exists(p => p.sig == sig_of(id) and p.view == view),
+        sent_proposal.exists(((s, p)) => s == sig_of(id) and p.view == view),
     }
 
     // The designated leader for `view` is considered inactive if they have not
@@ -298,7 +298,7 @@ module replica {
     }
 
     def learned_parents(view: ViewNumber, payload: Payload): Set[ViewNumber] = {
-        sent_proposal.filter(p => p.view == view and p.payload == payload).map(p => p.parent)
+        sent_proposal.filter(((_, p)) => p.view == view and p.payload == payload).map(((_, p)) => p.parent)
     }
 
     def has_parent_conflict(view: ViewNumber, payload: Payload): bool = {
@@ -472,7 +472,7 @@ module replica {
                 nondet id = oneOf(CORRECT)
                 nondet new_payload = oneOf(VALID_PAYLOADS)
                 nondet parent_view = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
-                proposer_step(id, new_payload, parent_view),
+                propose(id, new_payload, parent_view),
             },
             all {
                 byzantine_replica_step,
@@ -500,21 +500,15 @@ module replica {
                 {
                     on_timeout(id)
                 },
-                all {
-                    sent_proposal != Set(),
-                    nondet p = oneOf(sent_proposal)
-                    on_proposal(id, p)
-                },
                 {
-                    nondet view = VIEWS.oneOf()
-                    nondet payload = AllPayloads.oneOf()
-                    val matching = sent_vote.filter(v =>
-                        vote_view(v) == view and is_notarize(v) and vote_payload(v) == Some(payload)
-                    )
+                    val notarize_votes = sent_vote.fold(Set(), (acc, v) => match v {
+                        | Notarize(nv) => acc.union(Set(nv))
+                        | _ => acc
+                    })
                     all {
-                        matching != Set(),
-                        nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
-                        on_vote_notarize(id, view, payload, votes)
+                        notarize_votes != Set(),
+                        nondet nv = notarize_votes.oneOf()
+                        on_notarize(id, nv)
                     }
                 },
                 {
@@ -526,7 +520,7 @@ module replica {
                     all {
                         matching != Set(),
                         nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
-                        on_vote_finalize(id, view, payload, votes)
+                        on_finalize(id, view, payload, votes)
                     }
                 },
                 {
@@ -537,7 +531,7 @@ module replica {
                     all {
                         matching != Set(),
                         nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
-                        on_vote_nullify(id, view, votes)
+                        on_nullify(id, view, votes)
                     }
                 },
                 all {
@@ -550,55 +544,52 @@ module replica {
     }
 
     // Upon entering a view, the leader may propose and implicitly cast notarize(c, v).
-    action proposer_step(
+    action propose(
         id: ReplicaId,
         new_payload: Payload,
         parent_view: ViewNumber
     ): bool = all {
+        val store = store_vote.get(id)
         val self = replica_state.get(id)
         val certs = store_certificate.get(id)
         all {
             id == leader.get(self.view),
             not(self.propose_sent),
             not(self.nullified),
-            any {
+            if (VALID_PAYLOADS.contains(new_payload) and valid_parent(self, self.view, parent_view, certs)) {
                 // Proposal success path
+                val proposal: Proposal = {
+                    view: self.view,
+                    parent: parent_view,
+                    payload: new_payload,
+                }
+
                 all {
-                    VALID_PAYLOADS.contains(new_payload),
-                    valid_parent(self, self.view, parent_view, certs),
+                    sent_proposal' = sent_proposal.union(Set((sig_of(id), proposal))),
+                    sent_vote' = sent_vote.union(Set(notarize(proposal, sig_of(id)))),
+                    store_vote' = store_vote.set(id, store.union(Set(notarize(proposal, sig_of(id))))),
+                    replica_state' = replica_state.set(id, {
+                        ...self,
+                        propose_sent: true,
+                        leader_timeout_cancelled: true,
+                        notarized: self.notarized.put(self.view, Some(new_payload)),
+                        ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
+                    }),
+                    ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
 
-                    val proposal: Proposal = {
-                        view: self.view,
-                        parent: parent_view,
-                        payload: new_payload,
-                        sig: sig_of(id),
-                    }
-
-                    all {
-                        sent_proposal' = sent_proposal.union(Set(proposal)),
-                        sent_vote' = sent_vote.union(Set(notarize(proposal, sig_of(id)))),
-                        replica_state' = replica_state.set(id, {
-                            ...self,
-                            propose_sent: true,
-                            leader_timeout_cancelled: true,
-                            notarized: self.notarized.put(self.view, Some(new_payload)),
-                            ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
-                        }),
-                        ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
-
-                        // unchanged
-                        store_vote' = store_vote,
-                        sent_certificate' = sent_certificate,
-                        store_certificate' = store_certificate,
-                        leader' = leader,
-                        ghost_committed_blocks' = ghost_committed_blocks,
-                        certify_policy' = certify_policy
-                    }
-                },
+                    // unchanged
+                    sent_certificate' = sent_certificate,
+                    store_certificate' = store_certificate,
+                    leader' = leader,
+                    ghost_committed_blocks' = ghost_committed_blocks,
+                    certify_policy' = certify_policy
+                }
+            } else {
                 // Proposal failure path: immediate timeout expiry
                 // Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
                 all {
                     sent_vote' = sent_vote.union(Set(nullify(self.view, sig_of(id)))),
+                    store_vote' = store_vote.set(id, store.union(Set(nullify(self.view, sig_of(id))))),
                     replica_state' = replica_state.set(id, {
                         ...self,
                         nullified: true,
@@ -610,7 +601,6 @@ module replica {
                     // unchanged
                     sent_proposal' = sent_proposal,
                     sent_certificate' = sent_certificate,
-                    store_vote' = store_vote,
                     store_certificate' = store_certificate,
                     leader' = leader,
                     ghost_proposal' = ghost_proposal,
@@ -618,107 +608,98 @@ module replica {
                     certify_policy' = certify_policy
                 }
             },
-            lastAction' = "proposer"
+            lastAction' = "propose"
         }
     }
 
-    // Upon receiving first leader proposal in current view:
-    // - cancel leader timeout
-    // - if valid parent and payload valid -> notarize
-    // - if payload invalid -> nullify
-    action on_proposal(id: ReplicaId, proposal: Proposal): bool = all {
+    // Upon receiving a notarize vote:
+    // - if from the leader: validate proposal and send notarize/nullify
+    // - otherwise: collect vote, on 2f+1 create notarization cert
+    action on_notarize(id: ReplicaId, vote: NotarizeVote): bool = all {
+        val store = store_vote.get(id)
         val self = replica_state.get(id)
         val certs = store_certificate.get(id)
-        val expected_parent = parent_payload(self, proposal.view, proposal.parent, certs)
-
-        all {
-            proposal.view == self.view,
-            proposal.sig == sig_of(leader.get(proposal.view)),
-            proposal.parent < proposal.view,
-            proposal.parent >= GENESIS_VIEW,
+        val proposal = vote.proposal
+        val view = proposal.view
+        val payload = proposal.payload
+        val input = Notarize(vote)
+        val is_leader_vote = (vote.sig == sig_of(leader.get(view)))
+        val can_process_as_proposal = and {
+            is_leader_vote,
+            view == self.view,
             not(has_notarized(self)),
             not(self.nullified),
-            is_some(expected_parent),
-
-            any {
-                all {
-                    VALID_PAYLOADS.contains(proposal.payload),
-                    valid_parent(self, proposal.view, proposal.parent, certs),
-
-                    sent_vote' = sent_vote.union(Set(notarize(proposal, sig_of(id)))),
-                    replica_state' = replica_state.set(id, {
-                        ...self,
-                        leader_timeout_cancelled: true,
-                        notarized: self.notarized.put(self.view, Some(proposal.payload)),
-                        ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
-                    }),
-                },
-                // Treat local verification failure as immediate timeout expiry and broadcast `nullify(v)`.
-                all {
-                    or {
-                        not(VALID_PAYLOADS.contains(proposal.payload)),
-                        not(valid_parent(self, proposal.view, proposal.parent, certs)),
-                    },
-
-                    sent_vote' = sent_vote.union(Set(nullify(proposal.view, sig_of(id)))),
-                    replica_state' = replica_state.set(id, {
-                        ...self,
-                        nullified: true,
-                        leader_timeout_cancelled: true,
-                        advance_timeout_cancelled: true,
-                        ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NullifyKind))
-                    }),
-                }
-            },
-
-            ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
-
-            // unchanged
-            store_vote' = store_vote,
-            sent_proposal' = sent_proposal,
-            sent_certificate' = sent_certificate,
-            store_certificate' = store_certificate,
-            leader' = leader,
-            ghost_committed_blocks' = ghost_committed_blocks,
-            certify_policy' = certify_policy,
-            lastAction' = "on_proposal"
         }
-    }
 
-    // Upon receiving votes for notarize(c, v):
-    // - collect votes
-    // - on 2f+1: create notarization cert, attempt certification
-    action on_vote_notarize(id: ReplicaId, view: ViewNumber, payload: Payload, votes: Set[Vote]): bool = all {
-        val store = store_vote.get(id)
-        all {
-            votes != Set(),
-            votes.forall(v => and {
-                vote_view(v) == view,
-                is_notarize(v),
-                vote_payload(v) == Some(payload),
-            }),
+        if (can_process_as_proposal) {
+            // Proposal processing: validate the leader's proposal and vote
+            val expected_parent = parent_payload(self, proposal.view, proposal.parent, certs)
+            all {
+                view == self.view,
+                vote.sig == sig_of(leader.get(view)),
+                proposal.parent < view,
+                proposal.parent >= GENESIS_VIEW,
+                not(has_notarized(self)),
+                not(self.nullified),
+                is_some(expected_parent),
 
-            val new_store = store.union(votes)
-            val certs = store_certificate.get(id)
+                any {
+                    all {
+                        VALID_PAYLOADS.contains(payload),
+                        valid_parent(self, view, proposal.parent, certs),
+
+                        sent_vote' = sent_vote.union(Set(notarize(proposal, sig_of(id)))),
+                        store_vote' = store_vote.set(id, store.union(Set(input, notarize(proposal, sig_of(id))))),
+                        replica_state' = replica_state.set(id, {
+                            ...self,
+                            leader_timeout_cancelled: true,
+                            notarized: self.notarized.put(self.view, Some(payload)),
+                            ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
+                        }),
+                    },
+                    all {
+                        or {
+                            not(VALID_PAYLOADS.contains(payload)),
+                            not(valid_parent(self, view, proposal.parent, certs)),
+                        },
+
+                        sent_vote' = sent_vote.union(Set(nullify(view, sig_of(id)))),
+                        store_vote' = store_vote,
+                        replica_state' = replica_state.set(id, {
+                            ...self,
+                            nullified: true,
+                            leader_timeout_cancelled: true,
+                            advance_timeout_cancelled: true,
+                            ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NullifyKind))
+                        }),
+                    }
+                },
+
+                ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
+
+                // unchanged
+                sent_proposal' = sent_proposal,
+                sent_certificate' = sent_certificate,
+                store_certificate' = store_certificate,
+                leader' = leader,
+                ghost_committed_blocks' = ghost_committed_blocks,
+                certify_policy' = certify_policy,
+                lastAction' = "on_notarize"
+            }
+        } else {
+            // Vote aggregation: collect vote and check for notarization quorum
+            val new_store = store.union(Set(input))
             val had_notarization = certs.exists(c => and {
                 is_notarization_cert(c),
                 cert_view(c) == view,
                 cert_payload(c) == Some(payload),
             })
             val now_notarized = is_view_notarized_votes(view, new_store, payload)
-            // Extract proposal from one of the matching votes
-            val matched_proposal = votes.fold(
-                { payload: payload, view: view, parent: GENESIS_VIEW, sig: "" },
-                (acc, v) => match v {
-                    | Notarize(nv) => nv.proposal
-                    | _ => acc
-                }
-            )
 
             all {
                 store_vote' = store_vote.set(id, new_store),
 
-                match create_notarization(id, matched_proposal, new_store) {
+                match create_notarization(id, proposal, new_store) {
                     | Some(cert) => all {
                         now_notarized,
                         _process_notarization_certificate(id, cert, not(had_notarization))
@@ -737,7 +718,7 @@ module replica {
                 leader' = leader,
                 ghost_proposal' = ghost_proposal,
                 certify_policy' = certify_policy,
-                lastAction' = "on_vote_notarize"
+                lastAction' = "on_notarize"
             }
         }
     }
@@ -745,7 +726,7 @@ module replica {
     // Upon receiving votes for finalize(c, v):
     // - collect votes
     // - on 2f+1: create finalization cert and enter v+1
-    action on_vote_finalize(id: ReplicaId, view: ViewNumber, payload: Payload, votes: Set[Vote]): bool = all {
+    action on_finalize(id: ReplicaId, view: ViewNumber, payload: Payload, votes: Set[Vote]): bool = all {
         val store = store_vote.get(id)
         all {
             votes != Set(),
@@ -765,7 +746,7 @@ module replica {
             val now_finalized = is_view_finalized_votes(view, new_store, payload)
             // Extract proposal from one of the matching votes
             val matched_proposal = votes.fold(
-                { payload: payload, view: view, parent: GENESIS_VIEW, sig: "" },
+                { payload: payload, view: view, parent: GENESIS_VIEW },
                 (acc, v) => match v {
                     | Finalize(fv) => fv.proposal
                     | _ => acc
@@ -794,7 +775,7 @@ module replica {
                 leader' = leader,
                 ghost_proposal' = ghost_proposal,
                 certify_policy' = certify_policy,
-                lastAction' = "on_vote_finalize"
+                lastAction' = "on_finalize"
             }
         }
     }
@@ -806,7 +787,7 @@ module replica {
     // Additional Simplex rule:
     // if a non-leader replica receives nullify(v) from the current leader of view v,
     // it treats this as immediate timeout expiry and broadcasts nullify(v).
-    action on_vote_nullify(id: ReplicaId, view: ViewNumber, votes: Set[Vote]): bool = all {
+    action on_nullify(id: ReplicaId, view: ViewNumber, votes: Set[Vote]): bool = all {
         val store = store_vote.get(id)
         val self = replica_state.get(id)
         all {
@@ -889,7 +870,7 @@ module replica {
                 leader' = leader,
                 ghost_proposal' = ghost_proposal,
                 certify_policy' = certify_policy,
-                lastAction' = "on_vote_nullify"
+                lastAction' = "on_nullify"
             }
         }
     }
@@ -969,7 +950,7 @@ module replica {
                     // Extract proposal from the cert for finalize vote
                     val cert_prop = match cert {
                         | Notarization(n) => n.proposal
-                        | _ => { payload: cert_payload_val, view: cert_view_num, parent: GENESIS_VIEW, sig: "" }
+                        | _ => { payload: cert_payload_val, view: cert_view_num, parent: GENESIS_VIEW }
                     }
 
                     if (can_send_finalize)
@@ -1140,7 +1121,6 @@ module replica {
                   view: view,
                   payload: payload,
                   parent: parent_view,
-                  sig: sender
               }
 
               val votes = kinds.map(k =>
@@ -1168,7 +1148,6 @@ module replica {
                 view: view,
                 payload: payload,
                 parent: parent_view,
-                sig: sender
             }
 
             val votes = if (kind == NotarizationKind) {
@@ -1210,9 +1189,8 @@ module replica {
                 view: view,
                 payload: payload,
                 parent: parent,
-                sig: sig
             }
-            sent_proposal' = sent_proposal.union(Set(proposal)),
+            sent_proposal' = sent_proposal.union(Set((sig_of(sig), proposal))),
         }
     }
 
@@ -1309,7 +1287,7 @@ module replica {
             sig_of(id).in(ByzantineSigs),
             VIEWS.forall(v =>
                 sent_proposal
-                    .filter(p => p.sig == sig_of(id) and p.view == v)
+                    .filter(((s, p)) => s == sig_of(id) and p.view == v)
                     .size() <= 1
             )
         }

@@ -24,19 +24,17 @@ module tests {
             payload: "val_b1",
             view: FIRST_VIEW,
             parent: GENESIS_VIEW,
-            sig: sig_of("n4")
         }
         val cert = notarization(proposal, Set("n0", "n1", "n2"), "n0")
 
         initWithLeaderAndCertify(
-            Map(0 -> "n2", 1 -> "n4", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
+            Map(0 -> "n2", 1 -> "n3", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
             CERTIFY_ALL_TRUE
         )
-            .then(inject_proposal(proposal))
-            .then(on_proposal("n0", proposal))
-            .then(on_proposal("n1", proposal))
-            .then(on_proposal("n2", proposal))
-            .then(on_proposal("n3", proposal))
+            .then(propose("n3", proposal.payload, proposal.parent))
+            .then(replica_receives_notarize_vote("n0", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
+            .then(replica_receives_notarize_vote("n1", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
+            .then(replica_receives_notarize_vote("n2", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(on_certificate("n3", cert))
             .then(all {
                 assert(store_certificate.get("n3").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b1"))),
@@ -62,8 +60,8 @@ module tests {
             .expect(all_invariants)
     }
 
-    action inject_proposal(proposal: Proposal): bool = all {
-        sent_proposal' = sent_proposal.union(Set(proposal)),
+    action inject_proposal(sender: Signature, proposal: Proposal): bool = all {
+        sent_proposal' = sent_proposal.union(Set((sender, proposal))),
         sent_vote' = sent_vote,
         sent_certificate' = sent_certificate,
         store_vote' = store_vote,
@@ -91,17 +89,17 @@ module tests {
     }
 
     action replica_receives_notarize_vote(id: ReplicaId, payload: Payload, view: ViewNumber, parent: ViewNumber, src: ReplicaId): bool = {
-        val p: Proposal = { payload: payload, view: view, parent: parent, sig: sig_of(src) }
-        on_vote_notarize(id, view, payload, Set(notarize(p, src)))
+        val p: Proposal = { payload: payload, view: view, parent: parent }
+        on_notarize(id, { proposal: p, sig: src })
     }
 
     action replica_receives_finalize_vote(id: ReplicaId, payload: Payload, view: ViewNumber, parent: ViewNumber, src: ReplicaId): bool = {
-        val p: Proposal = { payload: payload, view: view, parent: parent, sig: sig_of(src) }
-        on_vote_finalize(id, view, payload, Set(finalize(p, src)))
+        val p: Proposal = { payload: payload, view: view, parent: parent }
+        on_finalize(id, view, payload, Set(finalize(p, src)))
     }
 
     action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: ReplicaId): bool =
-        on_vote_nullify(id, view, Set(nullify(view, src)))
+        on_nullify(id, view, Set(nullify(view, src)))
 
     action unchanged_all = all {
         sent_proposal' = sent_proposal,
