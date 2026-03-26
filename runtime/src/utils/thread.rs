@@ -10,7 +10,7 @@ pub(crate) fn system_default_stack_size() -> Option<usize> {
     *SYSTEM_DEFAULT_STACK_SIZE.get_or_init(system_default_stack_size_impl)
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn system_default_stack_size_impl() -> Option<usize> {
     let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
 
@@ -34,6 +34,31 @@ fn system_default_stack_size_impl() -> Option<usize> {
     }
 
     Some(stack_size)
+}
+
+#[cfg(target_os = "macos")]
+fn system_default_stack_size_impl() -> Option<usize> {
+    // macOS uses different defaults for the main thread and spawned threads:
+    // the main thread stack is 8 MiB, while secondary threads default to
+    // 512 KiB. We use `RLIMIT_STACK` here to avoid inheriting the smaller
+    // secondary-thread default through `pthread_attr_getstacksize`.
+    let mut stack_limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+
+    // SAFETY: `stack_limit` points to uninitialized storage reserved for
+    // `rlimit`, exactly as required by `getrlimit`.
+    let limit_result = unsafe { libc::getrlimit(libc::RLIMIT_STACK, stack_limit.as_mut_ptr()) };
+    if limit_result != 0 {
+        return None;
+    }
+
+    // SAFETY: `getrlimit` succeeded, so `stack_limit` is initialized.
+    let stack_limit = unsafe { stack_limit.assume_init() };
+    if stack_limit.rlim_cur == libc::RLIM_INFINITY {
+        return None;
+    }
+
+    let limit = usize::try_from(stack_limit.rlim_cur).ok()?;
+    Some(limit.max(libc::PTHREAD_STACK_MIN as usize))
 }
 
 #[cfg(not(unix))]
