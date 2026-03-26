@@ -76,9 +76,9 @@ use commonware_utils::{
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
-    future::Either,
+    future::BoxFuture,
     task::{waker, ArcWake},
-    Future,
+    Future, FutureExt as _,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
@@ -778,6 +778,35 @@ impl ArcWake for TaskWaker {
     }
 }
 
+/// Releases a reserved work task if spawn exits before the future is installed.
+struct ReservedTask {
+    tasks: Arc<Tasks>,
+    task: Option<Arc<Task>>,
+}
+
+impl ReservedTask {
+    const fn new(tasks: Arc<Tasks>, task: Arc<Task>) -> Self {
+        Self {
+            tasks,
+            task: Some(task),
+        }
+    }
+
+    fn take(mut self) -> Arc<Task> {
+        self.task
+            .take()
+            .expect("reserved task must still exist when installing future")
+    }
+}
+
+impl Drop for ReservedTask {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            self.tasks.remove(task.id);
+        }
+    }
+}
+
 /// A collection of [Task]s that are being executed by the [Executor].
 struct Tasks {
     /// The next task id.
@@ -824,9 +853,9 @@ impl Tasks {
 
     /// Reserve a non-root task slot.
     ///
-    /// Returns a task handle if the slot was accepted, or `None` if task
+    /// Returns a reserved task if the slot was accepted, or `None` if task
     /// registration has already been closed for shutdown.
-    fn reserve_work(arc_self: &Arc<Self>, label: Label) -> Option<Arc<Task>> {
+    fn reserve_work(arc_self: &Arc<Self>, label: Label) -> Option<ReservedTask> {
         let closed = arc_self.closed.lock();
         if *closed {
             return None;
@@ -838,7 +867,7 @@ impl Tasks {
             mode: Mode::Work(Mutex::new(None)),
         });
         arc_self.running.lock().insert(id, task.clone());
-        Some(task)
+        Some(ReservedTask::new(arc_self.clone(), task))
     }
 
     /// Install the future for a previously reserved non-root task and queue it
@@ -884,8 +913,8 @@ impl Tasks {
 
     /// Lookup a task.
     ///
-    /// We must return cloned here because we cannot hold the running lock while polling a task (will
-    /// deadlock if [Self::register_work] is called).
+    /// We must return a clone here because we cannot hold the running lock
+    /// while polling a task. Task polling can re-enter task registration.
     fn get(&self, id: u128) -> Option<Arc<Task>> {
         let running = self.running.lock();
         running.get(&id).cloned()
@@ -1207,14 +1236,14 @@ impl crate::Spawner for Context {
         self.tree = child;
 
         // Spawn the task (we don't care about Model)
-        let future = if is_instrumented {
+        let future: BoxFuture<'_, T> = if is_instrumented {
             let span = info_span!(parent: None, "task", name = %label.name());
             for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
             }
-            Either::Left(f(self).instrument(span))
+            f(self).instrument(span).boxed()
         } else {
-            Either::Right(f(self))
+            f(self).boxed()
         };
         let (f, handle) = Handle::init(
             future,
@@ -1222,7 +1251,7 @@ impl crate::Spawner for Context {
             executor.panicker.clone(),
             Arc::clone(&parent),
         );
-        executor.tasks.install_work(&task, Box::pin(f));
+        executor.tasks.install_work(&task.take(), Box::pin(f));
 
         // Register the task on the parent
         if let Some(aborter) = handle.aborter() {
