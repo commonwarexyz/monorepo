@@ -914,11 +914,11 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
 
     /// Return the anchor height for a given generation.
     fn anchor_height(&self, generation: usize) -> u64 {
-        self.generation_state
+        let (anchor, _) = self
+            .generation_state
             .get(&generation)
-            .map_or(self.last_dispatched_anchor.height.get(), |(anchor, _)| {
-                anchor.height.get()
-            })
+            .unwrap_or_else(|| panic!("missing state for dispatch generation {generation}"));
+        anchor.height.get()
     }
 
     /// Record that database `idx` reached `generation`.
@@ -2298,6 +2298,20 @@ mod tests {
                 panic!("stale reached event must not allow convergence at {anchor:?}")
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "missing state for dispatch generation 1")]
+    fn coordinator_anchor_height_panics_on_missing_generation_state() {
+        let mut state = CoordinatorState::new(2, anchor(0), (0u64, 0u64));
+        state.record_tip_update(anchor(1), (1, 1));
+        let action = state.next_action();
+        assert!(matches!(
+            action,
+            CoordinatorAction::Dispatch { generation: 1, .. }
+        ));
+        state.generation_state.remove(&1);
+        let _ = state.anchor_height(1);
     }
 
     #[test]

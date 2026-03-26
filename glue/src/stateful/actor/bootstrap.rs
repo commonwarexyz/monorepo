@@ -85,6 +85,20 @@ type SyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::S
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type AnchoredUpdate<A, E> = (Anchor<BlockDigest<A, E>>, SyncTargets<A, E>);
 
+/// Bootstrap outcome before durable metadata is finalized.
+enum BootstrapState<D, G: commonware_cryptography::Digest> {
+    /// Databases are ready with no marshal floor update.
+    Ready {
+        databases: D,
+        last_processed: Anchor<G>,
+    },
+    /// Databases were state-synced and require marshal floor update.
+    Synced {
+        databases: D,
+        last_processed: Anchor<G>,
+    },
+}
+
 /// Startup inputs for bootstrap.
 pub(super) enum Mode<E, A>
 where
@@ -210,7 +224,7 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
         );
 
         let genesis = application.genesis().await;
-        let databases = A::Databases::init(context.clone(), db_config.clone()).await;
+        let databases = A::Databases::init(context.clone(), db_config).await;
         let db_targets = databases.committed_targets().await;
         let (processed_anchor, processed_targets) =
             processed_anchor_targets::<E, A, S, V>(&marshal, &genesis).await;
@@ -227,15 +241,17 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
         return;
     }
 
-    let (databases, last_processed, new_marshal_floor) = match mode {
+    let state = match mode {
         Mode::MarshalSync => {
             let databases = A::Databases::init(context.clone(), db_config).await;
-            let genesis_digest = application.genesis().await.digest();
-            let anchor = Anchor {
+            let last_processed = Anchor {
                 height: Height::zero(),
-                digest: genesis_digest,
+                digest: application.genesis().await.digest(),
             };
-            (databases, anchor, None)
+            BootstrapState::Ready {
+                databases,
+                last_processed,
+            }
         }
         Mode::StateSync {
             block,
@@ -246,7 +262,7 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
                 digest: block.digest(),
             };
             let initial_targets = A::sync_targets(&block);
-            let (databases, sync_anchor) = A::Databases::sync(
+            let (databases, last_processed) = A::Databases::sync(
                 context.clone(),
                 db_config,
                 resolvers,
@@ -257,19 +273,37 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
             )
             .await
             .unwrap_or_else(|err| panic!("state sync failed: {err:?}"));
-            (databases, sync_anchor, Some(sync_anchor.height))
+            BootstrapState::Synced {
+                databases,
+                last_processed,
+            }
         }
     };
 
-    if let Some(floor_height) = new_marshal_floor {
-        // Raising the marshal floor also clears marshal's pending application
-        // acknowledgements below that floor.
-        marshal.set_floor(floor_height, true).await;
-        marshal
-            .get_processed_height()
-            .await
-            .expect("marshal must respond with processed height after set_floor");
-    }
+    let (databases, last_processed) = match state {
+        BootstrapState::Ready {
+            databases,
+            last_processed,
+        } => (databases, last_processed),
+        BootstrapState::Synced {
+            databases,
+            last_processed,
+        } => {
+            let floor = last_processed.height;
+            // Raising the marshal floor also clears marshal's pending application
+            // acknowledgements below that floor.
+            marshal.set_floor(floor, true).await;
+            let processed_height = marshal
+                .get_processed_height()
+                .await
+                .expect("marshal must respond with processed height after set_floor");
+            assert_eq!(
+                processed_height, floor,
+                "marshal processed height must match updated floor after state sync",
+            );
+            (databases, last_processed)
+        }
+    };
 
     metadata
         .put_sync(SYNC_DONE_KEY, true)
