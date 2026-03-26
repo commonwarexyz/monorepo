@@ -50,6 +50,14 @@
 //! 5. Call [`ApplicationMailbox::sync_complete`] with the constructed databases
 //!    and the synced digest, transitioning the actor into block-processing
 //!    mode.
+//!
+//! ## Crash during state sync
+//!
+//! If the node crashes while state sync is in progress (before `sync_done` is
+//! persisted), the database partitions may contain partial sync data that is
+//! incompatible with a fresh [`ManagedDb::init`](crate::stateful::db::ManagedDb::init).
+//! The operator must delete the database storage directory before restarting.
+//! A future version may automate this cleanup.
 
 use crate::stateful::{
     db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
