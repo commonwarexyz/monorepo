@@ -21,17 +21,9 @@ use rand::Rng;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
-/// Runtime serving state for the resolver actor.
-enum State<DB> {
-    /// Database is not attached yet.
-    NoDb,
-    /// Database is attached and can serve incoming requests.
-    HasDb(Arc<AsyncRwLock<DB>>),
-}
-
 type Op<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Op;
 type DatabaseRoot<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Digest;
-type SyncMailbox<DB> = Mailbox<Op<DB>, DatabaseRoot<DB>, DB>;
+type SyncMailbox<DB> = Mailbox<DB, Op<DB>, DatabaseRoot<DB>>;
 type Pending<Op, D> = oneshot::Sender<Result<FetchResult<Op, D>, mailbox::ResponseDropped>>;
 type PendingSubs<DB> = HashMap<handler::Request, Vec<Pending<Op<DB>, DatabaseRoot<DB>>>>;
 
@@ -71,6 +63,14 @@ where
 
     /// Send responses with network priority.
     pub priority_responses: bool,
+}
+
+/// Runtime serving state for the resolver actor.
+enum State<DB> {
+    /// Database is not attached yet.
+    NoDb,
+    /// Database is attached and can serve incoming requests.
+    HasDb(Arc<AsyncRwLock<DB>>),
 }
 
 /// An action dispatched by incoming mailbox messages.

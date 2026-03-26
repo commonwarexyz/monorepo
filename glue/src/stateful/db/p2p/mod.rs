@@ -11,11 +11,6 @@
 //!   engine, dispatches fetches, fans out deliveries to waiting callers,
 //!   and serves produce requests from the local database.
 
-use super::AttachableResolver;
-use commonware_cryptography::Digest;
-use commonware_utils::sync::AsyncRwLock;
-use std::sync::Arc;
-
 mod actor;
 pub use actor::{Actor, Config};
 
@@ -25,14 +20,3 @@ pub use mailbox::{Mailbox, ResponseDropped};
 mod handler;
 
 mod metrics;
-
-impl<Op, D, DB> AttachableResolver<DB> for Mailbox<Op, D, DB>
-where
-    Op: commonware_codec::Read<Cfg = ()> + Send + Sync + Clone + 'static,
-    D: Digest,
-    DB: Send + Sync + 'static,
-{
-    async fn attach_database(&self, db: Arc<AsyncRwLock<DB>>) {
-        self.attach_database(db).await;
-    }
-}

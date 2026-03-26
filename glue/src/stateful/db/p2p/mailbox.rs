@@ -1,6 +1,7 @@
 //! Mailbox and wire types for the QMDB sync resolver service.
 
 use super::handler;
+use crate::stateful::db::AttachableResolver;
 use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
@@ -34,17 +35,11 @@ pub(super) enum Message<DB, Op, D: Digest> {
 }
 
 /// Client-facing resolver mailbox used by the QMDB sync engine.
-pub struct Mailbox<Op, D, DB>
-where
-    D: Digest,
-{
+pub struct Mailbox<DB, Op, D: Digest> {
     sender: mpsc::Sender<Message<DB, Op, D>>,
 }
 
-impl<Op, D, DB> Clone for Mailbox<Op, D, DB>
-where
-    D: Digest,
-{
+impl<DB, Op, D: Digest> Clone for Mailbox<DB, Op, D> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -52,27 +47,19 @@ where
     }
 }
 
-impl<Op, D, DB> Mailbox<Op, D, DB>
-where
-    D: Digest,
-{
+impl<DB, Op, D: Digest> Mailbox<DB, Op, D> {
     pub(super) const fn new(sender: mpsc::Sender<Message<DB, Op, D>>) -> Self {
         Self { sender }
     }
 }
 
-impl<Op, D, DB> Mailbox<Op, D, DB>
-where
-    Op: Send,
-    D: Digest,
-    DB: Send + Sync,
-{
+impl<DB: Send + Sync, Op: Send, D: Digest> Mailbox<DB, Op, D> {
     pub async fn attach_database(&self, db: Arc<AsyncRwLock<DB>>) {
         self.sender.send_lossy(Message::AttachDatabase(db)).await;
     }
 }
 
-impl<Op, D, DB> SyncResolver for Mailbox<Op, D, DB>
+impl<DB, Op, D> SyncResolver for Mailbox<DB, Op, D>
 where
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
     D: Digest,
@@ -122,6 +109,17 @@ where
     }
 }
 
+impl<DB, Op, D> AttachableResolver<DB> for Mailbox<DB, Op, D>
+where
+    Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
+    D: Digest,
+    DB: Send + Sync + 'static,
+{
+    async fn attach_database(&self, db: Arc<AsyncRwLock<DB>>) {
+        self.attach_database(db).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,7 +131,7 @@ mod tests {
     fn get_operations_cancellation_sends_cancel_message() {
         deterministic::Runner::default().start(|_| async move {
             let (sender, mut receiver) = mpsc::channel(4);
-            let mailbox = Mailbox::<u64, sha256::Digest, ()>::new(sender);
+            let mailbox = Mailbox::<(), u64, sha256::Digest>::new(sender);
             let op_count = Location::new(10);
             let start_loc = Location::new(3);
             let max_ops = NZU64!(2);
