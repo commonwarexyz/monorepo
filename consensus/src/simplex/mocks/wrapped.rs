@@ -1,12 +1,12 @@
 use crate::{simplex::elector, types::Round};
-use commonware_codec::{types::lazy::Lazy, Encode};
+use commonware_codec::{Encode, types::lazy::Lazy};
 use commonware_cryptography::{
+    Hasher as _,
     certificate::{Attestation, Verification},
     sha256::Sha256,
-    Hasher as _,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{test_rng, Faults, Participant};
+use commonware_utils::{Faults, Participant, test_rng};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Behavior {
@@ -15,7 +15,7 @@ pub enum Behavior {
 }
 
 #[derive(Clone, Debug)]
-pub struct WrappedScheme<S> {
+pub struct Scheme<S> {
     inner: S,
     behavior: Behavior,
 }
@@ -27,9 +27,9 @@ pub struct WrappedElector<E, S> {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct WrappedConfig<L>(pub L);
+pub struct Config<L>(pub L);
 
-impl<S> WrappedScheme<S> {
+impl<S> Scheme<S> {
     pub const fn new(inner: S, behavior: Behavior) -> Self {
         Self { inner, behavior }
     }
@@ -65,40 +65,39 @@ impl<S> WrappedScheme<S> {
         D: commonware_cryptography::Digest,
     {
         let encoded = signature.encode().to_vec();
+        let bit_len = encoded.len() * 8;
         let mut hasher = Sha256::default();
         hasher.update(&signer.encode());
         hasher.update(&encoded);
         let digest = hasher.finalize();
-        let start = usize::from(digest.as_ref()[0]) % (encoded.len() * 8);
+        let start = usize::from(digest.as_ref()[0]) % bit_len;
 
-        for offset in 0..(encoded.len() * 8) {
-            let flip = (start + offset) % (encoded.len() * 8);
-            let byte = flip / 8;
-            let bit = flip % 8;
-            let mut corrupted = encoded.clone();
-            corrupted[byte] ^= 1 << bit;
-            let lazy = Lazy::deferred(&mut corrupted.as_slice(), ());
-            let attestation = Attestation {
-                signer,
-                signature: lazy.clone(),
-            };
-            if lazy.get().is_some()
-                && !inner.verify_attestation(
-                    &mut test_rng(),
-                    subject.clone(),
-                    &attestation,
-                    &Sequential,
-                )
-            {
-                return lazy;
-            }
-        }
-
-        panic!("expected at least one invalid but decodable signature mutation");
+        (0..bit_len)
+            .find_map(|offset| {
+                let flip = (start + offset) % bit_len;
+                let byte = flip / 8;
+                let bit = flip % 8;
+                let mut corrupted = encoded.clone();
+                corrupted[byte] ^= 1 << bit;
+                let lazy = Lazy::deferred(&mut corrupted.as_slice(), ());
+                let attestation = Attestation {
+                    signer,
+                    signature: lazy.clone(),
+                };
+                (lazy.get().is_some()
+                    && !inner.verify_attestation(
+                        &mut test_rng(),
+                        subject.clone(),
+                        &attestation,
+                        &Sequential,
+                    ))
+                .then_some(lazy)
+            })
+            .expect("expected at least one invalid but decodable signature mutation")
     }
 }
 
-impl<S, L> elector::Config<WrappedScheme<S>> for WrappedConfig<L>
+impl<S, L> elector::Config<Scheme<S>> for Config<L>
 where
     S: commonware_cryptography::certificate::Scheme,
     L: elector::Config<S>,
@@ -108,7 +107,7 @@ where
     fn build(
         self,
         participants: &commonware_utils::ordered::Set<
-            <WrappedScheme<S> as commonware_cryptography::certificate::Scheme>::PublicKey,
+            <Scheme<S> as commonware_cryptography::certificate::Scheme>::PublicKey,
         >,
     ) -> Self::Elector {
         WrappedElector {
@@ -118,7 +117,7 @@ where
     }
 }
 
-impl<S, E> elector::Elector<WrappedScheme<S>> for WrappedElector<E, S>
+impl<S, E> elector::Elector<Scheme<S>> for WrappedElector<E, S>
 where
     S: commonware_cryptography::certificate::Scheme,
     E: elector::Elector<S>,
@@ -127,14 +126,14 @@ where
         &self,
         round: Round,
         certificate: Option<
-            &<WrappedScheme<S> as commonware_cryptography::certificate::Scheme>::Certificate,
+            &<Scheme<S> as commonware_cryptography::certificate::Scheme>::Certificate,
         >,
     ) -> Participant {
         self.inner.elect(round, certificate)
     }
 }
 
-impl<S> commonware_cryptography::certificate::Scheme for WrappedScheme<S>
+impl<S> commonware_cryptography::certificate::Scheme for Scheme<S>
 where
     S: commonware_cryptography::certificate::Scheme,
 {
