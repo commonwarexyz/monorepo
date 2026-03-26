@@ -68,7 +68,7 @@ fn system_default_stack_size_impl() -> Option<usize> {
     }
 
     let limit = usize::try_from(stack_limit.rlim_cur).ok()?;
-    Some(limit.max(libc::PTHREAD_STACK_MIN as usize))
+    Some(limit)
 }
 
 #[cfg(not(unix))]
