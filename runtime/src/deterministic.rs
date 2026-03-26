@@ -217,6 +217,9 @@ pub struct Config {
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     timeout: Option<Duration>,
 
+    /// Maximum time to wait for spawned tasks to finish after shutdown begins.
+    shutdown_timeout: Duration,
+
     /// Whether spawned tasks should catch panics instead of propagating them.
     catch_panics: bool,
 
@@ -256,6 +259,7 @@ impl Config {
             cycle: Duration::from_millis(1),
             start_time: UNIX_EPOCH,
             timeout: None,
+            shutdown_timeout: Duration::from_secs(60),
             catch_panics: false,
             storage_fault_cfg: FaultConfig::default(),
             network_buffer_pool_cfg,
@@ -292,6 +296,11 @@ impl Config {
     /// See [Config]
     pub const fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
+        self
+    }
+    /// See [Config]
+    pub const fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.shutdown_timeout = timeout;
         self
     }
     /// See [Config]
@@ -332,6 +341,10 @@ impl Config {
     /// See [Config]
     pub const fn timeout(&self) -> Option<Duration> {
         self.timeout
+    }
+    /// See [Config]
+    pub const fn shutdown_timeout(&self) -> Duration {
+        self.shutdown_timeout
     }
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
@@ -378,7 +391,7 @@ pub struct Executor {
     registered_metrics: Mutex<HashSet<MetricKey>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
-    shutdown_timeout: Option<Duration>,
+    shutdown_timeout: Duration,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     rng: Arc<Mutex<BoxDynRng>>,
@@ -467,7 +480,7 @@ impl Executor {
 pub struct Checkpoint {
     cycle: Duration,
     deadline: Option<SystemTime>,
-    shutdown_timeout: Option<Duration>,
+    shutdown_timeout: Duration,
     auditor: Arc<Auditor>,
     rng: Arc<Mutex<BoxDynRng>>,
     time: Mutex<SystemTime>,
@@ -588,13 +601,13 @@ impl Runner {
         // Keep driving the scheduler so aborted children can observe
         // cancellation and finish cleanup cooperatively before start()
         // returns or resumes the original panic.
-        let shutdown_deadline = executor.shutdown_timeout.map(|timeout| {
+        let shutdown_deadline = Some(
             executor
                 .time
                 .lock()
-                .checked_add(timeout)
-                .expect("shutdown timeout overflow")
-        });
+                .checked_add(executor.shutdown_timeout)
+                .expect("shutdown timeout overflow"),
+        );
 
         match catch_unwind(AssertUnwindSafe(|| executor_loop.drain(shutdown_deadline))) {
             Ok(true) => trace!("unfinished tasks remaining after shutdown timeout"),
@@ -1207,7 +1220,7 @@ impl Context {
             registered_metrics: Mutex::new(HashSet::new()),
             cycle: cfg.cycle,
             deadline,
-            shutdown_timeout: cfg.timeout,
+            shutdown_timeout: cfg.shutdown_timeout,
             metrics,
             auditor,
             rng,
