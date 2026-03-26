@@ -686,7 +686,7 @@ mod tests {
         tests::test_network_trait(|| {
             Network::start(
                 Config::default(),
-                thread::system_default_stack_size(),
+                thread::system_default_thread_stack_size(),
                 &mut Registry::default(),
                 test_pool(),
             )
@@ -707,7 +707,7 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                thread::system_default_stack_size(),
+                thread::system_default_thread_stack_size(),
                 &mut Registry::default(),
                 test_pool(),
             )
@@ -720,7 +720,7 @@ mod tests {
     async fn test_small_send_read_quickly() {
         let network = Network::start(
             Config::default(),
-            thread::system_default_stack_size(),
+            thread::system_default_thread_stack_size(),
             &mut Registry::default(),
             test_pool(),
         )
@@ -759,7 +759,7 @@ mod tests {
                 read_write_timeout: op_timeout,
                 ..Default::default()
             },
-            thread::system_default_stack_size(),
+            thread::system_default_thread_stack_size(),
             &mut Registry::default(),
             test_pool(),
         )
@@ -802,7 +802,7 @@ mod tests {
                 read_buffer_size: 0,
                 ..Default::default()
             },
-            thread::system_default_stack_size(),
+            thread::system_default_thread_stack_size(),
             &mut Registry::default(),
             test_pool(),
         )
@@ -856,7 +856,7 @@ mod tests {
                 read_write_timeout: op_timeout,
                 ..Default::default()
             },
-            thread::system_default_stack_size(),
+            thread::system_default_thread_stack_size(),
             &mut Registry::default(),
             test_pool(),
         )
@@ -898,7 +898,7 @@ mod tests {
         // Use default buffer size to enable buffering
         let network = Network::start(
             Config::default(),
-            thread::system_default_stack_size(),
+            thread::system_default_thread_stack_size(),
             &mut Registry::default(),
             test_pool(),
         )

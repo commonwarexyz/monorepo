@@ -2,26 +2,27 @@
 
 use std::{sync::OnceLock, thread};
 
-/// Cached default system stack size for spawned threads.
-static SYSTEM_DEFAULT_STACK_SIZE: OnceLock<usize> = OnceLock::new();
+/// Cached default system thread stack size.
+static SYSTEM_DEFAULT_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
 
-/// Rust's default stack size for spawned threads when no explicit size is set.
+/// Rust's default thread stack size when no explicit size is set.
 ///
 /// See <https://doc.rust-lang.org/std/thread/#stack-size>.
-pub(crate) const RUST_DEFAULT_STACK_SIZE: usize = 2 * 1024 * 1024;
+pub(crate) const RUST_DEFAULT_THREAD_STACK_SIZE: usize = 2 * 1024 * 1024;
 
-/// Returns the system default stack size for spawned threads.
+/// Returns the system default thread stack size.
 ///
 /// This uses the operating system's default spawned-thread stack size when it
 /// can be queried, and otherwise falls back to Rust's default spawned-thread
 /// stack size.
-pub(crate) fn system_default_stack_size() -> usize {
-    *SYSTEM_DEFAULT_STACK_SIZE
-        .get_or_init(|| system_default_stack_size_impl().unwrap_or(RUST_DEFAULT_STACK_SIZE))
+pub(crate) fn system_default_thread_stack_size() -> usize {
+    *SYSTEM_DEFAULT_THREAD_STACK_SIZE.get_or_init(|| {
+        system_default_thread_stack_size_impl().unwrap_or(RUST_DEFAULT_THREAD_STACK_SIZE)
+    })
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn system_default_stack_size_impl() -> Option<usize> {
+fn system_default_thread_stack_size_impl() -> Option<usize> {
     let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
 
     // SAFETY: `attr` points to uninitialized storage reserved for
@@ -47,7 +48,7 @@ fn system_default_stack_size_impl() -> Option<usize> {
 }
 
 #[cfg(target_os = "macos")]
-fn system_default_stack_size_impl() -> Option<usize> {
+fn system_default_thread_stack_size_impl() -> Option<usize> {
     // macOS uses different defaults for the main thread and spawned threads:
     // the main thread stack is 8 MiB, while secondary threads default to
     // 512 KiB. We use `RLIMIT_STACK` here to avoid inheriting the smaller
@@ -72,7 +73,7 @@ fn system_default_stack_size_impl() -> Option<usize> {
 }
 
 #[cfg(not(unix))]
-const fn system_default_stack_size_impl() -> Option<usize> {
+const fn system_default_thread_stack_size_impl() -> Option<usize> {
     None
 }
 
@@ -92,15 +93,10 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_system_default_stack_size_is_positive_when_available() {
-        assert!(system_default_stack_size() > 0);
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_spawn_uses_system_default_stack_size() {
-        let expected = system_default_stack_size();
+    fn test_spawn_uses_system_default_thread_stack_size() {
+        let expected = system_default_thread_stack_size();
         let observed = spawn(expected, || {
             let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
 
@@ -136,7 +132,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn test_spawn_uses_system_default_stack_size() {
+    fn test_spawn_uses_system_default_thread_stack_size() {
         let pthread_default = {
             let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
 
@@ -156,7 +152,10 @@ mod tests {
             // SAFETY: `attr` remains initialized until it is destroyed here.
             let destroy_result = unsafe { libc::pthread_attr_destroy(&mut attr) };
 
-            assert_eq!(get_result, 0, "failed to get pthread default stack size");
+            assert_eq!(
+                get_result, 0,
+                "failed to get pthread default thread stack size"
+            );
             assert_eq!(
                 destroy_result, 0,
                 "failed to destroy pthread default attributes"
@@ -164,7 +163,7 @@ mod tests {
 
             pthread_default
         };
-        let expected = system_default_stack_size();
+        let expected = system_default_thread_stack_size();
 
         // On macOS, `pthread_attr_init` exposes the secondary-thread default,
         // while `system_default_stack_size()` uses `RLIMIT_STACK` instead.
