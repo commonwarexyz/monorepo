@@ -151,6 +151,9 @@ where
     /// only when the block is permanently invalid; if validity may still
     /// change as additional information arrives, continue waiting.
     ///
+    /// Verification must reject any block whose execution result does not
+    /// match the block's committed state (for example, a state root mismatch).
+    ///
     /// This future may be cancelled by consensus if the caller drops its
     /// response receiver. Implementations should be cancellation-safe: dropping
     /// and retrying must not violate invariants or lose durable progress.
@@ -167,6 +170,11 @@ where
     /// an ancestor block is missing (e.g. after a restart). The block is
     /// known-good (it was previously certified), so the implementation
     /// should unconditionally execute the block's state transitions.
+    ///
+    /// The returned merkleized state must match what
+    /// [`verify`](Self::verify) accepted for `block`. The wrapper commits this
+    /// replay result during finalization and cannot re-check block-specific
+    /// commitments generically.
     ///
     /// This future may be cancelled if the originating propose/verify request
     /// is dropped. Implementations should be cancellation-safe: dropping and
