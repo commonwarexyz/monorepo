@@ -53,8 +53,6 @@ module replica {
 
     // history of received proposals
     var ghost_proposal: ReplicaId -> Set[Proposal]
-    // global parent relations learned from proposals, keyed by (view, payload)
-    var parent_refs: ViewNumber -> (Payload -> Set[ParentRef])
     // sequence of finalized payloads observed by each correct replica
     var ghost_committed_blocks: ReplicaId -> List[Payload]
     // Replica-local deterministic certification policy from the application.
@@ -299,22 +297,12 @@ module replica {
         VIEWS.filter(v => v > v1 and v < v2).forall(v => is_view_nullified(v, certificates))
     }
 
-    // The set of parent references observed for a (view, payload) pair.
-    def learned_parents(view: ViewNumber, payload: Payload): Set[ParentRef] = {
-        parent_refs.get(view).get(payload)
+    def learned_parents(view: ViewNumber, payload: Payload): Set[ViewNumber] = {
+        sent_proposal.filter(p => p.view == view and p.payload == payload).map(p => p.parent)
     }
 
     def has_parent_conflict(view: ViewNumber, payload: Payload): bool = {
         learned_parents(view, payload).size() > 1
-    }
-
-    // Unique parent reference for (view, payload), if known.
-    def unique_parent(view: ViewNumber, payload: Payload): Option[ParentRef] = {
-        val refs = learned_parents(view, payload)
-        if (refs.size() == 1)
-            refs.fold(None, (_acc, p) => Some(p))
-        else
-            None
     }
 
     pure def list_contains_payload(chain: List[Payload], payload: Payload): bool = {
@@ -324,29 +312,52 @@ module replica {
     // Parent is valid if all intermediate views are nullified and the parent view
     // is either finalized or notarized and locally certified.
     pure def valid_parent(
-        self: ReplicaState,
-        view: ViewNumber,
-        parent_view: ViewNumber,
-        certificates: Set[Certificate]
-    ): bool = and {
-        parent_view < view,
-        parent_view >= self.last_finalized,
-        are_views_nullified(parent_view, view, certificates),
-        or {
-            is_view_finalized(parent_view, certificates),
-            and {
-                is_view_notarized(parent_view, certificates),
-                is_some(self.certified.get(parent_view)),
-            }
-        }
-    }
+          self: ReplicaState,
+          view: ViewNumber,
+          parent: ViewNumber,
+          certificates: Set[Certificate]
+      ): bool = {
+          is_some(parent_payload(self, view, parent, certificates))
+      }
 
-    // A predicate `is_select_parent(id, pv)` iff `pv` can be selected by id in current view.
-    def is_select_parent(id: ReplicaId, parent_view: ViewNumber): bool = {
-        val self = replica_state.get(id)
-        val certs = store_certificate.get(id)
-        valid_parent(self, self.view, parent_view, certs)
-    }
+    pure def finalized_payload_at(
+          view: ViewNumber,
+          certificates: Set[Certificate]
+      ): Option[Payload] = {
+          val payloads =
+              certificates
+                  .filter(c => and {
+                      is_finalization_cert(c),
+                      cert_view(c) == view,
+                  })
+                  .map(c => cert_payload(c))
+
+          if (payloads.size() == 1)
+              payloads.fold(None, (_acc, p) => p)
+          else
+              None
+      }
+
+      pure def parent_payload(
+          self: ReplicaState,
+          view: ViewNumber,
+          parent_view: ViewNumber,
+          certificates: Set[Certificate]
+      ): Option[Payload] = {
+          if (view <= parent_view)
+              None
+          else if (parent_view < self.last_finalized)
+              None
+          else if (not(are_views_nullified(parent_view, view, certificates)))
+              None
+          else if (parent_view == GENESIS_VIEW)
+              Some(GENESIS_PAYLOAD)
+          else
+              match (finalized_payload_at(parent_view, certificates)) {
+                  | Some(p) => Some(p)
+                  | None => self.certified.get(parent_view)
+              }
+      }
 
     // Certification is deterministic and may depend on replica id.
     def can_certify(id: ReplicaId, payload: Payload): bool = {
@@ -444,7 +455,6 @@ module replica {
             store_vote' = CORRECT.mapBy(_ => Set()),
             store_certificate' = CORRECT.mapBy(_ => Set()),
             ghost_committed_blocks' = CORRECT.mapBy(_ => List()),
-            parent_refs' = VIEWS.mapBy(_ => ParentTrackedPayloads.mapBy(_ => Set())),
             ghost_proposal' = CORRECT.mapBy(_ => Set()),
             leader' = l,
             certify_policy' = certify,
@@ -582,7 +592,6 @@ module replica {
                         store_certificate' = store_certificate,
                         leader' = leader,
                         ghost_committed_blocks' = ghost_committed_blocks,
-                        parent_refs' = parent_refs,
                         certify_policy' = certify_policy
                     }
                 },
@@ -606,7 +615,6 @@ module replica {
                     leader' = leader,
                     ghost_proposal' = ghost_proposal,
                     ghost_committed_blocks' = ghost_committed_blocks,
-                    parent_refs' = parent_refs,
                     certify_policy' = certify_policy
                 }
             },
@@ -621,13 +629,8 @@ module replica {
     action on_proposal(id: ReplicaId, proposal: Proposal): bool = all {
         val self = replica_state.get(id)
         val certs = store_certificate.get(id)
-        val parent_ref: ParentRef = {
-            parent_view: proposal.parent
-        }
-        val updated_parent_refs = parent_refs.setBy(proposal.view, by_view =>
-            by_view.setBy(proposal.payload, old => old.union(Set(parent_ref)))
-        )
-        val unique_parent = updated_parent_refs.get(proposal.view).get(proposal.payload).size() == 1
+        val expected_parent = parent_payload(self, proposal.view, proposal.parent, certs)
+
         all {
             proposal.view == self.view,
             proposal.sig == sig_of(leader.get(proposal.view)),
@@ -635,12 +638,12 @@ module replica {
             proposal.parent >= GENESIS_VIEW,
             not(has_notarized(self)),
             not(self.nullified),
+            is_some(expected_parent),
 
             any {
                 all {
                     VALID_PAYLOADS.contains(proposal.payload),
                     valid_parent(self, proposal.view, proposal.parent, certs),
-                    unique_parent,
 
                     sent_vote' = sent_vote.union(Set(notarize(proposal, sig_of(id)))),
                     replica_state' = replica_state.set(id, {
@@ -655,7 +658,6 @@ module replica {
                     or {
                         not(VALID_PAYLOADS.contains(proposal.payload)),
                         not(valid_parent(self, proposal.view, proposal.parent, certs)),
-                        not(unique_parent),
                     },
 
                     sent_vote' = sent_vote.union(Set(nullify(proposal.view, sig_of(id)))),
@@ -670,7 +672,6 @@ module replica {
             },
 
             ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
-            parent_refs' = updated_parent_refs,
 
             // unchanged
             store_vote' = store_vote,
@@ -735,7 +736,6 @@ module replica {
                 sent_proposal' = sent_proposal,
                 leader' = leader,
                 ghost_proposal' = ghost_proposal,
-                parent_refs' = parent_refs,
                 certify_policy' = certify_policy,
                 lastAction' = "on_vote_notarize"
             }
@@ -793,7 +793,6 @@ module replica {
                 sent_proposal' = sent_proposal,
                 leader' = leader,
                 ghost_proposal' = ghost_proposal,
-                parent_refs' = parent_refs,
                 certify_policy' = certify_policy,
                 lastAction' = "on_vote_finalize"
             }
@@ -889,7 +888,6 @@ module replica {
                 sent_proposal' = sent_proposal,
                 leader' = leader,
                 ghost_proposal' = ghost_proposal,
-                parent_refs' = parent_refs,
                 certify_policy' = certify_policy,
                 lastAction' = "on_vote_nullify"
             }
@@ -920,7 +918,6 @@ module replica {
             store_vote' = store_vote,
             leader' = leader,
             ghost_proposal' = ghost_proposal,
-            parent_refs' = parent_refs,
             certify_policy' = certify_policy,
             lastAction' = "on_certificate"
         }
@@ -1119,7 +1116,6 @@ module replica {
             leader' = leader,
             ghost_committed_blocks' = ghost_committed_blocks,
             ghost_proposal' = ghost_proposal,
-            parent_refs' = parent_refs,
             certify_policy' = certify_policy,
             lastAction' = "timeout"
         }
@@ -1228,7 +1224,6 @@ module replica {
         store_certificate' = store_certificate,
         leader' = leader,
         ghost_proposal' = ghost_proposal,
-        parent_refs' = parent_refs,
         certify_policy' = certify_policy
     }
 
@@ -1330,16 +1325,6 @@ module replica {
         VIEWS.forall(v => is_some(self.notarized.get(v)) iff has_notarized_view(id, v, sent_vote))
     })
 
-
-    // Learned parent references must always point to an older view.
-    val parent_refs_well_formed = VIEWS.forall(v => {
-        ParentTrackedPayloads.forall(b => {
-            learned_parents(v, b).forall(parent => and {
-                parent.parent_view >= GENESIS_VIEW,
-                parent.parent_view < v,
-            })
-        })
-    })
 
     def finalized_payloads_seen(view: ViewNumber): Set[Option[Payload]] = {
         CORRECT.fold(Set(), (acc, id) =>
@@ -1460,7 +1445,6 @@ module replica {
         validity,
         valid_last_finalized,
         notarized_consistency,
-        parent_refs_well_formed,
         unique_notarized_or_finalized_payload_per_view,
         finalize_vote_requires_notarization_cert,
         finalized_payloads_have_unique_parent,

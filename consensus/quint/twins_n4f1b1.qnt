@@ -46,7 +46,6 @@ module twins {
   val validity = i::validity
   val valid_last_finalized = i::valid_last_finalized
   val notarized_consistency = i::notarized_consistency
-  val parent_refs_well_formed = i::parent_refs_well_formed
   val unique_notarized_or_finalized_payload_per_view = i::unique_notarized_or_finalized_payload_per_view
   val finalize_vote_requires_notarization_cert = i::finalize_vote_requires_notarization_cert
   val finalized_payloads_have_unique_parent = i::finalized_payloads_have_unique_parent

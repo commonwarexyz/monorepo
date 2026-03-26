@@ -145,14 +145,15 @@ module tests {
             .then(replica_receives_finalize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n1"))
             .then(replica_receives_finalize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n2"))
 
-            // n0 and n1 see proposal A and notarize.
+            // All correct replicas see proposal A and notarize.
             .then(inject_proposal(proposal_a))
             .then(on_proposal("n0", proposal_a))
             .then(on_proposal("n1", proposal_a))
+            .then(on_proposal("n2", proposal_a))
 
-            // n2 sees proposal B.
+            // Byzantine also injects proposal B with a different parent,
+            // creating a parent conflict in sent_proposal.
             .then(inject_proposal(proposal_b))
-            .then(on_proposal("n2", proposal_b))
 
             // Byzantine n3 also sent a notarize vote.
             .then(inject_vote(notarize(proposal_a, "n3")))
@@ -180,7 +181,6 @@ module tests {
         store_vote' = store_vote,
         store_certificate' = store_certificate,
         ghost_proposal' = ghost_proposal,
-        parent_refs' = parent_refs,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state,
@@ -195,7 +195,6 @@ module tests {
         store_vote' = store_vote,
         store_certificate' = store_certificate,
         ghost_proposal' = ghost_proposal,
-        parent_refs' = parent_refs,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state,
@@ -223,7 +222,6 @@ module tests {
         store_vote' = store_vote,
         store_certificate' = store_certificate,
         ghost_proposal' = ghost_proposal,
-        parent_refs' = parent_refs,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state,
