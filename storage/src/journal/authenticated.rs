@@ -68,19 +68,23 @@ impl<H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<H, Item> {
         MerkleizedBatch { inner: mmr, items }
     }
 
-    /// Hash and merkleize a shared items segment.
+    /// Like [`merkleize`](Self::merkleize), but the caller supplies the items
+    /// instead of accumulating them with [`add`](Self::add). The two approaches
+    /// must not be mixed: do not call [`add`](Self::add) before this method.
     ///
-    /// Each item is encoded and hashed into the MMR, then the provided `Arc`
-    /// is used as-is in the resulting [`MerkleizedBatch`]. This lets callers
-    /// share a single `Arc<Vec<Item>>` across multiple consumers without
-    /// cloning the items themselves.
-    pub(crate) fn merkleize_shared(
+    /// The items are encoded and hashed into the MMR, and the `Arc` is stored
+    /// directly in the resulting [`MerkleizedBatch`] without copying.
+    ///
+    /// # Panics
+    ///
+    /// Panics if items were previously added via [`add`](Self::add).
+    pub(crate) fn merkleize_with(
         mut self,
         items: Arc<Vec<Item>>,
     ) -> MerkleizedBatch<H::Digest, Item> {
-        debug_assert!(
+        assert!(
             self.items.is_empty(),
-            "merkleize_shared expects no items added via add"
+            "merkleize_with expects no items added via add"
         );
         for item in &*items {
             let encoded = item.encode();
@@ -2129,6 +2133,100 @@ mod tests {
 
             // items has 1 item, but we try to skip 5.
             let _ = merkleized.finalize_from(journal.mmr.size(), 5);
+        });
+    }
+
+    /// merkleize_with produces the same root as add + merkleize.
+    #[test_traced("INFO")]
+    fn test_merkleize_with_matches_add() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let journal = create_journal_with_ops(context, "mw-matches", 5).await;
+
+            let ops = vec![
+                create_operation(10),
+                create_operation(11),
+                create_operation(12),
+            ];
+
+            // add + merkleize
+            let mut batch = journal.new_batch();
+            for op in &ops {
+                batch = batch.add(op.clone());
+            }
+            let expected = batch.merkleize();
+
+            // merkleize_with
+            let actual = journal.new_batch().merkleize_with(Arc::new(ops));
+
+            assert_eq!(actual.root(), expected.root());
+        });
+    }
+
+    /// merkleize_with items are readable after finalize + apply.
+    #[test_traced("INFO")]
+    fn test_merkleize_with_apply() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut journal = create_journal_with_ops(context, "mw-apply", 5).await;
+
+            let ops = vec![create_operation(10), create_operation(11)];
+            let merkleized = journal.new_batch().merkleize_with(Arc::new(ops.clone()));
+
+            let expected_root = merkleized.root();
+            journal.apply_batch(merkleized.finalize()).await.unwrap();
+
+            assert_eq!(journal.root(), expected_root);
+            assert_eq!(*journal.size().await, 7);
+
+            let reader = journal.reader().await;
+            assert_eq!(reader.read(5).await.unwrap(), ops[0]);
+            assert_eq!(reader.read(6).await.unwrap(), ops[1]);
+        });
+    }
+
+    /// merkleize_with shares the Arc: the caller's clone and the batch's
+    /// internal segment point to the same allocation.
+    #[test_traced("INFO")]
+    fn test_merkleize_with_shares_arc() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let journal = create_journal_with_ops(context, "mw-arc", 5).await;
+
+            let ops = Arc::new(vec![create_operation(10)]);
+            let merkleized = journal.new_batch().merkleize_with(ops.clone());
+
+            // The batch's items chain should contain our Arc (same pointer).
+            let batch_segment = merkleized.items.last().unwrap();
+            assert!(Arc::ptr_eq(&ops, batch_segment));
+        });
+    }
+
+    /// merkleize_with panics if add was called first.
+    #[test_traced("INFO")]
+    #[should_panic(expected = "merkleize_with expects no items added via add")]
+    fn test_merkleize_with_panics_after_add() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let journal = create_journal_with_ops(context, "mw-panic", 5).await;
+
+            let batch = journal.new_batch().add(create_operation(10));
+            let _ = batch.merkleize_with(Arc::new(vec![create_operation(11)]));
+        });
+    }
+
+    /// merkleize_with with empty items produces the same root as merkleize
+    /// with no adds.
+    #[test_traced("INFO")]
+    fn test_merkleize_with_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let journal = create_journal_with_ops(context, "mw-empty", 5).await;
+
+            let expected = journal.new_batch().merkleize();
+            let actual = journal.new_batch().merkleize_with(Arc::new(vec![]));
+
+            assert_eq!(actual.root(), expected.root());
         });
     }
 }

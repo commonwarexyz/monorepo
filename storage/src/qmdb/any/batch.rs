@@ -453,13 +453,12 @@ where
         // The journal batch was created eagerly at batch construction time and its
         // parent already contains all prior batches' MMR state, so we only
         // hash THIS batch's operations. Parent operations are never re-cloned,
-        // re-encoded, or re-hashed. The ops Arc is shared between the journal
-        // items chain and base_operations to avoid cloning every operation.
-        let ops_arc = Arc::new(ops);
-        let journal = self.journal_batch.merkleize_shared(Arc::clone(&ops_arc));
+        // re-encoded, or re-hashed.
+        let ops = Arc::new(ops);
+        let journal = self.journal_batch.merkleize_with(ops.clone());
 
         // Build the operation chain: parent segments + this batch's segment.
-        self.base_operations.push(ops_arc);
+        self.base_operations.push(ops);
 
         // Merge with base diff: entries not overridden by this batch.
         // O(K) deep copy (K = distinct keys in parent diff) when the parent MerkleizedBatch or
