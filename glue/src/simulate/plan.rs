@@ -104,11 +104,22 @@ pub struct PlanBuilder<D: EngineDefinition> {
     engine: D,
     crashes: Vec<Crash<D::PublicKey>>,
     required_finalizations: u64,
-    exit_condition: Option<Box<dyn ExitCondition<D::PublicKey, D::State>>>,
+    exit_condition: Option<ExitConditionFactory<D>>,
     timeout: Option<Duration>,
-    finalization_property: Vec<Box<dyn FinalizationProperty<D::State>>>,
-    property: Vec<Box<dyn Property<D::PublicKey, D::State>>>,
+    finalization_property: Vec<FinalizationPropertyFactory<D>>,
+    property: Vec<PropertyFactory<D>>,
 }
+
+type ExitConditionFactory<D> = Box<
+    dyn Fn() -> Box<dyn ExitCondition<<D as EngineDefinition>::PublicKey, <D as EngineDefinition>::State>>,
+>;
+
+type FinalizationPropertyFactory<D> =
+    Box<dyn Fn() -> Box<dyn FinalizationProperty<<D as EngineDefinition>::State>>>;
+
+type PropertyFactory<D> = Box<
+    dyn Fn() -> Box<dyn Property<<D as EngineDefinition>::PublicKey, <D as EngineDefinition>::State>>,
+>;
 
 impl<D: EngineDefinition> PlanBuilder<D> {
     /// Create a builder with the required engine and sensible defaults.
@@ -195,9 +206,9 @@ impl<D: EngineDefinition> PlanBuilder<D> {
     /// Override the default exit condition.
     pub fn exit_condition(
         mut self,
-        condition: impl ExitCondition<D::PublicKey, D::State> + 'static,
+        condition: impl ExitCondition<D::PublicKey, D::State> + Clone + 'static,
     ) -> Self {
-        self.exit_condition = Some(Box::new(condition));
+        self.exit_condition = Some(Box::new(move || Box::new(condition.clone())));
         self
     }
 
@@ -208,14 +219,19 @@ impl<D: EngineDefinition> PlanBuilder<D> {
 
     pub fn finalization_property(
         mut self,
-        property: impl FinalizationProperty<D::State> + 'static,
+        property: impl FinalizationProperty<D::State> + Clone + 'static,
     ) -> Self {
-        self.finalization_property.push(Box::new(property));
+        self.finalization_property
+            .push(Box::new(move || Box::new(property.clone())));
         self
     }
 
-    pub fn property(mut self, property: impl Property<D::PublicKey, D::State> + 'static) -> Self {
-        self.property.push(Box::new(property));
+    pub fn property(
+        mut self,
+        property: impl Property<D::PublicKey, D::State> + Clone + 'static,
+    ) -> Self {
+        self.property
+            .push(Box::new(move || Box::new(property.clone())));
         self
     }
 
@@ -226,32 +242,42 @@ impl<D: EngineDefinition> PlanBuilder<D> {
             .first()
             .copied()
             .expect("at least one seed must be configured");
-        let exit_condition = self
-            .exit_condition
-            .unwrap_or_else(|| Box::new(MinimumFinalizations::new(self.required_finalizations)));
+        self.build_with_seed(seed)
+    }
+
+    fn build_with_seed(&self, seed: u64) -> Plan<D> {
+        let exit_condition = self.exit_condition.as_ref().map_or_else(
+            || Box::new(MinimumFinalizations::new(self.required_finalizations)) as _,
+            |factory| factory(),
+        );
+        let finalization_property = self
+            .finalization_property
+            .iter()
+            .map(|factory| factory())
+            .collect();
+        let property = self.property.iter().map(|factory| factory()).collect();
         Plan {
             seed,
-            participants: self.participants,
-            link: self.link,
+            participants: self.participants.clone(),
+            link: self.link.clone(),
             max_message_size: self.max_message_size,
-            engine: self.engine,
-            crashes: self.crashes,
+            engine: self.engine.clone(),
+            crashes: self.crashes.clone(),
             required_finalizations: self.required_finalizations,
             exit_condition,
             timeout: self.timeout,
-            finalization_property: self.finalization_property,
-            property: self.property,
+            finalization_property,
+            property,
         }
     }
 
-    /// Build the plan once and run it for each configured seed.
+    /// Build a fresh plan per seed and run each simulation.
     pub fn run(self) -> Result<Vec<PlanResult<D>>, String> {
-        let seeds = self.seeds.clone();
-        let plan = self.build();
-        let mut results = Vec::with_capacity(seeds.len());
-        for seed in seeds {
+        let mut results = Vec::with_capacity(self.seeds.len());
+        for &seed in &self.seeds {
+            let plan = self.build_with_seed(seed);
             let result = plan
-                .run_with_seed(seed)
+                .run()
                 .map_err(|e| format!("seed {seed}: {e}"))?;
             results.push(result);
         }
@@ -726,7 +752,11 @@ mod tests {
     use commonware_consensus::types::View;
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{Clock, Handle, Quota, Spawner};
-    use std::{future::Future, pin::Pin};
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     #[derive(Clone)]
     struct FinalizingEngine {
@@ -811,6 +841,7 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
     struct AtLeastTrackedValidators {
         min: usize,
     }
@@ -827,6 +858,37 @@ mod tests {
             _target_count: usize,
         ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
             Box::pin(async move { Ok(tracker.tracked_count() >= self.min) })
+        }
+    }
+
+    #[derive(Default)]
+    struct SingleUseProperty {
+        calls: AtomicUsize,
+    }
+
+    impl Clone for SingleUseProperty {
+        fn clone(&self) -> Self {
+            Self::default()
+        }
+    }
+
+    impl Property<ed25519::PublicKey, ()> for SingleUseProperty {
+        fn name(&self) -> &str {
+            "single_use_property"
+        }
+
+        fn check<'a>(
+            &'a self,
+            _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+            _states: &'a [&'a ()],
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async move {
+                let previous = self.calls.fetch_add(1, Ordering::Relaxed);
+                if previous == 0 {
+                    return Ok(());
+                }
+                Err(format!("property reused across runs: call {}", previous + 1))
+            })
         }
     }
 
@@ -927,5 +989,16 @@ mod tests {
             2,
             "custom exit condition should see both validators"
         );
+    }
+
+    #[test]
+    fn multi_seed_run_reconstructs_properties_per_seed() {
+        PlanBuilder::new(FinalizingEngine::new(1, Duration::from_millis(10), 1))
+            .seeds([0, 1])
+            .timeout(Duration::from_secs(1))
+            .required_finalizations(1)
+            .property(SingleUseProperty::default())
+            .run()
+            .expect("stateful properties should not be reused across seed runs");
     }
 }
