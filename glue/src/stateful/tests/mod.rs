@@ -23,24 +23,28 @@ mod single_db_app;
 
 const NUM_VALIDATORS: u32 = 5;
 
+#[test_group("slow")]
 #[test_traced("DEBUG")]
 fn all_validators_finalize_and_commit() {
     run_finalize(SingleDbEngine::new(NUM_VALIDATORS));
     run_finalize(MultiDbEngine::new(NUM_VALIDATORS));
 }
 
+#[test_group("slow")]
 #[test_traced("DEBUG")]
 fn deterministic_across_seeds() {
     run_determinism(SingleDbEngine::new(NUM_VALIDATORS));
     run_determinism(MultiDbEngine::new(NUM_VALIDATORS));
 }
 
+#[test_group("slow")]
 #[test_traced("DEBUG")]
 fn crash_and_restart_one_validator() {
     run_crash_restart(SingleDbEngine::new(NUM_VALIDATORS));
     run_crash_restart(MultiDbEngine::new(NUM_VALIDATORS));
 }
 
+#[test_group("slow")]
 #[test_traced("DEBUG")]
 fn delayed_start_one_validator() {
     run_delayed_start(SingleDbEngine::new(NUM_VALIDATORS));
@@ -83,6 +87,7 @@ fn state_sync_lossy_network() {
     run_state_sync_lossy(MultiDbEngine::new(NUM_VALIDATORS).with_state_sync(), link);
 }
 
+#[test_group("slow")]
 #[test_traced("DEBUG")]
 fn lossy_network() {
     let link = Link {
@@ -94,12 +99,14 @@ fn lossy_network() {
     run_lossy(MultiDbEngine::new(NUM_VALIDATORS), link);
 }
 
+#[test_group("slow")]
 #[test_traced("DEBUG")]
 fn random_crashes() {
     run_random_crashes(SingleDbEngine::new(NUM_VALIDATORS));
     run_random_crashes(MultiDbEngine::new(NUM_VALIDATORS));
 }
 
+#[test_group("slow")]
 #[test_traced("DEBUG")]
 fn many_concurrent_crashes() {
     run_many_crashes(SingleDbEngine::new(NUM_VALIDATORS));

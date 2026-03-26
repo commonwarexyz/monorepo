@@ -22,7 +22,7 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{non_empty_range, sync::AsyncRwLock};
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 type KeylessDbHandle<E, V, H> = Arc<AsyncRwLock<Keyless<E, V, H>>>;
 
@@ -34,18 +34,17 @@ pub struct KeylessUnmerkleized<E: Storage + Clock + Metrics, V: VariableValue, H
     metadata: Option<V>,
 }
 
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Deref
+    for KeylessUnmerkleized<E, V, H>
+{
+    type Target = UnmerkleizedBatch<H, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.batch
+    }
+}
+
 impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> KeylessUnmerkleized<E, V, H> {
-    /// The location that the next appended value will be placed at.
-    pub const fn size(&self) -> Location {
-        self.batch.size()
-    }
-
-    /// Append a value.
-    pub fn append(mut self, value: V) -> Self {
-        self.batch = self.batch.append(value);
-        self
-    }
-
     /// Set commit metadata included in the next [`merkleize`](UnmerkleizedTrait::merkleize) call.
     pub fn with_metadata(mut self, metadata: V) -> Self {
         self.metadata = Some(metadata);
@@ -64,6 +63,16 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> KeylessUnmerklei
 pub struct KeylessMerkleized<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
     batch: MerkleizedBatch<H::Digest, V>,
     db: KeylessDbHandle<E, V, H>,
+}
+
+impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Deref
+    for KeylessMerkleized<E, V, H>
+{
+    type Target = MerkleizedBatch<H::Digest, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.batch
+    }
 }
 
 impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> KeylessMerkleized<E, V, H> {
