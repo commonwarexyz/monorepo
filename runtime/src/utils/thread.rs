@@ -84,7 +84,8 @@ fn system_thread_stack_size_impl() -> Option<usize> {
 }
 
 #[cfg(not(unix))]
-const fn system_thread_stack_size_impl() -> Option<usize> {
+#[allow(clippy::missing_const_for_fn)]
+fn system_thread_stack_size_impl() -> Option<usize> {
     None
 }
 
@@ -100,7 +101,7 @@ where
         .expect("failed to spawn thread")
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
 
