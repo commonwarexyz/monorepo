@@ -110,17 +110,16 @@ impl Tree {
             return;
         };
 
-        // Abort descendants before the task on this node so the entire subtree is
-        // already marked aborted by the time task cleanup runs.
+        // Abort the task.
+        if let Some(aborter) = task {
+            aborter.abort();
+        }
+
+        // Drain children so the subtree cannot be aborted twice.
         for child in children {
             if let Some(child) = child.upgrade() {
                 child.abort();
             }
-        }
-
-        // Abort the task on this node.
-        if let Some(aborter) = task {
-            aborter.abort();
         }
     }
 }

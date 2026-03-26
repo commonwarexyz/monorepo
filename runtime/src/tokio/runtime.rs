@@ -141,20 +141,29 @@ impl TaskTracker {
         })
     }
 
-    /// Closes task registration and waits for all tracked tasks to finish.
+    /// Closes task registration for shutdown.
+    fn close(&self) {
+        self.state.fetch_or(Self::CLOSED, Ordering::Relaxed);
+    }
+
+    /// Waits for all tracked tasks to finish.
+    ///
+    /// Task registration must already be closed before calling this function.
     ///
     /// Returns `true` if all tracked tasks finish before `timeout`, or `false`
     /// if shutdown timed out first.
-    fn close(&self, timeout: Duration) -> bool {
+    fn wait_for_idle(&self, timeout: Duration) -> bool {
         let deadline = Instant::now()
             .checked_add(timeout)
             .expect("shutdown timeout overflow");
 
         let mut gate = self.gate.lock();
-
-        // Atomically close registration and observe how many tracked tasks were
-        // still live at the moment shutdown started.
-        let state = self.state.fetch_or(Self::CLOSED, Ordering::Relaxed);
+        let state = self.state.load(Ordering::Relaxed);
+        assert_ne!(
+            state & Self::CLOSED,
+            0,
+            "task registration must be closed before waiting for idle",
+        );
         if Self::live(state) == 0 {
             return true;
         }
@@ -603,6 +612,10 @@ impl crate::Runner for Runner {
         let result = catch_unwind(AssertUnwindSafe(|| {
             runtime.block_on(panicked.monitor(f(context)))
         }));
+
+        // Close task registration before aborting the tree so task cleanup
+        // cannot enqueue new work while shutdown is propagating.
+        executor.tasks.close();
         tree.abort();
         metric.finish();
 
@@ -616,7 +629,7 @@ impl crate::Runner for Runner {
         // If a tracked task does not finish before the timeout (may be a blocking task we
         // cannot cancel), log the slow shutdown and continue returning or resuming
         // the original panic.
-        if !executor.tasks.close(self.cfg.shutdown_timeout) {
+        if !executor.tasks.wait_for_idle(self.cfg.shutdown_timeout) {
             error!("unfinished tasks remaining after shutdown timeout");
         }
         runtime.shutdown_timeout(
