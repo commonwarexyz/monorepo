@@ -851,7 +851,6 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BufferPoolThreadCache;
 
     #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {
@@ -860,13 +859,17 @@ mod tests {
         assert_eq!(cfg.worker_threads, 8);
         assert_eq!(
             cfg.resolved_network_buffer_pool_config()
-                .thread_cache_capacity,
-            BufferPoolThreadCache::ForParallelism(NZUsize!(8))
+                .thread_cache_config,
+            BufferPoolConfig::for_network()
+                .with_thread_cache_for_parallelism(NZUsize!(8))
+                .thread_cache_config
         );
         assert_eq!(
             cfg.resolved_storage_buffer_pool_config()
-                .thread_cache_capacity,
-            BufferPoolThreadCache::ForParallelism(NZUsize!(8))
+                .thread_cache_config,
+            BufferPoolConfig::for_storage()
+                .with_thread_cache_for_parallelism(NZUsize!(8))
+                .thread_cache_config
         );
     }
 
@@ -884,13 +887,17 @@ mod tests {
 
         assert_eq!(
             cfg.resolved_network_buffer_pool_config()
-                .thread_cache_capacity,
-            BufferPoolThreadCache::ForParallelism(NZUsize!(2))
+                .thread_cache_config,
+            BufferPoolConfig::for_network()
+                .with_thread_cache_for_parallelism(NZUsize!(2))
+                .thread_cache_config
         );
         assert_eq!(
             cfg.resolved_storage_buffer_pool_config()
-                .thread_cache_capacity,
-            BufferPoolThreadCache::Disabled
+                .thread_cache_config,
+            BufferPoolConfig::for_storage()
+                .with_thread_cache_disabled()
+                .thread_cache_config
         );
     }
 }
