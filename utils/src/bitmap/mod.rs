@@ -1864,6 +1864,120 @@ mod tests {
     }
 
     #[test]
+    fn test_ones_iter_empty() {
+        let bv: BitMap<4> = BitMap::new();
+        let ones: Vec<u64> = bv.ones_iter().collect();
+        assert!(ones.is_empty());
+    }
+
+    #[test]
+    fn test_ones_iter_all_zeros() {
+        let bv = BitMap::<4>::zeroes(100);
+        let ones: Vec<u64> = bv.ones_iter().collect();
+        assert!(ones.is_empty());
+    }
+
+    #[test]
+    fn test_ones_iter_all_ones() {
+        let bv = BitMap::<4>::ones(100);
+        let ones: Vec<u64> = bv.ones_iter().collect();
+        let expected: Vec<u64> = (0..100).collect();
+        assert_eq!(ones, expected);
+    }
+
+    #[test]
+    fn test_ones_iter_sparse() {
+        let mut bv = BitMap::<4>::zeroes(64);
+        bv.set(0, true);
+        bv.set(31, true);
+        bv.set(32, true);
+        bv.set(63, true);
+
+        let ones: Vec<u64> = bv.ones_iter().collect();
+        assert_eq!(ones, vec![0, 31, 32, 63]);
+    }
+
+    #[test]
+    fn test_ones_iter_single_bit() {
+        let mut bv: BitMap<4> = BitMap::new();
+        bv.push(true);
+        assert_eq!(bv.ones_iter().collect::<Vec<_>>(), vec![0]);
+
+        let mut bv: BitMap<4> = BitMap::new();
+        bv.push(false);
+        assert!(bv.ones_iter().collect::<Vec<_>>().is_empty());
+    }
+
+    #[test]
+    fn test_ones_iter_multi_chunk() {
+        // Use small chunks (4 bytes = 32 bits) to ensure multi-chunk coverage.
+        let mut bv = BitMap::<4>::zeroes(96);
+        // Set one bit per chunk.
+        bv.set(7, true); // chunk 0
+        bv.set(40, true); // chunk 1
+        bv.set(95, true); // chunk 2
+
+        let ones: Vec<u64> = bv.ones_iter().collect();
+        assert_eq!(ones, vec![7, 40, 95]);
+    }
+
+    #[test]
+    fn test_ones_iter_partial_chunk() {
+        // 35 bits = 1 full chunk (32 bits) + 3 bits in a partial chunk.
+        let mut bv = BitMap::<4>::zeroes(35);
+        bv.set(31, true); // last bit of full chunk
+        bv.set(32, true); // first bit of partial chunk
+        bv.set(34, true); // last bit
+
+        let ones: Vec<u64> = bv.ones_iter().collect();
+        assert_eq!(ones, vec![31, 32, 34]);
+    }
+
+    #[test]
+    fn test_ones_iter_from_midway() {
+        let mut bv = BitMap::<4>::zeroes(64);
+        bv.set(5, true);
+        bv.set(20, true);
+        bv.set(40, true);
+        bv.set(60, true);
+
+        // Start from position 20 -- should skip bit 5.
+        let ones: Vec<u64> = Readable::ones_iter_from(&bv, 20).collect();
+        assert_eq!(ones, vec![20, 40, 60]);
+
+        // Start from position 21 -- should skip bits 5 and 20.
+        let ones: Vec<u64> = Readable::ones_iter_from(&bv, 21).collect();
+        assert_eq!(ones, vec![40, 60]);
+
+        // Start past all set bits.
+        let ones: Vec<u64> = Readable::ones_iter_from(&bv, 61).collect();
+        assert!(ones.is_empty());
+    }
+
+    #[test]
+    fn test_ones_iter_matches_count_ones() {
+        let mut bv: BitMap<8> = BitMap::new();
+        for i in 0..200 {
+            bv.push(i % 7 == 0);
+        }
+        assert_eq!(bv.ones_iter().count() as u64, bv.count_ones());
+    }
+
+    #[test]
+    fn test_ones_iter_different_chunk_sizes() {
+        let pattern: Vec<bool> = (0..100).map(|i| i % 5 == 0).collect();
+        let expected: Vec<u64> = (0..100).filter(|i| i % 5 == 0).collect();
+
+        let bv4: BitMap<4> = pattern.as_slice().into();
+        let bv8: BitMap<8> = pattern.as_slice().into();
+        let bv16: BitMap<16> = pattern.as_slice().into();
+
+        assert_eq!(bv4.ones_iter().collect::<Vec<_>>(), expected);
+        assert_eq!(bv8.ones_iter().collect::<Vec<_>>(), expected);
+        assert_eq!(bv16.ones_iter().collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
     fn test_codec_roundtrip() {
         // Test empty bitmap
         let original: BitMap<4> = BitMap::new();
