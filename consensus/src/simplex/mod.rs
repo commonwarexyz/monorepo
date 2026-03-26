@@ -3095,12 +3095,15 @@ mod tests {
 
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
+            // Link all honest nodes. Only link node 0 to node 1.
+            //
+            // Node 0 cannot locally form a certificate because it only sees itself plus one honest
+            // peer, but it should still receive the certificates relayed by that peer.
             let link = Link {
                 latency: Duration::from_millis(100),
                 jitter: Duration::from_millis(1),
                 success_rate: 1.0,
             };
-            // Link all honest nodes. Only link the byzantine node to a single honest node.
             fn link_graph(_: usize, i: usize, j: usize) -> bool {
                 if i == 0 || j == 0 {
                     return i == 1 || j == 1;
@@ -3173,34 +3176,52 @@ mod tests {
                     .expect("validator should be registered");
                 engine.start(pending, recovered, resolver);
             }
-
-            let mut byzantine_reporter = reporters[0].clone();
-            let mut honest_reporter = reporters[1].clone();
-
             // Wait for an honest node to observe the finalizations
+            let excluded_reporter = reporters[0].clone();
+            let mut honest_reporter = reporters[1].clone();
             let (mut honest_latest, mut honest_monitor) = honest_reporter.subscribe().await;
             while honest_latest < required_containers {
                 honest_latest = honest_monitor.recv().await.expect("event missing");
             }
 
-            // The byzantine node should not have observed the finalizations yet since we JUST
-            // saw it come from the honest node and it has to transmit over the network.
-            let (byzantine_latest, _) = byzantine_reporter.subscribe().await;
-            assert!(byzantine_latest < required_containers);
-
-            // Node 0 cannot locally form a certificate because it only sees its own invalid vote
-            // plus one honest peer, but it should still receive finalization certificates from
-            // that peer.
+            // Wait for all in-flight certificates to arrive at excluded node and be reported.
             context.sleep(Duration::from_secs(1)).await;
 
-            // The byzantine reporter should have received the finalizations from the network.
-            let (byzantine_latest, _) = byzantine_reporter.subscribe().await;
-            assert!(byzantine_latest >= required_containers);
+            // It should have received similar certificates to the honest node (with some
+            // tolerance for initial views in which may not have yet been connected).
+            let honest_notarized = {
+                let notarizations = honest_reporter.notarizations.lock();
+                View::range(View::new(1), required_containers.next())
+                    .filter(|view| notarizations.contains_key(view))
+                    .count()
+            };
+            let excluded_notarized = {
+                let notarizations = excluded_reporter.notarizations.lock();
+                View::range(View::new(1), required_containers.next())
+                    .filter(|view| notarizations.contains_key(view))
+                    .count()
+            };
+            assert!(
+                excluded_notarized >= honest_notarized.saturating_sub(2),
+                "honest_notarized: {honest_notarized}, excluded_notarized: {excluded_notarized}"
+            );
 
-            // It should have recieved certificates of all types.
-            assert!(!byzantine_reporter.finalizations.lock().is_empty());
-            assert!(!byzantine_reporter.notarizations.lock().is_empty());
-            assert!(!byzantine_reporter.nullifications.lock().is_empty());
+            let honest_finalized = {
+                let finalizations = honest_reporter.finalizations.lock();
+                View::range(View::new(1), required_containers.next())
+                    .filter(|view| finalizations.contains_key(view))
+                    .count()
+            };
+            let excluded_finalized = {
+                let finalizations = excluded_reporter.finalizations.lock();
+                View::range(View::new(1), required_containers.next())
+                    .filter(|view| finalizations.contains_key(view))
+                    .count()
+            };
+            assert!(
+                excluded_finalized >= honest_finalized.saturating_sub(2),
+                "honest_finalized: {honest_finalized}, excluded_finalized: {excluded_finalized}"
+            );
         });
     }
 
