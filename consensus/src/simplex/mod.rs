@@ -3068,13 +3068,13 @@ mod tests {
         L: Elector<S>,
     {
         let n = 4;
-        let required_containers = View::new(3);
+        let required_containers = View::new(10);
         let activity_timeout = ViewDelta::new(10);
         let skip_timeout = ViewDelta::new(5);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(10)));
+            .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             let (network, mut oracle) = Network::new(
@@ -3193,13 +3193,14 @@ mod tests {
             // that peer.
             context.sleep(Duration::from_secs(1)).await;
 
-            // The reporter should have received the finalizations from the network.
-            assert!(
-                !byzantine_reporter.finalizations.lock().is_empty(),
-                "no finalizations"
-            );
+            // The byzantine reporter should have received the finalizations from the network.
             let (byzantine_latest, _) = byzantine_reporter.subscribe().await;
             assert!(byzantine_latest >= required_containers);
+
+            // It should have recieved certificates of all types.
+            assert!(!byzantine_reporter.finalizations.lock().is_empty());
+            assert!(!byzantine_reporter.notarizations.lock().is_empty());
+            assert!(!byzantine_reporter.nullifications.lock().is_empty());
         });
     }
 
@@ -3207,12 +3208,30 @@ mod tests {
     #[test_group("slow")]
     #[test_traced]
     fn test_received_finalizations_are_reported() {
-        received_finalizations_are_reported::<_, _, Random>(0, bls12381_threshold_vrf::fixture::<MinPk, _>);
-        received_finalizations_are_reported::<_, _, Random>(0, bls12381_threshold_vrf::fixture::<MinSig, _>);
-        received_finalizations_are_reported::<_, _, RoundRobin>(0, bls12381_threshold_std::fixture::<MinPk, _>);
-        received_finalizations_are_reported::<_, _, RoundRobin>(0, bls12381_threshold_std::fixture::<MinSig, _>);
-        received_finalizations_are_reported::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinPk, _>);
-        received_finalizations_are_reported::<_, _, RoundRobin>(0, bls12381_multisig::fixture::<MinSig, _>);
+        received_finalizations_are_reported::<_, _, Random>(
+            0,
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        received_finalizations_are_reported::<_, _, Random>(
+            0,
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        received_finalizations_are_reported::<_, _, RoundRobin>(
+            0,
+            bls12381_threshold_std::fixture::<MinPk, _>,
+        );
+        received_finalizations_are_reported::<_, _, RoundRobin>(
+            0,
+            bls12381_threshold_std::fixture::<MinSig, _>,
+        );
+        received_finalizations_are_reported::<_, _, RoundRobin>(
+            0,
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        received_finalizations_are_reported::<_, _, RoundRobin>(
+            0,
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
         received_finalizations_are_reported::<_, _, RoundRobin>(0, ed25519::fixture);
         received_finalizations_are_reported::<_, _, RoundRobin>(0, secp256r1::fixture);
     }
