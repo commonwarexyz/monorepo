@@ -1,5 +1,4 @@
 use crate::{supervision::Tree, utils::extract_panic_message, Error};
-use commonware_macros::stability;
 use commonware_utils::{
     channel::oneshot,
     sync::{Mutex, Once},
@@ -10,8 +9,6 @@ use futures::{
     FutureExt as _,
 };
 use prometheus_client::metrics::gauge::Gauge;
-#[stability(ALPHA)]
-use std::panic::resume_unwind;
 use std::{
     any::Any,
     future::Future,
@@ -222,19 +219,6 @@ pub(crate) struct Panicked {
 }
 
 impl Panicked {
-    /// Polls a task that should be interrupted by a panic.
-    #[stability(ALPHA)]
-    pub(crate) async fn interrupt<Fut>(self, task: Fut) -> Fut::Output
-    where
-        Fut: Future,
-    {
-        let (result, _) = self.monitor(task).await;
-        match result {
-            Ok(output) => output,
-            Err(panic) => resume_unwind(panic),
-        }
-    }
-
     /// Waits for `task` to complete or for the first propagated task panic.
     ///
     /// If `task` completes first, returns its output and the panic receiver so

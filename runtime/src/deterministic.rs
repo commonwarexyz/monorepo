@@ -92,6 +92,7 @@ use rand_core::CryptoRngCore;
 use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
+    any::Any,
     borrow::Cow,
     collections::{BTreeMap, BinaryHeap, HashMap, HashSet},
     mem::{replace, take},
@@ -377,6 +378,7 @@ pub struct Executor {
     registered_metrics: Mutex<HashSet<MetricKey>>,
     cycle: Duration,
     deadline: Option<SystemTime>,
+    shutdown_timeout: Option<Duration>,
     metrics: Arc<Metrics>,
     auditor: Arc<Auditor>,
     rng: Arc<Mutex<BoxDynRng>>,
@@ -465,6 +467,7 @@ impl Executor {
 pub struct Checkpoint {
     cycle: Duration,
     deadline: Option<SystemTime>,
+    shutdown_timeout: Option<Duration>,
     auditor: Arc<Auditor>,
     rng: Arc<Mutex<BoxDynRng>>,
     time: Mutex<SystemTime>,
@@ -550,133 +553,60 @@ impl Runner {
         let storage = context.storage.clone();
         let network_buffer_pool_cfg = context.network_buffer_pool.config().clone();
         let storage_buffer_pool_cfg = context.storage_buffer_pool.config().clone();
-        let mut root = Box::pin(panicked.interrupt(f(context)));
+        let tree = context.tree.clone();
+        let mut root = Box::pin(panicked.monitor(f(context)));
+
+        // Get metrics
         let label = Label::root();
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
         let metric =
             MetricHandle::new(executor.metrics.tasks_running.get_or_create(&label).clone());
 
         // Register the root task
-        Tasks::register_root(&executor.tasks);
+        let root_id = Tasks::register_root(&executor.tasks);
+        let mut executor_loop = ExecutorLoop {
+            executor: &executor,
+            root: &mut root,
+            root_id,
+        };
 
-        // Process tasks until root task completes or progress stalls.
-        // Catch root panics and propagated child panics so task cleanup still
-        // runs before the original unwind is resumed.
-        let result = catch_unwind(AssertUnwindSafe(|| loop {
-            // Ensure we have not exceeded our deadline
-            {
-                let current = executor.time.lock();
-                if let Some(deadline) = executor.deadline {
-                    if *current >= deadline {
-                        drop(current);
-                        panic!("runtime timeout");
-                    }
-                }
-            }
+        // Process tasks until the root exits. Catch root panics and propagated
+        // child panics so shutdown cleanup still runs before we resume the
+        // original unwind.
+        let root_result = catch_unwind(AssertUnwindSafe(|| executor_loop.run(executor.deadline)));
 
-            // Drain all ready tasks
-            let mut queue = executor.tasks.drain();
-
-            // Shuffle tasks (if more than one)
-            if queue.len() > 1 {
-                let mut rng = executor.rng.lock();
-                queue.shuffle(&mut *rng);
-            }
-
-            // Run all snapshotted tasks
-            //
-            // This approach is more efficient than randomly selecting a task one-at-a-time
-            // because it ensures we don't pull the same pending task multiple times in a row (without
-            // processing a different task required for other tasks to make progress).
-            trace!(
-                iter = executor.metrics.iterations.get(),
-                tasks = queue.len(),
-                "starting loop"
-            );
-            let mut output = None;
-            for id in queue {
-                // Lookup the task (it may have completed already)
-                let Some(task) = executor.tasks.get(id) else {
-                    trace!(id, "skipping missing task");
-                    continue;
-                };
-
-                // Record task for auditing
-                executor.auditor.event(b"process_task", |hasher| {
-                    hasher.update(task.id.to_be_bytes());
-                    hasher.update(task.label.name().as_bytes());
-                });
-                executor.metrics.task_polls.get_or_create(&task.label).inc();
-                trace!(id, "processing task");
-
-                // Prepare task for polling
-                let waker = waker(Arc::new(TaskWaker {
-                    id,
-                    tasks: Arc::downgrade(&executor.tasks),
-                }));
-                let mut cx = task::Context::from_waker(&waker);
-
-                // Poll the task
-                match &task.mode {
-                    Mode::Root => {
-                        // Poll the root task
-                        if let Poll::Ready(result) = root.as_mut().poll(&mut cx) {
-                            trace!(id, "root task is complete");
-                            output = Some(result);
-                            break;
-                        }
-                    }
-                    Mode::Work(future) => {
-                        // Get the future (if it still exists)
-                        let mut fut_opt = future.lock();
-                        let Some(fut) = fut_opt.as_mut() else {
-                            trace!(id, "skipping already complete task");
-
-                            // Remove the future
-                            executor.tasks.remove(id);
-                            continue;
-                        };
-
-                        // Poll the task
-                        if fut.as_mut().poll(&mut cx).is_ready() {
-                            trace!(id, "task is complete");
-
-                            // Remove the future
-                            executor.tasks.remove(id);
-                            *fut_opt = None;
-                            continue;
-                        }
-                    }
-                }
-
-                // Try again later if task is still pending
-                trace!(id, "task is still pending");
-            }
-
-            // If the root task has completed, exit as soon as possible
-            if let Some(output) = output {
-                break output;
-            }
-
-            // Advance time (skipping ahead if no tasks are ready yet)
-            let mut current = executor.advance_time();
-            current = executor.skip_idle_time(current);
-
-            // Wake sleepers and ensure we continue to make progress
-            executor.wake_ready_sleepers(current);
-            executor.assert_liveness();
-
-            // Record that we completed another iteration of the event loop.
-            executor.metrics.iterations.inc();
-        }));
-
-        // Clear remaining tasks from the executor.
-        //
-        // It is critical that we wait to drop the strong
-        // reference to executor until after we have dropped
-        // all tasks (as they may attempt to upgrade their weak
-        // reference to the executor during drop).
+        // Close task registration before aborting the tree so task cleanup
+        // cannot enqueue new work while shutdown is propagating.
         executor.tasks.close();
+        tree.abort();
+        metric.finish();
+
+        // The root future is tracked separately from executor tasks, so remove
+        // its synthetic task entry before draining shutdown cleanup.
+        executor.tasks.remove(root_id);
+
+        // Keep driving the scheduler so aborted children can observe
+        // cancellation and finish cleanup cooperatively before start()
+        // returns or resumes the original panic.
+        let shutdown_deadline = executor.shutdown_timeout.map(|timeout| {
+            executor
+                .time
+                .lock()
+                .checked_add(timeout)
+                .expect("shutdown timeout overflow")
+        });
+
+        match catch_unwind(AssertUnwindSafe(|| executor_loop.drain(shutdown_deadline))) {
+            Ok(true) => trace!("unfinished tasks remaining after shutdown timeout"),
+            Ok(false) => {}
+            Err(payload) => resume_unwind(payload),
+        };
+
+        // Clear any tasks that did not exit cooperatively during shutdown.
+        //
+        // It is critical that we wait to drop the strong reference to executor
+        // until after we have dropped all tasks (as they may attempt to upgrade
+        // their weak reference to the executor during drop).
         executor.sleeping.lock().clear(); // included in tasks
         let tasks = executor.tasks.clear();
         for task in tasks {
@@ -697,13 +627,23 @@ impl Runner {
             Arc::weak_count(&executor) == 0,
             "executor still has weak references"
         );
-        metric.finish();
 
-        // Handle the result — resume the original panic after cleanup if one was caught.
+        // Handle the result — resume the original panic after cleanup if one
+        // was caught. If the root completed first, keep monitoring for child
+        // panics that occurred while we were draining shutdown cleanup.
+        let (result, mut panicked) = match root_result {
+            Ok(result) => result,
+            Err(payload) => resume_unwind(payload),
+        };
         let output = match result {
             Ok(output) => output,
             Err(payload) => resume_unwind(payload),
         };
+        if let Some(panicked) = panicked.as_mut() {
+            if let Ok(payload) = panicked.try_recv() {
+                resume_unwind(payload);
+            }
+        }
 
         // Extract the executor from the Arc
         let executor = Arc::into_inner(executor).expect("executor still has strong references");
@@ -712,6 +652,7 @@ impl Runner {
         let checkpoint = Checkpoint {
             cycle: executor.cycle,
             deadline: executor.deadline,
+            shutdown_timeout: executor.shutdown_timeout,
             auditor: executor.auditor,
             rng: executor.rng,
             time: executor.time,
@@ -729,6 +670,224 @@ impl Runner {
 impl Default for Runner {
     fn default() -> Self {
         Self::new(Config::default())
+    }
+}
+
+/// The root task's result together with the panic receiver that must remain
+/// active while shutdown cleanup drains.
+type RootResult<T> = (Result<T, Box<dyn Any + Send + 'static>>, Option<Panicked>);
+
+/// Drives executor tasks within the deterministic runtime.
+struct ExecutorLoop<'a, Fut, T>
+where
+    Fut: Future<Output = RootResult<T>>,
+{
+    executor: &'a Executor,
+    root: &'a mut Pin<Box<Fut>>,
+    root_id: u128,
+}
+
+impl<'a, Fut, T> ExecutorLoop<'a, Fut, T>
+where
+    Fut: Future<Output = RootResult<T>>,
+{
+    /// Shuffles a task snapshot to preserve deterministic but varied polling
+    /// order.
+    fn shuffle(&self, queue: &mut [u128]) {
+        if queue.len() > 1 {
+            let mut rng = self.executor.rng.lock();
+            queue.shuffle(&mut *rng);
+        }
+    }
+
+    /// Advances deterministic time, wakes any sleepers that became ready,
+    /// optionally checks liveness, and records another executor iteration.
+    fn tick(&self, assert_liveness: bool) {
+        // Advance time (skipping ahead if no tasks are ready yet).
+        let mut current = self.executor.advance_time();
+        current = self.executor.skip_idle_time(current);
+
+        // Wake sleepers after the passage of time.
+        self.executor.wake_ready_sleepers(current);
+
+        // During the main run loop, ensure we continue to make progress.
+        if assert_liveness {
+            self.executor.assert_liveness();
+        }
+
+        // Record that we completed another iteration of the event loop.
+        self.executor.metrics.iterations.inc();
+    }
+
+    /// Enforces the loop deadline.
+    ///
+    /// Returns `true` when the deadline elapsed. When `panic_on_timeout` is
+    /// `true`, deadline expiry panics instead.
+    fn check_deadline(&self, deadline: Option<SystemTime>, panic_on_timeout: bool) -> bool {
+        let current = self.executor.time.lock();
+        let Some(deadline) = deadline else {
+            return false;
+        };
+        if *current < deadline {
+            return false;
+        }
+        drop(current);
+        if panic_on_timeout {
+            panic!("runtime timeout");
+        }
+        true
+    }
+
+    /// Polls a snapshot of executor tasks.
+    fn poll(&mut self, queue: Vec<u128>, poll_root: bool) -> Option<RootResult<T>> {
+        for id in queue {
+            // Lookup the task (it may have completed already).
+            let Some(task) = self.executor.tasks.get(id) else {
+                trace!(id, "skipping missing task");
+                continue;
+            };
+
+            // Record task for auditing.
+            self.executor.auditor.event(b"process_task", |hasher| {
+                hasher.update(task.id.to_be_bytes());
+                hasher.update(task.label.name().as_bytes());
+            });
+            self.executor
+                .metrics
+                .task_polls
+                .get_or_create(&task.label)
+                .inc();
+            trace!(id, "processing task");
+
+            // Prepare task for polling.
+            let waker = waker(Arc::new(TaskWaker {
+                id,
+                tasks: Arc::downgrade(&self.executor.tasks),
+            }));
+            let mut cx = task::Context::from_waker(&waker);
+
+            match &task.mode {
+                Mode::Root => {
+                    if !poll_root {
+                        trace!(id, "skipping non-work task during cleanup");
+                        continue;
+                    }
+
+                    assert_eq!(id, self.root_id, "unexpected root task id");
+
+                    // Stop the main run loop as soon as the root finishes so
+                    // shutdown can transition immediately.
+                    if let Poll::Ready(result) = self.root.as_mut().poll(&mut cx) {
+                        trace!(id, "root task is complete");
+                        return Some(result);
+                    }
+                }
+                Mode::Work(future) => {
+                    // Get the future (if it still exists).
+                    let mut fut_opt = future.lock();
+                    let Some(fut) = fut_opt.as_mut() else {
+                        trace!(id, "skipping already complete task");
+
+                        // Remove the future.
+                        self.executor.tasks.remove(id);
+                        continue;
+                    };
+
+                    // Poll the task.
+                    if fut.as_mut().poll(&mut cx).is_ready() {
+                        trace!(id, "task is complete");
+
+                        // Remove the future.
+                        self.executor.tasks.remove(id);
+                        *fut_opt = None;
+                        continue;
+                    }
+                }
+            }
+
+            // Try again later if task is still pending.
+            trace!(id, "task is still pending");
+        }
+
+        None
+    }
+
+    /// Runs executor tasks until the root exits.
+    fn run(&mut self, deadline: Option<SystemTime>) -> RootResult<T> {
+        loop {
+            // Panic if the deadline has elapsed.
+            self.check_deadline(deadline, true);
+
+            // Snapshot the tasks to poll in this iteration.
+            let mut queue = self.executor.tasks.drain();
+
+            // Shuffle tasks.
+            self.shuffle(&mut queue);
+
+            // Run all snapshotted tasks.
+            //
+            // This approach is more efficient than randomly selecting a task
+            // one-at-a-time because it ensures we do not pull the same pending
+            // task multiple times in a row without first processing a
+            // different task that may be needed for progress.
+            trace!(
+                iter = self.executor.metrics.iterations.get(),
+                tasks = queue.len(),
+                "starting loop",
+            );
+            if let Some(result) = self.poll(queue, true) {
+                return result;
+            }
+
+            // Advance time, wake sleepers, ensure the runtime still makes
+            // progress, and record another executor iteration.
+            self.tick(true);
+        }
+    }
+
+    /// Drives shutdown cleanup until all remaining tasks have drained or the
+    /// shutdown deadline expires.
+    fn drain(&mut self, deadline: Option<SystemTime>) -> bool {
+        loop {
+            // Shutdown cleanup is complete once no tracked tasks remain.
+            if self.executor.tasks.is_empty() {
+                return false;
+            }
+
+            // Return if the shutdown deadline has elapsed.
+            if self.check_deadline(deadline, false) {
+                return true;
+            }
+
+            // During shutdown, poll every remaining task rather than just the
+            // ready queue so aborted futures can observe cancellation even if
+            // the abort did not wake them.
+            let mut queue = self.executor.tasks.running();
+
+            // Shuffle tasks.
+            self.shuffle(&mut queue);
+
+            // Run all snapshotted tasks.
+            //
+            // This approach is more efficient than randomly selecting a task
+            // one-at-a-time because it ensures we do not pull the same pending
+            // task multiple times in a row without first processing a
+            // different task that may be needed for progress.
+            trace!(
+                iter = self.executor.metrics.iterations.get(),
+                tasks = queue.len(),
+                "starting cleanup loop",
+            );
+            let result = self.poll(queue, false);
+            assert!(
+                result.is_none(),
+                "cleanup loop should not poll the root to completion",
+            );
+
+            // Advance time, wake sleepers, and record another executor
+            // iteration.
+            self.tick(false);
+        }
     }
 }
 
@@ -841,7 +1000,7 @@ impl Tasks {
     /// Register the root task.
     ///
     /// If the root task has already been registered, this function will panic.
-    fn register_root(arc_self: &Arc<Self>) {
+    fn register_root(arc_self: &Arc<Self>) -> u128 {
         let id = arc_self.increment();
         let task = Arc::new(Task {
             id,
@@ -849,6 +1008,7 @@ impl Tasks {
             mode: Mode::Root,
         });
         arc_self.register(id, task);
+        id
     }
 
     /// Reserve a non-root task slot.
@@ -906,9 +1066,19 @@ impl Tasks {
         replace(&mut *queue, Vec::with_capacity(len))
     }
 
+    /// Snapshot all running task ids.
+    fn running(&self) -> Vec<u128> {
+        self.running.lock().keys().copied().collect()
+    }
+
     /// The number of ready tasks.
     fn ready(&self) -> usize {
         self.ready.lock().len()
+    }
+
+    /// Whether there are any tracked tasks remaining.
+    fn is_empty(&self) -> bool {
+        self.running.lock().is_empty()
     }
 
     /// Lookup a task.
@@ -1037,6 +1207,7 @@ impl Context {
             registered_metrics: Mutex::new(HashSet::new()),
             cycle: cfg.cycle,
             deadline,
+            shutdown_timeout: cfg.timeout,
             metrics,
             auditor,
             rng,
@@ -1106,6 +1277,7 @@ impl Context {
             // Copied from the checkpoint
             cycle: checkpoint.cycle,
             deadline: checkpoint.deadline,
+            shutdown_timeout: checkpoint.shutdown_timeout,
             auditor: checkpoint.auditor,
             rng: checkpoint.rng,
             time: checkpoint.time,
