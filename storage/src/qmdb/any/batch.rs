@@ -452,7 +452,7 @@ where
         // Merkleize the journal batch.
         // The journal batch was created eagerly at batch construction time and its
         // parent already contains all prior batches' MMR state, so we only
-        // hash THIS batch's operations. Parent operations are never re-cloned,
+        // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
         let ops = Arc::new(ops);
         let journal = self.journal_batch.merkleize_with(ops.clone());
