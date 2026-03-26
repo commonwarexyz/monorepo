@@ -952,10 +952,10 @@ impl<const N: usize> Readable<N> for BitMap<N> {
             .saturating_sub(if self.is_chunk_aligned() { 0 } else { 1 })
     }
     fn get_chunk(&self, chunk: usize) -> [u8; N] {
-        *BitMap::get_chunk(self, chunk)
+        *Self::get_chunk(self, chunk)
     }
     fn last_chunk(&self) -> ([u8; N], u64) {
-        let (c, n) = BitMap::last_chunk(self);
+        let (c, n) = Self::last_chunk(self);
         (*c, n)
     }
     fn pruned_chunks(&self) -> usize {

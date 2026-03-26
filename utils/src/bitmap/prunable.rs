@@ -347,20 +347,20 @@ impl<const N: usize> Prunable<N> {
 
 impl<const N: usize> super::Readable<N> for Prunable<N> {
     fn complete_chunks(&self) -> usize {
-        Prunable::complete_chunks(self)
+        Self::complete_chunks(self)
     }
     fn get_chunk(&self, chunk: usize) -> [u8; N] {
-        *Prunable::get_chunk(self, chunk)
+        *Self::get_chunk(self, chunk)
     }
     fn last_chunk(&self) -> ([u8; N], u64) {
-        let (c, n) = Prunable::last_chunk(self);
+        let (c, n) = Self::last_chunk(self);
         (*c, n)
     }
     fn pruned_chunks(&self) -> usize {
         self.pruned_chunks
     }
     fn len(&self) -> u64 {
-        Prunable::len(self)
+        Self::len(self)
     }
 }
 
