@@ -116,7 +116,7 @@ where
     /// This may be a mempool that serves transactions, a stream of
     /// certificates, or any other source of input that drives state
     /// transitions.
-    type InputProvider: Clone + Send;
+    type InputProvider: Send;
 
     /// Extract per-database sync targets from a finalized block.
     ///

@@ -87,9 +87,8 @@ where
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
-    DB: Send + Sync + 'static,
     Arc<AsyncRwLock<DB>>: SyncResolver,
-    Op<DB>: Codec<Cfg = ()> + Send + Sync + Clone + 'static,
+    Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
     config: Config<P, D, B, DB>,
@@ -105,9 +104,8 @@ where
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
-    DB: Send + Sync + 'static,
     Arc<AsyncRwLock<DB>>: SyncResolver,
-    Op<DB>: Codec<Cfg = ()> + Send + Sync + Clone + 'static,
+    Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
     pub fn new(context: E, mut cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<DB>) {
