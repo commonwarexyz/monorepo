@@ -88,7 +88,7 @@ use crate::{
         },
         build_snapshot_from_log, delete_key,
         operation::{Committable as _, Key, Operation as _},
-        update_key, Error, FloorHelper,
+        update_key, FloorHelper,
     },
     translator::Translator,
     Context, Persistable,
@@ -97,6 +97,8 @@ use commonware_codec::{CodecShared, Read};
 use commonware_utils::Array;
 use core::ops::Range;
 use std::collections::BTreeMap;
+
+type Error = crate::qmdb::Error<crate::mmr::Family>;
 use tracing::{debug, warn};
 
 /// Configuration for initializing a [Db].
@@ -393,9 +395,10 @@ where
         self.log.destroy().await.map_err(Into::into)
     }
 
+    #[allow(clippy::type_complexity)]
     const fn as_floor_helper(
         &mut self,
-    ) -> FloorHelper<'_, Index<T, Location>, Journal<E, Operation<K, V>>> {
+    ) -> FloorHelper<'_, crate::mmr::Family, Index<T, Location>, Journal<E, Operation<K, V>>> {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
@@ -416,7 +419,13 @@ where
                 let updated = {
                     let reader = self.log.reader().await;
                     let new_loc = reader.bounds().end;
-                    update_key(&mut self.snapshot, &reader, &key, Location::new(new_loc)).await?
+                    update_key::<crate::mmr::Family, _, _>(
+                        &mut self.snapshot,
+                        &reader,
+                        &key,
+                        Location::new(new_loc),
+                    )
+                    .await?
                 };
                 if updated.is_some() {
                     self.steps += 1;
@@ -429,7 +438,8 @@ where
             } else {
                 let deleted = {
                     let reader = self.log.reader().await;
-                    delete_key(&mut self.snapshot, &reader, &key).await?
+                    delete_key::<crate::mmr::Family, _, _>(&mut self.snapshot, &reader, &key)
+                        .await?
                 };
                 if deleted.is_some() {
                     self.log.append(&Operation::Delete(key)).await?;

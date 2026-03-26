@@ -6,7 +6,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
-    mmr::Location,
+    mmr::{self, Location},
     qmdb::{
         any::{
             operation::update::Unordered as UnorderedUpdate,
@@ -14,13 +14,14 @@ use crate::{
             ValueEncoding,
         },
         current::proof::OperationProof,
-        Error,
     },
     Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
+
+type Error = crate::qmdb::Error<crate::mmr::Family>;
 
 /// Proof information for verifying a key has a particular value in the database.
 pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
@@ -35,7 +36,7 @@ pub type Db<E, C, K, V, I, H, const N: usize> =
 // Shared read-only functionality.
 impl<
         E: Context,
-        C: Contiguous<Item = Operation<K, V>>,
+        C: Contiguous<Item = Operation<mmr::Family, K, V>>,
         K: Array,
         V: ValueEncoding,
         I: UnorderedIndex<Value = Location>,
@@ -43,7 +44,7 @@ impl<
         const N: usize,
     > Db<E, C, K, V, I, H, N>
 where
-    Operation<K, V>: Codec,
+    Operation<mmr::Family, K, V>: Codec,
 {
     /// Get the value of `key` in the db, or None if it has no value.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
@@ -67,7 +68,7 @@ where
 
 impl<
         E: Context,
-        C: Mutable<Item = Operation<K, V>>,
+        C: Mutable<Item = Operation<mmr::Family, K, V>>,
         K: Array,
         V: ValueEncoding,
         I: UnorderedIndex<Value = Location>,
@@ -75,7 +76,7 @@ impl<
         const N: usize,
     > Db<E, C, K, V, I, H, N>
 where
-    Operation<K, V>: Codec,
+    Operation<mmr::Family, K, V>: Codec,
 {
     /// Generate and return a proof of the current value of `key`, along with the other
     /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not

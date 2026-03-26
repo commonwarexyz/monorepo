@@ -4,13 +4,13 @@ use crate::{
         authenticated,
         contiguous::{variable, Reader as _},
     },
-    mmr::{journaled::Mmr, Location, StandardHasher},
+    merkle::{self, mmr},
+    mmr::journaled::Mmr,
     qmdb::{
         any::VariableValue,
         build_snapshot_from_log,
         immutable::{self, Operation},
         sync::{self},
-        Error,
     },
     translator::Translator,
     Context,
@@ -19,7 +19,7 @@ use commonware_cryptography::Hasher;
 use commonware_utils::Array;
 use std::ops::Range;
 
-impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
+impl<E, K, V, H, T> sync::Database for immutable::Immutable<mmr::Family, E, K, V, H, T>
 where
     E: Context,
     K: Array,
@@ -39,11 +39,12 @@ where
     /// # Behavior
     ///
     /// This method handles different initialization scenarios based on existing data:
-    /// - If the MMR journal is empty or the last item is before the range start, it creates a
-    ///   fresh MMR from the provided `pinned_nodes`
-    /// - If the MMR journal has data but is incomplete (has length < range end), missing operations
-    ///   from the log are applied to bring it up to the target state
-    /// - If the MMR journal has data beyond the range end, it is rewound to match the sync target
+    /// - If the Merkle journal is empty or the last item is before the range start, it creates a
+    ///   fresh Merkle structure from the provided `pinned_nodes`
+    /// - If the Merkle journal has data but is incomplete (has length < range end), missing
+    ///   operations from the log are applied to bring it up to the target state
+    /// - If the Merkle journal has data beyond the range end, it is rewound to match the sync
+    ///   target
     ///
     /// # Returns
     ///
@@ -54,12 +55,12 @@ where
         db_config: Self::Config,
         log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<Location>,
+        range: Range<mmr::Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, Error> {
-        let hasher = StandardHasher::new();
+    ) -> Result<Self, crate::qmdb::Error<mmr::Family>> {
+        let hasher = merkle::hasher::Standard::new();
 
-        // Initialize MMR for sync
+        // Initialize Merkle structure for sync
         let mmr = Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
@@ -71,7 +72,7 @@ where
         )
         .await?;
 
-        let journal = authenticated::Journal::<_, _, _>::from_components(
+        let journal = authenticated::Journal::<mmr::Family, _, _, _>::from_components(
             mmr,
             log,
             hasher,
@@ -79,19 +80,19 @@ where
         )
         .await?;
 
-        let mut snapshot: Index<T, Location> =
+        let mut snapshot: Index<T, mmr::Location> =
             Index::new(context.with_label("snapshot"), db_config.translator.clone());
 
         let last_commit_loc = {
             // Get the start of the log.
             let reader = journal.journal.reader().await;
             let bounds = reader.bounds();
-            let start_loc = Location::new(bounds.start);
+            let start_loc = mmr::Location::new(bounds.start);
 
             // Build snapshot from the log
             build_snapshot_from_log(start_loc, &reader, &mut snapshot, |_, _| {}).await?;
 
-            Location::new(bounds.end.checked_sub(1).expect("commit should exist"))
+            mmr::Location::new(bounds.end.checked_sub(1).expect("commit should exist"))
         };
 
         let db = Self {
@@ -112,7 +113,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::{
-        mmr::Location,
+        merkle::mmr::{self, Location},
         qmdb::{
             immutable,
             immutable::Operation,
@@ -143,6 +144,7 @@ mod tests {
 
     /// Type alias for sync tests with simple codec config
     type ImmutableSyncTest = immutable::Immutable<
+        mmr::Family,
         deterministic::Context,
         sha256::Digest,
         sha256::Digest,

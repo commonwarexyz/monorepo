@@ -62,7 +62,7 @@ use crate::{
             Contiguous as _, Mutable as _, Reader,
         },
     },
-    mmr::{iterator::nodes_to_pin, journaled::Config as MmrConfig, Location, Proof},
+    merkle::{self, journaled::Config as MmrConfig, Family, Location, Proof},
     qmdb::{any::VariableValue, build_snapshot_from_log, delete_known_loc, Error},
     translator::Translator,
     Context,
@@ -77,14 +77,15 @@ pub mod batch;
 mod operation;
 pub use operation::Operation;
 
-type Journal<E, K, V, H> = authenticated::Journal<E, variable::Journal<E, Operation<K, V>>, H>;
+type Journal<F, E, K, V, H> =
+    authenticated::Journal<F, E, variable::Journal<E, Operation<K, V>>, H>;
 
 pub mod sync;
 
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
-    /// Configuration for the MMR backing the authenticated journal.
+    /// Configuration for the Merkle structure backing the authenticated journal.
     pub mmr: MmrConfig,
 
     /// Configuration for the variable-size operations log journal.
@@ -101,38 +102,39 @@ pub struct Config<T: Translator, C> {
 ///
 /// A key must be set at most once across the database history. Writing the same key more than
 /// once is undefined behavior.
-pub struct Immutable<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> {
+pub struct Immutable<F: Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> {
     /// Authenticated journal of operations.
-    journal: Journal<E, K, V, H>,
+    journal: Journal<F, E, K, V, H>,
 
     /// A map from each active key to the location of the operation that set its value.
     ///
     /// # Invariant
     ///
     /// Only references operations of type [Operation::Set].
-    snapshot: Index<T, Location>,
+    snapshot: Index<T, Location<F>>,
 
     /// The location of the last commit operation.
-    last_commit_loc: Location,
+    last_commit_loc: Location<F>,
 }
 
-// Shared read-only functionality.
-impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutable<E, K, V, H, T> {
+impl<F: Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    Immutable<F, E, K, V, H, T>
+{
     /// Return the Location of the next operation appended to this db.
-    pub async fn size(&self) -> Location {
+    pub async fn size(&self) -> Location<F> {
         self.bounds().await.end
     }
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    pub async fn bounds(&self) -> std::ops::Range<Location> {
+    pub async fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.journal.reader().await.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
     /// Get the value of `key` in the db, or None if it has no value or its corresponding operation
     /// has been pruned.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+    pub async fn get(&self, key: &K) -> Result<Option<V>, crate::qmdb::Error<F>> {
         let iter = self.snapshot.get(key);
         let reader = self.journal.reader().await;
         let oldest = reader.bounds().start;
@@ -149,19 +151,19 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
     }
 
     /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
-    /// [Error::OperationPruned] if loc precedes the oldest retained location. The location is
-    /// otherwise assumed valid.
+    /// [`crate::qmdb::Error::OperationPruned`] if loc precedes the oldest retained location. The
+    /// location is otherwise assumed valid.
     async fn get_from_loc(
         reader: &impl Reader<Item = Operation<K, V>>,
         key: &K,
-        loc: Location,
-    ) -> Result<Option<V>, Error> {
+        loc: Location<F>,
+    ) -> Result<Option<V>, crate::qmdb::Error<F>> {
         if loc < reader.bounds().start {
-            return Err(Error::OperationPruned(loc));
+            return Err(crate::qmdb::Error::OperationPruned(loc));
         }
 
         let Operation::Set(k, v) = reader.read(*loc).await? else {
-            return Err(Error::UnexpectedData(loc));
+            return Err(crate::qmdb::Error::UnexpectedData(loc));
         };
 
         if k != *key {
@@ -172,7 +174,7 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
     }
 
     /// Get the metadata associated with the last commit.
-    pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
+    pub async fn get_metadata(&self) -> Result<Option<V>, crate::qmdb::Error<F>> {
         let last_commit_loc = self.last_commit_loc;
         let Operation::Commit(metadata) = self
             .journal
@@ -193,21 +195,36 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
     ///
     /// # Errors
     ///
-    /// Returns [crate::mmr::Error::LocationOverflow] if `op_count` or `start_loc` >
-    /// [crate::merkle::Family::MAX_LEAVES].
-    /// Returns [crate::mmr::Error::RangeOutOfBounds] if `op_count` > number of operations, or
+    /// Returns [`crate::merkle::Error::LocationOverflow`] if `op_count` or `start_loc` >
+    /// [`Family::MAX_LEAVES`].
+    /// Returns [`crate::merkle::Error::RangeOutOfBounds`] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
-    /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
+    /// Returns [`crate::qmdb::Error::OperationPruned`] if `start_loc` has been pruned.
     pub async fn historical_proof(
         &self,
-        op_count: Location,
-        start_loc: Location,
+        op_count: Location<F>,
+        start_loc: Location<F>,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
+    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<K, V>>), crate::qmdb::Error<F>> {
         Ok(self
             .journal
             .historical_proof(op_count, start_loc, max_ops)
             .await?)
+    }
+
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
+    pub async fn proof(
+        &self,
+        start_index: Location<F>,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<K, V>>), crate::qmdb::Error<F>> {
+        let op_count = self.bounds().await.end;
+        self.historical_proof(op_count, start_index, max_ops).await
     }
 
     /// Prune operations prior to `prune_loc`. This does not affect the db's root, but it will
@@ -215,11 +232,15 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > last commit location.
-    /// - Returns [crate::mmr::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
-    pub async fn prune(&mut self, loc: Location) -> Result<(), Error> {
+    /// - Returns [`crate::qmdb::Error::PruneBeyondMinRequired`] if `prune_loc` > last commit
+    ///   location.
+    /// - Returns [merkle::Error::LocationOverflow] if `prune_loc` > [Family::MAX_LEAVES].
+    pub async fn prune(&mut self, loc: Location<F>) -> Result<(), crate::qmdb::Error<F>> {
         if loc > self.last_commit_loc {
-            return Err(Error::PruneBeyondMinRequired(loc, self.last_commit_loc));
+            return Err(crate::qmdb::Error::PruneBeyondMinRequired(
+                loc,
+                self.last_commit_loc,
+            ));
         }
         self.journal.prune(loc).await?;
 
@@ -228,8 +249,8 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
 
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
     ///
-    /// This rewinds both the operations journal and its MMR to the historical state at `size`,
-    /// and removes rewound set operations from the in-memory snapshot.
+    /// This rewinds both the operations journal and its Merkle structure to the historical state
+    /// at `size`, and removes rewound set operations from the in-memory snapshot.
     ///
     /// # Errors
     ///
@@ -245,7 +266,7 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Immutable::commit`] or
     /// [`Immutable::sync`].
-    pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
+    pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
         if rewind_size == current_size {
@@ -300,44 +321,39 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
         self.journal.root()
     }
 
-    /// Return the pinned MMR nodes at the given location.
-    pub async fn pinned_nodes_at(&self, loc: Location) -> Result<Vec<H::Digest>, Error> {
+    /// Return the pinned Merkle nodes at the given location.
+    pub async fn pinned_nodes_at(
+        &self,
+        loc: Location<F>,
+    ) -> Result<Vec<H::Digest>, crate::qmdb::Error<F>> {
         if !loc.is_valid() {
-            return Err(crate::mmr::Error::LocationOverflow(loc).into());
+            return Err(crate::merkle::Error::LocationOverflow(loc).into());
         }
-        let futs: Vec<_> = nodes_to_pin(loc)
+        let leaves = self.journal.merkle.leaves();
+        let futs: Vec<_> = F::nodes_to_pin(leaves, loc)
+            .into_iter()
             .map(|p| async move {
                 self.journal
-                    .mmr
+                    .merkle
                     .get_node(p)
                     .await?
-                    .ok_or(crate::mmr::Error::ElementPruned(p).into())
+                    .ok_or(crate::merkle::Error::ElementPruned(p).into())
             })
             .collect();
         futures::future::try_join_all(futs).await
     }
+}
 
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
-    pub async fn proof(
-        &self,
-        start_index: Location,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<Operation<K, V>>), Error> {
-        let op_count = self.bounds().await.end;
-        self.historical_proof(op_count, start_index, max_ops).await
-    }
-
+// Initialization.
+impl<F: merkle::Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator>
+    Immutable<F, E, K, V, H, T>
+{
     /// Returns an [Immutable] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
         cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, crate::qmdb::Error<F>> {
         let mut journal = Journal::new(
             context.clone(),
             cfg.mmr,
@@ -358,12 +374,13 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
             // Get the start of the log.
             let reader = journal.reader().await;
             let bounds = reader.bounds();
-            let start_loc = Location::new(bounds.start);
+            let start_loc = Location::<F>::new(bounds.start);
 
             // Build snapshot from the log.
-            build_snapshot_from_log(start_loc, &reader, &mut snapshot, |_, _| {}).await?;
+            build_snapshot_from_log::<F, _, _, _>(start_loc, &reader, &mut snapshot, |_, _| {})
+                .await?;
 
-            Location::new(bounds.end.checked_sub(1).expect("commit should exist"))
+            Location::<F>::new(bounds.end.checked_sub(1).expect("commit should exist"))
         };
 
         Ok(Self {
@@ -376,22 +393,23 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
-    pub async fn sync(&self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), crate::qmdb::Error<F>> {
         Ok(self.journal.sync().await?)
     }
 
     /// Durably commit the journal state published by prior [`Immutable::apply_batch`] calls.
-    pub async fn commit(&self) -> Result<(), Error> {
+    pub async fn commit(&self) -> Result<(), crate::qmdb::Error<F>> {
         Ok(self.journal.commit().await?)
     }
 
     /// Destroy the db, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
+    pub async fn destroy(self) -> Result<(), crate::qmdb::Error<F>> {
         Ok(self.journal.destroy().await?)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<H, K, V> {
+    #[allow(clippy::type_complexity)]
+    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, H, K, V> {
         let journal_size = *self.last_commit_loc + 1;
         batch::UnmerkleizedBatch::new(self, journal_size)
     }
@@ -401,7 +419,7 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
     /// A changeset is only valid if the database has not been modified since the batch that
     /// produced it was created. Multiple batches can be forked from the same parent for speculative
     /// execution, but only one may be applied. Applying a stale changeset returns
-    /// [`Error::StaleChangeset`].
+    /// [`crate::qmdb::Error::StaleChangeset`].
     ///
     /// Returns the range of locations written.
     ///
@@ -410,18 +428,18 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
     /// commit, or [`Immutable::sync`] for a stronger durability boundary.
     pub async fn apply_batch(
         &mut self,
-        batch: batch::Changeset<K, H::Digest, V>,
-    ) -> Result<Range<Location>, Error> {
+        batch: batch::Changeset<F, K, H::Digest, V>,
+    ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let journal_size = *self.last_commit_loc + 1;
         if batch.db_size != journal_size {
-            return Err(Error::StaleChangeset {
+            return Err(crate::qmdb::Error::StaleChangeset {
                 expected: batch.db_size,
                 actual: journal_size,
             });
         }
-        let start_loc = Location::new(journal_size);
+        let start_loc = Location::<F>::new(journal_size);
 
-        // Write all operations to the authenticated journal + apply MMR changeset.
+        // Write all operations to the authenticated journal + apply Merkle changeset.
         self.journal.apply_batch(batch.journal_finalized).await?;
 
         // Apply snapshot diffs.
@@ -436,9 +454,9 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
         }
 
         // Update state.
-        self.last_commit_loc = Location::new(batch.total_size - 1);
+        self.last_commit_loc = Location::<F>::new(batch.total_size - 1);
 
-        let end_loc = Location::new(batch.total_size);
+        let end_loc = Location::<F>::new(batch.total_size);
         Ok(start_loc..end_loc)
     }
 }
@@ -446,7 +464,10 @@ impl<E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> Immutabl
 #[cfg(test)]
 pub(super) mod test {
     use super::*;
-    use crate::{mmr::StandardHasher, qmdb::verify_proof, translator::TwoCap};
+    use crate::{merkle::mmr, qmdb::verify_proof, translator::TwoCap};
+    use mmr::Location;
+    type Error = crate::qmdb::Error<mmr::Family>;
+    type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -488,7 +509,7 @@ pub(super) mod test {
     /// Return an [Immutable] database initialized with a fixed config.
     async fn open_db(
         context: deterministic::Context,
-    ) -> Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap> {
+    ) -> Immutable<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap> {
         let cfg = db_config("partition", &context);
         Immutable::init(context, cfg).await.unwrap()
     }
@@ -1032,12 +1053,12 @@ pub(super) mod test {
         });
     }
 
-    type Db = Immutable<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    type Db = Immutable<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
-    fn assert_db_futures_are_send(db: &mut Db, key: Digest, loc: Location) {
+    fn assert_db_futures_are_send(db: &mut Db, key: Digest, loc: mmr::Location) {
         is_send(db.get(&key));
         is_send(db.get_metadata());
         is_send(db.proof(loc, NZU64!(1)));

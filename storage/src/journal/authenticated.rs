@@ -1,18 +1,18 @@
 //! Authenticated journal implementation.
 //!
-//! An authenticated journal maintains a contiguous journal of items alongside a Merkle Mountain
-//! Range (MMR). The item at index i in the journal corresponds to the leaf at Location i in the
-//! MMR. This structure enables efficient proofs that an item is included in the journal at a
-//! specific location.
+//! An authenticated journal maintains a contiguous journal of items alongside a Merkle-family
+//! structure. The item at index i in the journal corresponds to the leaf at Location i in the
+//! Merkle structure. This structure enables efficient proofs that an item is included in the
+//! journal at a specific location.
 
 use crate::{
     journal::{
         contiguous::{fixed, variable, Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    mmr::{
-        self, batch, journaled::Mmr, Error as MmrError, Location, Position, Proof, Readable,
-        StandardHasher,
+    merkle::{
+        self, batch, hasher::Standard as StandardHasher, journaled::Journaled, Family, Location,
+        Position, Proof, Readable,
     },
     Context, Persistable,
 };
@@ -26,9 +26,9 @@ use tracing::{debug, warn};
 
 /// Errors that can occur when interacting with an authenticated journal.
 #[derive(Error, Debug)]
-pub enum Error {
-    #[error("mmr error: {0}")]
-    Mmr(#[from] mmr::Error),
+pub enum Error<F: Family> {
+    #[error("merkle error: {0}")]
+    Merkle(#[from] merkle::Error<F>),
 
     #[error("journal error: {0}")]
     Journal(#[from] super::Error),
@@ -36,9 +36,9 @@ pub enum Error {
 
 /// A speculative batch whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
-pub struct UnmerkleizedBatch<H: Hasher, Item: Send + Sync> {
-    // The inner batch of MMR leaf digests.
-    inner: batch::UnmerkleizedBatch<H::Digest>,
+pub struct UnmerkleizedBatch<F: Family, H: Hasher, Item: Send + Sync> {
+    // The inner batch of Merkle leaf digests.
+    inner: batch::UnmerkleizedBatch<F, H::Digest>,
     // The hasher to use for hashing the items.
     hasher: StandardHasher<H>,
     // The items to append from ancestor batches in the chain.
@@ -47,7 +47,7 @@ pub struct UnmerkleizedBatch<H: Hasher, Item: Send + Sync> {
     items: Vec<Item>,
 }
 
-impl<H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<H, Item> {
+impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, Item> {
     /// Add an item to the batch.
     #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, item: Item) -> Self {
@@ -58,13 +58,16 @@ impl<H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<H, Item> {
     }
 
     /// Merkleize the batch, computing the root digest.
-    pub fn merkleize(self) -> MerkleizedBatch<H::Digest, Item> {
-        let mmr = self.inner.merkleize(&self.hasher);
+    pub fn merkleize(self) -> MerkleizedBatch<F, H::Digest, Item> {
+        let merkle = self.inner.merkleize(&self.hasher);
         let mut items = self.parent_items;
         if !self.items.is_empty() {
             items.push(Arc::new(self.items));
         }
-        MerkleizedBatch { inner: mmr, items }
+        MerkleizedBatch {
+            inner: merkle,
+            items,
+        }
     }
 }
 
@@ -72,21 +75,21 @@ impl<H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<H, Item> {
 ///
 /// `Clone` is O(chain depth) in Arc clones (no data is deep-copied).
 #[derive(Clone, Debug)]
-pub struct MerkleizedBatch<D: Digest, Item: Send + Sync> {
-    /// The inner batch of MMR leaf digests.
-    inner: batch::MerkleizedBatch<D>,
+pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync> {
+    /// The inner batch of Merkle leaf digests.
+    inner: batch::MerkleizedBatch<F, D>,
     /// The items to append.
     pub(crate) items: Vec<Arc<Vec<Item>>>,
 }
 
-impl<D: Digest, Item: Send + Sync> MerkleizedBatch<D, Item> {
+impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
     /// Return the root digest of the authenticated journal after this batch is applied.
     pub fn root(&self) -> D {
         self.inner.root()
     }
 
     /// Create a new speculative batch of operations with this batch as its parent.
-    pub fn new_batch<H: Hasher<Digest = D>>(&self) -> UnmerkleizedBatch<H, Item>
+    pub fn new_batch<H: Hasher<Digest = D>>(&self) -> UnmerkleizedBatch<F, H, Item>
     where
         Item: Encode,
     {
@@ -100,7 +103,7 @@ impl<D: Digest, Item: Send + Sync> MerkleizedBatch<D, Item> {
 
     /// Consume this batch, collecting the changes from its ancestors and itself into a
     /// [`Changeset`] which can be applied to the journal.
-    pub fn finalize(self) -> Changeset<D, Item> {
+    pub fn finalize(self) -> Changeset<F, D, Item> {
         Changeset {
             changeset: self.inner.finalize(),
             items: self.items,
@@ -112,13 +115,17 @@ impl<D: Digest, Item: Send + Sync> MerkleizedBatch<D, Item> {
     ///
     /// Use this when an ancestor batch in the chain has already been committed, advancing
     /// the journal's size past the original fork point. For example, given a chain
-    /// `journal -> A -> B`, after committing A: call `B.finalize_from(journal.mmr.size(),
-    /// A_item_count)` to produce a changeset containing only B's items and MMR delta.
+    /// `journal -> A -> B`, after committing A: call `B.finalize_from(journal.merkle.size(),
+    /// A_item_count)` to produce a changeset containing only B's items and Merkle delta.
     ///
     /// # Panics
     ///
     /// Panics if `items_to_skip` exceeds the total number of items in the chain.
-    pub fn finalize_from(self, current_base: Position, items_to_skip: u64) -> Changeset<D, Item>
+    pub fn finalize_from(
+        self,
+        current_base: Position<F>,
+        items_to_skip: u64,
+    ) -> Changeset<F, D, Item>
     where
         Item: Clone,
     {
@@ -144,16 +151,16 @@ impl<D: Digest, Item: Send + Sync> MerkleizedBatch<D, Item> {
     }
 }
 
-impl<D: Digest, Item: Send + Sync> Readable for MerkleizedBatch<D, Item> {
-    type Family = mmr::Family;
+impl<F: Family, D: Digest, Item: Send + Sync> Readable for MerkleizedBatch<F, D, Item> {
+    type Family = F;
     type Digest = D;
-    type Error = mmr::Error;
+    type Error = merkle::Error<F>;
 
-    fn size(&self) -> Position {
+    fn size(&self) -> Position<F> {
         self.inner.size()
     }
 
-    fn get_node(&self, pos: Position) -> Option<D> {
+    fn get_node(&self, pos: Position<F>) -> Option<D> {
         self.inner.get_node(pos)
     }
 
@@ -161,74 +168,76 @@ impl<D: Digest, Item: Send + Sync> Readable for MerkleizedBatch<D, Item> {
         self.inner.root()
     }
 
-    fn pruning_boundary(&self) -> Location {
+    fn pruning_boundary(&self) -> Location<F> {
         self.inner.pruning_boundary()
     }
 
     fn proof(
         &self,
-        hasher: &impl crate::merkle::hasher::Hasher<mmr::Family, Digest = D>,
-        loc: Location,
-    ) -> Result<Proof<D>, mmr::Error> {
+        hasher: &impl crate::merkle::hasher::Hasher<F, Digest = D>,
+        loc: Location<F>,
+    ) -> Result<Proof<F, D>, merkle::Error<F>> {
         self.inner.proof(hasher, loc)
     }
 
     fn range_proof(
         &self,
-        hasher: &impl crate::merkle::hasher::Hasher<mmr::Family, Digest = D>,
-        range: core::ops::Range<Location>,
-    ) -> Result<Proof<D>, mmr::Error> {
+        hasher: &impl crate::merkle::hasher::Hasher<F, Digest = D>,
+        range: core::ops::Range<Location<F>>,
+    ) -> Result<Proof<F, D>, merkle::Error<F>> {
         self.inner.range_proof(hasher, range)
     }
 }
 
 /// An owned changeset that can be applied to the journal.
-pub struct Changeset<D: Digest, Item> {
-    // The inner MMR changeset.
-    changeset: batch::Changeset<D>,
+pub struct Changeset<F: Family, D: Digest, Item> {
+    // The inner Merkle changeset.
+    changeset: batch::Changeset<F, D>,
     // The items to append.
     items: Vec<Arc<Vec<Item>>>,
 }
 
-/// An append-only data structure that maintains a sequential journal of items alongside a Merkle
-/// Mountain Range (MMR). The item at index i in the journal corresponds to the leaf at Location i
-/// in the MMR. This structure enables efficient proofs that an item is included in the journal at a
-/// specific location.
-pub struct Journal<E, C, H>
+/// An append-only data structure that maintains a sequential journal of items alongside a
+/// Merkle-family structure. The item at index i in the journal corresponds to the leaf at Location
+/// i in the Merkle structure. This structure enables efficient proofs that an item is included in
+/// the journal at a specific location.
+pub struct Journal<F, E, C, H>
 where
+    F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
-    /// MMR where each leaf is an item digest.
+    /// Merkle structure where each leaf is an item digest.
     /// Invariant: leaf i corresponds to item i in the journal.
-    pub(crate) mmr: Mmr<E, H::Digest>,
+    pub(crate) merkle: Journaled<F, E, H::Digest>,
 
     /// Journal of items.
-    /// Invariant: item i corresponds to leaf i in the MMR.
+    /// Invariant: item i corresponds to leaf i in the Merkle structure.
     pub(crate) journal: C,
 
     pub(crate) hasher: StandardHasher<H>,
 }
 
-impl<E, C, H> Journal<E, C, H>
+impl<F, E, C, H> Journal<F, E, C, H>
 where
+    F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
     /// Returns the Location of the next item appended to the journal.
-    pub async fn size(&self) -> Location {
+    pub async fn size(&self) -> Location<F> {
         Location::new(self.journal.size().await)
     }
 
-    /// Return the root of the MMR.
+    /// Return the root of the Merkle structure.
     pub fn root(&self) -> H::Digest {
-        self.mmr.root()
+        self.merkle.root()
     }
 
     /// Create a speculative batch atop this journal.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<H, C::Item>
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, C::Item>
     where
         C::Item: Encode,
     {
@@ -239,122 +248,125 @@ where
     ///
     /// The batch has no items (the committed items are on disk, not in memory).
     /// This is the starting point for building owned batch chains.
-    pub(crate) fn to_merkleized_batch(&self) -> MerkleizedBatch<H::Digest, C::Item> {
+    pub(crate) fn to_merkleized_batch(&self) -> MerkleizedBatch<F, H::Digest, C::Item> {
         MerkleizedBatch {
-            inner: self.mmr.to_batch(),
+            inner: self.merkle.to_batch(),
             items: Vec::new(),
         }
     }
 }
 
-impl<E, C, H> Journal<E, C, H>
+impl<F, E, C, H> Journal<F, E, C, H>
 where
+    F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
-    /// Durably persist the journal. This is faster than `sync()` but does not persist the MMR,
-    /// meaning recovery will be required on startup if we crash before `sync()`.
-    pub async fn commit(&self) -> Result<(), Error> {
+    /// Durably persist the journal. This is faster than `sync()` but does not persist the Merkle
+    /// structure, meaning recovery will be required on startup if we crash before `sync()`.
+    pub async fn commit(&self) -> Result<(), Error<F>> {
         self.journal.commit().await.map_err(Error::Journal)
     }
 }
 
-impl<E, C, H> Journal<E, C, H>
+impl<F, E, C, H> Journal<F, E, C, H>
 where
+    F: Family,
     E: Context,
     C: Mutable<Item: EncodeShared>,
     H: Hasher,
 {
-    /// Create a new [Journal] from the given components after aligning the MMR with the journal.
+    /// Create a new [Journal] from the given components after aligning the Merkle structure with
+    /// the journal.
     pub async fn from_components(
-        mut mmr: Mmr<E, H::Digest>,
+        mut merkle: Journaled<F, E, H::Digest>,
         journal: C,
         hasher: StandardHasher<H>,
         apply_batch_size: u64,
-    ) -> Result<Self, Error> {
-        Self::align(&mut mmr, &journal, &hasher, apply_batch_size).await?;
+    ) -> Result<Self, Error<F>> {
+        Self::align(&mut merkle, &journal, &hasher, apply_batch_size).await?;
 
-        // Sync the MMR to disk to avoid having to repeat any recovery that may have been performed
-        // on next startup.
-        mmr.sync().await?;
+        // Sync the Merkle structure to disk to avoid having to repeat any recovery that may have
+        // been performed on next startup.
+        merkle.sync().await?;
 
         Ok(Self {
-            mmr,
+            merkle,
             journal,
             hasher,
         })
     }
 
-    /// Align `mmr` to be consistent with `journal`. Any items in `mmr` that aren't in `journal` are
-    /// popped, and any items in `journal` that aren't in `mmr` are added to `mmr`. Items are added
-    /// to `mmr` in batches of size `apply_batch_size` to avoid memory bloat.
+    /// Align the Merkle structure to be consistent with the journal. Any items in the structure
+    /// that are not in the journal are popped, and any items in the journal that are not in the
+    /// structure are added. Items are added in batches of size `apply_batch_size` to avoid memory
+    /// bloat.
     async fn align(
-        mmr: &mut Mmr<E, H::Digest>,
+        merkle: &mut Journaled<F, E, H::Digest>,
         journal: &C,
         hasher: &StandardHasher<H>,
         apply_batch_size: u64,
-    ) -> Result<(), Error> {
-        // Rewind MMR elements that are ahead of the journal.
-        // Note mmr_size is the size of the MMR in leaves, not positions.
+    ) -> Result<(), Error<F>> {
+        // Rewind Merkle structure elements that are ahead of the journal.
         let journal_size = journal.size().await;
-        let mut mmr_size = mmr.leaves();
-        if mmr_size > journal_size {
-            let rewind_count = mmr_size - journal_size;
+        let mut merkle_leaves = merkle.leaves();
+        if merkle_leaves > journal_size {
+            let rewind_count = merkle_leaves - journal_size;
             warn!(
                 journal_size,
                 ?rewind_count,
-                "rewinding MMR to match journal"
+                "rewinding Merkle structure to match journal"
             );
-            mmr.rewind(*rewind_count as usize, hasher).await?;
-            mmr_size = Location::new(journal_size);
+            merkle.rewind(*rewind_count as usize, hasher).await?;
+            merkle_leaves = Location::new(journal_size);
         }
 
-        // If the MMR is behind, replay journal items to catch up.
-        if mmr_size < journal_size {
-            let replay_count = journal_size - *mmr_size;
+        // If the Merkle structure is behind, replay journal items to catch up.
+        if merkle_leaves < journal_size {
+            let replay_count = journal_size - *merkle_leaves;
             warn!(
                 ?journal_size,
-                replay_count, "MMR lags behind journal, replaying journal to catch up"
+                replay_count, "Merkle structure lags behind journal, replaying journal to catch up"
             );
 
             let reader = journal.reader().await;
-            while mmr_size < journal_size {
+            while merkle_leaves < journal_size {
                 let changeset = {
-                    let mut batch = mmr.new_batch();
+                    let mut batch = merkle.new_batch();
                     let mut count = 0u64;
-                    while count < apply_batch_size && mmr_size < journal_size {
-                        let op = reader.read(*mmr_size).await?;
+                    while count < apply_batch_size && merkle_leaves < journal_size {
+                        let op = reader.read(*merkle_leaves).await?;
                         batch = batch.add(hasher, &op.encode());
-                        mmr_size += 1;
+                        merkle_leaves += 1;
                         count += 1;
                     }
                     batch.merkleize(hasher).finalize()
                 };
-                mmr.apply(changeset)?;
+                merkle.apply(changeset)?;
             }
             return Ok(());
         }
 
-        // At this point the MMR and journal should be consistent.
-        assert_eq!(journal.size().await, *mmr.leaves());
+        // At this point the Merkle structure and journal should be consistent.
+        assert_eq!(journal.size().await, *merkle.leaves());
 
         Ok(())
     }
 
-    /// Append an item to the journal and update the MMR.
-    pub async fn append(&mut self, item: &C::Item) -> Result<Location, Error> {
+    /// Append an item to the journal and update the Merkle structure.
+    pub async fn append(&mut self, item: &C::Item) -> Result<Location<F>, Error<F>> {
         let encoded_item = item.encode();
 
-        // Append item to the journal, then update the MMR state.
+        // Append item to the journal, then update the Merkle structure state.
         let loc = self.journal.append(item).await?;
         let changeset = self
-            .mmr
+            .merkle
             .new_batch()
             .add(&self.hasher, &encoded_item)
             .merkleize(&self.hasher)
             .finalize();
-        self.mmr.apply(changeset)?;
+        self.merkle.apply(changeset)?;
 
         Ok(Location::new(loc))
     }
@@ -365,10 +377,13 @@ where
     /// batch that produced it was created. Multiple batches can be forked from the
     /// same parent for speculative execution, but only one may be applied. Applying
     /// a stale changeset returns an error.
-    pub async fn apply_batch(&mut self, batch: Changeset<H::Digest, C::Item>) -> Result<(), Error> {
-        let actual = self.mmr.size();
+    pub async fn apply_batch(
+        &mut self,
+        batch: Changeset<F, H::Digest, C::Item>,
+    ) -> Result<(), Error<F>> {
+        let actual = self.merkle.size();
         if batch.changeset.base_size != actual {
-            return Err(MmrError::StaleChangeset {
+            return Err(merkle::Error::StaleChangeset {
                 expected: batch.changeset.base_size,
                 actual,
             }
@@ -378,25 +393,25 @@ where
         for items in &batch.items {
             self.journal.append_many(items).await?;
         }
-        self.mmr.apply(batch.changeset)?;
-        assert_eq!(*self.mmr.leaves(), self.journal.size().await);
+        self.merkle.apply(batch.changeset)?;
+        assert_eq!(*self.merkle.leaves(), self.journal.size().await);
         Ok(())
     }
 
-    /// Prune both the MMR and journal to the given location.
+    /// Prune both the Merkle structure and journal to the given location.
     ///
     /// # Returns
     /// The new pruning boundary, which may be less than the requested `prune_loc`.
-    pub async fn prune(&mut self, prune_loc: Location) -> Result<Location, Error> {
-        if self.mmr.size() == 0 {
+    pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<Location<F>, Error<F>> {
+        if self.merkle.size() == 0 {
             // DB is empty, nothing to prune.
             return Ok(Location::new(self.reader().await.bounds().start));
         }
 
-        // Sync the MMR before pruning the journal, otherwise the MMR's last element could end up
-        // behind the journal's first element after a crash, and there would be no way to replay
-        // the items between the MMR's last element and the journal's first element.
-        self.mmr.sync().await?;
+        // Sync the Merkle structure before pruning the journal, otherwise its last element could
+        // end up behind the journal's first element after a crash, and there would be no way to
+        // replay the items between the structure's last element and the journal's first element.
+        self.merkle.sync().await?;
 
         // Prune the journal and check if anything was actually pruned
         if !self.journal.prune(*prune_loc).await? {
@@ -406,15 +421,16 @@ where
         let bounds = self.reader().await.bounds();
         debug!(size = ?bounds.end, ?prune_loc, boundary = ?bounds.start, "pruned inactive ops");
 
-        // Prune MMR to match the journal's actual boundary
-        self.mmr.prune(Location::from(bounds.start)).await?;
+        // Prune Merkle structure to match the journal's actual boundary
+        self.merkle.prune(Location::from(bounds.start)).await?;
 
         Ok(Location::new(bounds.start))
     }
 }
 
-impl<E, C, H> Journal<E, C, H>
+impl<F, E, C, H> Journal<F, E, C, H>
 where
+    F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
@@ -426,22 +442,22 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [Error::Mmr] with [MmrError::LocationOverflow] if `start_loc` >
-    ///   [crate::merkle::Family::MAX_LEAVES].
-    /// - Returns [Error::Mmr] with [MmrError::RangeOutOfBounds] if `start_loc` >= current
+    /// - Returns [Error::Merkle] with [merkle::Error::LocationOverflow] if `start_loc` >
+    ///   [Family::MAX_LEAVES].
+    /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >= current
     ///   item count.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
     ///   pruned.
     pub async fn proof(
         &self,
-        start_loc: Location,
+        start_loc: Location<F>,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
+    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
         self.historical_proof(self.size().await, start_loc, max_ops)
             .await
     }
 
-    /// Generate a historical proof with respect to the state of the MMR when it had
+    /// Generate a historical proof with respect to the state of the Merkle structure when it had
     /// `historical_leaves` leaves.
     ///
     /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
@@ -449,32 +465,32 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [Error::Mmr] with [MmrError::RangeOutOfBounds] if `start_loc` >=
+    /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >=
     ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
     /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
     ///   pruned.
     pub async fn historical_proof(
         &self,
-        historical_leaves: Location,
-        start_loc: Location,
+        historical_leaves: Location<F>,
+        start_loc: Location<F>,
         max_ops: NonZeroU64,
-    ) -> Result<(Proof<H::Digest>, Vec<C::Item>), Error> {
+    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
         // Acquire a reader guard to prevent pruning from advancing while we read.
         let reader = self.journal.reader().await;
         let bounds = reader.bounds();
 
         if *historical_leaves > bounds.end {
-            return Err(MmrError::RangeOutOfBounds(Location::new(bounds.end)).into());
+            return Err(merkle::Error::RangeOutOfBounds(Location::new(bounds.end)).into());
         }
         if start_loc >= historical_leaves {
-            return Err(MmrError::RangeOutOfBounds(start_loc).into());
+            return Err(merkle::Error::RangeOutOfBounds(start_loc).into());
         }
 
         let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
 
         let hasher = self.hasher.clone();
         let proof = self
-            .mmr
+            .merkle
             .historical_range_proof(&hasher, historical_leaves, start_loc..end_loc)
             .await?;
 
@@ -491,42 +507,44 @@ where
     }
 }
 
-impl<E, C, H> Journal<E, C, H>
+impl<F, E, C, H> Journal<F, E, C, H>
 where
+    F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
     /// Destroy the authenticated journal, removing all data from disk.
-    pub async fn destroy(self) -> Result<(), Error> {
+    pub async fn destroy(self) -> Result<(), Error<F>> {
         try_join!(
             self.journal.destroy().map_err(Error::Journal),
-            self.mmr.destroy().map_err(Error::Mmr),
+            self.merkle.destroy().map_err(Error::Merkle),
         )?;
 
         Ok(())
     }
 
     /// Durably persist the journal, ensuring no recovery is required on startup.
-    pub async fn sync(&self) -> Result<(), Error> {
+    pub async fn sync(&self) -> Result<(), Error<F>> {
         try_join!(
             self.journal.sync().map_err(Error::Journal),
-            self.mmr.sync().map_err(Error::Mmr)
+            self.merkle.sync().map_err(Error::Merkle)
         )?;
 
         Ok(())
     }
 }
 
-/// The number of items to apply to the MMR in a single batch.
+/// The number of items to apply to the Merkle structure in a single batch.
 const APPLY_BATCH_SIZE: u64 = 1 << 16;
 
 /// Generate a `new()` constructor for an authenticated journal backed by a specific contiguous
 /// journal type.
 macro_rules! impl_journal_new {
     ($journal_mod:ident, $cfg_ty:ty, $codec_bound:path) => {
-        impl<E, O, H> Journal<E, $journal_mod::Journal<E, O>, H>
+        impl<F, E, O, H> Journal<F, E, $journal_mod::Journal<E, O>, H>
         where
+            F: Family,
             E: Context,
             O: $codec_bound,
             H: Hasher,
@@ -534,26 +552,27 @@ macro_rules! impl_journal_new {
             /// Create a new authenticated [Journal].
             ///
             /// The inner journal will be rewound to the last item matching `rewind_predicate`,
-            /// and the MMR will be aligned to match.
+            /// and the merkle structure will be aligned to match.
             pub async fn new(
                 context: E,
-                mmr_cfg: crate::mmr::journaled::Config,
+                merkle_cfg: merkle::journaled::Config,
                 journal_cfg: $cfg_ty,
                 rewind_predicate: fn(&O) -> bool,
-            ) -> Result<Self, Error> {
+            ) -> Result<Self, Error<F>> {
                 let mut journal =
                     $journal_mod::Journal::init(context.with_label("journal"), journal_cfg).await?;
                 journal.rewind_to(rewind_predicate).await?;
 
                 let hasher = StandardHasher::<H>::new();
-                let mut mmr = Mmr::init(context.with_label("mmr"), &hasher, mmr_cfg).await?;
-                Self::align(&mut mmr, &journal, &hasher, APPLY_BATCH_SIZE).await?;
+                let mut merkle =
+                    Journaled::init(context.with_label("merkle"), &hasher, merkle_cfg).await?;
+                Self::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE).await?;
 
                 journal.sync().await?;
-                mmr.sync().await?;
+                merkle.sync().await?;
 
                 Ok(Self {
-                    mmr,
+                    merkle,
                     journal,
                     hasher,
                 })
@@ -565,8 +584,9 @@ macro_rules! impl_journal_new {
 impl_journal_new!(fixed, fixed::Config, CodecFixedShared);
 impl_journal_new!(variable, variable::Config<O::Cfg>, CodecShared);
 
-impl<E, C, H> Contiguous for Journal<E, C, H>
+impl<F, E, C, H> Contiguous for Journal<F, E, C, H>
 where
+    F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
@@ -582,8 +602,9 @@ where
     }
 }
 
-impl<E, C, H> Mutable for Journal<E, C, H>
+impl<F, E, C, H> Mutable for Journal<F, E, C, H>
 where
+    F: Family,
     E: Context,
     C: Mutable<Item: EncodeShared>,
     H: Hasher,
@@ -591,7 +612,7 @@ where
     async fn append(&mut self, item: &Self::Item) -> Result<u64, JournalError> {
         let res = self.append(item).await.map_err(|e| match e {
             Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
+            Error::Merkle(inner) => JournalError::Merkle(anyhow::Error::from(inner)),
         })?;
 
         Ok(*res)
@@ -604,12 +625,12 @@ where
     async fn rewind(&mut self, size: u64) -> Result<(), JournalError> {
         self.journal.rewind(size).await?;
 
-        let leaves = *self.mmr.leaves();
+        let leaves = *self.merkle.leaves();
         if leaves > size {
-            self.mmr
+            self.merkle
                 .rewind((leaves - size) as usize, &self.hasher)
                 .await
-                .map_err(|error| JournalError::Mmr(anyhow::Error::from(error)))?;
+                .map_err(|error| JournalError::Merkle(anyhow::Error::from(error)))?;
         }
 
         Ok(())
@@ -622,19 +643,20 @@ pub trait Inner<E: Context>: Mutable + Persistable<Error = JournalError> {
     type Config: Clone + Send;
 
     /// Initialize an authenticated [Journal] backed by this journal type.
-    fn init<H: Hasher>(
+    fn init<F: Family, H: Hasher>(
         context: E,
-        mmr_cfg: mmr::journaled::Config,
+        merkle_cfg: merkle::journaled::Config,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&Self::Item) -> bool,
-    ) -> impl core::future::Future<Output = Result<Journal<E, Self, H>, Error>> + Send
+    ) -> impl core::future::Future<Output = Result<Journal<F, E, Self, H>, Error<F>>> + Send
     where
         Self: Sized,
         Self::Item: EncodeShared;
 }
 
-impl<E, C, H> Persistable for Journal<E, C, H>
+impl<F, E, C, H> Persistable for Journal<F, E, C, H>
 where
+    F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
@@ -644,34 +666,35 @@ where
     async fn commit(&self) -> Result<(), JournalError> {
         self.commit().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
+            Error::Merkle(inner) => JournalError::Merkle(anyhow::Error::from(inner)),
         })
     }
 
     async fn sync(&self) -> Result<(), JournalError> {
         self.sync().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
+            Error::Merkle(inner) => JournalError::Merkle(anyhow::Error::from(inner)),
         })
     }
 
     async fn destroy(self) -> Result<(), JournalError> {
         self.destroy().await.map_err(|e| match e {
             Error::Journal(inner) => inner,
-            Error::Mmr(inner) => JournalError::Mmr(anyhow::Error::from(inner)),
+            Error::Merkle(inner) => JournalError::Merkle(anyhow::Error::from(inner)),
         })
     }
 }
 
 #[cfg(test)]
-impl<E, C, H> Journal<E, C, H>
+impl<F, E, C, H> Journal<F, E, C, H>
 where
+    F: Family,
     E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
     /// Test helper: Read the item at the given location.
-    pub(crate) async fn read(&self, loc: Location) -> Result<C::Item, Error> {
+    pub(crate) async fn read(&self, loc: Location<F>) -> Result<C::Item, Error<F>> {
         self.journal
             .reader()
             .await
@@ -686,9 +709,9 @@ mod tests {
     use super::*;
     use crate::{
         journal::contiguous::fixed::{Config as JConfig, Journal as ContiguousJournal},
-        mmr::{
-            journaled::{Config as MmrConfig, Mmr},
-            Location,
+        merkle::{
+            journaled::Config as MerkleConfig,
+            mmr::{self, journaled::Mmr},
         },
         qmdb::{
             any::unordered::{fixed::Operation, Update},
@@ -711,8 +734,8 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
     /// Create MMR configuration for tests.
-    fn mmr_config(suffix: &str, pooler: &impl BufferPooler) -> MmrConfig {
-        MmrConfig {
+    fn mmr_config(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig {
+        MerkleConfig {
             journal_partition: format!("mmr-journal-{suffix}"),
             metadata_partition: format!("mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
@@ -733,6 +756,7 @@ mod tests {
     }
 
     type AuthenticatedJournal = Journal<
+        mmr::Family,
         deterministic::Context,
         ContiguousJournal<deterministic::Context, Operation<Digest, Digest>>,
         Sha256,
@@ -813,7 +837,7 @@ mod tests {
     fn verify_proof(
         proof: &mmr::Proof<<Sha256 as commonware_cryptography::Hasher>::Digest>,
         operations: &[Operation<Digest, Digest>],
-        start_loc: Location,
+        start_loc: Location<mmr::Family>,
         root: &<Sha256 as commonware_cryptography::Hasher>::Digest,
         hasher: &StandardHasher<Sha256>,
     ) -> bool {
@@ -1155,8 +1179,8 @@ mod tests {
 
                 journal.rewind(2).await.unwrap();
                 assert_eq!(journal.size().await, 2);
-                assert_eq!(journal.mmr.leaves(), 2);
-                assert_eq!(journal.mmr.size(), 3);
+                assert_eq!(journal.merkle.leaves(), 2);
+                assert_eq!(journal.merkle.size(), 3);
                 let bounds = journal.reader().await.bounds();
                 assert_eq!(bounds.start, 0);
                 assert!(!bounds.is_empty());
@@ -1168,8 +1192,8 @@ mod tests {
 
                 journal.rewind(0).await.unwrap();
                 assert_eq!(journal.size().await, 0);
-                assert_eq!(journal.mmr.leaves(), 0);
-                assert_eq!(journal.mmr.size(), 0);
+                assert_eq!(journal.merkle.leaves(), 0);
+                assert_eq!(journal.merkle.size(), 0);
                 let bounds = journal.reader().await.bounds();
                 assert_eq!(bounds.start, 0);
                 assert!(bounds.is_empty());
@@ -1185,7 +1209,7 @@ mod tests {
                 journal.rewind(98).await.unwrap();
                 let bounds = journal.reader().await.bounds();
                 assert_eq!(bounds.end, 98);
-                assert_eq!(journal.mmr.leaves(), 98);
+                assert_eq!(journal.merkle.leaves(), 98);
                 assert_eq!(bounds.start, 98);
                 assert!(bounds.is_empty());
             }
@@ -1619,7 +1643,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(Error::Mmr(mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
             ));
         });
     }
@@ -1637,7 +1661,7 @@ mod tests {
 
             assert!(matches!(
                 result,
-                Err(Error::Mmr(mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
             ));
         });
     }
@@ -1858,7 +1882,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Merkle(merkle::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset, got {result:?}"
             );
@@ -1897,7 +1921,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Merkle(merkle::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset for sibling, got {result:?}"
             );
@@ -1927,7 +1951,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Merkle(merkle::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset for child after parent applied, got {result:?}"
             );
@@ -1957,7 +1981,7 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(super::Error::Mmr(mmr::Error::StaleChangeset { .. }))
+                    Err(super::Error::Merkle(merkle::Error::StaleChangeset { .. }))
                 ),
                 "expected StaleChangeset for parent after child applied, got {result:?}"
             );
@@ -1978,7 +2002,7 @@ mod tests {
             let merkleized = batch.merkleize();
 
             let normal = merkleized.clone().finalize();
-            let from = merkleized.finalize_from(journal.mmr.size(), 0);
+            let from = merkleized.finalize_from(journal.merkle.size(), 0);
 
             // Same root, same items.
             assert_eq!(normal.changeset.root, from.changeset.root);
@@ -2015,7 +2039,7 @@ mod tests {
             journal.apply_batch(parent.finalize()).await.unwrap();
 
             // finalize_from on child, skipping the 2 parent items.
-            let changeset = child.finalize_from(journal.mmr.size(), 2);
+            let changeset = child.finalize_from(journal.merkle.size(), 2);
 
             // Should contain exactly the 3 child items.
             let total_items: usize = changeset.items.iter().map(|s| s.len()).sum();
@@ -2062,13 +2086,13 @@ mod tests {
             journal.apply_batch(grandparent.finalize()).await.unwrap();
 
             // Commit parent via finalize_from, skipping grandparent's 3 items.
-            let changeset = parent.finalize_from(journal.mmr.size(), 3);
+            let changeset = parent.finalize_from(journal.merkle.size(), 3);
             let parent_items: usize = changeset.items.iter().map(|s| s.len()).sum();
             assert_eq!(parent_items, 2);
             journal.apply_batch(changeset).await.unwrap();
 
             // Commit child via finalize_from, skipping grandparent's 3 + parent's 2 = 5 items.
-            let changeset = child.finalize_from(journal.mmr.size(), 5);
+            let changeset = child.finalize_from(journal.merkle.size(), 5);
             let child_items: usize = changeset.items.iter().map(|s| s.len()).sum();
             assert_eq!(child_items, 1);
             journal.apply_batch(changeset).await.unwrap();
@@ -2096,7 +2120,7 @@ mod tests {
             let merkleized = journal.new_batch().add(create_operation(10)).merkleize();
 
             // items has 1 item, but we try to skip 5.
-            let _ = merkleized.finalize_from(journal.mmr.size(), 5);
+            let _ = merkleized.finalize_from(journal.merkle.size(), 5);
         });
     }
 }

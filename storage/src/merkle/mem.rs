@@ -166,6 +166,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// The resulting structure has no retained nodes -- only the O(log N) pinned peaks needed
     /// for proof generation and the already-known root. This avoids rehashing.
     #[cfg(feature = "std")]
+    #[allow(dead_code)]
     pub(crate) fn from_pruned(
         root: D,
         pruning_boundary: Position<F>,

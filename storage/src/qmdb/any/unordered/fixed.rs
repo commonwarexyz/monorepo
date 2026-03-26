@@ -4,23 +4,28 @@ use crate::{
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
     mmr::Location,
-    qmdb::{
-        any::{unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
-        Error,
-    },
+    qmdb::any::{unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
     translator::Translator,
     Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
 
+type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
+
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
-pub type Operation<K, V> = unordered::Operation<K, FixedEncoding<V>>;
+pub type Operation<K, V> = unordered::Operation<crate::merkle::mmr::Family, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
+pub type Db<E, K, V, H, T> = super::Db<
+    crate::merkle::mmr::Family,
+    E,
+    Journal<E, Operation<K, V>>,
+    Index<T, Location>,
+    H,
+    Update<K, V>,
+>;
 
 impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator> Db<E, K, V, H, T> {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
@@ -59,15 +64,14 @@ pub mod partitioned {
         index::partitioned::unordered::Index,
         journal::contiguous::fixed::Journal,
         mmr::Location,
-        qmdb::{
-            any::{FixedConfig as Config, FixedValue},
-            Error,
-        },
+        qmdb::any::{FixedConfig as Config, FixedValue},
         translator::Translator,
         Context,
     };
     use commonware_cryptography::Hasher;
     use commonware_utils::Array;
+
+    type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
 
     /// A key-value QMDB with a partitioned snapshot index.
     ///
@@ -79,6 +83,7 @@ pub mod partitioned {
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
     pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
+        crate::merkle::mmr::Family,
         E,
         Journal<E, Operation<K, V>>,
         Index<T, Location, P>,
@@ -133,6 +138,7 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
+        merkle::Location as GenericLocation,
         mmr::{Location, StandardHasher},
         qmdb::{
             any::{
@@ -153,13 +159,30 @@ pub(crate) mod test {
     use commonware_utils::{test_rng_seeded, NZU64};
     use rand::RngCore;
 
+    /// A generic type alias for an Any database parameterized by merkle family.
+    type AnyTestGeneric<F> = crate::qmdb::any::db::Db<
+        F,
+        deterministic::Context,
+        Journal<
+            deterministic::Context,
+            crate::qmdb::any::operation::Unordered<F, Digest, FixedEncoding<Digest>>,
+        >,
+        Index<TwoCap, GenericLocation<F>>,
+        Sha256,
+        crate::qmdb::any::operation::update::Unordered<Digest, FixedEncoding<Digest>>,
+    >;
+
     /// A type alias for the concrete [Db] type used in these unit tests.
     pub(crate) type AnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
-    /// Return an `Any` database initialized with a fixed config.
-    async fn open_db(context: deterministic::Context) -> AnyTest {
+    /// Return an `Any` database initialized with a fixed config, generic over merkle family.
+    async fn open_db_generic<F: crate::merkle::Family>(
+        context: deterministic::Context,
+    ) -> AnyTestGeneric<F> {
         let cfg = fixed_db_config::<TwoCap>("partition", &context);
-        AnyTest::init(context, cfg).await.unwrap()
+        crate::qmdb::any::init(context, cfg, None, |_, _| {}, Index::new)
+            .await
+            .unwrap()
     }
 
     /// Create a test database with unique partition names
@@ -217,40 +240,380 @@ pub(crate) mod test {
         db.apply_batch(finalized).await.unwrap();
     }
 
-    // Test that replaying multiple updates of the same key on startup doesn't leave behind old data
-    // in the snapshot.
+    /// Helper: commit a batch of key-value writes and return the applied range (generic).
+    async fn commit_writes_generic<F: crate::merkle::Family>(
+        db: &mut AnyTestGeneric<F>,
+        writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
+        metadata: Option<Digest>,
+    ) -> std::ops::Range<GenericLocation<F>> {
+        let mut batch = db.new_batch();
+        for (k, v) in writes {
+            batch = batch.write(k, v);
+        }
+        let finalized = batch.merkleize(metadata, db).await.unwrap().finalize();
+        let range = db.apply_batch(finalized).await.unwrap();
+        db.commit().await.unwrap();
+        range
+    }
+
+    fn key(i: u64) -> Digest {
+        Sha256::hash(&i.to_be_bytes())
+    }
+
+    fn val(i: u64) -> Digest {
+        Sha256::hash(&(i + 10000).to_be_bytes())
+    }
+
+    // -- Generic inner functions for parameterized batch tests --
+
+    async fn batch_empty_inner<F: crate::merkle::Family>(context: deterministic::Context) {
+        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+        let root_before = db.root();
+
+        let finalized = db
+            .new_batch()
+            .merkleize(None, &db)
+            .await
+            .unwrap()
+            .finalize();
+        db.apply_batch(finalized).await.unwrap();
+        assert_ne!(db.root(), root_before);
+
+        // DB should still be functional.
+        commit_writes_generic(&mut db, [(key(0), Some(val(0)))], None).await;
+        assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+
+        db.destroy().await.unwrap();
+    }
+
+    async fn batch_metadata_inner<F: crate::merkle::Family>(context: deterministic::Context) {
+        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+        let metadata = val(42);
+
+        commit_writes_generic(&mut db, [(key(0), Some(val(0)))], Some(metadata)).await;
+        assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+
+        let finalized = db
+            .new_batch()
+            .merkleize(None, &db)
+            .await
+            .unwrap()
+            .finalize();
+        db.apply_batch(finalized).await.unwrap();
+        assert_eq!(db.get_metadata().await.unwrap(), None);
+
+        db.destroy().await.unwrap();
+    }
+
+    async fn batch_get_read_through_inner<F: crate::merkle::Family>(
+        context: deterministic::Context,
+    ) {
+        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+
+        let ka = key(0);
+        let va = val(0);
+        commit_writes_generic(&mut db, [(ka, Some(va))], None).await;
+
+        let kb = key(1);
+        let vb = val(1);
+        let kc = key(2);
+
+        let mut batch = db.new_batch();
+        assert_eq!(batch.get(&ka, &db).await.unwrap(), Some(va));
+
+        batch = batch.write(kb, Some(vb));
+        assert_eq!(batch.get(&kb, &db).await.unwrap(), Some(vb));
+        assert_eq!(batch.get(&kc, &db).await.unwrap(), None);
+
+        let va2 = val(100);
+        batch = batch.write(ka, Some(va2));
+        assert_eq!(batch.get(&ka, &db).await.unwrap(), Some(va2));
+
+        batch = batch.write(ka, None);
+        assert_eq!(batch.get(&ka, &db).await.unwrap(), None);
+
+        db.destroy().await.unwrap();
+    }
+
+    async fn batch_get_on_merkleized_inner<F: crate::merkle::Family>(
+        context: deterministic::Context,
+    ) {
+        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+
+        let ka = key(0);
+        let kb = key(1);
+        let kc = key(2);
+        let kd = key(3);
+
+        commit_writes_generic(&mut db, [(ka, Some(val(0))), (kb, Some(val(1)))], None).await;
+
+        let va2 = val(100);
+        let vc = val(2);
+        let merkleized = db
+            .new_batch()
+            .write(ka, Some(va2))
+            .write(kb, None)
+            .write(kc, Some(vc))
+            .merkleize(None, &db)
+            .await
+            .unwrap();
+
+        assert_eq!(merkleized.get(&ka, &db).await.unwrap(), Some(va2));
+        assert_eq!(merkleized.get(&kb, &db).await.unwrap(), None);
+        assert_eq!(merkleized.get(&kc, &db).await.unwrap(), Some(vc));
+        assert_eq!(merkleized.get(&kd, &db).await.unwrap(), None);
+
+        db.destroy().await.unwrap();
+    }
+
+    async fn batch_stacked_get_inner<F: crate::merkle::Family>(context: deterministic::Context) {
+        let db = open_db_generic::<F>(context.with_label("db")).await;
+
+        let ka = key(0);
+        let kb = key(1);
+
+        let merkleized = db
+            .new_batch()
+            .write(ka, Some(val(0)))
+            .merkleize(None, &db)
+            .await
+            .unwrap();
+
+        let mut child = merkleized.new_batch();
+        assert_eq!(child.get(&ka, &db).await.unwrap(), Some(val(0)));
+
+        child = child.write(ka, Some(val(100)));
+        assert_eq!(child.get(&ka, &db).await.unwrap(), Some(val(100)));
+
+        child = child.write(kb, Some(val(1)));
+        assert_eq!(child.get(&kb, &db).await.unwrap(), Some(val(1)));
+
+        child = child.write(ka, None);
+        assert_eq!(child.get(&ka, &db).await.unwrap(), None);
+
+        drop(child);
+        drop(merkleized);
+        db.destroy().await.unwrap();
+    }
+
+    async fn batch_stacked_delete_recreate_inner<F: crate::merkle::Family>(
+        context: deterministic::Context,
+    ) {
+        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+        let ka = key(0);
+
+        commit_writes_generic(&mut db, [(ka, Some(val(0)))], None).await;
+
+        let parent_m = db
+            .new_batch()
+            .write(ka, None)
+            .merkleize(None, &db)
+            .await
+            .unwrap();
+        assert_eq!(parent_m.get(&ka, &db).await.unwrap(), None);
+
+        let child_m = parent_m
+            .new_batch()
+            .write(ka, Some(val(200)))
+            .merkleize(None, &db)
+            .await
+            .unwrap();
+        assert_eq!(child_m.get(&ka, &db).await.unwrap(), Some(val(200)));
+
+        let finalized = child_m.finalize();
+        db.apply_batch(finalized).await.unwrap();
+        assert_eq!(db.get(&ka).await.unwrap(), Some(val(200)));
+
+        db.destroy().await.unwrap();
+    }
+
+    async fn batch_apply_returns_range_inner<F: crate::merkle::Family>(
+        context: deterministic::Context,
+    ) {
+        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+
+        let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
+        let range1 = commit_writes_generic(&mut db, writes, None).await;
+
+        assert_eq!(range1.start, GenericLocation::<F>::new(1));
+        assert!(range1.end.saturating_sub(*range1.start) >= 6);
+
+        let writes: Vec<_> = (5..10).map(|i| (key(i), Some(val(i)))).collect();
+        let range2 = commit_writes_generic(&mut db, writes, None).await;
+        assert_eq!(range2.start, range1.end);
+
+        db.destroy().await.unwrap();
+    }
+
+    async fn batch_speculative_root_inner<F: crate::merkle::Family>(
+        context: deterministic::Context,
+    ) {
+        let mut db = open_db_generic::<F>(context.with_label("db")).await;
+
+        let mut batch = db.new_batch();
+        for i in 0..10 {
+            batch = batch.write(key(i), Some(val(i)));
+        }
+        let merkleized = batch.merkleize(None, &db).await.unwrap();
+        let speculative_root = merkleized.root();
+
+        let finalized = merkleized.finalize();
+        db.apply_batch(finalized).await.unwrap();
+        assert_eq!(db.root(), speculative_root);
+
+        db.destroy().await.unwrap();
+    }
+
+    async fn log_replay_inner<F: crate::merkle::Family>(context: deterministic::Context) {
+        let db_context = context.with_label("db");
+        let mut db = open_db_generic::<F>(db_context.clone()).await;
+
+        // Update the same key many times within a single batch.
+        const UPDATES: u64 = 100;
+        let k = Sha256::hash(&UPDATES.to_be_bytes());
+        let finalized = {
+            let mut batch = db.new_batch();
+            for i in 0u64..UPDATES {
+                let v = Sha256::hash(&(i * 1000).to_be_bytes());
+                batch = batch.write(k, Some(v));
+            }
+            batch.merkleize(None, &db).await.unwrap().finalize()
+        };
+        db.apply_batch(finalized).await.unwrap();
+        db.commit().await.unwrap();
+        let root = db.root();
+
+        // Simulate a failed commit and test that the log replay doesn't leave behind old data.
+        drop(db);
+        let db: AnyTestGeneric<F> = open_db_generic::<F>(db_context.with_label("reopened")).await;
+        let iter = db.snapshot.get(&k);
+        assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
+        assert_eq!(db.root(), root);
+
+        db.destroy().await.unwrap();
+    }
+
+    // -- MMR test wrappers --
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(batch_empty_inner::<crate::merkle::mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_metadata() {
+        let executor = deterministic::Runner::default();
+        executor.start(batch_metadata_inner::<crate::merkle::mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_get_read_through() {
+        let executor = deterministic::Runner::default();
+        executor.start(batch_get_read_through_inner::<crate::merkle::mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_get_on_merkleized() {
+        let executor = deterministic::Runner::default();
+        executor.start(batch_get_on_merkleized_inner::<crate::merkle::mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_stacked_get() {
+        let executor = deterministic::Runner::default();
+        executor.start(batch_stacked_get_inner::<crate::merkle::mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_stacked_delete_recreate() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| {
+            batch_stacked_delete_recreate_inner::<crate::merkle::mmr::Family>(context)
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_apply_returns_range() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| {
+            batch_apply_returns_range_inner::<crate::merkle::mmr::Family>(context)
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_speculative_root() {
+        let executor = deterministic::Runner::default();
+        executor.start(batch_speculative_root_inner::<crate::merkle::mmr::Family>);
+    }
+
     #[test_traced("WARN")]
     fn test_any_fixed_db_log_replay() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db_context = context.with_label("db");
-            let mut db = open_db(db_context.clone()).await;
+        executor.start(log_replay_inner::<crate::merkle::mmr::Family>);
+    }
 
-            // Update the same key many times within a single batch.
-            const UPDATES: u64 = 100;
-            let k = Sha256::hash(&UPDATES.to_be_bytes());
-            let finalized = {
-                let mut batch = db.new_batch();
-                for i in 0u64..UPDATES {
-                    let v = Sha256::hash(&(i * 1000).to_be_bytes());
-                    batch = batch.write(k, Some(v));
-                }
-                batch.merkleize(None, &db).await.unwrap().finalize()
-            };
-            db.apply_batch(finalized).await.unwrap();
-            db.commit().await.unwrap();
-            let root = db.root();
+    // -- MMB test wrappers --
 
-            // Simulate a failed commit and test that the log replay doesn't leave behind old data.
-            drop(db);
-            let db = open_db(db_context.with_label("reopened")).await;
-            let iter = db.snapshot.get(&k);
-            assert_eq!(iter.cloned().collect::<Vec<_>>().len(), 1);
-            assert_eq!(db.root(), root);
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_empty_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(batch_empty_inner::<crate::merkle::mmb::Family>);
+    }
 
-            db.destroy().await.unwrap();
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_metadata_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(batch_metadata_inner::<crate::merkle::mmb::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_get_read_through_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(batch_get_read_through_inner::<crate::merkle::mmb::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_get_on_merkleized_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(batch_get_on_merkleized_inner::<crate::merkle::mmb::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_stacked_get_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(batch_stacked_get_inner::<crate::merkle::mmb::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_stacked_delete_recreate_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| {
+            batch_stacked_delete_recreate_inner::<crate::merkle::mmb::Family>(context)
         });
     }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_apply_returns_range_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| {
+            batch_apply_returns_range_inner::<crate::merkle::mmb::Family>(context)
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_unordered_fixed_batch_speculative_root_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(batch_speculative_root_inner::<crate::merkle::mmb::Family>);
+    }
+
+    #[test_traced("WARN")]
+    fn test_any_fixed_db_log_replay_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(log_replay_inner::<crate::merkle::mmb::Family>);
+    }
+
+    // -- MMR-only tests (use verify_proof / Position which are MMR-specific) --
 
     #[test]
     fn test_any_fixed_db_historical_proof_basic() {
@@ -310,7 +673,7 @@ pub(crate) mod test {
             assert!(matches!(
                 db.historical_proof(db.bounds().await.end + 1, Location::new(6), NZU64!(10))
                     .await,
-                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Merkle(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
 
             db.destroy().await.unwrap();
@@ -432,258 +795,6 @@ pub(crate) mod test {
         });
     }
 
-    fn key(i: u64) -> Digest {
-        Sha256::hash(&i.to_be_bytes())
-    }
-
-    fn val(i: u64) -> Digest {
-        Sha256::hash(&(i + 10000).to_be_bytes())
-    }
-
-    /// Helper: commit a batch of key-value writes and return the applied range.
-    async fn commit_writes(
-        db: &mut AnyTest,
-        writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
-        metadata: Option<Digest>,
-    ) -> std::ops::Range<Location> {
-        let mut batch = db.new_batch();
-        for (k, v) in writes {
-            batch = batch.write(k, v);
-        }
-        let finalized = batch.merkleize(metadata, &*db).await.unwrap().finalize();
-        let range = db.apply_batch(finalized).await.unwrap();
-        db.commit().await.unwrap();
-        range
-    }
-
-    /// An empty batch (no mutations) still produces a valid commit.
-    #[test_traced("INFO")]
-    fn test_unordered_fixed_batch_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = open_db(context.with_label("db")).await;
-            let root_before = db.root();
-
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
-            assert_ne!(db.root(), root_before);
-
-            // DB should still be functional.
-            commit_writes(&mut db, [(key(0), Some(val(0)))], None).await;
-            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// Metadata propagates through merkleize and clears with None.
-    #[test_traced("INFO")]
-    fn test_unordered_fixed_batch_metadata() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = open_db(context.with_label("db")).await;
-            let metadata = val(42);
-
-            commit_writes(&mut db, [(key(0), Some(val(0)))], Some(metadata)).await;
-            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
-
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
-            assert_eq!(db.get_metadata().await.unwrap(), None);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// batch.get() reads through: pending mutations -> base DB.
-    #[test_traced("INFO")]
-    fn test_unordered_fixed_batch_get_read_through() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = open_db(context.with_label("db")).await;
-
-            let ka = key(0);
-            let va = val(0);
-            commit_writes(&mut db, [(ka, Some(va))], None).await;
-
-            let kb = key(1);
-            let vb = val(1);
-            let kc = key(2);
-
-            let mut batch = db.new_batch();
-            assert_eq!(batch.get(&ka, &db).await.unwrap(), Some(va));
-
-            batch = batch.write(kb, Some(vb));
-            assert_eq!(batch.get(&kb, &db).await.unwrap(), Some(vb));
-            assert_eq!(batch.get(&kc, &db).await.unwrap(), None);
-
-            let va2 = val(100);
-            batch = batch.write(ka, Some(va2));
-            assert_eq!(batch.get(&ka, &db).await.unwrap(), Some(va2));
-
-            batch = batch.write(ka, None);
-            assert_eq!(batch.get(&ka, &db).await.unwrap(), None);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// merkleized.get() reflects the resolved diff after merkleize.
-    #[test_traced("INFO")]
-    fn test_unordered_fixed_batch_get_on_merkleized() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = open_db(context.with_label("db")).await;
-
-            let ka = key(0);
-            let kb = key(1);
-            let kc = key(2);
-            let kd = key(3);
-
-            commit_writes(&mut db, [(ka, Some(val(0))), (kb, Some(val(1)))], None).await;
-
-            let va2 = val(100);
-            let vc = val(2);
-            let merkleized = db
-                .new_batch()
-                .write(ka, Some(va2))
-                .write(kb, None)
-                .write(kc, Some(vc))
-                .merkleize(None, &db)
-                .await
-                .unwrap();
-
-            assert_eq!(merkleized.get(&ka, &db).await.unwrap(), Some(va2));
-            assert_eq!(merkleized.get(&kb, &db).await.unwrap(), None);
-            assert_eq!(merkleized.get(&kc, &db).await.unwrap(), Some(vc));
-            assert_eq!(merkleized.get(&kd, &db).await.unwrap(), None);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// Child batch reads through: child mutations -> parent diff -> base DB.
-    #[test_traced("INFO")]
-    fn test_unordered_fixed_batch_stacked_get() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_db(context.with_label("db")).await;
-
-            let ka = key(0);
-            let kb = key(1);
-
-            let merkleized = db
-                .new_batch()
-                .write(ka, Some(val(0)))
-                .merkleize(None, &db)
-                .await
-                .unwrap();
-
-            let mut child = merkleized.new_batch::<Sha256>();
-            assert_eq!(child.get(&ka, &db).await.unwrap(), Some(val(0)));
-
-            child = child.write(ka, Some(val(100)));
-            assert_eq!(child.get(&ka, &db).await.unwrap(), Some(val(100)));
-
-            child = child.write(kb, Some(val(1)));
-            assert_eq!(child.get(&kb, &db).await.unwrap(), Some(val(1)));
-
-            child = child.write(ka, None);
-            assert_eq!(child.get(&ka, &db).await.unwrap(), None);
-
-            drop(child);
-            drop(merkleized);
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// Parent deletes a base-DB key, child re-creates it.
-    #[test_traced("INFO")]
-    fn test_unordered_fixed_batch_stacked_delete_recreate() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = open_db(context.with_label("db")).await;
-            let ka = key(0);
-
-            commit_writes(&mut db, [(ka, Some(val(0)))], None).await;
-
-            let parent_m = db
-                .new_batch()
-                .write(ka, None)
-                .merkleize(None, &db)
-                .await
-                .unwrap();
-            assert_eq!(parent_m.get(&ka, &db).await.unwrap(), None);
-
-            let child_m = parent_m
-                .new_batch::<Sha256>()
-                .write(ka, Some(val(200)))
-                .merkleize(None, &db)
-                .await
-                .unwrap();
-            assert_eq!(child_m.get(&ka, &db).await.unwrap(), Some(val(200)));
-
-            let finalized = child_m.finalize();
-            db.apply_batch(finalized).await.unwrap();
-            assert_eq!(db.get(&ka).await.unwrap(), Some(val(200)));
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// apply_batch() returns the correct range of committed locations.
-    #[test_traced("INFO")]
-    fn test_unordered_fixed_batch_apply_returns_range() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = open_db(context.with_label("db")).await;
-
-            let writes: Vec<_> = (0..5).map(|i| (key(i), Some(val(i)))).collect();
-            let range1 = commit_writes(&mut db, writes, None).await;
-
-            assert_eq!(range1.start, Location::new(1));
-            assert!(range1.end.saturating_sub(*range1.start) >= 6);
-
-            let writes: Vec<_> = (5..10).map(|i| (key(i), Some(val(i)))).collect();
-            let range2 = commit_writes(&mut db, writes, None).await;
-            assert_eq!(range2.start, range1.end);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// Speculative root from MerkleizedBatch matches db.root() after apply.
-    #[test_traced("INFO")]
-    fn test_unordered_fixed_batch_speculative_root() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db = open_db(context.with_label("db")).await;
-
-            let mut batch = db.new_batch();
-            for i in 0..10 {
-                batch = batch.write(key(i), Some(val(i)));
-            }
-            let merkleized = batch.merkleize(None, &db).await.unwrap();
-            let speculative_root = merkleized.root();
-
-            let finalized = merkleized.finalize();
-            db.apply_batch(finalized).await.unwrap();
-            assert_eq!(db.root(), speculative_root);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
     fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
@@ -708,11 +819,11 @@ pub(crate) mod test {
             type Mmr = TestMmr;
 
             fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
-                (self.log.mmr, self.log.journal)
+                (self.log.merkle, self.log.journal)
             }
 
             async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
-                join_all(nodes_to_pin(loc).map(|p| self.log.mmr.get_node(p)))
+                join_all(nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
                     .await
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())

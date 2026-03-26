@@ -14,13 +14,14 @@ use crate::{
     qmdb::{
         any::{unordered::fixed::Operation, value::FixedEncoding, FixedValue},
         current::FixedConfig as Config,
-        Error,
     },
     translator::Translator,
     Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
+
+type Error = crate::qmdb::Error<crate::mmr::Family>;
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
 pub type Db<E, K, V, H, T, const N: usize> =
@@ -50,13 +51,14 @@ pub mod partitioned {
         qmdb::{
             any::{unordered::fixed::partitioned::Operation, value::FixedEncoding, FixedValue},
             current::FixedConfig as Config,
-            Error,
         },
         translator::Translator,
         Context,
     };
     use commonware_cryptography::Hasher;
     use commonware_utils::Array;
+
+    type Error = crate::qmdb::Error<crate::mmr::Family>;
 
     /// A partitioned variant of [super::Db].
     ///

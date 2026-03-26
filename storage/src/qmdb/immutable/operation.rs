@@ -4,7 +4,7 @@
 //! adding new keyed values (no updates or deletions).
 
 use crate::{
-    mmr::Location,
+    merkle::{Family, Location},
     qmdb::{any::VariableValue, operation::Operation as OperationTrait},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -20,6 +20,9 @@ const COMMIT_CONTEXT: u8 = 1;
 ///
 /// Unlike mutable database operations, immutable operations only support
 /// setting new values and committing - no updates or deletions.
+///
+/// This type is family-agnostic: it does not store any [`Location`] and implements
+/// [`OperationTrait<F>`] for every [`Family`] `F`.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Operation<K: Array, V: VariableValue> {
     /// Set a key to a value. The key must not already exist.
@@ -53,7 +56,7 @@ impl<K: Array, V: VariableValue> EncodeSize for Operation<K, V> {
     }
 }
 
-impl<K: Array, V: VariableValue> OperationTrait for Operation<K, V> {
+impl<F: Family, K: Array, V: VariableValue> OperationTrait<F> for Operation<K, V> {
     type Key = K;
 
     fn key(&self) -> Option<&Self::Key> {
@@ -69,7 +72,7 @@ impl<K: Array, V: VariableValue> OperationTrait for Operation<K, V> {
         matches!(self, Self::Set(_, _))
     }
 
-    fn has_floor(&self) -> Option<Location> {
+    fn has_floor(&self) -> Option<Location<F>> {
         // Immutable databases don't have inactivity floors
         None
     }
@@ -148,18 +151,33 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode, EncodeSize, FixedSize as _};
     use commonware_utils::sequence::U64;
 
+    type Op = Operation<U64, U64>;
+
+    #[test]
+    fn test_operation_roundtrip() {
+        let set_op = Op::Set(U64::new(1), U64::new(2));
+        let encoded = set_op.encode();
+        let decoded = Op::decode(encoded).unwrap();
+        assert_eq!(set_op, decoded);
+
+        let commit_op = Op::Commit(Some(U64::new(3)));
+        let encoded = commit_op.encode();
+        let decoded = Op::decode(encoded).unwrap();
+        assert_eq!(commit_op, decoded);
+    }
+
     #[test]
     fn test_operation_key() {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let set_op = Operation::Set(key.clone(), value.clone());
+        let set_op = Op::Set(key.clone(), value.clone());
         assert_eq!(&key, set_op.key().unwrap());
 
-        let commit_op = Operation::<U64, U64>::Commit(Some(value));
+        let commit_op = Op::Commit(Some(value));
         assert_eq!(None, commit_op.key());
 
-        let commit_op_none = Operation::<U64, U64>::Commit(None);
+        let commit_op_none = Op::Commit(None);
         assert_eq!(None, commit_op_none.key());
     }
 
@@ -168,13 +186,13 @@ mod tests {
         let key = U64::new(1234);
         let value = U64::new(56789);
 
-        let set_op = Operation::Set(key, value.clone());
+        let set_op = Op::Set(key, value.clone());
         assert!(!set_op.is_commit());
 
-        let commit_op = Operation::<U64, U64>::Commit(Some(value));
+        let commit_op = Op::Commit(Some(value));
         assert!(commit_op.is_commit());
 
-        let commit_op_none = Operation::<U64, U64>::Commit(None);
+        let commit_op_none = Op::Commit(None);
         assert!(commit_op_none.is_commit());
     }
 
@@ -184,21 +202,21 @@ mod tests {
         let value = U64::new(56789);
 
         // Test Set operation
-        let set_op = Operation::Set(key, value.clone());
+        let set_op = Op::Set(key, value.clone());
         let encoded = set_op.encode();
-        let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
+        let decoded = Op::decode(encoded).unwrap();
         assert_eq!(set_op, decoded);
 
         // Test Commit operation with value
-        let commit_op = Operation::<U64, U64>::Commit(Some(value));
+        let commit_op = Op::Commit(Some(value));
         let encoded = commit_op.encode();
-        let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
+        let decoded = Op::decode(encoded).unwrap();
         assert_eq!(commit_op, decoded);
 
         // Test Commit operation without value
-        let commit_op = Operation::<U64, U64>::Commit(None);
+        let commit_op = Op::Commit(None);
         let encoded = commit_op.encode();
-        let decoded = Operation::<U64, U64>::decode(encoded).unwrap();
+        let decoded = Op::decode(encoded).unwrap();
         assert_eq!(commit_op, decoded);
     }
 
@@ -208,17 +226,17 @@ mod tests {
         let value = U64::new(56789);
 
         // Test Set operation
-        let set_op = Operation::Set(key, value.clone());
+        let set_op = Op::Set(key, value.clone());
         assert_eq!(set_op.encode_size(), 1 + U64::SIZE + value.encode_size());
         assert_eq!(set_op.encode().len(), set_op.encode_size());
 
         // Test Commit operation with value
-        let commit_op = Operation::<U64, U64>::Commit(Some(value.clone()));
+        let commit_op = Op::Commit(Some(value.clone()));
         assert_eq!(commit_op.encode_size(), 1 + Some(value).encode_size());
         assert_eq!(commit_op.encode().len(), commit_op.encode_size());
 
         // Test Commit operation without value
-        let commit_op = Operation::<U64, U64>::Commit(None);
+        let commit_op = Op::Commit(None);
         assert_eq!(
             commit_op.encode_size(),
             1 + Option::<U64>::None.encode_size()
@@ -232,28 +250,28 @@ mod tests {
         let value = U64::new(56789);
 
         // Test Set operation
-        let set_op = Operation::Set(key.clone(), value.clone());
+        let set_op = Op::Set(key.clone(), value.clone());
         assert_eq!(
             format!("{set_op}"),
             format!("[key:{key} value:{}]", hex(&value.encode()))
         );
 
         // Test Commit operation with value
-        let commit_op = Operation::<U64, U64>::Commit(Some(value.clone()));
+        let commit_op = Op::Commit(Some(value.clone()));
         assert_eq!(
             format!("{commit_op}"),
             format!("[commit {}]", hex(&value.encode()))
         );
 
         // Test Commit operation without value
-        let commit_op = Operation::<U64, U64>::Commit(None);
+        let commit_op = Op::Commit(None);
         assert_eq!(format!("{commit_op}"), "[commit]");
     }
 
     #[test]
     fn test_operation_invalid_context() {
         let invalid = vec![0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
+        let decoded = Op::decode(invalid.as_ref());
         assert!(matches!(
             decoded.unwrap_err(),
             CodecError::InvalidEnum(0xFF)
@@ -264,12 +282,12 @@ mod tests {
     fn test_operation_insufficient_buffer() {
         // Test insufficient buffer for Set operation
         let invalid = vec![SET_CONTEXT];
-        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
+        let decoded = Op::decode(invalid.as_ref());
         assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
 
         // Test insufficient buffer for Commit operation
         let invalid = vec![COMMIT_CONTEXT];
-        let decoded = Operation::<U64, U64>::decode(invalid.as_ref());
+        let decoded = Op::decode(invalid.as_ref());
         assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
     }
 
@@ -279,15 +297,15 @@ mod tests {
         let value = U64::new(1000);
 
         // Test all operation variants
-        let operations: Vec<Operation<U64, U64>> = vec![
-            Operation::Set(key, value.clone()),
-            Operation::Commit(Some(value)),
-            Operation::Commit(None),
+        let operations: Vec<Op> = vec![
+            Op::Set(key, value.clone()),
+            Op::Commit(Some(value)),
+            Op::Commit(None),
         ];
 
         for op in operations {
             let encoded = op.encode();
-            let decoded = Operation::<U64, U64>::decode(encoded.clone()).unwrap();
+            let decoded = Op::decode(encoded.clone()).unwrap();
             assert_eq!(op, decoded, "Failed to roundtrip: {op:?}");
             assert_eq!(encoded.len(), op.encode_size(), "Size mismatch for: {op:?}");
         }
@@ -299,7 +317,7 @@ mod tests {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Operation<U64, U64>>
+            CodecConformance<Op>
         }
     }
 }

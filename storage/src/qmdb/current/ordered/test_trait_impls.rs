@@ -27,7 +27,7 @@ crate::qmdb::any::traits::impl_db_any! {
         H: Hasher,
         T: Translator,
     }
-    Key = K, Value = V, Digest = H::Digest
+    Family = crate::merkle::mmr::Family, Key = K, Value = V, Digest = H::Digest
 }
 
 // =============================================================================
@@ -44,7 +44,7 @@ crate::qmdb::any::traits::impl_db_any! {
         T: Translator,
         VariableOperation<K, V>: Codec,
     }
-    Key = K, Value = V, Digest = H::Digest
+    Family = crate::merkle::mmr::Family, Key = K, Value = V, Digest = H::Digest
 }
 
 // =============================================================================
@@ -99,7 +99,7 @@ crate::qmdb::any::traits::impl_db_any! {
         H: Hasher,
         T: Translator,
     }
-    Key = K, Value = V, Digest = H::Digest
+    Family = crate::merkle::mmr::Family, Key = K, Value = V, Digest = H::Digest
 }
 
 impl<
@@ -140,7 +140,7 @@ crate::qmdb::any::traits::impl_db_any! {
         T: Translator,
         VariableOperation<K, V>: Codec,
     }
-    Key = K, Value = V, Digest = H::Digest
+    Family = crate::merkle::mmr::Family, Key = K, Value = V, Digest = H::Digest
 }
 
 impl<

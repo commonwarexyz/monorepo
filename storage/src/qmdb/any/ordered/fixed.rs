@@ -8,23 +8,28 @@ use crate::{
     index::ordered::Index,
     journal::contiguous::fixed::Journal,
     mmr::Location,
-    qmdb::{
-        any::{ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
-        Error,
-    },
+    qmdb::any::{ordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
     translator::Translator,
     Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
 
+type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
+
 pub type Update<K, V> = ordered::Update<K, FixedEncoding<V>>;
-pub type Operation<K, V> = ordered::Operation<K, FixedEncoding<V>>;
+pub type Operation<K, V> = ordered::Operation<crate::merkle::mmr::Family, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
+pub type Db<E, K, V, H, T> = super::Db<
+    crate::merkle::mmr::Family,
+    E,
+    Journal<E, Operation<K, V>>,
+    Index<T, Location>,
+    H,
+    Update<K, V>,
+>;
 
 impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator> Db<E, K, V, H, T> {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
@@ -63,15 +68,14 @@ pub mod partitioned {
         index::partitioned::ordered::Index,
         journal::contiguous::fixed::Journal,
         mmr::Location,
-        qmdb::{
-            any::{FixedConfig as Config, FixedValue},
-            Error,
-        },
+        qmdb::any::{FixedConfig as Config, FixedValue},
         translator::Translator,
         Context,
     };
     use commonware_cryptography::Hasher;
     use commonware_utils::Array;
+
+    type Error = crate::qmdb::Error<crate::mmr::Family>;
 
     /// An ordered key-value QMDB with a partitioned snapshot index.
     ///
@@ -83,6 +87,7 @@ pub mod partitioned {
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
     pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::ordered::Db<
+        crate::merkle::mmr::Family,
         E,
         Journal<E, Operation<K, V>>,
         Index<T, Location, P>,
@@ -422,7 +427,7 @@ pub(crate) mod test {
             // retained op to tip.
             let max_ops = NZU64!(4);
             let end_loc = db.bounds().await.end;
-            let start_loc = db.log.mmr.bounds().start;
+            let start_loc = db.log.merkle.bounds().start;
             // Raise the inactivity floor via an empty batch and make sure historical inactive
             // operations are still provable.
             let finalized = db
@@ -1490,11 +1495,11 @@ pub(crate) mod test {
             type Mmr = TestMmr;
 
             fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
-                (self.log.mmr, self.log.journal)
+                (self.log.merkle, self.log.journal)
             }
 
             async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
-                join_all(nodes_to_pin(loc).map(|p| self.log.mmr.get_node(p)))
+                join_all(nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
                     .await
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())

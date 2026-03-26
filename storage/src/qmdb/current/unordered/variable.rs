@@ -14,7 +14,6 @@ use crate::{
     qmdb::{
         any::{unordered::variable::Operation, value::VariableEncoding, VariableValue},
         current::VariableConfig as Config,
-        Error,
     },
     translator::Translator,
     Context,
@@ -22,6 +21,8 @@ use crate::{
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
+
+type Error = crate::qmdb::Error<crate::mmr::Family>;
 
 pub type Db<E, K, V, H, T, const N: usize> =
     super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, Index<T, Location>, H, N>;
@@ -54,7 +55,6 @@ pub mod partitioned {
                 unordered::variable::partitioned::Operation, value::VariableEncoding, VariableValue,
             },
             current::VariableConfig as Config,
-            Error,
         },
         translator::Translator,
         Context,
@@ -62,6 +62,8 @@ pub mod partitioned {
     use commonware_codec::Read;
     use commonware_cryptography::Hasher;
     use commonware_utils::Array;
+
+    type Error = crate::qmdb::Error<crate::mmr::Family>;
 
     /// A partitioned variant of [super::Db].
     ///

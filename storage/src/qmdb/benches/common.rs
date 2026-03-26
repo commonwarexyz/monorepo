@@ -493,7 +493,7 @@ pub async fn gen_random_kv<M>(
     commit_frequency: Option<u32>,
     make_value: impl Fn(&mut StdRng) -> M::Value,
 ) where
-    M: DbAny<Key = Digest>,
+    M: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest>,
 {
     let mut rng = StdRng::seed_from_u64(42);
 

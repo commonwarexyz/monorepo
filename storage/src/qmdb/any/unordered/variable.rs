@@ -11,7 +11,6 @@ use crate::{
     qmdb::{
         any::{unordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
-        Error,
     },
     translator::Translator,
     Context,
@@ -19,13 +18,21 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 
+type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
+
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
-pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
+pub type Operation<K, V> = unordered::Operation<crate::merkle::mmr::Family, K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
+pub type Db<E, K, V, H, T> = super::Db<
+    crate::merkle::mmr::Family,
+    E,
+    Journal<E, Operation<K, V>>,
+    Index<T, Location>,
+    H,
+    Update<K, V>,
+>;
 
 impl<E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator> Db<E, K, V, H, T>
 where
@@ -73,13 +80,14 @@ pub mod partitioned {
         qmdb::{
             any::{VariableConfig, VariableValue},
             operation::Key,
-            Error,
         },
         translator::Translator,
         Context,
     };
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
+
+    type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -91,6 +99,7 @@ pub mod partitioned {
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
     pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
+        crate::merkle::mmr::Family,
         E,
         Journal<E, Operation<K, V>>,
         Index<T, Location, P>,
@@ -210,7 +219,8 @@ pub(crate) mod test {
     /// create_test_ops(n') for n < n'.
     pub(crate) fn create_test_ops(
         n: usize,
-    ) -> Vec<unordered::Operation<Digest, VariableEncoding<Vec<u8>>>> {
+    ) -> Vec<unordered::Operation<crate::merkle::mmr::Family, Digest, VariableEncoding<Vec<u8>>>>
+    {
         create_test_ops_seeded(n, 0)
     }
 
@@ -219,7 +229,8 @@ pub(crate) mod test {
     pub(crate) fn create_test_ops_seeded(
         n: usize,
         seed: u64,
-    ) -> Vec<unordered::Operation<Digest, VariableEncoding<Vec<u8>>>> {
+    ) -> Vec<unordered::Operation<crate::merkle::mmr::Family, Digest, VariableEncoding<Vec<u8>>>>
+    {
         let mut rng = test_rng_seeded(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -239,7 +250,9 @@ pub(crate) mod test {
     /// Applies the given operations to the database.
     pub(crate) async fn apply_ops(
         db: &mut AnyTest,
-        ops: Vec<unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>,
+        ops: Vec<
+            unordered::Operation<crate::merkle::mmr::Family, Digest, VariableEncoding<Vec<u8>>>,
+        >,
     ) {
         let finalized = {
             let mut batch = db.new_batch();
@@ -640,11 +653,11 @@ pub(crate) mod test {
             type Mmr = TestMmr;
 
             fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
-                (self.log.mmr, self.log.journal)
+                (self.log.merkle, self.log.journal)
             }
 
             async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
-                join_all(nodes_to_pin(loc).map(|p| self.log.mmr.get_node(p)))
+                join_all(nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
                     .await
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())
@@ -657,6 +670,7 @@ pub(crate) mod test {
     #[allow(dead_code, clippy::manual_async_fn)]
     fn issue_2787_regression(
         db: &crate::qmdb::immutable::Immutable<
+            crate::merkle::mmr::Family,
             deterministic::Context,
             Digest,
             Vec<u8>,
@@ -868,7 +882,11 @@ pub(crate) mod test {
         use commonware_cryptography::sha256;
         use std::collections::HashMap;
 
-        type Snap = MerkleizedBatch<sha256::Digest, super::Update<Digest, Vec<u8>>>;
+        type Snap = MerkleizedBatch<
+            crate::merkle::mmr::Family,
+            sha256::Digest,
+            super::Update<Digest, Vec<u8>>,
+        >;
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

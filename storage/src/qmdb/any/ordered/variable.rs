@@ -12,7 +12,6 @@ use crate::{
     qmdb::{
         any::{ordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
-        Error,
     },
     translator::Translator,
     Context,
@@ -20,13 +19,21 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 
+type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
+
 pub type Update<K, V> = ordered::Update<K, VariableEncoding<V>>;
-pub type Operation<K, V> = ordered::Operation<K, VariableEncoding<V>>;
+pub type Operation<K, V> = ordered::Operation<crate::merkle::mmr::Family, K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T> =
-    super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
+pub type Db<E, K, V, H, T> = super::Db<
+    crate::merkle::mmr::Family,
+    E,
+    Journal<E, Operation<K, V>>,
+    Index<T, Location>,
+    H,
+    Update<K, V>,
+>;
 
 impl<E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator> Db<E, K, V, H, T>
 where
@@ -74,13 +81,14 @@ pub mod partitioned {
         qmdb::{
             any::{VariableConfig, VariableValue},
             operation::Key,
-            Error,
         },
         translator::Translator,
         Context,
     };
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
+
+    type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
 
     /// An ordered key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -92,6 +100,7 @@ pub mod partitioned {
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
     pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::ordered::Db<
+        crate::merkle::mmr::Family,
         E,
         Journal<E, Operation<K, V>>,
         Index<T, Location, P>,
@@ -605,11 +614,11 @@ pub(crate) mod test {
             type Mmr = TestMmr;
 
             fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
-                (self.log.mmr, self.log.journal)
+                (self.log.merkle, self.log.journal)
             }
 
             async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
-                join_all(nodes_to_pin(loc).map(|p| self.log.mmr.get_node(p)))
+                join_all(nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
                     .await
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())

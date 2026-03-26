@@ -1,18 +1,19 @@
-use crate::mmr::{
-    verification::ProofStore, Error, Location, Position, Proof, StandardHasher as Standard,
+use crate::merkle::{
+    hasher::Standard, verification::ProofStore, Error, Family, Location, Position, Proof,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 
 /// Verify that a [Proof] is valid for a range of operations and a target root.
-pub fn verify_proof<Op, H, D>(
+pub fn verify_proof<F, Op, H, D>(
     hasher: &Standard<H>,
-    proof: &Proof<D>,
-    start_loc: Location,
+    proof: &Proof<F, D>,
+    start_loc: Location<F>,
     operations: &[Op],
     target_root: &D,
 ) -> bool
 where
+    F: Family,
     Op: Encode,
     H: Hasher<Digest = D>,
     D: Digest,
@@ -25,15 +26,16 @@ where
 ///
 /// The `pinned_nodes` are the individual peak digests before the proven range (as returned by
 /// `nodes_to_pin`). When `start_loc` is 0, `pinned_nodes` must be empty.
-pub fn verify_proof_and_pinned_nodes<Op, H, D>(
+pub fn verify_proof_and_pinned_nodes<F, Op, H, D>(
     hasher: &Standard<H>,
-    proof: &Proof<D>,
-    start_loc: Location,
+    proof: &Proof<F, D>,
+    start_loc: Location<F>,
     operations: &[Op],
     pinned_nodes: &[D],
     target_root: &D,
 ) -> bool
 where
+    F: Family,
     Op: Encode,
     H: Hasher<Digest = D>,
     D: Digest,
@@ -42,16 +44,17 @@ where
     proof.verify_proof_and_pinned_nodes(hasher, &elements, start_loc, pinned_nodes, target_root)
 }
 
-/// Verify that a [Proof] is valid for a range of operations and extract all digests (and their positions)
-/// in the range of the [Proof].
-pub fn verify_proof_and_extract_digests<Op, H, D>(
+/// Verify that a [Proof] is valid for a range of operations and extract all digests (and their
+/// positions) in the range of the [Proof].
+pub fn verify_proof_and_extract_digests<F, Op, H, D>(
     hasher: &Standard<H>,
-    proof: &Proof<D>,
-    start_loc: Location,
+    proof: &Proof<F, D>,
+    start_loc: Location<F>,
     operations: &[Op],
     target_root: &D,
-) -> Result<Vec<(Position, D)>, Error>
+) -> Result<Vec<(Position<F>, D)>, Error<F>>
 where
+    F: Family,
     Op: Encode,
     H: Hasher<Digest = D>,
     D: Digest,
@@ -61,22 +64,20 @@ where
 }
 
 /// Verify a [Proof] and convert it into a [ProofStore].
-pub fn create_proof_store<Op, H, D>(
+pub fn create_proof_store<F, Op, H, D>(
     hasher: &Standard<H>,
-    proof: &Proof<D>,
-    start_loc: Location,
+    proof: &Proof<F, D>,
+    start_loc: Location<F>,
     operations: &[Op],
     root: &D,
-) -> Result<ProofStore<D>, Error>
+) -> Result<ProofStore<F, D>, Error<F>>
 where
+    F: Family,
     Op: Encode,
     H: Hasher<Digest = D>,
     D: Digest,
 {
-    // Encode operations for verification
     let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-
-    // Create ProofStore by verifying the proof and extracting all digests
     ProofStore::new(hasher, proof, &elements, start_loc, root)
 }
 
@@ -85,33 +86,35 @@ where
 /// `peaks` must contain any peak digests that fall in the fold prefix of the original proof
 /// (peaks entirely before the original range's start location). If the original range started
 /// at location 0, pass an empty slice.
-pub fn create_multi_proof<D: Digest>(
-    proof_store: &ProofStore<D>,
-    locations: &[Location],
-    peaks: &[(Position, D)],
-) -> Result<Proof<D>, Error> {
+pub fn create_multi_proof<F, D>(
+    proof_store: &ProofStore<F, D>,
+    locations: &[Location<F>],
+    peaks: &[(Position<F>, D)],
+) -> Result<Proof<F, D>, Error<F>>
+where
+    F: Family,
+    D: Digest,
+{
     proof_store.multi_proof(locations, peaks)
 }
 
 /// Verify a Multi-Proof for operations at specific locations.
-pub fn verify_multi_proof<Op, H, D>(
+pub fn verify_multi_proof<F, Op, H, D>(
     hasher: &Standard<H>,
-    proof: &Proof<D>,
-    operations: &[(Location, Op)],
+    proof: &Proof<F, D>,
+    operations: &[(Location<F>, Op)],
     target_root: &D,
 ) -> bool
 where
+    F: Family,
     Op: Encode,
     H: Hasher<Digest = D>,
     D: Digest,
 {
-    // Encode operations and convert locations to positions
     let elements = operations
         .iter()
         .map(|(loc, op)| (op.encode(), *loc))
         .collect::<Vec<_>>();
-
-    // Verify the proof
     proof.verify_multi_inclusion(hasher, &elements, target_root)
 }
 
@@ -120,7 +123,7 @@ mod tests {
     use super::*;
     use crate::{
         merkle::LocationRangeExt as _,
-        mmr::{mem::Mmr, verification},
+        mmr::{self, mem::Mmr, verification},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
@@ -155,14 +158,14 @@ mod tests {
 
             // Generate proof for all operations
             let proof = mmr
-                .range_proof(&hasher, Location::new(0)..Location::new(3))
+                .range_proof(&hasher, mmr::Location::new(0)..mmr::Location::new(3))
                 .unwrap();
 
             // Verify the proof
             assert!(verify_proof(
                 &hasher,
                 &proof,
-                Location::new(0), // start_loc
+                mmr::Location::new(0), // start_loc
                 &operations,
                 root,
             ));
@@ -172,7 +175,7 @@ mod tests {
             assert!(!verify_proof(
                 &hasher,
                 &proof,
-                Location::new(0),
+                mmr::Location::new(0),
                 &operations,
                 &wrong_root,
             ));
@@ -182,7 +185,7 @@ mod tests {
             assert!(!verify_proof(
                 &hasher,
                 &proof,
-                Location::new(0),
+                mmr::Location::new(0),
                 &wrong_operations,
                 root,
             ));
@@ -211,10 +214,10 @@ mod tests {
                 }
                 mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
             }
-            let start_loc = Location::new(5u64);
+            let start_loc = mmr::Location::new(5u64);
             let root = mmr.root();
             let proof = mmr
-                .range_proof(&hasher, Location::new(5)..Location::new(8))
+                .range_proof(&hasher, mmr::Location::new(5)..mmr::Location::new(8))
                 .unwrap();
 
             // Verify with correct start location
@@ -224,7 +227,7 @@ mod tests {
             assert!(!verify_proof(
                 &hasher,
                 &proof,
-                Location::new(0), // wrong start_loc
+                mmr::Location::new(0), // wrong start_loc
                 &operations,
                 root,
             ));
@@ -249,14 +252,14 @@ mod tests {
                 mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
             }
             let root = mmr.root();
-            let range = Location::new(1)..Location::new(4);
+            let range = mmr::Location::new(1)..mmr::Location::new(4);
             let proof = mmr.range_proof(&hasher, range.clone()).unwrap();
 
             // Verify and extract digests for subset of operations
             let result = verify_proof_and_extract_digests(
                 &hasher,
                 &proof,
-                Location::new(1), // start_loc
+                mmr::Location::new(1), // start_loc
                 &operations[range.to_usize_range()],
                 root,
             );
@@ -269,7 +272,7 @@ mod tests {
             assert!(verify_proof_and_extract_digests(
                 &hasher,
                 &proof,
-                Location::new(1),
+                mmr::Location::new(1),
                 &operations[range.to_usize_range()],
                 &wrong_root,
             )
@@ -296,7 +299,7 @@ mod tests {
                 mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
             }
             let root = mmr.root();
-            let range = Location::new(0)..Location::new(3);
+            let range = mmr::Location::new(0)..mmr::Location::new(3);
             let proof = mmr.range_proof(&hasher, range.clone()).unwrap();
 
             // Create proof store
@@ -311,7 +314,7 @@ mod tests {
             let proof_store = result.unwrap();
 
             // Verify we can generate sub-proofs from the store
-            let range = Location::new(0)..Location::new(2);
+            let range = mmr::Location::new(0)..mmr::Location::new(2);
             let sub_proof = proof_store.range_proof(&hasher, range.clone()).unwrap();
 
             // Verify the sub-proof
@@ -342,7 +345,7 @@ mod tests {
                 }
                 mmr.apply(batch.merkleize(&hasher).finalize()).unwrap();
             }
-            let range = Location::new(0)..Location::new(2);
+            let range = mmr::Location::new(0)..mmr::Location::new(2);
             let proof = mmr.range_proof(&hasher, range).unwrap();
 
             // Should fail with invalid root
@@ -350,7 +353,7 @@ mod tests {
             assert!(create_proof_store(
                 &hasher,
                 &proof,
-                Location::new(0),
+                mmr::Location::new(0),
                 &operations,
                 &wrong_root,
             )
@@ -379,25 +382,26 @@ mod tests {
 
             // Create proof for full range
             let proof = mmr
-                .range_proof(&hasher, Location::new(0)..Location::new(20))
+                .range_proof(&hasher, mmr::Location::new(0)..mmr::Location::new(20))
                 .unwrap();
 
             // Create proof store
             let proof_store =
-                create_proof_store(&hasher, &proof, Location::new(0), &operations, root).unwrap();
+                create_proof_store(&hasher, &proof, mmr::Location::new(0), &operations, root)
+                    .unwrap();
 
             // Generate multi-proof for specific locations
             let target_locations = vec![
-                Location::new(2),
-                Location::new(5),
-                Location::new(10),
-                Location::new(15),
-                Location::new(18),
+                mmr::Location::new(2),
+                mmr::Location::new(5),
+                mmr::Location::new(10),
+                mmr::Location::new(15),
+                mmr::Location::new(18),
             ];
             let multi_proof = create_multi_proof(&proof_store, &target_locations, &[]).unwrap();
 
             // Prepare operations for verification
-            let selected_ops: Vec<(Location, u64)> = target_locations
+            let selected_ops: Vec<(mmr::Location, u64)> = target_locations
                 .iter()
                 .map(|&loc| (loc, operations[*loc as usize]))
                 .collect();
@@ -431,7 +435,7 @@ mod tests {
             let root = mmr.root();
 
             // Proof store starts at 32, so the first peak is folded into the proof prefix.
-            let range = Location::new(32)..Location::new(49);
+            let range = mmr::Location::new(32)..mmr::Location::new(49);
             let proof = mmr.range_proof(&hasher, range.clone()).unwrap();
             let proof_store = create_proof_store(
                 &hasher,
@@ -442,10 +446,10 @@ mod tests {
             )
             .unwrap();
 
-            let target_locations = vec![Location::new(33), Location::new(48)];
+            let target_locations = vec![mmr::Location::new(33), mmr::Location::new(48)];
 
             // Without the folded-prefix peaks, multi-proof generation should fail.
-            let start_pos = Position::try_from(range.start).unwrap();
+            let start_pos = mmr::Position::try_from(range.start).unwrap();
             let fold_prefix_peaks: Vec<_> = mmr
                 .peak_iterator()
                 .take_while(|(peak_pos, _)| *peak_pos < start_pos)
@@ -456,13 +460,13 @@ mod tests {
             let missing_peaks = create_multi_proof(&proof_store, &target_locations, &[]);
             assert!(matches!(
                 missing_peaks,
-                Err(Error::ElementPruned(pos)) if pos == fold_prefix_peaks[0].0
+                Err(mmr::Error::ElementPruned(pos)) if pos == fold_prefix_peaks[0].0
             ));
 
             // Supplying the required peaks should produce a valid multi-proof.
             let multi_proof =
                 create_multi_proof(&proof_store, &target_locations, &fold_prefix_peaks).unwrap();
-            let selected_ops: Vec<(Location, u64)> = target_locations
+            let selected_ops: Vec<(mmr::Location, u64)> = target_locations
                 .iter()
                 .map(|&loc| (loc, operations[*loc as usize]))
                 .collect();
@@ -495,16 +499,20 @@ mod tests {
             let root = mmr.root();
 
             // Generate multi-proof directly from MMR
-            let target_locations = vec![Location::new(1), Location::new(4), Location::new(7)];
+            let target_locations = vec![
+                mmr::Location::new(1),
+                mmr::Location::new(4),
+                mmr::Location::new(7),
+            ];
             let multi_proof = verification::multi_proof(&mmr, &target_locations)
                 .await
                 .unwrap();
 
             // Verify with correct operations
             let selected_ops = vec![
-                (Location::new(1), operations[1]),
-                (Location::new(4), operations[4]),
-                (Location::new(7), operations[7]),
+                (mmr::Location::new(1), operations[1]),
+                (mmr::Location::new(4), operations[4]),
+                (mmr::Location::new(7), operations[7]),
             ];
             assert!(verify_multi_proof(
                 &hasher,
@@ -515,17 +523,17 @@ mod tests {
 
             // Verify fails with wrong operations
             let wrong_ops = vec![
-                (Location::new(1), 99),
-                (Location::new(4), operations[4]),
-                (Location::new(7), operations[7]),
+                (mmr::Location::new(1), 99),
+                (mmr::Location::new(4), operations[4]),
+                (mmr::Location::new(7), operations[7]),
             ];
             assert!(!verify_multi_proof(&hasher, &multi_proof, &wrong_ops, root,));
 
             // Verify fails with wrong locations
             let wrong_locations = vec![
-                (Location::new(0), operations[1]),
-                (Location::new(4), operations[4]),
-                (Location::new(7), operations[7]),
+                (mmr::Location::new(0), operations[1]),
+                (mmr::Location::new(4), operations[4]),
+                (mmr::Location::new(7), operations[7]),
             ];
             assert!(!verify_multi_proof(
                 &hasher,
@@ -549,14 +557,14 @@ mod tests {
             assert!(verify_multi_proof(
                 &hasher,
                 &empty_proof,
-                &[] as &[(Location, u64)],
+                &[] as &[(mmr::Location, u64)],
                 empty_root,
             ));
 
             // Proofs over empty locations should otherwise not be allowed.
             assert!(matches!(
                 verification::multi_proof(&empty_mmr, &[]).await,
-                Err(Error::Empty)
+                Err(mmr::Error::Empty)
             ));
         });
     }
@@ -582,19 +590,21 @@ mod tests {
 
             // Create proof store for all elements
             let proof = mmr
-                .range_proof(&hasher, Location::new(0)..Location::new(3))
+                .range_proof(&hasher, mmr::Location::new(0)..mmr::Location::new(3))
                 .unwrap();
             let proof_store =
-                create_proof_store(&hasher, &proof, Location::new(0), &operations, root).unwrap();
+                create_proof_store(&hasher, &proof, mmr::Location::new(0), &operations, root)
+                    .unwrap();
 
             // Generate multi-proof for single element
-            let multi_proof = create_multi_proof(&proof_store, &[Location::new(1)], &[]).unwrap();
+            let multi_proof =
+                create_multi_proof(&proof_store, &[mmr::Location::new(1)], &[]).unwrap();
 
             // Verify single element
             assert!(verify_multi_proof(
                 &hasher,
                 &multi_proof,
-                &[(Location::new(1), operations[1])],
+                &[(mmr::Location::new(1), operations[1])],
                 root,
             ));
         });

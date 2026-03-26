@@ -5,7 +5,7 @@ use commonware_cryptography::Hasher as CryptoHasher;
 use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    mmr::{journaled::Config as MmrConfig, Location, Proof},
+    mmr::{self, journaled::Config as MmrConfig, Location, Proof},
     qmdb::{
         self,
         any::{
@@ -87,7 +87,7 @@ where
     async fn add_operations(
         &mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::qmdb::Error> {
+    ) -> Result<(), qmdb::Error<mmr::Family>> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             // Ignore bad inputs rather than return errors.
             error!("operations must end with a commit");
@@ -131,14 +131,15 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>> + Send
+    {
         self.historical_proof(op_count, start_loc, max_ops)
     }
 
     fn pinned_nodes_at(
         &self,
         loc: Location,
-    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error>> + Send {
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send {
         self.pinned_nodes_at(loc)
     }
 

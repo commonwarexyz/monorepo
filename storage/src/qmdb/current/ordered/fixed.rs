@@ -15,13 +15,14 @@ use crate::{
     qmdb::{
         any::{ordered::fixed::Operation, value::FixedEncoding, FixedValue},
         current::FixedConfig as Config,
-        Error,
     },
     translator::Translator,
     Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
+
+type Error = crate::qmdb::Error<crate::mmr::Family>;
 
 pub type Db<E, K, V, H, T, const N: usize> =
     super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, Index<T, Location>, H, N>;
@@ -47,13 +48,14 @@ pub mod partitioned {
         qmdb::{
             any::{ordered::fixed::partitioned::Operation, value::FixedEncoding, FixedValue},
             current::FixedConfig as Config,
-            Error,
         },
         translator::Translator,
         Context,
     };
     use commonware_cryptography::Hasher;
     use commonware_utils::Array;
+
+    type Error = crate::qmdb::Error<crate::mmr::Family>;
 
     /// A partitioned variant of [super::Db].
     ///

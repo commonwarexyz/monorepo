@@ -96,14 +96,14 @@ async fn build_db<E, U, I, H, J, const N: usize>(
     apply_batch_size: usize,
     metadata_partition: String,
     thread_pool: Option<commonware_parallel::ThreadPool>,
-) -> Result<db::Db<E, J, I, H, U, N>, qmdb::Error>
+) -> Result<db::Db<E, J, I, H, U, N>, qmdb::Error<crate::merkle::mmr::Family>>
 where
     E: Context,
     U: Update + Send + Sync + 'static,
     I: crate::index::Unordered<Value = Location>,
     H: Hasher,
-    J: Mutable<Item = Operation<U>> + Persistable<Error = crate::journal::Error>,
-    Operation<U>: Codec + Committable + CodecShared,
+    J: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = crate::journal::Error>,
+    Operation<mmr::Family, U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
     let hasher = StandardHasher::<H>::new();
@@ -117,8 +117,13 @@ where
         &hasher,
     )
     .await?;
-    let log =
-        authenticated::Journal::from_components(mmr, log, hasher, apply_batch_size as u64).await?;
+    let log = authenticated::Journal::<mmr::Family, _, _, _>::from_components(
+        mmr,
+        log,
+        hasher,
+        apply_batch_size as u64,
+    )
+    .await?;
 
     // Initialize bitmap with pruned chunks.
     //
@@ -127,15 +132,16 @@ where
     // init_from_log, which pads the gap between `pruned_chunks * CHUNK_SIZE_BITS` and the
     // journal's inactivity floor with inactive (false) bits.
     let pruned_chunks = (*range.start / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
-    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| qmdb::Error::DataCorrupted("pruned chunks overflow"))?;
+    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks).map_err(|_| {
+        qmdb::Error::<crate::merkle::mmr::Family>::DataCorrupted("pruned chunks overflow")
+    })?;
 
     // Build any::Db with bitmap callback.
     //
     // init_from_log replays the operations, building the snapshot (index) and invoking
     // our callback for each operation to populate the bitmap.
     let known_inactivity_floor = Location::new(status.len());
-    let any: AnyDb<E, J, I, H, U> = AnyDb::init_from_log(
+    let any: AnyDb<crate::merkle::mmr::Family, E, J, I, H, U> = AnyDb::init_from_log(
         index,
         log,
         Some(known_inactivity_floor),
@@ -163,12 +169,11 @@ where
         let num_grafted_pins = (pruned_chunks as u64).count_ones() as usize;
         let mut pins = Vec::with_capacity(num_grafted_pins);
         for pos in ops_pin_positions.take(num_grafted_pins) {
-            let digest = any
-                .log
-                .mmr
-                .get_node(pos)
-                .await?
-                .ok_or(qmdb::Error::DataCorrupted("missing ops pinned node"))?;
+            let digest = any.log.merkle.get_node(pos).await?.ok_or(qmdb::Error::<
+                crate::merkle::mmr::Family,
+            >::DataCorrupted(
+                "missing ops pinned node"
+            ))?;
             pins.push(digest);
         }
         pins
@@ -180,7 +185,7 @@ where
         &hasher,
         &status,
         &grafted_pinned_nodes,
-        &any.log.mmr,
+        &any.log.merkle,
         thread_pool.as_ref(),
     )
     .await?;
@@ -188,7 +193,7 @@ where
     // Compute the canonical root. The grafted root is deterministic from the ops
     // (which are authenticated by the engine) and the bitmap (which is deterministic
     // from the ops).
-    let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
+    let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.merkle);
     let partial = db::partial_chunk(&status);
     let grafted_mmr_root = db::compute_grafted_mmr_root(&hasher, &storage).await?;
     let ops_root = any.log.root();
@@ -247,7 +252,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error> {
+    ) -> Result<Self, qmdb::Error<crate::merkle::mmr::Family>> {
         let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
         let thread_pool = config.mmr_config.thread_pool.clone();
@@ -296,7 +301,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error> {
+    ) -> Result<Self, qmdb::Error<crate::merkle::mmr::Family>> {
         let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
         let thread_pool = config.mmr_config.thread_pool.clone();
@@ -344,7 +349,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error> {
+    ) -> Result<Self, qmdb::Error<crate::merkle::mmr::Family>> {
         let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
         let thread_pool = config.mmr_config.thread_pool.clone();
@@ -393,7 +398,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error> {
+    ) -> Result<Self, qmdb::Error<crate::merkle::mmr::Family>> {
         let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
         let thread_pool = config.mmr_config.thread_pool.clone();
@@ -439,7 +444,7 @@ macro_rules! impl_current_resolver {
         {
             type Digest = H::Digest;
             type Op = $op<K, V>;
-            type Error = qmdb::Error;
+            type Error = qmdb::Error<crate::merkle::mmr::Family>;
 
             async fn get_operations(
                 &self,
@@ -483,7 +488,7 @@ macro_rules! impl_current_resolver {
         {
             type Digest = H::Digest;
             type Op = $op<K, V>;
-            type Error = qmdb::Error;
+            type Error = qmdb::Error<crate::merkle::mmr::Family>;
 
             async fn get_operations(
                 &self,
@@ -492,7 +497,7 @@ macro_rules! impl_current_resolver {
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
+            ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error<crate::merkle::mmr::Family>> {
                 let db = self.read().await;
                 let (proof, operations) = db.any
                     .historical_proof(op_count, start_loc, max_ops)
@@ -528,7 +533,7 @@ macro_rules! impl_current_resolver {
         {
             type Digest = H::Digest;
             type Op = $op<K, V>;
-            type Error = qmdb::Error;
+            type Error = qmdb::Error<crate::merkle::mmr::Family>;
 
             async fn get_operations(
                 &self,
@@ -537,9 +542,9 @@ macro_rules! impl_current_resolver {
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error> {
+            ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error<crate::merkle::mmr::Family>> {
                 let guard = self.read().await;
-                let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
+                let db = guard.as_ref().ok_or(qmdb::Error::<crate::merkle::mmr::Family>::KeyNotFound)?;
                 let (proof, operations) = db.any
                     .historical_proof(op_count, start_loc, max_ops)
                     .await?;

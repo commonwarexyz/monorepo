@@ -6,6 +6,7 @@
 
 use crate::{
     journal::contiguous::Contiguous,
+    merkle::mmr,
     mmr::Location,
     qmdb::{
         self,
@@ -48,14 +49,16 @@ pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 
 /// Trait for cleanup operations in tests.
 pub(crate) trait Destructible {
-    fn destroy(self) -> impl std::future::Future<Output = Result<(), qmdb::Error>> + Send;
+    fn destroy(
+        self,
+    ) -> impl std::future::Future<Output = Result<(), qmdb::Error<crate::merkle::mmr::Family>>> + Send;
 }
 
 // Implement Destructible for the concrete MMR type used in tests.
 // This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
 impl Destructible for crate::mmr::journaled::Mmr<deterministic::Context, Digest> {
-    async fn destroy(self) -> Result<(), qmdb::Error> {
-        self.destroy().await.map_err(qmdb::Error::Mmr)
+    async fn destroy(self) -> Result<(), qmdb::Error<crate::merkle::mmr::Family>> {
+        self.destroy().await.map_err(qmdb::Error::Merkle)
     }
 }
 
@@ -77,7 +80,7 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
 pub(crate) trait SyncTestHarness: Sized + 'static {
     /// The database type being tested.
     type Db: qmdb::sync::Database<Context = deterministic::Context, Digest = Digest, Config: Clone>
-        + DbAny<Key = Digest, Digest = Digest>;
+        + DbAny<mmr::Family, Key = Digest, Digest = Digest>;
 
     /// Return the root the sync engine targets.
     fn sync_target_root(db: &Self::Db) -> Digest;
@@ -275,7 +278,7 @@ where
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>(target_db_ops: usize)
 where
     Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode + Clone + OperationTrait<Key = Digest>,
+    OpOf<H>: Encode + Clone + OperationTrait<mmr::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -341,7 +344,7 @@ where
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>(original_ops: usize)
 where
     Arc<DbOf<H>>: Resolver<Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode + Clone + OperationTrait<Key = Digest>,
+    OpOf<H>: Encode + Clone + OperationTrait<mmr::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -436,7 +439,7 @@ where
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>(num_ops: usize)
 where
     resolver::tests::FailResolver<OpOf<H>, Digest>: Resolver<Op = OpOf<H>, Digest = Digest>,
-    OpOf<H>: Encode + Clone + OperationTrait<Key = Digest>,
+    OpOf<H>: Encode + Clone + OperationTrait<mmr::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -1865,8 +1868,13 @@ mod harnesses {
 
         fn create_ops(
             n: usize,
-        ) -> Vec<crate::qmdb::any::unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>
-        {
+        ) -> Vec<
+            crate::qmdb::any::unordered::Operation<
+                crate::merkle::mmr::Family,
+                Digest,
+                VariableEncoding<Vec<u8>>,
+            >,
+        > {
             crate::qmdb::any::unordered::variable::test::create_test_ops(n)
         }
 
@@ -1887,7 +1895,13 @@ mod harnesses {
 
         async fn apply_ops(
             mut db: Self::Db,
-            ops: Vec<crate::qmdb::any::unordered::Operation<Digest, VariableEncoding<Vec<u8>>>>,
+            ops: Vec<
+                crate::qmdb::any::unordered::Operation<
+                    crate::merkle::mmr::Family,
+                    Digest,
+                    VariableEncoding<Vec<u8>>,
+                >,
+            >,
         ) -> Self::Db {
             crate::qmdb::any::unordered::variable::test::apply_ops(&mut db, ops).await;
             let finalized = db
