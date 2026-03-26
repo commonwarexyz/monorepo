@@ -18,8 +18,8 @@ module itf_main {
         BYZANTINE = Set("n0"),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3"),
         VIEWS = 1.to(6),
-        VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
-        INVALID_BLOCKS = Set()
+        VALID_PAYLOADS = Set("val_b0", "val_b1", "val_b2"),
+        INVALID_PAYLOADS = Set()
     ) as r from "./replica"
 
     pure val CERTIFY_ALL = r::Replicas.mapBy(_ => app::certify_always_true)

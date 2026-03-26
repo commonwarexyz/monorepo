@@ -1,9 +1,9 @@
 module automaton {
     import types.* from "./types"
 
-    // Set of blocks for which a certification decision is defined.
-    const CERTIFY_DOMAIN: Set[Block]
+    // Set of payloads for which a certification decision is defined.
+    const CERTIFY_DOMAIN: Set[Payload]
 
     // Default certification policy: always certify notarized payloads.
-    pure val certify_always_true: Block -> bool = CERTIFY_DOMAIN.mapBy(_ => true)
+    pure val certify_always_true: Payload -> bool = CERTIFY_DOMAIN.mapBy(_ => true)
 }

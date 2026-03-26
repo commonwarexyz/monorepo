@@ -13,13 +13,13 @@ module tests {
         BYZANTINE = Set(),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3"),
         VIEWS = 1.to(6),
-        VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2", "val_b3_part"),
-        INVALID_BLOCKS = Set("inv_b3")
+        VALID_PAYLOADS = Set("val_b0", "val_b1", "val_b2", "val_b3_part"),
+        INVALID_PAYLOADS = Set("inv_b3")
     ).* from "../replica"
 
     pure val CERTIFY_ALL_TRUE = Replicas.mapBy(_ => app::certify_always_true)
     pure val CERTIFY_FAIL_INV_B3_BLOCK = Map(
-        GENESIS_BLOCK -> true,
+        GENESIS_PAYLOAD -> true,
         "val_b0" -> true,
         "val_b1" -> true,
         "val_b2" -> true,
@@ -44,10 +44,9 @@ module tests {
 
     run happyPathFinalizeTest = {
         val proposal = {
-            block: "val_b0",
+            payload: "val_b0",
             view: FIRST_VIEW,
-            view_parent: GENESIS_VIEW,
-            block_parent: GENESIS_BLOCK,
+            parent: GENESIS_VIEW,
             sig: sig_of("n0")
         }
 
@@ -61,34 +60,34 @@ module tests {
             .then(on_proposal("n2", proposal))
             .then(on_proposal("n3", proposal))
 
-            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n0"))
-            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n1"))
-            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n1"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n2"))
 
-            .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, "n0"))
-            .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, "n1"))
-            .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n0"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n1"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n2"))
 
-            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, "n0"))
-            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, "n1"))
-            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n0"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n1"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n2"))
             .then(all {
-                assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b0"))),
-                assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == Some("val_b0"))),
-                assert(sent_vote.exists(v => vote_sig(v) == "n1" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == Some("val_b0"))),
-                assert(sent_vote.exists(v => vote_sig(v) == "n2" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == Some("val_b0"))),
-                assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_notarize(v) and vote_block(v) == Some("val_b0"))),
-                assert(sent_vote.exists(v => vote_sig(v) == "n1" and vote_view(v) == FIRST_VIEW and is_notarize(v) and vote_block(v) == Some("val_b0"))),
-                assert(sent_vote.exists(v => vote_sig(v) == "n2" and vote_view(v) == FIRST_VIEW and is_notarize(v) and vote_block(v) == Some("val_b0"))),
+                assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b0"))),
+                assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_payload(v) == Some("val_b0"))),
+                assert(sent_vote.exists(v => vote_sig(v) == "n1" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_payload(v) == Some("val_b0"))),
+                assert(sent_vote.exists(v => vote_sig(v) == "n2" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_payload(v) == Some("val_b0"))),
+                assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_notarize(v) and vote_payload(v) == Some("val_b0"))),
+                assert(sent_vote.exists(v => vote_sig(v) == "n1" and vote_view(v) == FIRST_VIEW and is_notarize(v) and vote_payload(v) == Some("val_b0"))),
+                assert(sent_vote.exists(v => vote_sig(v) == "n2" and vote_view(v) == FIRST_VIEW and is_notarize(v) and vote_payload(v) == Some("val_b0"))),
                 assert(replica_state.get("n0").view == 2),
                 unchanged_all,
             })
 
-            .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, "n0"))
-            .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, "n1"))
-            .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n0"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n1"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n2"))
             .then(all {
-                assert(store_certificate.get("n0").exists(c => cert_kind(c) == FinalizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b0"))),
+                assert(store_certificate.get("n0").exists(c => cert_kind(c) == FinalizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b0"))),
                 assert(replica_state.get("n0").last_finalized == FIRST_VIEW),
                 assert(ghost_committed_blocks.get("n0").length() == 1),
                 assert(ghost_committed_blocks.get("n0")[0] == "val_b0"),
@@ -100,10 +99,9 @@ module tests {
     run certificationAlwaysTrueTriggersFinalizeTest = {
 
         val proposal = {
-            block: "val_b0",
+            payload: "val_b0",
             view: FIRST_VIEW,
-            view_parent: GENESIS_VIEW,
-            block_parent: GENESIS_BLOCK,
+            parent: GENESIS_VIEW,
             sig: sig_of("n0")
         }
 
@@ -116,12 +114,12 @@ module tests {
             .then(on_proposal("n1", proposal))
             .then(on_proposal("n2", proposal))
 
-            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n0"))
-            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n1"))
-            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n0"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n1"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n2"))
             .then(all {
-                assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b0"))),
-                assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_block(v) == Some("val_b0"))),
+                assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b0"))),
+                assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_payload(v) == Some("val_b0"))),
                 assert(not(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_nullify(v)))),
                 assert(replica_state.get("n0").view == 2),
                 unchanged_all,
@@ -153,7 +151,7 @@ module tests {
             CERTIFY_ALL_TRUE
         )
             // Force proposer failure with an invalid parent for FIRST_VIEW.
-            .then(proposer_step("n0", "val_b0", "val_b1", GENESIS_VIEW))
+            .then(proposer_step("n0", "val_b0", 1))
             .then(all {
                 assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_nullify(v))),
                 assert(replica_state.get("n0").nullified == true),
@@ -169,10 +167,9 @@ module tests {
 
     run runCertifyTest = {
         val proposal = {
-            block: "val_b3_part",
+            payload: "val_b3_part",
             view: FIRST_VIEW,
-            view_parent: GENESIS_VIEW,
-            block_parent: GENESIS_BLOCK,
+            parent: GENESIS_VIEW,
             sig: sig_of("n3")
         }
 
@@ -186,11 +183,11 @@ module tests {
             .then(on_proposal("n2", proposal))
 
             // All replicas see notarize quorum; certification fails -> all send nullify.
-            .then(replica_receives_notarize_quorum("n0", "val_b3_part", FIRST_VIEW, Set("n0", "n1", "n2")))
-            .then(replica_receives_notarize_quorum("n1", "val_b3_part", FIRST_VIEW, Set("n0", "n1", "n2")))
-            .then(replica_receives_notarize_quorum("n2", "val_b3_part", FIRST_VIEW, Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_quorum("n0", "val_b3_part", FIRST_VIEW,  Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_quorum("n1", "val_b3_part", FIRST_VIEW,  Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_quorum("n2", "val_b3_part", FIRST_VIEW,  Set("n0", "n1", "n2")))
             .then(all {
-                assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_block(c) == Some("val_b3_part"))),
+                assert(store_certificate.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b3_part"))),
                 assert(replica_state.get("n0").certified.get(FIRST_VIEW) == None),
                 assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_nullify(v))),
                 assert(sent_vote.exists(v => vote_sig(v) == "n1" and vote_view(v) == FIRST_VIEW and is_nullify(v))),
@@ -209,10 +206,10 @@ module tests {
                 unchanged_all,
             })
             // In view 2, n0 is leader but must refuse to build on uncertified val_b3_part.
-            .then(proposer_step("n0", "val_b0", "val_b3_part", FIRST_VIEW))
+            .then(proposer_step("n0", "val_b0", FIRST_VIEW))
             .then(all {
                 assert(sent_vote.exists(v => vote_sig(v) == "n0" and vote_view(v) == 2 and is_nullify(v))),
-                assert(not(sent_proposal.exists(p => p.sig == "n0" and p.view == 2 and p.block_parent == "val_b3_part" and p.view_parent == FIRST_VIEW))),
+                assert(not(sent_proposal.exists(p => p.sig == "n0" and p.view == 2 and p.parent == FIRST_VIEW))),
                 unchanged_all,
             })
             .expect(all_invariants)
@@ -220,10 +217,9 @@ module tests {
 
     run localVerificationFailureTest = {
         val invalid_proposal = {
-            block: "inv_b3",
+            payload: "inv_b3",
             view: FIRST_VIEW,
-            view_parent: GENESIS_VIEW,
-            block_parent: GENESIS_BLOCK,
+            parent: GENESIS_VIEW,
             sig: sig_of("n0")
         }
 
@@ -275,11 +271,15 @@ module tests {
         lastAction' = "inject_vote",
     }
 
-    action replica_receives_notarize_vote(id: ReplicaId, block: Block, view: ViewNumber, src: ReplicaId): bool =
-        on_vote_notarize(id, view, block, Set(notarize(view, src, block)))
+    action replica_receives_notarize_vote(id: ReplicaId, payload: Payload, view: ViewNumber, parent: ViewNumber, src: ReplicaId): bool = {
+            val p: Proposal = { payload: payload, view: view, parent: parent, sig: sig_of(src) }
+            on_vote_notarize(id, view, payload, Set(notarize(p, src)))
+        }
 
-    action replica_receives_finalize_vote(id: ReplicaId, block: Block, view: ViewNumber, src: ReplicaId): bool =
-        on_vote_finalize(id, view, block, Set(finalize(view, src, block)))
+    action replica_receives_finalize_vote(id: ReplicaId, payload: Payload, view: ViewNumber, parent: ViewNumber, src: ReplicaId): bool = {
+        val p: Proposal = { payload: payload, view: view, parent: parent, sig: sig_of(src) }
+        on_vote_finalize(id, view, payload, Set(finalize(p, src)))
+    }
 
     action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: ReplicaId): bool =
         on_vote_nullify(id, view, Set(nullify(view, src)))
@@ -299,11 +299,15 @@ module tests {
         lastAction' = lastAction,
     }
 
-    action replica_receives_notarize_quorum(id: ReplicaId, block: Block, view: ViewNumber, srcs: Set[ReplicaId]): bool =
-        on_vote_notarize(id, view, block, srcs.map(src => notarize(view, src, block)))
+    action replica_receives_notarize_quorum(id: ReplicaId, payload: Payload, view: ViewNumber, srcs: Set[ReplicaId]): bool = {
+        val p: Proposal = { payload: payload, view: view, parent: GENESIS_VIEW, sig: "" }
+        on_vote_notarize(id, view, payload, srcs.map(src => notarize(p, src)))
+    }
 
-    action replica_receives_finalize_quorum(id: ReplicaId, block: Block, view: ViewNumber, srcs: Set[ReplicaId]): bool =
-        on_vote_finalize(id, view, block, srcs.map(src => finalize(view, src, block)))
+    action replica_receives_finalize_quorum(id: ReplicaId, payload: Payload, view: ViewNumber, srcs: Set[ReplicaId]): bool = {
+        val p: Proposal = { payload: payload, view: view, parent: GENESIS_VIEW, sig: "" }
+        on_vote_finalize(id, view, payload, srcs.map(src => finalize(p, src)))
+    }
 
     action replica_receives_nullify_quorum(id: ReplicaId, view: ViewNumber, srcs: Set[ReplicaId]): bool =
         on_vote_nullify(id, view, srcs.map(src => nullify(view, src)))
@@ -314,10 +318,9 @@ module tests {
     // non-current views).
     run noBackfillNullifyForPastViewTest = {
         val proposal = {
-            block: "val_b3_part",
+            payload: "val_b3_part",
             view: FIRST_VIEW,
-            view_parent: GENESIS_VIEW,
-            block_parent: GENESIS_BLOCK,
+            parent: GENESIS_VIEW,
             sig: sig_of("n3")
         }
 
@@ -332,9 +335,9 @@ module tests {
             .then(on_proposal("n2", proposal))
 
             // n0, n1, n2 form notarization; certification fails -> all send nullify(1).
-            .then(replica_receives_notarize_quorum("n0", "val_b3_part", FIRST_VIEW, Set("n0", "n1", "n2")))
-            .then(replica_receives_notarize_quorum("n1", "val_b3_part", FIRST_VIEW, Set("n0", "n1", "n2")))
-            .then(replica_receives_notarize_quorum("n2", "val_b3_part", FIRST_VIEW, Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_quorum("n0", "val_b3_part", FIRST_VIEW,  Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_quorum("n1", "val_b3_part", FIRST_VIEW,  Set("n0", "n1", "n2")))
+            .then(replica_receives_notarize_quorum("n2", "val_b3_part", FIRST_VIEW,  Set("n0", "n1", "n2")))
 
             // n3 (the leader) receives nullify quorum -> nullification cert -> view 2.
             // leader_nullify_trigger does not fire since n3 IS the leader; n3 sends no nullify.
@@ -349,12 +352,12 @@ module tests {
             // n3 (now in view 2) receives the notarization cert for view 1.
             // Certification of val_b3_part fails, but n3 must NOT backfill
             // nullify(1) because view 1 is no longer n3's current view.
-            .then(on_certificate("n3", notarization(FIRST_VIEW, "val_b3_part", Set("n0", "n1", "n2"), "n0")))
+            .then(on_certificate("n3", notarization(proposal, Set("n0", "n1", "n2"), "n0")))
             .then(all {
                 // n3 stored the notarization for view 1...
                 assert(store_certificate.get("n3").exists(c =>
                     is_notarization_cert(c) and cert_view(c) == FIRST_VIEW
-                    and cert_block(c) == Some("val_b3_part"))),
+                    and cert_payload(c) == Some("val_b3_part"))),
                 // ...but did NOT send nullify for the past view.
                 assert(not(sent_vote.exists(v =>
                     vote_sig(v) == "n3" and vote_view(v) == FIRST_VIEW and is_nullify(v)))),
@@ -367,17 +370,15 @@ module tests {
     // All correct replicas finalize two consecutive blocks.
     run allCorrectReplicasFinalizeTwoBlocksTest = {
         val proposal1 = {
-            block: "val_b0",
+            payload: "val_b0",
             view: FIRST_VIEW,
-            view_parent: GENESIS_VIEW,
-            block_parent: GENESIS_BLOCK,
+            parent: GENESIS_VIEW,
             sig: sig_of("n0")
         }
         val proposal2 = {
-            block: "val_b1",
+            payload: "val_b1",
             view: 2,
-            view_parent: FIRST_VIEW,
-            block_parent: "val_b0",
+            parent: FIRST_VIEW,
             sig: sig_of("n1")
         }
 
@@ -392,15 +393,15 @@ module tests {
         .then(on_proposal("n2", proposal1))
         .then(on_proposal("n3", proposal1))
         // All replicas receive notarize quorum -> notarization, send finalize, advance to view 2
-        .then(replica_receives_notarize_quorum("n0", "val_b0", FIRST_VIEW, Set("n0", "n1", "n2")))
-        .then(replica_receives_notarize_quorum("n1", "val_b0", FIRST_VIEW, Set("n0", "n1", "n2")))
+        .then(replica_receives_notarize_quorum("n0", "val_b0", FIRST_VIEW,  Set("n0", "n1", "n2")))
+        .then(replica_receives_notarize_quorum("n1", "val_b0", FIRST_VIEW,  Set("n0", "n1", "n2")))
         .then(replica_receives_notarize_quorum("n2", "val_b0", FIRST_VIEW, Set("n0", "n1", "n2")))
-        .then(replica_receives_notarize_quorum("n3", "val_b0", FIRST_VIEW, Set("n0", "n1", "n2")))
+        .then(replica_receives_notarize_quorum("n3", "val_b0", FIRST_VIEW,  Set("n0", "n1", "n2")))
         // All replicas receive finalize quorum -> finalization, commit val_b0
-        .then(replica_receives_finalize_quorum("n0", "val_b0", FIRST_VIEW, Set("n0", "n1", "n2")))
-        .then(replica_receives_finalize_quorum("n1", "val_b0", FIRST_VIEW, Set("n0", "n1", "n2")))
-        .then(replica_receives_finalize_quorum("n2", "val_b0", FIRST_VIEW, Set("n0", "n1", "n2")))
-        .then(replica_receives_finalize_quorum("n3", "val_b0", FIRST_VIEW, Set("n0", "n1", "n2")))
+        .then(replica_receives_finalize_quorum("n0", "val_b0", FIRST_VIEW,  Set("n0", "n1", "n2")))
+        .then(replica_receives_finalize_quorum("n1", "val_b0", FIRST_VIEW,  Set("n0", "n1", "n2")))
+        .then(replica_receives_finalize_quorum("n2", "val_b0", FIRST_VIEW,  Set("n0", "n1", "n2")))
+        .then(replica_receives_finalize_quorum("n3", "val_b0", FIRST_VIEW,  Set("n0", "n1", "n2")))
         .then(all {
             assert(CORRECT.forall(id => ghost_committed_blocks.get(id).length() == 1)),
             assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == "val_b0")),
@@ -434,10 +435,9 @@ module tests {
     // Views 1 and 2 timeout, then view 3 leader proposes and all replicas finalize.
     run timeoutViewsThenFinalizeTest = {
         val proposal = {
-            block: "val_b0",
+            payload: "val_b0",
             view: 3,
-            view_parent: GENESIS_VIEW,
-            block_parent: GENESIS_BLOCK,
+            parent: GENESIS_VIEW,
             sig: sig_of("n2")
         }
 
@@ -450,10 +450,10 @@ module tests {
         .then(on_timeout("n1"))
         .then(on_timeout("n2"))
         .then(on_timeout("n3"))
-        .then(replica_receives_nullify_quorum("n0", FIRST_VIEW, Set("n0", "n1", "n2")))
-        .then(replica_receives_nullify_quorum("n1", FIRST_VIEW, Set("n0", "n1", "n2")))
-        .then(replica_receives_nullify_quorum("n2", FIRST_VIEW, Set("n0", "n1", "n2")))
-        .then(replica_receives_nullify_quorum("n3", FIRST_VIEW, Set("n0", "n1", "n2")))
+        .then(replica_receives_nullify_quorum("n0", FIRST_VIEW,  Set("n0", "n1", "n2")))
+        .then(replica_receives_nullify_quorum("n1", FIRST_VIEW,  Set("n0", "n1", "n2")))
+        .then(replica_receives_nullify_quorum("n2", FIRST_VIEW,  Set("n0", "n1", "n2")))
+        .then(replica_receives_nullify_quorum("n3", FIRST_VIEW,  Set("n0", "n1", "n2")))
         .then(all {
             assert(CORRECT.forall(id => replica_state.get(id).view == 2)),
             unchanged_all,
@@ -477,14 +477,14 @@ module tests {
         .then(on_proposal("n1", proposal))
         .then(on_proposal("n2", proposal))
         .then(on_proposal("n3", proposal))
-        .then(replica_receives_notarize_quorum("n0", "val_b0", 3, Set("n0", "n1", "n2")))
-        .then(replica_receives_notarize_quorum("n1", "val_b0", 3, Set("n0", "n1", "n2")))
-        .then(replica_receives_notarize_quorum("n2", "val_b0", 3, Set("n0", "n1", "n2")))
-        .then(replica_receives_notarize_quorum("n3", "val_b0", 3, Set("n0", "n1", "n2")))
-        .then(replica_receives_finalize_quorum("n0", "val_b0", 3, Set("n0", "n1", "n2")))
-        .then(replica_receives_finalize_quorum("n1", "val_b0", 3, Set("n0", "n1", "n2")))
-        .then(replica_receives_finalize_quorum("n2", "val_b0", 3, Set("n0", "n1", "n2")))
-        .then(replica_receives_finalize_quorum("n3", "val_b0", 3, Set("n0", "n1", "n2")))
+        .then(replica_receives_notarize_quorum("n0", "val_b0", 3,  Set("n0", "n1", "n2")))
+        .then(replica_receives_notarize_quorum("n1", "val_b0", 3,  Set("n0", "n1", "n2")))
+        .then(replica_receives_notarize_quorum("n2", "val_b0", 3,  Set("n0", "n1", "n2")))
+        .then(replica_receives_notarize_quorum("n3", "val_b0", 3,  Set("n0", "n1", "n2")))
+        .then(replica_receives_finalize_quorum("n0", "val_b0", 3,  Set("n0", "n1", "n2")))
+        .then(replica_receives_finalize_quorum("n1", "val_b0", 3,  Set("n0", "n1", "n2")))
+        .then(replica_receives_finalize_quorum("n2", "val_b0", 3,  Set("n0", "n1", "n2")))
+        .then(replica_receives_finalize_quorum("n3", "val_b0", 3,  Set("n0", "n1", "n2")))
         .then(all {
             assert(CORRECT.forall(id => ghost_committed_blocks.get(id).length() == 1)),
             assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == "val_b0")),
@@ -494,21 +494,19 @@ module tests {
         .expect(all_invariants)
     }
 
-    // View 1 leader proposes block with wrong parent (not genesis), replicas nullify.
-    // View 2 leader proposes correct block with genesis parent, all replicas finalize.
+    // View 1 leader proposes payload with wrong parent, replicas nullify.
+    // View 2 leader proposes correct payload with genesis parent, all replicas finalize.
     run wrongParentNullifyThenCorrectFinalizeTest = {
         val bad_proposal = {
-            block: "val_b0",
-            view: FIRST_VIEW,
-            view_parent: GENESIS_VIEW,
-            block_parent: "val_b1",
+            payload: "inv_b3",
+            view: 1,
+            parent: GENESIS_VIEW,
             sig: sig_of("n0")
         }
         val correct_proposal = {
-            block: "val_b0",
+            payload: "val_b0",
             view: 2,
-            view_parent: GENESIS_VIEW,
-            block_parent: GENESIS_BLOCK,
+            parent: GENESIS_VIEW,
             sig: sig_of("n1")
         }
 
@@ -560,20 +558,18 @@ module tests {
         .expect(all_invariants)
     }
 
-    // Replica n0 is very slow (always nullifies), but n1, n2, n3 finalize 2 blocks.
+    // Replica n0 is very slow (always nullifies), but n1, n2, n3 finalize 2 payloads.
     run slowReplicaAlwaysNullifiesTest = {
         val proposal1 = {
-            block: "val_b0",
+            payload: "val_b0",
             view: FIRST_VIEW,
-            view_parent: GENESIS_VIEW,
-            block_parent: GENESIS_BLOCK,
+            parent: GENESIS_VIEW,
             sig: sig_of("n1")
         }
         val proposal2 = {
-            block: "val_b1",
+            payload: "val_b1",
             view: 2,
-            view_parent: FIRST_VIEW,
-            block_parent: "val_b0",
+            parent: FIRST_VIEW,
             sig: sig_of("n2")
         }
 
@@ -596,7 +592,7 @@ module tests {
         .then(replica_receives_finalize_quorum("n2", "val_b0", FIRST_VIEW, Set("n1", "n2", "n3")))
         .then(replica_receives_finalize_quorum("n3", "val_b0", FIRST_VIEW, Set("n1", "n2", "n3")))
         // n0 receives finalization cert to advance to view 2
-        .then(on_certificate("n0", finalization(FIRST_VIEW, "val_b0", Set("n1", "n2", "n3"), "n1")))
+        .then(on_certificate("n0", finalization(proposal1, Set("n1", "n2", "n3"), "n1")))
         // View 2: n0 times out again (slow), n2 is leader and proposes
         .then(on_timeout("n0"))
         .then(inject_proposal(proposal2))
@@ -610,7 +606,7 @@ module tests {
         .then(replica_receives_finalize_quorum("n2", "val_b1", 2, Set("n1", "n2", "n3")))
         .then(replica_receives_finalize_quorum("n3", "val_b1", 2, Set("n1", "n2", "n3")))
         .then(all {
-            // n1, n2, n3 finalized 2 blocks
+            // n1, n2, n3 finalized 2 payloads
             assert(Set("n1", "n2", "n3").forall(id => ghost_committed_blocks.get(id).length() == 2)),
             assert(Set("n1", "n2", "n3").forall(id => ghost_committed_blocks.get(id)[0] == "val_b0")),
             assert(Set("n1", "n2", "n3").forall(id => ghost_committed_blocks.get(id)[1] == "val_b1")),
@@ -619,7 +615,7 @@ module tests {
                 vote_sig(v) == "n0" and vote_view(v) == FIRST_VIEW and is_nullify(v))),
             assert(sent_vote.exists(v =>
                 vote_sig(v) == "n0" and vote_view(v) == 2 and is_nullify(v))),
-            // n0 committed 1 block (from receiving finalization cert for view 1)
+            // n0 committed 1 payload (from receiving finalization cert for view 1)
             assert(ghost_committed_blocks.get("n0").length() == 1),
             assert(ghost_committed_blocks.get("n0")[0] == "val_b0"),
             unchanged_all,

@@ -1,6 +1,6 @@
 // -*- mode: Bluespec; -*-
 
-// This is an explorative module applying the basic Twins style test 
+// This is an explorative module applying the basic Twins style test
 // to model byzantine behaviour with 1 faulty replicas and 5 correct replicas.
 module twins {
   import automaton(
@@ -16,8 +16,8 @@ module twins {
     N = 4,
     F = 1,
     Q = 3,
-    VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
-    INVALID_BLOCKS = Set("inval_0", "inval_1"),
+    VALID_PAYLOADS = Set("val_b0", "val_b1", "val_b2"),
+    INVALID_PAYLOADS = Set("inval_0", "inval_1"),
     VIEWS = 1.to(6),
   ) as i from "./replica"
 
@@ -28,7 +28,7 @@ module twins {
       Map(0 -> "n3_1", 1 -> "n3_2", 2 -> "n0", 3 -> "n3_1", 4 -> "n3_2", 5 -> "n1", 6 -> "n1"),
       CERTIFY_ALL_TRUE
     ),
-            
+
     // 2 replicas from the CORRECT set have twins that makes them byzantine
     assert(i::N + 1 == i::CORRECT.size()),
     assert(i::BYZANTINE.size()==0)
@@ -47,9 +47,9 @@ module twins {
   val valid_last_finalized = i::valid_last_finalized
   val notarized_consistency = i::notarized_consistency
   val parent_refs_well_formed = i::parent_refs_well_formed
-  val unique_notarized_or_finalized_block_per_view = i::unique_notarized_or_finalized_block_per_view
+  val unique_notarized_or_finalized_payload_per_view = i::unique_notarized_or_finalized_payload_per_view
   val finalize_vote_requires_notarization_cert = i::finalize_vote_requires_notarization_cert
-  val finalized_blocks_have_unique_parent = i::finalized_blocks_have_unique_parent
+  val finalized_payloads_have_unique_parent = i::finalized_payloads_have_unique_parent
   val finalized_certificates_are_committed = i::finalized_certificates_are_committed
   val committed_blocks_no_duplicates = i::committed_blocks_no_duplicates
   val certificates_require_sent_votes = i::certificates_require_sent_votes

@@ -15,10 +15,10 @@ module replica {
     const BYZANTINE: Set[ReplicaId]
     // The set of all views.
     const VIEWS: Set[ViewNumber]
-    // the set of all valid blocks
-    const VALID_BLOCKS: Set[Block]
-    // externally invalid blocks (for adversarial tests)
-    const INVALID_BLOCKS: Set[Block]
+    // the set of all valid payloads
+    const VALID_PAYLOADS: Set[Payload]
+    // externally invalid payloads (for adversarial tests)
+    const INVALID_PAYLOADS: Set[Payload]
     // All replicas.
     pure val Replicas = CORRECT.union(BYZANTINE)
     // The keys of the replicas, normally, one unique key per replica.
@@ -28,8 +28,8 @@ module replica {
     // Produce replica's signature
     pure def sig_of(id: ReplicaId): ReplicaKey = REPLICA_KEYS.get(id)
 
-    pure val AllBlocks = VALID_BLOCKS.union(Set(GENESIS_BLOCK)).union(INVALID_BLOCKS)
-    pure val ParentTrackedBlocks = AllBlocks
+    pure val AllPayloads = VALID_PAYLOADS.union(Set(GENESIS_PAYLOAD)).union(INVALID_PAYLOADS)
+    pure val ParentTrackedPayloads = AllPayloads
     pure val CorrectSigs = CORRECT.map(id => sig_of(id))
     pure val ByzantineSigs = BYZANTINE.map(id => sig_of(id))
     pure val LEADER_INACTIVITY_WINDOW = 2
@@ -53,21 +53,21 @@ module replica {
 
     // history of received proposals
     var ghost_proposal: ReplicaId -> Set[Proposal]
-    // global parent relations learned from proposals, keyed by (view, block)
-    var parent_refs: ViewNumber -> (Block -> Set[ParentRef])
-    // sequence of finalized blocks observed by each correct replica
-    var ghost_committed_blocks: ReplicaId -> List[Block]
+    // global parent relations learned from proposals, keyed by (view, payload)
+    var parent_refs: ViewNumber -> (Payload -> Set[ParentRef])
+    // sequence of finalized payloads observed by each correct replica
+    var ghost_committed_blocks: ReplicaId -> List[Payload]
     // Replica-local deterministic certification policy from the application.
-    var certify_policy: ReplicaId -> (Block -> bool)
+    var certify_policy: ReplicaId -> (Payload -> bool)
     // The last action taken (for IST assume_state).
     var lastAction: str
 
     // Filter votes by view and kind.
     pure def vote_view(v: Vote): ViewNumber = {
         match (v) {
-            | Notarize(n) => n.view
+            | Notarize(n) => n.proposal.view
             | Nullify(n) => n.view
-            | Finalize(f) => f.view
+            | Finalize(f) => f.proposal.view
         }
     }
 
@@ -79,11 +79,19 @@ module replica {
         }
     }
 
-    pure def vote_block(v: Vote): Option[Block] = {
+    pure def vote_payload(v: Vote): Option[Payload] = {
         match (v) {
-            | Notarize(n) => Some(n.block)
+            | Notarize(n) => Some(n.proposal.payload)
             | Nullify(_) => None
-            | Finalize(f) => Some(f.block)
+            | Finalize(f) => Some(f.proposal.payload)
+        }
+    }
+
+    pure def vote_proposal(v: Vote): Option[Proposal] = {
+        match (v) {
+            | Notarize(n) => Some(n.proposal)
+            | Nullify(_) => None
+            | Finalize(f) => Some(f.proposal)
         }
     }
 
@@ -118,9 +126,9 @@ module replica {
 
     pure def cert_view(c: Certificate): ViewNumber = {
         match (c) {
-            | Notarization(n) => n.view
+            | Notarization(n) => n.proposal.view
             | Nullification(n) => n.view
-            | Finalization(f) => f.view
+            | Finalization(f) => f.proposal.view
         }
     }
 
@@ -140,11 +148,19 @@ module replica {
         }
     }
 
-    pure def cert_block(c: Certificate): Option[Block] = {
+    pure def cert_payload(c: Certificate): Option[Payload] = {
         match (c) {
-            | Notarization(n) => Some(n.block)
+            | Notarization(n) => Some(n.proposal.payload)
             | Nullification(_) => None
-            | Finalization(f) => Some(f.block)
+            | Finalization(f) => Some(f.proposal.payload)
+        }
+    }
+
+    pure def cert_proposal(c: Certificate): Option[Proposal] = {
+        match (c) {
+            | Notarization(n) => Some(n.proposal)
+            | Nullification(_) => None
+            | Finalization(f) => Some(f.proposal)
         }
     }
 
@@ -227,10 +243,10 @@ module replica {
         certificates.exists(c => is_finalization_cert(c) and cert_view(c) == view)
     }
 
-    pure def is_view_notarized_votes(view: ViewNumber, votes: Set[Vote], block: Block): bool = or {
-        view == GENESIS_VIEW and block == GENESIS_BLOCK,
+    pure def is_view_notarized_votes(view: ViewNumber, votes: Set[Vote], payload: Payload): bool = or {
+        view == GENESIS_VIEW and payload == GENESIS_PAYLOAD,
         select_votes(view, NotarizeKind, votes)
-            .filter(v => vote_block(v) == Some(block))
+            .filter(v => vote_payload(v) == Some(payload))
             .map(v => vote_sig(v))
             .size() >= Q
     }
@@ -240,10 +256,10 @@ module replica {
         certificates.exists(c => is_finalization_cert(c) and cert_view(c) == view)
     }
 
-    pure def is_view_finalized_votes(view: ViewNumber, votes: Set[Vote], block: Block): bool = or {
-        view == GENESIS_VIEW and block == GENESIS_BLOCK,
+    pure def is_view_finalized_votes(view: ViewNumber, votes: Set[Vote], payload: Payload): bool = or {
+        view == GENESIS_VIEW and payload == GENESIS_PAYLOAD,
         select_votes(view, FinalizeKind, votes)
-            .filter(v => vote_block(v) == Some(block))
+            .filter(v => vote_payload(v) == Some(payload))
             .map(v => vote_sig(v))
             .size() >= Q
     }
@@ -260,20 +276,20 @@ module replica {
             .size() >= Q
     }
 
-    pure def is_block_notarized(view: ViewNumber, block: Block, certificates: Set[Certificate]): bool = or {
-        view == GENESIS_VIEW and block == GENESIS_BLOCK,
+    pure def is_payload_notarized(view: ViewNumber, payload: Payload, certificates: Set[Certificate]): bool = or {
+        view == GENESIS_VIEW and payload == GENESIS_PAYLOAD,
         certificates.exists(c => and {
             cert_view(c) == view,
-            cert_block(c) == Some(block),
+            cert_payload(c) == Some(payload),
             is_notarization_cert(c) or is_finalization_cert(c),
         })
     }
 
-    pure def is_block_finalized(view: ViewNumber, block: Block, certificates: Set[Certificate]): bool = or {
-        view == GENESIS_VIEW and block == GENESIS_BLOCK,
+    pure def is_payload_finalized(view: ViewNumber, payload: Payload, certificates: Set[Certificate]): bool = or {
+        view == GENESIS_VIEW and payload == GENESIS_PAYLOAD,
         certificates.exists(c => and {
             cert_view(c) == view,
-            cert_block(c) == Some(block),
+            cert_payload(c) == Some(payload),
             is_finalization_cert(c),
         })
     }
@@ -283,65 +299,58 @@ module replica {
         VIEWS.filter(v => v > v1 and v < v2).forall(v => is_view_nullified(v, certificates))
     }
 
-    // The set of parent references observed for a (view, block) pair.
-    def learned_parents(view: ViewNumber, block: Block): Set[ParentRef] = {
-        parent_refs.get(view).get(block)
+    // The set of parent references observed for a (view, payload) pair.
+    def learned_parents(view: ViewNumber, payload: Payload): Set[ParentRef] = {
+        parent_refs.get(view).get(payload)
     }
 
-    def has_parent_conflict(view: ViewNumber, block: Block): bool = {
-        learned_parents(view, block).size() > 1
+    def has_parent_conflict(view: ViewNumber, payload: Payload): bool = {
+        learned_parents(view, payload).size() > 1
     }
 
-    // Unique parent reference for (view, block), if known.
-    def unique_parent(view: ViewNumber, block: Block): Option[ParentRef] = {
-        val refs = learned_parents(view, block)
+    // Unique parent reference for (view, payload), if known.
+    def unique_parent(view: ViewNumber, payload: Payload): Option[ParentRef] = {
+        val refs = learned_parents(view, payload)
         if (refs.size() == 1)
             refs.fold(None, (_acc, p) => Some(p))
         else
             None
     }
 
-    // Does a child block have a uniquely learned parent edge to `parent_block`
-    // in at least one view?
-    def block_links_to_parent(child_block: Block, parent_block: Block): bool = {
-        VIEWS.exists(v => option_has(unique_parent(v, child_block), p => p.parent_block == parent_block))
+    pure def list_contains_payload(chain: List[Payload], payload: Payload): bool = {
+        chain.indices().exists(i => chain[i] == payload)
     }
 
-    pure def list_contains_block(chain: List[Block], block: Block): bool = {
-        chain.indices().exists(i => chain[i] == block)
-    }
-
-    // Parent is valid if all intermediate views are nullified and the parent is either:
-    // (a) finalized, or (b) notarized and locally certified.
+    // Parent is valid if all intermediate views are nullified and the parent view
+    // is either finalized or notarized and locally certified.
     pure def valid_parent(
         self: ReplicaState,
         view: ViewNumber,
-        parent_block: Block,
         parent_view: ViewNumber,
         certificates: Set[Certificate]
     ): bool = and {
         parent_view < view,
-        parent_view >= GENESIS_VIEW,
+        parent_view >= self.last_finalized,
         are_views_nullified(parent_view, view, certificates),
         or {
-            is_block_finalized(parent_view, parent_block, certificates),
+            is_view_finalized(parent_view, certificates),
             and {
-                is_block_notarized(parent_view, parent_block, certificates),
-                self.certified.get(parent_view) == Some(parent_block),
+                is_view_notarized(parent_view, certificates),
+                is_some(self.certified.get(parent_view)),
             }
         }
     }
 
-    // A predicate `is_select_parent(id, pb, pv)` iff `(pb, pv)` can be selected by id in current view.
-    def is_select_parent(id: ReplicaId, parent_block: Block, parent_view: ViewNumber): bool = {
+    // A predicate `is_select_parent(id, pv)` iff `pv` can be selected by id in current view.
+    def is_select_parent(id: ReplicaId, parent_view: ViewNumber): bool = {
         val self = replica_state.get(id)
         val certs = store_certificate.get(id)
-        valid_parent(self, self.view, parent_block, parent_view, certs)
+        valid_parent(self, self.view, parent_view, certs)
     }
 
     // Certification is deterministic and may depend on replica id.
-    def can_certify(id: ReplicaId, block: Block): bool = {
-        certify_policy.get(id).get(block)
+    def can_certify(id: ReplicaId, payload: Payload): bool = {
+        certify_policy.get(id).get(payload)
     }
 
     // Enter a new view, unless it is older than the current view or outside modeled bounds.
@@ -372,32 +381,32 @@ module replica {
             Some(nullification(view, signers, sig_of(id)))
     }
 
-    def create_notarization(id: ReplicaId, view: ViewNumber, block: Block, votes: Set[Vote]): Option[Certificate] = {
+    def create_notarization(id: ReplicaId, proposal: Proposal, votes: Set[Vote]): Option[Certificate] = {
         val similar_votes: Set[Vote] = votes.filter(v => and {
-            vote_view(v) == view,
+            vote_view(v) == proposal.view,
             is_notarize(v),
-            vote_block(v) == Some(block)
+            vote_payload(v) == Some(proposal.payload)
         })
         val signers = similar_votes.map(v => vote_sig(v))
 
         if (signers.size() < Q)
             None
         else
-            Some(notarization(view, block, signers, sig_of(id)))
+            Some(notarization(proposal, signers, sig_of(id)))
     }
 
-    def create_finalization(id: ReplicaId, view: ViewNumber, block: Block, votes: Set[Vote]): Option[Certificate] = {
+    def create_finalization(id: ReplicaId, proposal: Proposal, votes: Set[Vote]): Option[Certificate] = {
         val similar_votes: Set[Vote] = votes.filter(v => and {
-            vote_view(v) == view,
+            vote_view(v) == proposal.view,
             is_finalize(v),
-            vote_block(v) == Some(block)
+            vote_payload(v) == Some(proposal.payload)
         })
         val signers = similar_votes.map(v => vote_sig(v))
 
         if (signers.size() < Q)
             None
         else
-            Some(finalization(view, block, signers, sig_of(id)))
+            Some(finalization(proposal, signers, sig_of(id)))
     }
 
     action init = {
@@ -407,14 +416,14 @@ module replica {
     }
 
     action initWithLeader(l: ViewNumber -> ReplicaId): bool = {
-        val default_block_policy = AllBlocks.mapBy(_ => true)
-        val default_certify_policy = Replicas.mapBy(_ => default_block_policy)
+        val default_payload_policy = AllPayloads.mapBy(_ => true)
+        val default_certify_policy = Replicas.mapBy(_ => default_payload_policy)
         initWithLeaderAndCertify(l, default_certify_policy)
     }
 
     action initWithLeaderAndCertify(
         l: ViewNumber -> ReplicaId,
-        certify: ReplicaId -> (Block -> bool)
+        certify: ReplicaId -> (Payload -> bool)
     ): bool = {
         all {
             replica_state' = CORRECT.mapBy(id => {
@@ -435,7 +444,7 @@ module replica {
             store_vote' = CORRECT.mapBy(_ => Set()),
             store_certificate' = CORRECT.mapBy(_ => Set()),
             ghost_committed_blocks' = CORRECT.mapBy(_ => List()),
-            parent_refs' = VIEWS.mapBy(_ => ParentTrackedBlocks.mapBy(_ => Set())),
+            parent_refs' = VIEWS.mapBy(_ => ParentTrackedPayloads.mapBy(_ => Set())),
             ghost_proposal' = CORRECT.mapBy(_ => Set()),
             leader' = l,
             certify_policy' = certify,
@@ -451,10 +460,9 @@ module replica {
             },
             all {
                 nondet id = oneOf(CORRECT)
-                nondet new_block = oneOf(VALID_BLOCKS)
-                nondet parent_block = oneOf(AllBlocks.union(Set(GENESIS_BLOCK)))
+                nondet new_payload = oneOf(VALID_PAYLOADS)
                 nondet parent_view = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
-                proposer_step(id, new_block, parent_block, parent_view),
+                proposer_step(id, new_payload, parent_view),
             },
             all {
                 byzantine_replica_step,
@@ -489,26 +497,26 @@ module replica {
                 },
                 {
                     nondet view = VIEWS.oneOf()
-                    nondet block = AllBlocks.oneOf()
+                    nondet payload = AllPayloads.oneOf()
                     val matching = sent_vote.filter(v =>
-                        vote_view(v) == view and is_notarize(v) and vote_block(v) == Some(block)
+                        vote_view(v) == view and is_notarize(v) and vote_payload(v) == Some(payload)
                     )
                     all {
                         matching != Set(),
                         nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
-                        on_vote_notarize(id, view, block, votes)
+                        on_vote_notarize(id, view, payload, votes)
                     }
                 },
                 {
                     nondet view = VIEWS.oneOf()
-                    nondet block = AllBlocks.oneOf()
+                    nondet payload = AllPayloads.oneOf()
                     val matching = sent_vote.filter(v =>
-                        vote_view(v) == view and is_finalize(v) and vote_block(v) == Some(block)
+                        vote_view(v) == view and is_finalize(v) and vote_payload(v) == Some(payload)
                     )
                     all {
                         matching != Set(),
                         nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
-                        on_vote_finalize(id, view, block, votes)
+                        on_vote_finalize(id, view, payload, votes)
                     }
                 },
                 {
@@ -534,8 +542,7 @@ module replica {
     // Upon entering a view, the leader may propose and implicitly cast notarize(c, v).
     action proposer_step(
         id: ReplicaId,
-        new_block: Block,
-        parent_block: Block,
+        new_payload: Payload,
         parent_view: ViewNumber
     ): bool = all {
         val self = replica_state.get(id)
@@ -547,25 +554,24 @@ module replica {
             any {
                 // Proposal success path
                 all {
-                    VALID_BLOCKS.contains(new_block),
-                    valid_parent(self, self.view, parent_block, parent_view, certs),
+                    VALID_PAYLOADS.contains(new_payload),
+                    valid_parent(self, self.view, parent_view, certs),
 
                     val proposal: Proposal = {
                         view: self.view,
-                        view_parent: parent_view,
-                        block: new_block,
-                        block_parent: parent_block,
+                        parent: parent_view,
+                        payload: new_payload,
                         sig: sig_of(id),
                     }
 
                     all {
                         sent_proposal' = sent_proposal.union(Set(proposal)),
-                        sent_vote' = sent_vote.union(Set(notarize(self.view, sig_of(id), new_block))),
+                        sent_vote' = sent_vote.union(Set(notarize(proposal, sig_of(id)))),
                         replica_state' = replica_state.set(id, {
                             ...self,
                             propose_sent: true,
                             leader_timeout_cancelled: true,
-                            notarized: self.notarized.put(self.view, Some(new_block)),
+                            notarized: self.notarized.put(self.view, Some(new_payload)),
                             ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
                         }),
                         ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
@@ -610,46 +616,45 @@ module replica {
 
     // Upon receiving first leader proposal in current view:
     // - cancel leader timeout
-    // - if valid parent and block valid -> notarize
-    // - if block invalid -> nullify
+    // - if valid parent and payload valid -> notarize
+    // - if payload invalid -> nullify
     action on_proposal(id: ReplicaId, proposal: Proposal): bool = all {
         val self = replica_state.get(id)
         val certs = store_certificate.get(id)
         val parent_ref: ParentRef = {
-            parent_block: proposal.block_parent,
-            parent_view: proposal.view_parent
+            parent_view: proposal.parent
         }
         val updated_parent_refs = parent_refs.setBy(proposal.view, by_view =>
-            by_view.setBy(proposal.block, old => old.union(Set(parent_ref)))
+            by_view.setBy(proposal.payload, old => old.union(Set(parent_ref)))
         )
-        val unique_parent = updated_parent_refs.get(proposal.view).get(proposal.block).size() == 1
+        val unique_parent = updated_parent_refs.get(proposal.view).get(proposal.payload).size() == 1
         all {
             proposal.view == self.view,
             proposal.sig == sig_of(leader.get(proposal.view)),
-            proposal.view_parent < proposal.view,
-            proposal.view_parent >= GENESIS_VIEW,
+            proposal.parent < proposal.view,
+            proposal.parent >= GENESIS_VIEW,
             not(has_notarized(self)),
             not(self.nullified),
 
             any {
                 all {
-                    VALID_BLOCKS.contains(proposal.block),
-                    valid_parent(self, proposal.view, proposal.block_parent, proposal.view_parent, certs),
+                    VALID_PAYLOADS.contains(proposal.payload),
+                    valid_parent(self, proposal.view, proposal.parent, certs),
                     unique_parent,
 
-                    sent_vote' = sent_vote.union(Set(notarize(proposal.view, sig_of(id), proposal.block))),
+                    sent_vote' = sent_vote.union(Set(notarize(proposal, sig_of(id)))),
                     replica_state' = replica_state.set(id, {
                         ...self,
                         leader_timeout_cancelled: true,
-                        notarized: self.notarized.put(self.view, Some(proposal.block)),
+                        notarized: self.notarized.put(self.view, Some(proposal.payload)),
                         ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
                     }),
                 },
                 // Treat local verification failure as immediate timeout expiry and broadcast `nullify(v)`.
                 all {
                     or {
-                        not(VALID_BLOCKS.contains(proposal.block)),
-                        not(valid_parent(self, proposal.view, proposal.block_parent, proposal.view_parent, certs)),
+                        not(VALID_PAYLOADS.contains(proposal.payload)),
+                        not(valid_parent(self, proposal.view, proposal.parent, certs)),
                         not(unique_parent),
                     },
 
@@ -682,14 +687,14 @@ module replica {
     // Upon receiving votes for notarize(c, v):
     // - collect votes
     // - on 2f+1: create notarization cert, attempt certification
-    action on_vote_notarize(id: ReplicaId, view: ViewNumber, block: Block, votes: Set[Vote]): bool = all {
+    action on_vote_notarize(id: ReplicaId, view: ViewNumber, payload: Payload, votes: Set[Vote]): bool = all {
         val store = store_vote.get(id)
         all {
             votes != Set(),
             votes.forall(v => and {
                 vote_view(v) == view,
                 is_notarize(v),
-                vote_block(v) == Some(block),
+                vote_payload(v) == Some(payload),
             }),
 
             val new_store = store.union(votes)
@@ -697,14 +702,22 @@ module replica {
             val had_notarization = certs.exists(c => and {
                 is_notarization_cert(c),
                 cert_view(c) == view,
-                cert_block(c) == Some(block),
+                cert_payload(c) == Some(payload),
             })
-            val now_notarized = is_view_notarized_votes(view, new_store, block)
+            val now_notarized = is_view_notarized_votes(view, new_store, payload)
+            // Extract proposal from one of the matching votes
+            val matched_proposal = votes.fold(
+                { payload: payload, view: view, parent: GENESIS_VIEW, sig: "" },
+                (acc, v) => match v {
+                    | Notarize(nv) => nv.proposal
+                    | _ => acc
+                }
+            )
 
             all {
                 store_vote' = store_vote.set(id, new_store),
 
-                match create_notarization(id, view, block, new_store) {
+                match create_notarization(id, matched_proposal, new_store) {
                     | Some(cert) => all {
                         now_notarized,
                         _process_notarization_certificate(id, cert, not(had_notarization))
@@ -732,14 +745,14 @@ module replica {
     // Upon receiving votes for finalize(c, v):
     // - collect votes
     // - on 2f+1: create finalization cert and enter v+1
-    action on_vote_finalize(id: ReplicaId, view: ViewNumber, block: Block, votes: Set[Vote]): bool = all {
+    action on_vote_finalize(id: ReplicaId, view: ViewNumber, payload: Payload, votes: Set[Vote]): bool = all {
         val store = store_vote.get(id)
         all {
             votes != Set(),
             votes.forall(v => and {
                 vote_view(v) == view,
                 is_finalize(v),
-                vote_block(v) == Some(block),
+                vote_payload(v) == Some(payload),
             }),
 
             val new_store = store.union(votes)
@@ -747,14 +760,22 @@ module replica {
             val had_finalization = certs.exists(c => and {
                 is_finalization_cert(c),
                 cert_view(c) == view,
-                cert_block(c) == Some(block),
+                cert_payload(c) == Some(payload),
             })
-            val now_finalized = is_view_finalized_votes(view, new_store, block)
+            val now_finalized = is_view_finalized_votes(view, new_store, payload)
+            // Extract proposal from one of the matching votes
+            val matched_proposal = votes.fold(
+                { payload: payload, view: view, parent: GENESIS_VIEW, sig: "" },
+                (acc, v) => match v {
+                    | Finalize(fv) => fv.proposal
+                    | _ => acc
+                }
+            )
 
             all {
                 store_vote' = store_vote.set(id, new_store),
 
-                match create_finalization(id, view, block, new_store) {
+                match create_finalization(id, matched_proposal, new_store) {
                     | Some(cert) => all {
                         now_finalized,
                         _process_finalization_certificate(id, cert, not(had_finalization))
@@ -920,12 +941,12 @@ module replica {
             },
 
             val cert_view_num = cert_view(cert)
-            match (cert_block(cert)) {
-                | Some(cert_block_val) => all {
+            match (cert_payload(cert)) {
+                | Some(cert_payload_val) => all {
                     val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
-                    val parent_conflicted = has_parent_conflict(cert_view_num, cert_block_val)
+                    val parent_conflicted = has_parent_conflict(cert_view_num, cert_payload_val)
                     val can_send_finalize = and {
-                        can_certify(id, cert_block_val),
+                        can_certify(id, cert_payload_val),
                         not(parent_conflicted),
                         self.certified.get(cert_view_num) == None,
                         not(has_sent_finalize(id, cert_view_num)),
@@ -938,7 +959,7 @@ module replica {
                         // Do not immediately nullify on parent conflict.
                         // Equivocation blocks finalization (see can_send_finalize),
                         // and the certification timeout handles nullification.
-                        not(can_certify(id, cert_block_val)),
+                        not(can_certify(id, cert_payload_val)),
                         self.view == cert_view_num,
                         // NOTE: Model simplification: suppress nullify retries (single-shot nullify per view).
                         // Real implementation may rebroadcast nullify for liveness.
@@ -948,16 +969,21 @@ module replica {
                         // The Rust voter implementation enforces that exclusion, so this model does that too.
                         not(has_sent_finalize(id, cert_view_num))
                     }
+                    // Extract proposal from the cert for finalize vote
+                    val cert_prop = match cert {
+                        | Notarization(n) => n.proposal
+                        | _ => { payload: cert_payload_val, view: cert_view_num, parent: GENESIS_VIEW, sig: "" }
+                    }
 
                     if (can_send_finalize)
                         all {
-                            sent_vote' = sent_vote.union(Set(finalize(cert_view_num, sig_of(id), cert_block_val))),
+                            sent_vote' = sent_vote.union(Set(finalize(cert_prop, sig_of(id)))),
                             replica_state' = replica_state.set(id,
                                 enter_view({
                                     ...self,
                                     advance_timeout_cancelled: if (self.view == cert_view_num) true else self.advance_timeout_cancelled,
                                     ghost_last_seen_notarization: seen_notarization,
-                                    certified: self.certified.put(cert_view_num, Some(cert_block_val)),
+                                    certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
                                     ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(FinalizeKind))
                                 }, cert_view_num + 1)
                             ),
@@ -1031,17 +1057,17 @@ module replica {
             },
 
             val cert_view_num = cert_view(cert)
-            match (cert_block(cert)) {
-                | Some(cert_block_val) => all {
+            match (cert_payload(cert)) {
+                | Some(cert_payload_val) => all {
                     val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
                     val newer = cert_view_num > self.last_finalized
 
                     all {
-                        // Watermark-only finalization: append just the finalized block.
+                        // Watermark-only finalization: append just the finalized payload.
                         // No recursive ancestor walk -- matches the Rust implementation
                         // which updates last_finalized as a simple watermark.
                         if (is_new_cert and newer)
-                            ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.append(cert_block_val))
+                            ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.append(cert_payload_val))
                         else
                             ghost_committed_blocks' = ghost_committed_blocks,
 
@@ -1107,19 +1133,27 @@ module replica {
         all {
               nondet sender = BYZANTINE.oneOf()
               nondet view = VIEWS.oneOf()
-              nondet block = AllBlocks.oneOf()
+              nondet payload = AllPayloads.oneOf()
+              nondet parent_view = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
 
               nondet base = Set(NotarizeKind, NullifyKind, FinalizeKind).powerset().oneOf()
               nondet kind = Set(NotarizeKind, NullifyKind, FinalizeKind).oneOf()
               val kinds = base.union(Set(kind))
 
+              val byz_proposal: Proposal = {
+                  view: view,
+                  payload: payload,
+                  parent: parent_view,
+                  sig: sender
+              }
+
               val votes = kinds.map(k =>
                   if (k == NotarizeKind) {
-                      notarize(view, sender, block)
+                      notarize(byz_proposal, sender)
                   } else if (k == NullifyKind) {
                       nullify(view, sender)
                   } else {
-                      finalize(view, sender, block)
+                      finalize(byz_proposal, sender)
                   }
               )
 
@@ -1130,13 +1164,22 @@ module replica {
         all {
             nondet sender = BYZANTINE.oneOf()
             nondet view = VIEWS.oneOf()
-            nondet block = AllBlocks.oneOf()
+            nondet payload = AllPayloads.oneOf()
+            nondet parent_view = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
             nondet kind = oneOf(Set(NotarizationKind, NullificationKind, FinalizationKind))
+
+            val byz_proposal: Proposal = {
+                view: view,
+                payload: payload,
+                parent: parent_view,
+                sig: sender
+            }
+
             val votes = if (kind == NotarizationKind) {
                 sent_vote.filter(v => and {
                     vote_view(v) == view,
                     is_notarize(v),
-                    vote_block(v) == Some(block)
+                    vote_payload(v) == Some(payload)
                 })
             } else if (kind == NullificationKind) {
                 sent_vote.filter(v => and {
@@ -1147,32 +1190,30 @@ module replica {
                 sent_vote.filter(v => and {
                     vote_view(v) == view,
                     is_finalize(v),
-                    vote_block(v) == Some(block)
+                    vote_payload(v) == Some(payload)
                 })
             }
             nondet agg_sig = votes.map(v => vote_sig(v)).union(BYZANTINE).powerset().oneOf()
             val cert = if (kind == NotarizationKind) {
-                notarization(view, block, agg_sig, sender)
+                notarization(byz_proposal, agg_sig, sender)
             } else if (kind == NullificationKind) {
                 nullification(view, agg_sig, sender)
             } else {
-                finalization(view, block, agg_sig, sender)
+                finalization(byz_proposal, agg_sig, sender)
             }
             sent_certificate' = sent_certificate.union(Set(cert))
         },
 
         // Adversary may inject arbitrary proposal.
         all {
-            nondet view_parent = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
+            nondet parent = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
             nondet view = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
             nondet sig = BYZANTINE.oneOf()
-            nondet block = AllBlocks.oneOf()
-            nondet block_parent = AllBlocks.oneOf()
+            nondet payload = AllPayloads.oneOf()
             val proposal = {
                 view: view,
-                block: block,
-                block_parent: block_parent,
-                view_parent: view_parent,
+                payload: payload,
+                parent: parent,
                 sig: sig
             }
             sent_proposal' = sent_proposal.union(Set(proposal)),
@@ -1203,17 +1244,17 @@ module replica {
         Q == N - F,
     }
 
-    // No two correct replicas disagree on which block was finalized in a view.
+    // No two correct replicas disagree on which payload was finalized in a view.
     // With watermark-only finalization (no ancestor walk), we check set agreement
-    // rather than prefix agreement: the set of committed blocks at each replica
-    // must be consistent (any block committed by one must also be committed by
+    // rather than prefix agreement: the set of committed payloads at each replica
+    // must be consistent (any payload committed by one must also be committed by
     // the other, or not yet committed).
     val agreement = tuples(CORRECT, CORRECT).forall(((p1, p2)) => {
         val blocks1 = ghost_committed_blocks.get(p1)
         val blocks2 = ghost_committed_blocks.get(p2)
         val set1 = blocks1.indices().map(i => blocks1[i])
         val set2 = blocks2.indices().map(i => blocks2[i])
-        // Every block committed by p1 is either committed by p2 or will be
+        // Every payload committed by p1 is either committed by p2 or will be
         // (subset in either direction).
         or {
             set1.subseteq(set2),
@@ -1292,16 +1333,15 @@ module replica {
 
     // Learned parent references must always point to an older view.
     val parent_refs_well_formed = VIEWS.forall(v => {
-        ParentTrackedBlocks.forall(b => {
+        ParentTrackedPayloads.forall(b => {
             learned_parents(v, b).forall(parent => and {
                 parent.parent_view >= GENESIS_VIEW,
                 parent.parent_view < v,
-                ParentTrackedBlocks.contains(parent.parent_block),
             })
         })
     })
 
-    def finalized_blocks_seen(view: ViewNumber): Set[Option[Block]] = {
+    def finalized_payloads_seen(view: ViewNumber): Set[Option[Payload]] = {
         CORRECT.fold(Set(), (acc, id) =>
             acc.union(
                 store_certificate.get(id)
@@ -1309,17 +1349,17 @@ module replica {
                         is_finalization_cert(c),
                         cert_view(c) == view,
                     })
-                    .map(c => cert_block(c))
+                    .map(c => cert_payload(c))
             )
         )
     }
 
-    // If a block B for view v is finalized, no other block B' at v can be finalized.
+    // If a payload B for view v is finalized, no other payload B' at v can be finalized.
     val validity = VIEWS.forall(v =>
-        finalized_blocks_seen(v).size() <= 1
+        finalized_payloads_seen(v).size() <= 1
     )
 
-    val unique_notarized_or_finalized_block_per_view =
+    val unique_notarized_or_finalized_payload_per_view =
         tuples(CORRECT, VIEWS).forall(((id, v)) => {
             val certs = store_certificate.get(id)
             certs
@@ -1327,7 +1367,7 @@ module replica {
                     cert_view(c) == v,
                     is_notarization_cert(c) or is_finalization_cert(c),
                 })
-                .map(c => cert_block(c))
+                .map(c => cert_payload(c))
                 .size() <= 1
         })
 
@@ -1335,36 +1375,36 @@ module replica {
         val certs = store_certificate.get(id)
         sent_vote
             .filter(v => vote_sig(v) == sig_of(id) and is_finalize(v))
-            .forall(v => option_has(vote_block(v), b =>
+            .forall(v => option_has(vote_payload(v), b =>
                 certs.exists(c => and {
                     is_notarization_cert(c),
                     cert_view(c) == vote_view(v),
-                    cert_block(c) == Some(b),
+                    cert_payload(c) == Some(b),
                 })
             ))
     })
 
-    // A finalized (view, block) must not have conflicting parent references.
-    val finalized_blocks_have_unique_parent = CORRECT.forall(id => {
+    // A finalized (view, payload) must not have conflicting parent references.
+    val finalized_payloads_have_unique_parent = CORRECT.forall(id => {
         val certs = store_certificate.get(id)
         certs
             .filter(c => is_finalization_cert(c))
-            .forall(c => option_has(cert_block(c), b => learned_parents(cert_view(c), b).size() <= 1))
+            .forall(c => option_has(cert_payload(c), b => learned_parents(cert_view(c), b).size() <= 1))
     })
 
-    // Upon finalization, the finalized block must appear in the committed chain.
+    // Upon finalization, the finalized payload must appear in the committed chain.
     val finalized_certificates_are_committed = CORRECT.forall(id => {
         val self = replica_state.get(id)
         val chain = ghost_committed_blocks.get(id)
         val certs = store_certificate.get(id)
         certs
             .filter(c => is_finalization_cert(c) and cert_view(c) <= self.last_finalized)
-            .forall(c => option_has(cert_block(c), b => list_contains_block(chain, b)))
+            .forall(c => option_has(cert_payload(c), b => list_contains_payload(chain, b)))
     })
 
     // With watermark-only finalization (no recursive ancestor walk),
-    // committed blocks are not guaranteed to be consecutively parent-linked.
-    // Instead, we verify the weaker property that every committed block
+    // committed payloads are not guaranteed to be consecutively parent-linked.
+    // Instead, we verify the weaker property that every committed payload
     // is distinct (no duplicates).
     val committed_blocks_no_duplicates = CORRECT.forall(id => {
         val chain = ghost_committed_blocks.get(id)
@@ -1381,8 +1421,8 @@ module replica {
                 sent_vote
                     .filter(v => and {
                         is_notarize(v),
-                        vote_view(v) == n.view,
-                        vote_block(v) == Some(n.block),
+                        vote_view(v) == n.proposal.view,
+                        vote_payload(v) == Some(n.proposal.payload),
                     })
                     .map(v => vote_sig(v))
 
@@ -1398,8 +1438,8 @@ module replica {
                 sent_vote
                     .filter(v => and {
                         is_finalize(v),
-                        vote_view(v) == f.view,
-                        vote_block(v) == Some(f.block),
+                        vote_view(v) == f.proposal.view,
+                        vote_payload(v) == Some(f.proposal.payload),
                     })
                     .map(v => vote_sig(v))
         }
@@ -1421,9 +1461,9 @@ module replica {
         valid_last_finalized,
         notarized_consistency,
         parent_refs_well_formed,
-        unique_notarized_or_finalized_block_per_view,
+        unique_notarized_or_finalized_payload_per_view,
         finalize_vote_requires_notarization_cert,
-        finalized_blocks_have_unique_parent,
+        finalized_payloads_have_unique_parent,
         finalized_certificates_are_committed,
         committed_blocks_no_duplicates,
         certificates_require_sent_votes,
@@ -1449,7 +1489,7 @@ module replica {
 
     // Examples.
 
-    // Check this invariant to see an example of having a finalized block.
+    // Check this invariant to see an example of having a finalized payload.
     val block_example = not(CORRECT.exists(id => {
         ghost_committed_blocks.get(id).length() >= 1
     }))

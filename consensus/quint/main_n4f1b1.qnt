@@ -10,8 +10,8 @@ module main {
         CORRECT = Set("n0", "n1", "n2"),
         BYZANTINE = Set("n3"),
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3"),
-        VALID_BLOCKS = Set("val_b0", "val_b1", "val_b2"),
-        INVALID_BLOCKS = Set("inval_0", "inval_1"),
+        VALID_PAYLOADS = Set("val_b0", "val_b1", "val_b2"),
+        INVALID_PAYLOADS = Set("inval_0", "inval_1"),
         VIEWS = 1.to(6),
   ) .* from "./replica"
 }

@@ -9,7 +9,7 @@ module types {
 
     type ViewNumber = int
 
-    type Block = str
+    type Payload = str
 
     type Kind = str
 
@@ -20,7 +20,7 @@ module types {
     // several replica ids may have the private/key pair.
     type ReplicaKey = str
 
-    pure val GENESIS_BLOCK: Block = "GENESIS_BLOCK"
+    pure val GENESIS_PAYLOAD: Payload = "GENESIS_PAYLOAD"
 
     pure val GENESIS_VIEW = 0
     pure val FIRST_VIEW = 1
@@ -33,9 +33,20 @@ module types {
     pure val NullificationKind = "NULLIFICATION_KIND"
     pure val FinalizationKind = "FINALIZATION_KIND"
 
-    type NotarizeVote = {
+    // Leader-proposal message
+    type Proposal = {
+        // proposed payload
+        payload: Payload,
+        // The view in which this proposal is made
         view: ViewNumber,
-        block: Block,
+        // The view of the parent proposal that this one builds upon
+        parent: ViewNumber,
+        // Leader's identity
+        sig: Signature
+    }
+
+    type NotarizeVote = {
+        proposal: Proposal,
         sig: Signature
     }
 
@@ -45,8 +56,7 @@ module types {
     }
 
     type FinalizeVote = {
-        view: ViewNumber,
-        block: Block,
+        proposal: Proposal,
         sig: Signature
     }
 
@@ -62,25 +72,22 @@ module types {
         })
     }
 
-    pure def notarize(v: ViewNumber, id: Signature, block: Block): Vote = {
+    pure def notarize(proposal: Proposal, id: Signature): Vote = {
         Notarize({
-            view: v,
-            sig: id,
-            block: block
+            proposal: proposal,
+            sig: id
         })
     }
 
-    pure def finalize(v: ViewNumber, id: Signature, block: Block): Vote = {
+    pure def finalize(proposal: Proposal, id: Signature): Vote = {
         Finalize({
-            view: v,
-            sig: id,
-            block: block
+            proposal: proposal,
+            sig: id
         })
     }
 
     type NotarizationCert = {
-        view: ViewNumber,
-        block: Block,
+        proposal: Proposal,
         signatures: Set[Signature],
         ghost_sender: Signature
     }
@@ -92,8 +99,7 @@ module types {
     }
 
     type FinalizationCert = {
-        view: ViewNumber,
-        block: Block,
+        proposal: Proposal,
         signatures: Set[Signature],
         ghost_sender: Signature
     }
@@ -104,14 +110,12 @@ module types {
         | Finalization(FinalizationCert)
 
     pure def notarization(
-        view: ViewNumber,
-        block: Block,
+        proposal: Proposal,
         signatures: Set[Signature],
         ghost_sender: Signature
     ): Certificate = {
         Notarization({
-            view: view,
-            block: block,
+            proposal: proposal,
             signatures: signatures,
             ghost_sender: ghost_sender
         })
@@ -130,36 +134,19 @@ module types {
     }
 
     pure def finalization(
-        view: ViewNumber,
-        block: Block,
+        proposal: Proposal,
         signatures: Set[Signature],
         ghost_sender: Signature
     ): Certificate = {
         Finalization({
-            view: view,
-            block: block,
+            proposal: proposal,
             signatures: signatures,
             ghost_sender: ghost_sender
         })
     }
 
-    // Leader-proposal message ⟨propose,h,b_0,…,b_h⟩
-    type Proposal = {
-        // proposed block
-        block: Block,
-        // The view in which this proposal is made
-        view: ViewNumber,   
-        // parent block
-        block_parent: Block,  
-        // The view of the parent proposal that this one builds upon
-        view_parent: ViewNumber,  
-        // Leader's identity
-        sig: Signature
-    }
-
     // Parent pointer recorded from observed proposals.
     type ParentRef = {
-        parent_block: Block,
         parent_view: ViewNumber
     }
 
@@ -185,9 +172,9 @@ module types {
         last_finalized: ViewNumber,
         // not in the original spec, whether this replica has sent a proposal
         propose_sent: bool,
-        // block this replica has notarized per view
-        notarized: ViewNumber -> Option[Block],
-        // block this replica has certified per view
-        certified: ViewNumber -> Option[Block]
+        // payload this replica has notarized per view
+        notarized: ViewNumber -> Option[Payload],
+        // payload this replica has certified per view
+        certified: ViewNumber -> Option[Payload]
     }
 }

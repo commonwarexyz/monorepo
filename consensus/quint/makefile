@@ -1,11 +1,11 @@
 FUZZ_TRACES_ROOT ?= ../fuzz/artifacts/traces
 FUZZ_CORPUS ?= ../fuzz/corpus
 TEST_DIR ?= traces
-
+TRACE_TARGET ?= simplex_ed25519_quint_twins
 FUZZ_RUNS ?= -1
-TRACE_SELECTION_STRATEGY ?= lof
+TRACE_SELECTION_STRATEGY ?= smallscope
 MIN_REQUIRED_CONTAINERS ?= 3
-MAX_REQUIRED_CONTAINERS ?= 5
+MAX_REQUIRED_CONTAINERS ?= 6
 
 .PHONY: test typecheck repl check clean get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces tv tv_live tv_live_fuzz tv_live_watch generate_itf convert_itf replay_itf clean_mbt_traces conformance_roundtrip ist
 
@@ -49,7 +49,7 @@ get_fuzz_traces:
 	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
 	COMMONWARE_MIN_REQUIRED_CONTAINERS=$(MIN_REQUIRED_CONTAINERS) \
 	COMMONWARE_MAX_REQUIRED_CONTAINERS=$(MAX_REQUIRED_CONTAINERS) \
-	cargo +nightly fuzz run simplex_ed25519_quint_disrupter -- -runs=$(FUZZ_RUNS)
+	cargo +nightly fuzz run $(TRACE_TARGET) -- -runs=$(FUZZ_RUNS)
 
 build_quint_tests_from_fuzz_traces:
 	@for dir in $(FUZZ_TRACES_ROOT)/*/; do \
@@ -85,7 +85,7 @@ tv_live: clean_fuzz_traces clean_traces
 		COMMONWARE_TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
 		COMMONWARE_MIN_REQUIRED_CONTAINERS="$(MIN_REQUIRED_CONTAINERS)" \
 		COMMONWARE_MAX_REQUIRED_CONTAINERS="$(MAX_REQUIRED_CONTAINERS)" \
-		cargo +nightly fuzz run simplex_ed25519_quint_disrupter -- -runs=$(FUZZ_RUNS) & \
+		cargo +nightly fuzz run "$(TRACE_TARGET)" -- -runs=$(FUZZ_RUNS) & \
 		fuzz=$$!; \
 		while kill -0 $$watcher 2>/dev/null && kill -0 $$fuzz 2>/dev/null; do \
 			sleep 1; \
@@ -107,7 +107,7 @@ tv_live_fuzz:
 	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
 	COMMONWARE_MIN_REQUIRED_CONTAINERS=$(MIN_REQUIRED_CONTAINERS) \
 	COMMONWARE_MAX_REQUIRED_CONTAINERS=$(MAX_REQUIRED_CONTAINERS) \
-	cargo +nightly fuzz run simplex_ed25519_quint_disrupter
+	cargo +nightly fuzz run $(TRACE_TARGET)
 
 tv_live_watch: clean_traces
 	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
