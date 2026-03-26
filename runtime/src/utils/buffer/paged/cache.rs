@@ -447,8 +447,7 @@ impl CacheRef {
     /// page. `offset` must be page aligned.
     ///
     /// This method is best-effort. If insertion fails because all slots are currently reserved, the
-    /// remaining pages are dropped after logging an error. This affects cache hit rate, not
-    /// correctness.
+    /// remaining pages are left uncached. This affects cache hit rate, not correctness.
     pub fn cache(&self, blob_id: u64, mut buf: &[u8], offset: u64) -> usize {
         let logical_page_size = self.page_size as usize;
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
@@ -459,11 +458,11 @@ impl CacheRef {
             let current_page = page_num;
             let page = &buf[..logical_page_size];
             if cache.insert_page((blob_id, current_page), page).is_err() {
-                error!(
+                debug!(
                     blob_id,
                     page_num = current_page,
                     dropped_pages = buf.len() / logical_page_size,
-                    "failed to cache pages",
+                    "leaving flushed pages uncached because all cache slots are reserved",
                 );
                 break;
             }
@@ -551,8 +550,9 @@ impl Cache {
 
     /// Put a page into the cache by copying logical bytes into a target slot.
     ///
-    /// If the destination slot is uniquely owned, its existing allocation is reused. If the slot is
-    /// shared by readers, a replacement allocation is taken from `pool`.
+    /// If the destination slot still holds a uniquely owned physical-page-sized allocation, that
+    /// backing is reused. If the slot backing is shared by readers, was already moved into an
+    /// in-flight fetch, or is otherwise too small, a replacement allocation is taken from `pool`.
     ///
     /// Returns `Err(())` only when no slot is currently reservable.
     fn insert_page(&mut self, key: (u64, u64), page: &[u8]) -> Result<(), ()> {
@@ -777,21 +777,18 @@ impl Cache {
 
     /// Take a writable slot buffer for fetch or cache refill.
     ///
-    /// Reuses the existing slot allocation when uniquely owned; otherwise allocates from the pool.
+    /// Reuses the existing slot allocation when it is uniquely owned and still large enough for one
+    /// physical page. Otherwise allocates a replacement from the pool. This covers the normal
+    /// shared-reader case as well as reserved slots whose backing was already moved into an
+    /// in-flight fetch future.
     fn take_slot_buffer(&mut self, slot: usize) -> crate::IoBufMut {
         let current = std::mem::take(&mut self.slots[slot].buf);
         match current.try_into_mut() {
-            Ok(mut writable) => {
-                assert!(
-                    writable.capacity() >= self.physical_page_size,
-                    "slot buffer capacity ({}) < physical_page_size ({})",
-                    writable.capacity(),
-                    self.physical_page_size,
-                );
+            Ok(mut writable) if writable.capacity() >= self.physical_page_size => {
                 writable.clear();
                 writable
             }
-            Err(_) => self.pool.alloc(self.physical_page_size),
+            Ok(_) | Err(_) => self.pool.alloc(self.physical_page_size),
         }
     }
 
@@ -879,6 +876,9 @@ mod tests {
     fn install_fetch_state(cache_ref: &CacheRef, key: (u64, u64), state: Arc<PageFetchState>) {
         let mut cache = cache_ref.cache.write();
         let slot = cache.reserve_slot().expect("failed to reserve cache slot");
+        // Mirror the real miss path, which moves the slot backing into the in-flight fetch before
+        // the slot transitions to `Reserved`.
+        let _ = cache.take_slot_buffer(slot);
         cache.index.insert(key, slot);
         cache.set_fetching(slot, key, state);
     }
@@ -895,14 +895,6 @@ mod tests {
             .fetch_for_key(key)
             .map(|(_, state)| Arc::strong_count(&state).saturating_sub(1))
             .unwrap_or(0)
-    }
-
-    async fn ok_blob_op() -> Result<(), crate::Error> {
-        Ok(())
-    }
-
-    async fn read_failed<T>() -> Result<T, crate::Error> {
-        Err(Error::ReadFailed)
     }
 
     /// Test blob that optionally blocks one read, then returns a valid physical page payload.
@@ -971,15 +963,15 @@ mod tests {
             _offset: u64,
             _buf: impl Into<crate::IoBufs> + Send,
         ) -> Result<(), crate::Error> {
-            ok_blob_op().await
+            Ok(())
         }
 
         async fn resize(&self, _len: u64) -> Result<(), crate::Error> {
-            ok_blob_op().await
+            Ok(())
         }
 
         async fn sync(&self) -> Result<(), crate::Error> {
-            ok_blob_op().await
+            Ok(())
         }
     }
 
@@ -1024,15 +1016,15 @@ mod tests {
             _offset: u64,
             _buf: impl Into<crate::IoBufs> + Send,
         ) -> Result<(), crate::Error> {
-            ok_blob_op().await
+            Ok(())
         }
 
         async fn resize(&self, _len: u64) -> Result<(), crate::Error> {
-            ok_blob_op().await
+            Ok(())
         }
 
         async fn sync(&self) -> Result<(), crate::Error> {
-            ok_blob_op().await
+            Ok(())
         }
     }
 
@@ -1053,7 +1045,7 @@ mod tests {
 
     impl crate::Blob for ControlledBlob {
         async fn read_at(&self, offset: u64, len: usize) -> Result<crate::IoBufsMut, crate::Error> {
-            self.read_at_buf(offset, len, crate::IoBufsMut::default())
+            self.read_at_buf(offset, len, crate::IoBufMut::with_capacity(len))
                 .await
         }
 
@@ -1092,15 +1084,15 @@ mod tests {
             _offset: u64,
             _buf: impl Into<crate::IoBufs> + Send,
         ) -> Result<(), crate::Error> {
-            ok_blob_op().await
+            Ok(())
         }
 
         async fn resize(&self, _len: u64) -> Result<(), crate::Error> {
-            ok_blob_op().await
+            Ok(())
         }
 
         async fn sync(&self) -> Result<(), crate::Error> {
-            ok_blob_op().await
+            Ok(())
         }
     }
 
@@ -1109,8 +1101,9 @@ mod tests {
     struct ErrorBlob;
 
     impl crate::Blob for ErrorBlob {
-        async fn read_at(&self, _offset: u64, _len: usize) -> Result<crate::IoBufsMut, crate::Error> {
-            read_failed().await
+        async fn read_at(&self, offset: u64, len: usize) -> Result<crate::IoBufsMut, crate::Error> {
+            self.read_at_buf(offset, len, crate::IoBufMut::with_capacity(len))
+                .await
         }
 
         async fn read_at_buf(
@@ -1119,7 +1112,7 @@ mod tests {
             _len: usize,
             _buf: impl Into<crate::IoBufsMut> + Send,
         ) -> Result<crate::IoBufsMut, crate::Error> {
-            read_failed().await
+            Err(Error::ReadFailed)
         }
 
         async fn write_at(
@@ -1127,25 +1120,24 @@ mod tests {
             _offset: u64,
             _buf: impl Into<crate::IoBufs> + Send,
         ) -> Result<(), crate::Error> {
-            ok_blob_op().await
+            Ok(())
         }
 
         async fn resize(&self, _len: u64) -> Result<(), crate::Error> {
-            ok_blob_op().await
+            Ok(())
         }
 
         async fn sync(&self) -> Result<(), crate::Error> {
-            ok_blob_op().await
+            Ok(())
         }
     }
 
     #[test_traced]
-    fn test_helper_blobs_cover_trait_surface() {
-        // The inline test helpers live in this file, so exercise their trait surface directly
-        // instead of paying permanent coverage tax for dormant wrappers and no-op methods.
+    fn test_blocking_blob_read_waits_for_release() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // BlockingBlob should forward `read_at` through `read_at_buf` and honor the release gate.
+            // The blocking blob should not complete its direct `read_at` wrapper until the test
+            // explicitly releases the underlying gated `read_at_buf`.
             let (blocking_blob, started_rx, release_tx) =
                 BlockingBlob::new(PAGE_SIZE.get() as usize, 0xAB);
             let blocking_reader = {
@@ -1158,17 +1150,26 @@ mod tests {
                 })
             };
             started_rx.await.expect("blocking read never started");
+            // The helper still implements the full Blob trait while its first read is parked.
             blocking_blob.write_at(0, IoBufs::default()).await.unwrap();
             blocking_blob.resize(0).await.unwrap();
             blocking_blob.sync().await.unwrap();
-            release_tx.send(()).expect("failed to release blocking blob");
+            release_tx
+                .send(())
+                .expect("failed to release blocking blob");
             assert_eq!(
                 blocking_reader.await.expect("blocking read failed").len(),
                 PHYSICAL_PAGE_SIZE.get() as usize
             );
+        });
+    }
 
-            // PendingBlob's `read_at` wrapper should be abort-safe, and its no-op mutable methods
-            // should still satisfy the Blob contract when called directly.
+    #[test_traced]
+    fn test_pending_blob_read_can_be_aborted() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // A pending read should become abortable once the underlying fetch has started so cache
+            // cancellation tests can drop waiters without hanging the runtime.
             let (pending_blob, started_rx) = PendingBlob::new();
             let pending_reader = {
                 let blob = pending_blob.clone();
@@ -1182,27 +1183,55 @@ mod tests {
             pending_blob.write_at(0, IoBufs::default()).await.unwrap();
             pending_blob.resize(0).await.unwrap();
             pending_blob.sync().await.unwrap();
+        });
+    }
 
-            // ControlledBlob should support both the direct read wrapper and the no-op mutable API.
+    #[test_traced]
+    fn test_controlled_blob_read_returns_payload() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // The single-flight tests use both blob read entry points interchangeably, so the
+            // helper should surface the same physical page through each of them.
             let controlled_blob = ControlledBlob {
                 started: Arc::new(Mutex::new(None)),
                 release: Arc::new(Mutex::new(None)),
                 reads: Arc::new(AtomicUsize::new(1)),
                 result: ControlledBlobResult::Success(Arc::new(physical_page(7).as_ref().to_vec())),
             };
-            let controlled = controlled_blob
+            let direct = controlled_blob
                 .read_at(0, PHYSICAL_PAGE_SIZE.get() as usize)
                 .await
                 .unwrap()
                 .coalesce();
-            assert_eq!(controlled.len(), PHYSICAL_PAGE_SIZE.get() as usize);
-            controlled_blob.write_at(0, IoBufs::default()).await.unwrap();
+            let buffered = controlled_blob
+                .read_at_buf(
+                    0,
+                    PHYSICAL_PAGE_SIZE.get() as usize,
+                    crate::IoBufsMut::default(),
+                )
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(direct.as_ref(), buffered.as_ref());
+            controlled_blob
+                .write_at(0, IoBufs::default())
+                .await
+                .unwrap();
             controlled_blob.resize(0).await.unwrap();
             controlled_blob.sync().await.unwrap();
+        });
+    }
 
-            // ErrorBlob should fail both read entry points while leaving its mutable operations as
-            // harmless no-ops for the specific tests that use it.
-            assert!(matches!(ErrorBlob.read_at(0, 1).await, Err(Error::ReadFailed)));
+    #[test_traced]
+    fn test_error_blob_reads_fail_and_mutations_are_noops() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            // Cache error-path tests can hit either blob read entry point, so both should report
+            // the same failure while the unused mutable methods stay harmless.
+            assert!(matches!(
+                ErrorBlob.read_at(0, 1).await,
+                Err(Error::ReadFailed)
+            ));
             assert!(matches!(
                 ErrorBlob
                     .read_at_buf(0, 1, crate::IoBufsMut::default())
@@ -1995,8 +2024,7 @@ mod tests {
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
 
-            let pending_fut: PageFetchFut =
-                pending::<Result<IoBuf, Arc<Error>>>().boxed().shared();
+            let pending_fut: PageFetchFut = pending::<Result<IoBuf, Arc<Error>>>().boxed().shared();
             let state = Arc::new(PageFetchState::new(pending_fut));
             let waiter_ref = state.clone();
             install_fetch_state(&cache_ref, (42, 7), state);
@@ -2076,8 +2104,7 @@ mod tests {
             phys1.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc1).to_bytes());
             blob.write_at(physical_page_size, phys1).await.unwrap();
 
-            let pending_fut: PageFetchFut =
-                pending::<Result<IoBuf, Arc<Error>>>().boxed().shared();
+            let pending_fut: PageFetchFut = pending::<Result<IoBuf, Arc<Error>>>().boxed().shared();
             let state = Arc::new(PageFetchState::new(pending_fut));
             let _waiter = state.clone();
             install_fetch_state(&cache_ref, (42, 0), state);
@@ -2124,8 +2151,7 @@ mod tests {
             // Reserve the only slot for an unrelated in-flight fetch so the read must fall back to
             // an uncached blob read.
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
-            let pending_fut: PageFetchFut =
-                pending::<Result<IoBuf, Arc<Error>>>().boxed().shared();
+            let pending_fut: PageFetchFut = pending::<Result<IoBuf, Arc<Error>>>().boxed().shared();
             let state = Arc::new(PageFetchState::new(pending_fut));
             let _waiter = state.clone();
             install_fetch_state(&cache_ref, (42, 0), state);
@@ -2152,8 +2178,7 @@ mod tests {
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
 
-            let pending_fut: PageFetchFut =
-                pending::<Result<IoBuf, Arc<Error>>>().boxed().shared();
+            let pending_fut: PageFetchFut = pending::<Result<IoBuf, Arc<Error>>>().boxed().shared();
             install_fetch_state(
                 &cache_ref,
                 (0, 0),
@@ -2198,7 +2223,9 @@ mod tests {
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         let mut cache = Cache::new(pool, PAGE_SIZE, NZUsize!(1));
         let state = Arc::new(PageFetchState::new(
-            ready(Ok::<IoBuf, Arc<Error>>(physical_page(1))).boxed().shared(),
+            ready(Ok::<IoBuf, Arc<Error>>(physical_page(1)))
+                .boxed()
+                .shared(),
         ));
         cache.index.insert((0, 0), 0);
         cache.set_fetching(0, (1, 1), state);
@@ -2274,7 +2301,9 @@ mod tests {
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         let mut cache = Cache::new(pool, PAGE_SIZE, NZUsize!(1));
         let state = Arc::new(PageFetchState::new(
-            ready(Ok::<IoBuf, Arc<Error>>(physical_page(1))).boxed().shared(),
+            ready(Ok::<IoBuf, Arc<Error>>(physical_page(1)))
+                .boxed()
+                .shared(),
         ));
 
         assert!(!cache.finish_fetch_if_current(7, (0, 0), &state, Ok(physical_page(1))));
@@ -2288,7 +2317,9 @@ mod tests {
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         let mut cache = Cache::new(pool, PAGE_SIZE, NZUsize!(1));
         let state = Arc::new(PageFetchState::new(
-            ready(Ok::<IoBuf, Arc<Error>>(physical_page(1))).boxed().shared(),
+            ready(Ok::<IoBuf, Arc<Error>>(physical_page(1)))
+                .boxed()
+                .shared(),
         ));
 
         cache.index.insert((0, 0), 0);
