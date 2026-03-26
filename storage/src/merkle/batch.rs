@@ -93,7 +93,7 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest> {
     parent: MerkleizedBatch<F, D>,
     appended: Vec<D>,
     overwrites: BTreeMap<Position<F>, D>,
-    dirty_nodes: BTreeSet<(Position<F>, u32)>,
+    dirty_nodes: BTreeSet<(u32, Position<F>)>,
     #[cfg(feature = "std")]
     pool: Option<ThreadPool>,
 }
@@ -176,7 +176,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
                 len += 1;
             }
             for &(parent_pos, _, h) in buf[..len].iter().rev() {
-                if !self.dirty_nodes.insert((parent_pos, h)) {
+                if !self.dirty_nodes.insert((h, parent_pos)) {
                     break;
                 }
             }
@@ -194,7 +194,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         for height in heights {
             let pos = self.size();
             self.appended.push(D::EMPTY);
-            self.dirty_nodes.insert((pos, height));
+            self.dirty_nodes.insert((height, pos));
         }
 
         self
@@ -274,8 +274,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
 
     /// Consume this batch and produce an immutable [`MerkleizedBatch`] with computed root.
     pub fn merkleize(mut self, hasher: &impl Hasher<F, Digest = D>) -> MerkleizedBatch<F, D> {
-        let mut dirty: Vec<_> = core::mem::take(&mut self.dirty_nodes).into_iter().collect();
-        dirty.sort_by_key(|a| a.1);
+        let dirty: Vec<_> = core::mem::take(&mut self.dirty_nodes).into_iter().collect();
 
         #[cfg(feature = "std")]
         if let Some(pool) = self.pool.take() {
@@ -314,9 +313,9 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     fn merkleize_serial(
         &mut self,
         hasher: &impl Hasher<F, Digest = D>,
-        dirty: &[(Position<F>, u32)],
+        dirty: &[(u32, Position<F>)],
     ) {
-        for &(pos, height) in dirty {
+        for &(height, pos) in dirty {
             let (left, right) = F::children(pos, height);
             let left_d = self.get_node(left).expect("left child missing");
             let right_d = self.get_node(right).expect("right child missing");
@@ -332,11 +331,11 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
         &mut self,
         hasher: &impl Hasher<F, Digest = D>,
         pool: &ThreadPool,
-        dirty: &[(Position<F>, u32)],
+        dirty: &[(u32, Position<F>)],
     ) {
         let mut same_height = Vec::new();
-        let mut current_height = dirty.first().map_or(1, |&(_, h)| h);
-        for (i, &(pos, height)) in dirty.iter().enumerate() {
+        let mut current_height = dirty.first().map_or(1, |&(h, _)| h);
+        for (i, &(height, pos)) in dirty.iter().enumerate() {
             if height == current_height {
                 same_height.push(pos);
                 continue;
