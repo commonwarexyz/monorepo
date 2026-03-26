@@ -14,12 +14,11 @@ use crate::{
         self, batch, journaled::Mmr, Error as MmrError, Location, Position, Proof, Readable,
         StandardHasher,
     },
-    Persistable,
+    Context, Persistable,
 };
 use alloc::{sync::Arc, vec::Vec};
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::NonZeroU64;
 use futures::{future::try_join_all, try_join, TryFutureExt as _};
 use thiserror::Error;
@@ -197,7 +196,7 @@ pub struct Changeset<D: Digest, Item> {
 /// specific location.
 pub struct Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -214,7 +213,7 @@ where
 
 impl<E, C, H> Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -250,7 +249,7 @@ where
 
 impl<E, C, H> Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
@@ -263,7 +262,7 @@ where
 
 impl<E, C, H> Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Mutable<Item: EncodeShared>,
     H: Hasher,
 {
@@ -418,7 +417,7 @@ where
 
 impl<E, C, H> Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -496,7 +495,7 @@ where
 
 impl<E, C, H> Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
@@ -530,7 +529,7 @@ macro_rules! impl_journal_new {
     ($journal_mod:ident, $cfg_ty:ty, $codec_bound:path) => {
         impl<E, O, H> Journal<E, $journal_mod::Journal<E, O>, H>
         where
-            E: Storage + Clock + Metrics,
+            E: Context,
             O: $codec_bound,
             H: Hasher,
         {
@@ -570,7 +569,7 @@ impl_journal_new!(variable, variable::Config<O::Cfg>, CodecShared);
 
 impl<E, C, H> Contiguous for Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {
@@ -587,7 +586,7 @@ where
 
 impl<E, C, H> Mutable for Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Mutable<Item: EncodeShared>,
     H: Hasher,
 {
@@ -620,7 +619,7 @@ where
 }
 
 /// A [Mutable] journal that can serve as the inner journal of an authenticated [Journal].
-pub trait Inner<E: Storage + Clock + Metrics>: Mutable + Persistable<Error = JournalError> {
+pub trait Inner<E: Context>: Mutable + Persistable<Error = JournalError> {
     /// The configuration needed to initialize this journal.
     type Config: Clone + Send;
 
@@ -638,7 +637,7 @@ pub trait Inner<E: Storage + Clock + Metrics>: Mutable + Persistable<Error = Jou
 
 impl<E, C, H> Persistable for Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
     H: Hasher,
 {
@@ -669,7 +668,7 @@ where
 #[cfg(test)]
 impl<E, C, H> Journal<E, C, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: EncodeShared>,
     H: Hasher,
 {

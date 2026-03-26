@@ -22,10 +22,10 @@ use crate::{
         operation::{Key, Operation as OperationTrait},
         Error,
     },
+    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::bitmap::Prunable as BitMap;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -419,7 +419,7 @@ where
         db: &super::db::Db<E, C, I, H, update::Unordered<K, V>, N>,
     ) -> Result<Option<V::Value>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location> + 'static,
     {
@@ -434,7 +434,7 @@ where
         db: &super::db::Db<E, C, I, H, update::Unordered<K, V>, N>,
     ) -> Result<MerkleizedBatch<H::Digest, update::Unordered<K, V>, N>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location> + 'static,
     {
@@ -476,7 +476,7 @@ where
         db: &super::db::Db<E, C, I, H, update::Ordered<K, V>, N>,
     ) -> Result<Option<V::Value>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location> + 'static,
     {
@@ -491,7 +491,7 @@ where
         db: &super::db::Db<E, C, I, H, update::Ordered<K, V>, N>,
     ) -> Result<MerkleizedBatch<H::Digest, update::Ordered<K, V>, N>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location> + 'static,
     {
@@ -610,7 +610,7 @@ async fn compute_current_layer<E, U, C, I, H, const N: usize>(
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<MerkleizedBatch<H::Digest, U, N>, Error>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -913,7 +913,7 @@ where
         db: &super::db::Db<E, C, I, H, U, N>,
     ) -> Result<Option<U::Value>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Contiguous<Item = Operation<U>>,
         I: UnorderedIndex<Value = Location> + 'static,
         H: Hasher<Digest = D>,
@@ -1020,7 +1020,7 @@ where
 
 impl<E, C, I, H, U, const N: usize> super::db::Db<E, C, I, H, U, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -1062,7 +1062,7 @@ mod trait_impls {
         K: Key,
         V: ValueEncoding + 'static,
         H: Hasher,
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<update::Unordered<K, V>>>
             + Persistable<Error = crate::journal::Error>,
         I: UnorderedIndex<Value = Location> + 'static,
@@ -1093,7 +1093,7 @@ mod trait_impls {
         K: Key,
         V: ValueEncoding + 'static,
         H: Hasher,
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<update::Ordered<K, V>>>
             + Persistable<Error = crate::journal::Error>,
         I: crate::index::Ordered<Value = Location> + 'static,
@@ -1137,7 +1137,7 @@ mod trait_impls {
     impl<E, K, V, C, I, H, const N: usize> BatchableDb
         for CurrentDb<E, C, I, H, update::Unordered<K, V>, N>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<update::Unordered<K, V>>>
@@ -1166,7 +1166,7 @@ mod trait_impls {
     impl<E, K, V, C, I, H, const N: usize> BatchableDb
         for CurrentDb<E, C, I, H, update::Ordered<K, V>, N>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<update::Ordered<K, V>>>

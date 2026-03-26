@@ -224,7 +224,11 @@ Vamsi Policharla</a></div>
         multiplications for the <span class="math inline">\(v_a, v_b,
         v_q\)</span> terms, and finally checking a single multi-pairing.
         Of course, we still need to carry out steps 1-5 for each proof,
-        but these are very fast hashing and field operations.</p>
+        but these are very fast hashing and field operations. This
+        strategy applies more broadly to KZG opening proofs and
+        KZG-based SNARKs such as Plonk. For example, <a
+        href="https://github.com/Consensys/gnark/blob/6e6960808dfdc41e56d089d870f12ce2bc7f8289/std/recursion/plonk/verifier.go#L946-L973">gnark</a>
+        uses it for more efficient recursion of Plonk proofs.</p>
         <p>A quick implementation (with room for further optimization)
         of this idea can be found <a
         href="https://github.com/guruvamsi-policharla/garuda-pari/pull/1">here</a>,

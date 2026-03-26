@@ -452,14 +452,15 @@ commonware_macros::stability_scope!(ALPHA {
                 config,
                 commitment,
                 checking_data.clone(),
-                shards.map(|shard| {
-                    if shard.checking_data != checking_data {
-                        return Err(PhasedAsSchemeError::InconsistentCheckingData);
-                    }
-                    Ok(&shard.checked_shard)
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter(),
+                shards
+                    .map(|shard| {
+                        if shard.checking_data != checking_data {
+                            return Err(PhasedAsSchemeError::InconsistentCheckingData);
+                        }
+                        Ok(&shard.checked_shard)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter(),
                 strategy,
             )
             .map_err(PhasedAsSchemeError::Scheme)

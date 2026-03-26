@@ -107,9 +107,7 @@ async fn wait_for_event<Op, D: Digest, E>(
             || Some(Event::UpdateChannelClosed),
             |target| Some(Event::TargetUpdate(target))
         ),
-        result = batch_result_fut => {
-            result.map(|fetch_result| Event::BatchReceived(fetch_result))
-        },
+        result = batch_result_fut => result.map(|fetch_result| Event::BatchReceived(fetch_result)),
     }
 }
 

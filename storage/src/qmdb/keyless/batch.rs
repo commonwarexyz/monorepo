@@ -5,9 +5,9 @@ use crate::{
     journal::authenticated,
     mmr::{Location, Position},
     qmdb::{any::VariableValue, keyless::operation::Operation, Error},
+    Context,
 };
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
 use std::sync::Arc;
 
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
@@ -69,7 +69,7 @@ where
     /// Create a batch from a committed DB (no parent chain).
     pub(super) fn new<E>(keyless: &Keyless<E, V, H>, journal_size: u64) -> Self
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
     {
         Self {
             journal_batch: keyless.journal.to_merkleized_batch().new_batch::<H>(),
@@ -96,7 +96,7 @@ where
     /// Reads from pending appends, parent chain, or base DB.
     pub async fn get<E>(&self, loc: Location, db: &Keyless<E, V, H>) -> Result<Option<V>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
     {
         let loc_val = *loc;
         let parent_ops_len: u64 = self.base_operations.iter().map(|s| s.len() as u64).sum();
@@ -159,7 +159,7 @@ impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
     /// Read a value at `loc`.
     pub async fn get<E, H>(&self, loc: Location, db: &Keyless<E, V, H>) -> Result<Option<V>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         H: Hasher<Digest = D>,
     {
         let loc_val = *loc;
@@ -232,7 +232,7 @@ impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
 
 impl<E, V, H> Keyless<E, V, H>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     V: VariableValue,
     H: Hasher,
 {

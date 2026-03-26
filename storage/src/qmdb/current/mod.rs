@@ -248,10 +248,10 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
 use std::sync::Arc;
 
@@ -301,7 +301,7 @@ pub(super) async fn init<E, U, H, T, I, J, const N: usize>(
     config: Config<T, J::Config>,
 ) -> Result<db::Db<E, J, I, H, U, N>, Error>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
@@ -399,7 +399,7 @@ pub mod tests {
         qmdb::{
             any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             store::tests::{TestKey, TestValue},
-            Error,
+            Error, Location,
         },
         translator::Translator,
     };
@@ -1218,6 +1218,442 @@ pub mod tests {
 
     fn val(i: u64) -> Digest {
         Sha256::hash(&(i + 10000).to_be_bytes())
+    }
+
+    async fn commit_writes_with_metadata(
+        db: &mut UnorderedVariableDb,
+        writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
+        metadata: Option<Digest>,
+    ) -> std::ops::Range<Location> {
+        let mut batch = db.new_batch();
+        for (k, v) in writes {
+            batch = batch.write(k, v);
+        }
+        let finalized = batch.merkleize(metadata, db).await.unwrap().finalize();
+        let range = db.apply_batch(finalized).await.unwrap();
+        db.commit().await.unwrap();
+        range
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_rewind_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-rewind-recovery";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+            let initial_size = db.bounds().await.end;
+            let initial_root = db.root();
+            let initial_ops_root = db.ops_root();
+            let initial_floor = db.inactivity_floor_loc();
+
+            let metadata_a = val(900);
+            let first_range = commit_writes_with_metadata(
+                &mut db,
+                [(key(0), Some(val(0))), (key(1), Some(val(1)))],
+                Some(metadata_a),
+            )
+            .await;
+            assert_eq!(first_range.start, initial_size);
+            let size_before = db.bounds().await.end;
+            let root_before = db.root();
+            let ops_root_before = db.ops_root();
+            let floor_before = db.inactivity_floor_loc();
+            assert_eq!(size_before, first_range.end);
+
+            let metadata_b = val(901);
+            let second_range = commit_writes_with_metadata(
+                &mut db,
+                [
+                    (key(0), Some(val(100))),
+                    (key(1), None),
+                    (key(2), Some(val(2))),
+                ],
+                Some(metadata_b),
+            )
+            .await;
+            assert_eq!(second_range.start, size_before);
+            assert_ne!(db.root(), root_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(val(901)));
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(100)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), None);
+            assert_eq!(db.get(&key(2)).await.unwrap(), Some(val(2)));
+
+            db.rewind(size_before).await.unwrap();
+            assert_eq!(db.bounds().await.end, size_before);
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.ops_root(), ops_root_before);
+            assert_eq!(db.inactivity_floor_loc(), floor_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(db.get(&key(2)).await.unwrap(), None);
+
+            db.commit().await.unwrap();
+            drop(db);
+
+            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.bounds().await.end, size_before);
+            assert_eq!(reopened.root(), root_before);
+            assert_eq!(reopened.ops_root(), ops_root_before);
+            assert_eq!(reopened.inactivity_floor_loc(), floor_before);
+            assert_eq!(reopened.get_metadata().await.unwrap(), Some(val(900)));
+            assert_eq!(reopened.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(reopened.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(reopened.get(&key(2)).await.unwrap(), None);
+
+            let mut reopened = reopened;
+            reopened.rewind(initial_size).await.unwrap();
+            assert_eq!(reopened.bounds().await.end, initial_size);
+            assert_eq!(reopened.root(), initial_root);
+            assert_eq!(reopened.ops_root(), initial_ops_root);
+            assert_eq!(reopened.inactivity_floor_loc(), initial_floor);
+            assert_eq!(reopened.get_metadata().await.unwrap(), None);
+            assert_eq!(reopened.get(&key(0)).await.unwrap(), None);
+            assert_eq!(reopened.get(&key(1)).await.unwrap(), None);
+            assert_eq!(reopened.get(&key(2)).await.unwrap(), None);
+
+            reopened.commit().await.unwrap();
+            drop(reopened);
+
+            let reopened_initial: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen_initial"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened_initial.bounds().await.end, initial_size);
+            assert_eq!(reopened_initial.root(), initial_root);
+            assert_eq!(reopened_initial.ops_root(), initial_ops_root);
+            assert_eq!(reopened_initial.inactivity_floor_loc(), initial_floor);
+            assert_eq!(reopened_initial.get_metadata().await.unwrap(), None);
+            assert_eq!(reopened_initial.get(&key(0)).await.unwrap(), None);
+            assert_eq!(reopened_initial.get(&key(1)).await.unwrap(), None);
+            assert_eq!(reopened_initial.get(&key(2)).await.unwrap(), None);
+
+            reopened_initial.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_rewind_recovery_pruned_repeated_updates() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 96;
+
+            let partition = "current-rewind-pruned-recovery";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            let key0 = key(0);
+            let mut history = Vec::new();
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(
+                    &mut db,
+                    [(key0, Some(val(20_000 + round)))],
+                    None,
+                )
+                .await;
+                history.push((
+                    db.bounds().await.end,
+                    db.inactivity_floor_loc(),
+                    db.root(),
+                    db.ops_root(),
+                    val(20_000 + round),
+                ));
+            }
+
+            // Keep most ops-log history, but force bitmap pruning so rewind uses pinned-node
+            // reconstruction (`pruned_chunks > 0` path).
+            db.prune(Location::new(1)).await.unwrap();
+            let pruned_bits = db.pruned_bits();
+            assert!(pruned_bits > 0, "expected bitmap pruning for rewind test");
+            let bounds = db.bounds().await;
+
+            let (target_size, target_root, target_ops_root, target_value) = history
+                .iter()
+                .enumerate()
+                .find_map(|(idx, (size, floor, root, ops_root, value))| {
+                    let removed_commits = history.len() - idx - 1;
+                    if removed_commits >= 3 && *size > bounds.start && *floor >= pruned_bits {
+                        Some((*size, *root, *ops_root, *value))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected legal pruned rewind target with repeated updates; bounds={bounds:?}, pruned_bits={pruned_bits}, latest_floor={:?}, history={history:?}",
+                        db.inactivity_floor_loc()
+                    )
+                });
+
+            db.rewind(target_size).await.unwrap();
+            assert_eq!(db.root(), target_root);
+            assert_eq!(db.ops_root(), target_ops_root);
+            assert_eq!(db.bounds().await.end, target_size);
+            assert_eq!(db.get(&key0).await.unwrap(), Some(target_value));
+
+            db.commit().await.unwrap();
+            drop(db);
+
+            let mut reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen_pruned_recovery"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.root(), target_root);
+            assert_eq!(reopened.ops_root(), target_ops_root);
+            assert_eq!(reopened.bounds().await.end, target_size);
+            assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_value));
+
+            let metadata_after_rewind = val(30_000);
+            let new_key = key(1);
+            let new_value = val(30_001);
+            let expected_end = commit_writes_with_metadata(
+                &mut reopened,
+                [(new_key, Some(new_value))],
+                Some(metadata_after_rewind),
+            )
+            .await
+            .end;
+            let root_after_new_write = reopened.root();
+            let ops_root_after_new_write = reopened.ops_root();
+            assert_eq!(reopened.bounds().await.end, expected_end);
+            assert_eq!(reopened.get_metadata().await.unwrap(), Some(metadata_after_rewind));
+            assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_value));
+            assert_eq!(reopened.get(&new_key).await.unwrap(), Some(new_value));
+
+            drop(reopened);
+            let reopened_after_new_write: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen_pruned_after_new_write"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened_after_new_write.root(), root_after_new_write);
+            assert_eq!(reopened_after_new_write.ops_root(), ops_root_after_new_write);
+            assert_eq!(reopened_after_new_write.bounds().await.end, expected_end);
+            assert_eq!(
+                reopened_after_new_write.get_metadata().await.unwrap(),
+                Some(metadata_after_rewind)
+            );
+            assert_eq!(reopened_after_new_write.get(&key0).await.unwrap(), Some(target_value));
+            assert_eq!(
+                reopened_after_new_write.get(&new_key).await.unwrap(),
+                Some(new_value)
+            );
+
+            reopened_after_new_write.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_rewind_small_delta_large_history() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 200;
+
+            let partition = "current-rewind-small-delta";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            let key0 = key(0);
+            let key1 = key(1);
+            let mut history = Vec::new();
+
+            for round in 0..COMMITS {
+                let key0_value = val(40_000 + round);
+                let key1_value = if round % 3 == 1 {
+                    None
+                } else {
+                    Some(val(50_000 + round))
+                };
+
+                commit_writes_with_metadata(
+                    &mut db,
+                    [(key0, Some(key0_value)), (key1, key1_value)],
+                    None,
+                )
+                .await;
+
+                history.push((
+                    db.bounds().await.end,
+                    db.root(),
+                    db.ops_root(),
+                    key0_value,
+                    key1_value,
+                ));
+            }
+
+            let target = *history
+                .get(history.len() - 3)
+                .expect("history should contain at least three commits");
+            let (target_size, target_root, target_ops_root, target_key0, target_key1) = target;
+
+            db.rewind(target_size).await.unwrap();
+            assert_eq!(db.bounds().await.end, target_size);
+            assert_eq!(db.root(), target_root);
+            assert_eq!(db.ops_root(), target_ops_root);
+            assert_eq!(db.get(&key0).await.unwrap(), Some(target_key0));
+            assert_eq!(db.get(&key1).await.unwrap(), target_key1);
+
+            db.commit().await.unwrap();
+            drop(db);
+
+            let reopened: UnorderedVariableDb = UnorderedVariableDb::init(
+                context.with_label("reopen_small_delta"),
+                variable_config::<OneCap>(partition, &context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.bounds().await.end, target_size);
+            assert_eq!(reopened.root(), target_root);
+            assert_eq!(reopened.ops_root(), target_ops_root);
+            assert_eq!(reopened.get(&key0).await.unwrap(), Some(target_key0));
+            assert_eq!(reopened.get(&key1).await.unwrap(), target_key1);
+
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_rewind_pruned_target_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const KEYS: u64 = 384;
+
+            let partition = "current-rewind-pruned";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            let first_range = commit_writes_with_metadata(
+                &mut db,
+                (0..KEYS).map(|i| (key(i), Some(val(i)))),
+                None,
+            )
+            .await;
+            commit_writes_with_metadata(
+                &mut db,
+                (0..KEYS).map(|i| (key(i), Some(val(1000 + i)))),
+                None,
+            )
+            .await;
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            let pruned_bits = db.pruned_bits();
+            assert!(
+                pruned_bits > *first_range.start,
+                "expected bitmap pruning boundary above rewind target: pruned_bits={pruned_bits}, target={:?}",
+                first_range.start
+            );
+
+            let oldest_retained = db.bounds().await.start;
+            let boundary_err = db.rewind(oldest_retained).await.unwrap_err();
+            assert!(
+                matches!(
+                    boundary_err,
+                    Error::Journal(crate::journal::Error::ItemPruned(_))
+                ),
+                "unexpected rewind error at retained boundary: {boundary_err:?}"
+            );
+
+            let expected_pruned_loc = *first_range.start - 1;
+            let err = db.rewind(first_range.start).await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    Error::Journal(crate::journal::Error::ItemPruned(loc))
+                    if loc == expected_pruned_loc
+                ),
+                "unexpected rewind error: {err:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_rewind_rejects_target_below_bitmap_floor() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            const COMMITS: u64 = 96;
+
+            let partition = "current-rewind-bitmap-floor";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            let mut history = Vec::new();
+            for round in 0..COMMITS {
+                commit_writes_with_metadata(
+                    &mut db,
+                    [(key(0), Some(val(10_000 + round)))],
+                    None,
+                )
+                .await;
+                history.push((db.bounds().await.end, db.inactivity_floor_loc()));
+            }
+            assert!(db.inactivity_floor_loc() > Location::new(64));
+
+            // Intentionally prune less than the inactivity floor: log retains older ops, but the
+            // bitmap still prunes to inactivity floor.
+            let prune_loc = Location::new(1);
+            db.prune(prune_loc).await.unwrap();
+            let pruned_bits = db.pruned_bits();
+            assert!(pruned_bits > 0);
+            let retained_start = db.bounds().await.start;
+
+            // Pick a historical commit that is still within retained log bounds but whose floor is
+            // below the bitmap pruning boundary.
+            let rewind_target = history
+                .iter()
+                .find_map(|(size, floor)| {
+                    if *size > *retained_start
+                        && *size >= pruned_bits
+                        && *floor >= *retained_start
+                        && *floor < pruned_bits
+                    {
+                        Some(*size)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "expected rewind target below bitmap boundary. retained_start={retained_start:?}, pruned_bits={pruned_bits}, latest_floor={:?}, history={history:?}",
+                        db.inactivity_floor_loc()
+                    )
+                });
+
+            let err = db.rewind(rewind_target).await.unwrap_err();
+            assert!(
+                matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+                "unexpected rewind error: {err:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
     }
 
     /// MerkleizedBatch::root() returns the canonical root that matches db.root()

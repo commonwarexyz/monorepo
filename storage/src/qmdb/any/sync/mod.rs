@@ -37,10 +37,10 @@ use crate::{
         operation::{Committable, Key, Operation},
     },
     translator::Translator,
+    Context,
 };
 use commonware_codec::{CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
 
@@ -58,7 +58,7 @@ async fn build_db<E, O, I, H, U, C, T>(
     apply_batch_size: usize,
 ) -> Result<Db<E, C, I, H, U>, qmdb::Error>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     O: Operation + Committable + CodecShared + Send + Sync + 'static,
     I: IndexFactory<T, Value = Location>,
     H: Hasher,
@@ -100,7 +100,7 @@ macro_rules! impl_sync_database {
      $(; $($where_extra:tt)+)?) => {
         impl<E, K, V, H, T> qmdb::sync::Database for $db<E, K, V, H, T>
         where
-            E: Storage + Clock + Metrics,
+            E: Context,
             K: $key_bound,
             V: $value_bound + 'static,
             H: Hasher,
