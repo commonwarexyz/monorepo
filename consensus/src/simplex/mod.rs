@@ -796,9 +796,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
 
                 // Ensure certificates for all views
                 {
@@ -1697,9 +1696,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
 
                 // Ensure offline node is never active
                 let mut exceptions = 0;
@@ -1944,9 +1942,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
 
                 // Ensure the slow validator never emits notarize or finalize
                 // votes. It may still emit nullifies after timing out.
@@ -2167,9 +2164,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
 
                 // Ensure quick recovery.
                 //
@@ -2392,9 +2388,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
             }
 
             // Ensure no blocked connections
@@ -2554,9 +2549,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
             }
 
             // Ensure no blocked connections
@@ -2834,9 +2828,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
             }
             assert!(count_conflicting > 0);
 
@@ -3021,11 +3014,13 @@ mod tests {
                 }
             }
 
-            // Ensure byzantine node is blocked by honest nodes
+            // Ensure byzantine node is blocked by honest nodes.
+            // The ">=" is because the Byzantine node may block itself.
             let blocked = oracle.blocked().await.unwrap();
-            assert!(blocked.len() >= participants.len() - 1); // Byzantine node may block itself.
+            assert!(blocked.len() >= participants.len() - 1);
             let byz = &participants[0];
             for (_, b) in blocked {
+                // Assert only the byzantine node is blocked.
                 assert_eq!(&b, byz);
             }
         });
@@ -3189,9 +3184,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
             }
 
             // Ensure invalid is blocked
@@ -3692,9 +3686,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
             }
 
             // Ensure reconfigurer is blocked (epoch mismatch)
@@ -3873,9 +3866,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
             }
             assert!(count_nullify_and_finalize > 0);
 
@@ -4043,9 +4035,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
             }
 
             // Ensure no blocked connections
@@ -4199,9 +4190,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
             }
 
             // Ensure no blocked connections
@@ -4606,9 +4596,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
 
                 // Check that we have certificates reported
                 {
@@ -5428,9 +5417,8 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-                {
-                    reporter.assert_no_invalid();
-                }
+
+                reporter.assert_no_invalid();
 
                 // Ensure no forks
                 let mut notarized = HashMap::new();
