@@ -309,6 +309,48 @@ where
         locations
     }
 
+    /// Gather exact existing-key locations for unordered mutation resolution.
+    ///
+    /// This differs from [`gather_existing_locations`](Self::gather_existing_locations),
+    /// which returns every snapshot location sharing the same translated key.
+    /// Unordered merkleization only needs the exact location for each mutated
+    /// key, so this helper filters snapshot collisions by reading candidate
+    /// operations and comparing full keys.
+    async fn gather_matching_locations<E, C, I>(
+        &self,
+        mutations: &BTreeMap<U::Key, Option<U::Value>>,
+        db: &Db<E, C, I, H, U>,
+    ) -> Result<Vec<Location>, Error>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<U>>,
+        I: UnorderedIndex<Value = Location>,
+    {
+        let mut locations = Vec::new();
+        let reader = db.log.reader().await;
+
+        for key in mutations.keys() {
+            if let Some(entry) = self.base_diff.get(key) {
+                if let Some(loc) = entry.loc() {
+                    locations.push(loc);
+                }
+                continue;
+            }
+
+            let candidates: Vec<Location> = db.snapshot.get(key).copied().collect();
+            for loc in candidates {
+                let op = reader.read(*loc).await?;
+                if op.key() == Some(key) {
+                    locations.push(loc);
+                    break;
+                }
+            }
+        }
+
+        locations.sort();
+        Ok(locations)
+    }
+
     /// Check if the operation at `loc` for `key` is still active.
     fn is_active_at<E, C, I>(
         &self,
@@ -584,7 +626,7 @@ where
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O, parallelized).
-        let locations = m.gather_existing_locations(&mutations, db);
+        let locations = m.gather_matching_locations(&mutations, db).await?;
         let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
         let results = try_join_all(futures).await?;
 
@@ -1442,6 +1484,22 @@ mod trait_impls {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        qmdb::any::{
+            ordered::fixed::Db as OrderedFixedDb, test::fixed_db_config,
+            unordered::fixed::Db as UnorderedFixedDb,
+        },
+        translator::OneCap,
+    };
+    use commonware_cryptography::{sha256, Sha256};
+    use commonware_runtime::{deterministic, Runner as _};
+
+    fn colliding_digest(prefix: u8, suffix: u64) -> sha256::Digest {
+        let mut bytes = [0u8; 32];
+        bytes[0] = prefix;
+        bytes[24..].copy_from_slice(&suffix.to_be_bytes());
+        sha256::Digest::from(bytes)
+    }
 
     /// Test helper: same logic as `Merkleizer::extract_parent_deleted_creates`
     /// but without requiring a full Merkleizer instance.
@@ -1523,5 +1581,170 @@ mod tests {
         // Mutation unchanged.
         assert_eq!(mutations.len(), 1);
         assert!(mutations.contains_key(&1));
+    }
+
+    #[test]
+    fn gather_matching_locations_filters_snapshot_collisions() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+            >;
+
+            let config = fixed_db_config::<OneCap>("gather-existing-collisions", &context);
+            let mut db = TestDb::init(context, config).await.unwrap();
+
+            let key_a = colliding_digest(0xAA, 1);
+            let key_b = colliding_digest(0xAA, 2);
+
+            let initial = db
+                .new_batch()
+                .write(key_a, Some(colliding_digest(0xBB, 1)))
+                .write(key_b, Some(colliding_digest(0xBB, 2)))
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(initial).await.unwrap();
+            db.commit().await.unwrap();
+
+            let candidates: Vec<_> = db.snapshot.get(&key_b).copied().collect();
+            assert_eq!(candidates.len(), 2);
+
+            let expected = {
+                let reader = db.log.reader().await;
+                let mut expected = None;
+                for loc in candidates {
+                    let op = reader.read(*loc).await.unwrap();
+                    if op.key() == Some(&key_b) {
+                        expected = Some(loc);
+                        break;
+                    }
+                }
+                expected.unwrap()
+            };
+
+            let (_, m) = db.new_batch().into_parts();
+            let mutations = BTreeMap::from([(key_b, Some(colliding_digest(0xCC, 2)))]);
+            let gathered = m.gather_matching_locations(&mutations, &db).await.unwrap();
+
+            assert_eq!(gathered, vec![expected]);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn child_root_matches_between_pending_and_committed_paths_under_collisions() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+            >;
+
+            let config = fixed_db_config::<OneCap>("batch-collision-regression", &context);
+            let mut db = TestDb::init(context, config).await.unwrap();
+
+            let mut initial = db.new_batch();
+            for i in 0..8 {
+                initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
+            }
+            let initial = initial.merkleize(None, &db).await.unwrap().finalize();
+            db.apply_batch(initial).await.unwrap();
+            db.commit().await.unwrap();
+
+            let mut parent = db.new_batch();
+            for i in 0..8 {
+                parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
+            }
+            for i in 8..16 {
+                parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
+            }
+            let parent = parent.merkleize(None, &db).await.unwrap();
+
+            let mut pending_child = parent.new_batch();
+            for i in 4..12 {
+                pending_child =
+                    pending_child.write(colliding_digest(0xAA, i), Some(colliding_digest(0xDD, i)));
+            }
+            let pending_child = pending_child.merkleize(None, &db).await.unwrap();
+
+            let finalized_parent = parent.finalize();
+            db.apply_batch(finalized_parent).await.unwrap();
+            db.commit().await.unwrap();
+
+            let mut committed_child = db.new_batch();
+            for i in 4..12 {
+                committed_child = committed_child
+                    .write(colliding_digest(0xAA, i), Some(colliding_digest(0xDD, i)));
+            }
+            let committed_child = committed_child.merkleize(None, &db).await.unwrap();
+
+            assert_eq!(pending_child.root(), committed_child.root());
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn ordered_child_root_matches_between_pending_and_committed_paths_under_collisions() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", &context);
+            let mut db = TestDb::init(context, config).await.unwrap();
+
+            let mut initial = db.new_batch();
+            for i in 0..8 {
+                initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
+            }
+            let initial = initial.merkleize(None, &db).await.unwrap().finalize();
+            db.apply_batch(initial).await.unwrap();
+            db.commit().await.unwrap();
+
+            let mut parent = db.new_batch();
+            for i in 0..8 {
+                parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
+            }
+            for i in 8..16 {
+                parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
+            }
+            let parent = parent.merkleize(None, &db).await.unwrap();
+
+            let mut pending_child = parent.new_batch();
+            for i in 4..12 {
+                pending_child =
+                    pending_child.write(colliding_digest(0xAA, i), Some(colliding_digest(0xDD, i)));
+            }
+            let pending_child = pending_child.merkleize(None, &db).await.unwrap();
+
+            let finalized_parent = parent.finalize();
+            db.apply_batch(finalized_parent).await.unwrap();
+            db.commit().await.unwrap();
+
+            let mut committed_child = db.new_batch();
+            for i in 4..12 {
+                committed_child = committed_child
+                    .write(colliding_digest(0xAA, i), Some(colliding_digest(0xDD, i)));
+            }
+            let committed_child = committed_child.merkleize(None, &db).await.unwrap();
+
+            assert_eq!(pending_child.root(), committed_child.root());
+            db.destroy().await.unwrap();
+        });
     }
 }

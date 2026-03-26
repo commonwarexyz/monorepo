@@ -1721,6 +1721,32 @@ pub(super) mod test {
     }
 
     #[test_traced]
+    fn test_immutable_child_root_matches_between_pending_and_committed_paths() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            let key1 = Sha256::hash(&[1]);
+            let key2 = Sha256::hash(&[2]);
+
+            let parent = db.new_batch().set(key1, vec![1]).merkleize(None);
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .set(key2, vec![2])
+                .merkleize(None);
+
+            db.apply_batch(parent.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            let committed_child = db.new_batch().set(key2, vec![2]).merkleize(None);
+
+            assert_eq!(pending_child.root(), committed_child.root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_stale_changeset_child_applied_before_parent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

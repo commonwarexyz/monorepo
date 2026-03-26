@@ -1223,6 +1223,13 @@ pub mod tests {
         Sha256::hash(&(i + 10000).to_be_bytes())
     }
 
+    fn colliding_digest(prefix: u8, suffix: u64) -> Digest {
+        let mut bytes = [0u8; 32];
+        bytes[0] = prefix;
+        bytes[24..].copy_from_slice(&suffix.to_be_bytes());
+        Digest::from(bytes)
+    }
+
     async fn commit_writes_with_metadata(
         db: &mut UnorderedVariableDb,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
@@ -1775,6 +1782,110 @@ pub mod tests {
             for i in 1..10 {
                 assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i)));
             }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_unordered_root_matches_between_pending_and_committed_paths() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedFixedDb =
+                UnorderedFixedDb::init(ctx.clone(), fixed_config::<OneCap>("ucr", &ctx))
+                    .await
+                    .unwrap();
+
+            let mut initial = db.new_batch();
+            for i in 0..8 {
+                initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
+            }
+            db.apply_batch(initial.merkleize(None, &db).await.unwrap().finalize())
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+
+            let mut parent = db.new_batch();
+            for i in 0..8 {
+                parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
+            }
+            for i in 8..16 {
+                parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
+            }
+            let parent = parent.merkleize(None, &db).await.unwrap();
+
+            let mut pending_child = parent.new_batch::<Sha256>();
+            for i in 4..12 {
+                pending_child =
+                    pending_child.write(colliding_digest(0xAA, i), Some(colliding_digest(0xDD, i)));
+            }
+            let pending_child = pending_child.merkleize(None, &db).await.unwrap();
+
+            db.apply_batch(parent.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            let mut committed_child = db.new_batch();
+            for i in 4..12 {
+                committed_child = committed_child
+                    .write(colliding_digest(0xAA, i), Some(colliding_digest(0xDD, i)));
+            }
+            let committed_child = committed_child.merkleize(None, &db).await.unwrap();
+
+            assert_eq!(pending_child.root(), committed_child.root());
+            assert_eq!(pending_child.ops_root(), committed_child.ops_root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_ordered_root_matches_between_pending_and_committed_paths() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: OrderedFixedDb =
+                OrderedFixedDb::init(ctx.clone(), fixed_config::<OneCap>("ocr", &ctx))
+                    .await
+                    .unwrap();
+
+            let mut initial = db.new_batch();
+            for i in 0..8 {
+                initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
+            }
+            db.apply_batch(initial.merkleize(None, &db).await.unwrap().finalize())
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+
+            let mut parent = db.new_batch();
+            for i in 0..8 {
+                parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
+            }
+            for i in 8..16 {
+                parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
+            }
+            let parent = parent.merkleize(None, &db).await.unwrap();
+
+            let mut pending_child = parent.new_batch::<Sha256>();
+            for i in 4..12 {
+                pending_child =
+                    pending_child.write(colliding_digest(0xAA, i), Some(colliding_digest(0xDD, i)));
+            }
+            let pending_child = pending_child.merkleize(None, &db).await.unwrap();
+
+            db.apply_batch(parent.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            let mut committed_child = db.new_batch();
+            for i in 4..12 {
+                committed_child = committed_child
+                    .write(colliding_digest(0xAA, i), Some(colliding_digest(0xDD, i)));
+            }
+            let committed_child = committed_child.merkleize(None, &db).await.unwrap();
+
+            assert_eq!(pending_child.root(), committed_child.root());
+            assert_eq!(pending_child.ops_root(), committed_child.ops_root());
 
             db.destroy().await.unwrap();
         });
