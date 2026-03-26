@@ -76,6 +76,10 @@ fn system_thread_stack_size_impl() -> Option<usize> {
     }
 
     let limit = usize::try_from(stack_limit.rlim_cur).ok()?;
+    if limit == 0 {
+        return None;
+    }
+
     Some(limit)
 }
 
