@@ -76,9 +76,9 @@ use commonware_utils::{
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
-    future::BoxFuture,
+    future::Either,
     task::{waker, ArcWake},
-    Future, FutureExt,
+    Future,
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
@@ -822,27 +822,37 @@ impl Tasks {
         arc_self.register(id, task);
     }
 
-    /// Register a non-root task to be executed.
+    /// Reserve a non-root task slot.
     ///
-    /// Returns `true` if the task was accepted, or `false` if task
+    /// Returns a task handle if the slot was accepted, or `None` if task
     /// registration has already been closed for shutdown.
-    fn register_work(
-        arc_self: &Arc<Self>,
-        label: Label,
-        future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    ) -> bool {
+    fn reserve_work(arc_self: &Arc<Self>, label: Label) -> Option<Arc<Task>> {
         let closed = arc_self.closed.lock();
         if *closed {
-            return false;
+            return None;
         }
         let id = arc_self.increment();
         let task = Arc::new(Task {
             id,
             label,
-            mode: Mode::Work(Mutex::new(Some(future))),
+            mode: Mode::Work(Mutex::new(None)),
         });
-        arc_self.register(id, task);
-        true
+        arc_self.running.lock().insert(id, task.clone());
+        Some(task)
+    }
+
+    /// Install the future for a previously reserved non-root task and queue it
+    /// for execution.
+    fn install_work(
+        &self,
+        task: &Arc<Task>,
+        future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+    ) {
+        let Mode::Work(slot) = &task.mode else {
+            panic!("reserved work task must be in work mode");
+        };
+        *slot.lock() = Some(future);
+        self.queue(task.id);
     }
 
     /// Register a new task to be executed.
@@ -1179,6 +1189,11 @@ impl crate::Spawner for Context {
     {
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
+        let executor = self.executor();
+        let Some(task) = Tasks::reserve_work(&executor.tasks, label.clone()) else {
+            // Shutdown has started and new tasks can no longer be registered.
+            return Handle::closed(metric);
+        };
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
@@ -1192,26 +1207,22 @@ impl crate::Spawner for Context {
         self.tree = child;
 
         // Spawn the task (we don't care about Model)
-        let executor = self.executor();
-        let future: BoxFuture<'_, T> = if is_instrumented {
+        let future = if is_instrumented {
             let span = info_span!(parent: None, "task", name = %label.name());
             for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
             }
-            f(self).instrument(span).boxed()
+            Either::Left(f(self).instrument(span))
         } else {
-            f(self).boxed()
+            Either::Right(f(self))
         };
         let (f, handle) = Handle::init(
             future,
-            metric.clone(),
+            metric,
             executor.panicker.clone(),
             Arc::clone(&parent),
         );
-        if !Tasks::register_work(&executor.tasks, label, Box::pin(f)) {
-            // Shutdown has started and new tasks can no longer be registered.
-            return Handle::closed(metric);
-        }
+        executor.tasks.install_work(&task, Box::pin(f));
 
         // Register the task on the parent
         if let Some(aborter) = handle.aborter() {
