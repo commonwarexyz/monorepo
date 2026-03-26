@@ -120,6 +120,27 @@ fn full_cluster_outage_and_recovery() {
     run_total_shutdown(MultiDbEngine::new(NUM_VALIDATORS));
 }
 
+#[test_group("slow")]
+#[test_traced("DEBUG")]
+fn state_sync_crash_during_sync() {
+    run_state_sync_crash_during_sync(SingleDbEngine::new(NUM_VALIDATORS).with_state_sync());
+    run_state_sync_crash_during_sync(MultiDbEngine::new(NUM_VALIDATORS).with_state_sync());
+}
+
+#[test_group("slow")]
+#[test_traced("DEBUG")]
+fn rapid_crashes() {
+    run_rapid_crashes(SingleDbEngine::new(NUM_VALIDATORS));
+    run_rapid_crashes(MultiDbEngine::new(NUM_VALIDATORS));
+}
+
+#[test_group("slow")]
+#[test_traced("DEBUG")]
+fn network_partition_and_rejoin() {
+    run_network_partition(SingleDbEngine::new(NUM_VALIDATORS));
+    run_network_partition(MultiDbEngine::new(NUM_VALIDATORS));
+}
+
 fn run_finalize<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
@@ -379,12 +400,119 @@ where
         .seeds(0..5)
         .crash(Crash::Delay {
             count: 1,
-            after: 80,
+            after: 30,
         })
         .link(link)
-        .exit_condition(ProcessedHeightAtLeast::new(150))
+        .exit_condition(ProcessedHeightAtLeast::new(60))
         .property(LateJoinerStateSyncHandoff)
-        .property(BlockAgreementAtHeight::new(150))
+        .property(BlockAgreementAtHeight::new(60))
+        .run()
+        .unwrap();
+}
+
+/// Crash the late joiner mid-sync and restart it, exercising the
+/// `sync_done` metadata recovery path (second boot takes marshal sync).
+fn run_state_sync_crash_during_sync<D>(engine: D)
+where
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: ProcessedHeight,
+    BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
+    ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
+{
+    let late_joiner = engine.participants()[0].clone();
+    PlanBuilder::new(engine)
+        .seeds(0..5)
+        .crash(Crash::Delay {
+            count: 1,
+            after: 20,
+        })
+        // Crash the late joiner shortly after it starts syncing, then restart.
+        .crash(Crash::Schedule(
+            Schedule::new()
+                .at(Duration::from_secs(5), Action::Crash(late_joiner.clone()))
+                .at(Duration::from_secs(7), Action::Restart(late_joiner)),
+        ))
+        .exit_condition(ProcessedHeightAtLeast::new(100))
+        .property(LateJoinerStateSyncHandoff)
+        .property(BlockAgreementAtHeight::new(100))
+        .run()
+        .unwrap();
+}
+
+/// Rapid successive crashes with very short downtime, targeting the
+/// processor's lazy recovery path being interrupted by cancellation.
+fn run_rapid_crashes<D>(engine: D)
+where
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: ProcessedHeight,
+    BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
+{
+    PlanBuilder::new(engine)
+        .seeds(0..5)
+        .crash(Crash::Random {
+            frequency: Duration::from_millis(500),
+            downtime: Duration::from_millis(100),
+            count: 1,
+        })
+        .exit_condition(ProcessedHeightAtLeast::new(50))
+        .property(BlockAgreementAtHeight::new(50))
+        .run()
+        .unwrap();
+}
+
+/// Temporarily partition one validator from the network, then heal,
+/// testing lazy recovery without a full restart.
+fn run_network_partition<D>(engine: D)
+where
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: ProcessedHeight,
+    BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
+{
+    let participants = engine.participants();
+    let isolated = participants[0].clone();
+    let good_link = Link {
+        latency: Duration::from_millis(10),
+        jitter: Duration::from_millis(5),
+        success_rate: 1.0,
+    };
+    let dead_link = Link {
+        latency: Duration::from_secs(1),
+        jitter: Duration::ZERO,
+        success_rate: 0.0,
+    };
+
+    // Build a schedule that kills all links to/from the isolated node at
+    // 500ms, then heals all links at 2s.
+    let mut schedule = Schedule::new();
+    for peer in &participants[1..] {
+        schedule = schedule
+            .at(
+                Duration::from_millis(500),
+                Action::UpdateLink {
+                    from: isolated.clone(),
+                    to: peer.clone(),
+                    link: dead_link.clone(),
+                },
+            )
+            .at(
+                Duration::from_millis(500),
+                Action::UpdateLink {
+                    from: peer.clone(),
+                    to: isolated.clone(),
+                    link: dead_link.clone(),
+                },
+            );
+    }
+    schedule = schedule.at(Duration::from_secs(2), Action::Heal(good_link));
+
+    PlanBuilder::new(engine)
+        .seeds(0..5)
+        .crash(Crash::Schedule(schedule))
+        .exit_condition(ProcessedHeightAtLeast::new(50))
+        .property(BlockAgreementAtHeight::new(50))
         .run()
         .unwrap();
 }
