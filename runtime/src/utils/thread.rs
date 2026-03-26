@@ -133,4 +133,54 @@ mod tests {
 
         assert_eq!(observed, expected);
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_spawn_uses_system_default_stack_size() {
+        let pthread_default = {
+            let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
+
+            // SAFETY: `attr` points to uninitialized storage reserved for
+            // `pthread_attr_t`, exactly as required by `pthread_attr_init`.
+            let init_result = unsafe { libc::pthread_attr_init(attr.as_mut_ptr()) };
+            assert_eq!(init_result, 0, "failed to initialize pthread attributes");
+
+            // SAFETY: `pthread_attr_init` succeeded, so `attr` is now initialized.
+            let mut attr = unsafe { attr.assume_init() };
+            let mut pthread_default = 0;
+
+            // SAFETY: `attr` is a valid initialized pthread attribute object and
+            // `pthread_default` points to writable storage for the result.
+            let get_result =
+                unsafe { libc::pthread_attr_getstacksize(&attr, &mut pthread_default) };
+            // SAFETY: `attr` remains initialized until it is destroyed here.
+            let destroy_result = unsafe { libc::pthread_attr_destroy(&mut attr) };
+
+            assert_eq!(get_result, 0, "failed to get pthread default stack size");
+            assert_eq!(
+                destroy_result, 0,
+                "failed to destroy pthread default attributes"
+            );
+
+            pthread_default
+        };
+        let expected = system_default_stack_size();
+
+        // On macOS, `pthread_attr_init` exposes the secondary-thread default,
+        // while `system_default_stack_size()` uses `RLIMIT_STACK` instead.
+        assert!(
+            expected >= pthread_default,
+            "macOS system stack size should differ from the pthread secondary-thread default"
+        );
+
+        let observed = spawn(expected, || {
+            // SAFETY: `pthread_self` returns the current thread handle for the
+            // calling thread.
+            unsafe { libc::pthread_get_stacksize_np(libc::pthread_self()) }
+        })
+        .join()
+        .expect("thread should complete successfully");
+
+        assert_eq!(observed, expected);
+    }
 }
