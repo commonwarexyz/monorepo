@@ -37,7 +37,6 @@ where
 
                     // Benchmark: random reads
                     let append = create_append(&ctx, &name, cache_ref).await;
-                    let mut buf = vec![0u8; read_size];
                     let max_offset = TOTAL_SIZE - read_size;
                     let mut rng = StdRng::seed_from_u64(42);
 
@@ -46,7 +45,7 @@ where
                         // Ensure ~1/100 reads are going to be cache misses.
                         for _ in 0..TOTAL_PAGES * 100 {
                             let offset = rng.gen_range(0..=max_offset) as u64;
-                            append.read_into(&mut buf, offset).await.unwrap();
+                            let _ = append.read_at(offset, read_size).await.unwrap();
                         }
                     }
                     let elapsed = start.elapsed();

@@ -88,10 +88,10 @@ use commonware_codec::{
 };
 use commonware_runtime::{
     buffer::paged::{Append, CacheRef, Replay},
-    Blob, Buf, BufMut, IoBuf, IoBufMut, Metrics, Storage,
+    Blob, Buf, BufMut, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
-use std::{io::Cursor, num::NonZeroUsize};
+use std::num::NonZeroUsize;
 use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
 
@@ -129,8 +129,6 @@ fn decode_length_prefix(buf: &mut impl Buf) -> Result<(usize, usize), Error> {
 enum ItemInfo {
     /// All item data is available in the buffer.
     Complete {
-        /// Length of the varint prefix.
-        varint_len: usize,
         /// Length of the item data.
         data_len: usize,
     },
@@ -159,10 +157,7 @@ fn find_item(buf: &mut impl Buf, offset: u64) -> Result<(u64, ItemInfo), Error> 
     let buffered = available.saturating_sub(varint_len);
 
     let item = if buffered >= size {
-        ItemInfo::Complete {
-            varint_len,
-            data_len: size,
-        }
+        ItemInfo::Complete { data_len: size }
     } else {
         ItemInfo::Incomplete {
             varint_len,
@@ -251,27 +246,17 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         blob: &Append<E::Blob>,
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
-        // Read varint header (max 5 bytes for u32)
-        let (buf, available) = blob
-            .read_up_to(
-                offset,
-                MAX_U32_VARINT_SIZE,
-                IoBufMut::with_capacity(MAX_U32_VARINT_SIZE),
-            )
-            .await?;
-        let buf = buf.freeze();
-        let mut cursor = Cursor::new(buf.slice(..available));
-        let (next_offset, item_info) = find_item(&mut cursor, offset)?;
+        // Read the varint header first. `read_at_up_to` may return only the header or the header
+        // plus some item bytes, but it keeps the bytes zero-copy as segmented `IoBufs`.
+        let mut header = blob.read_at_up_to(offset, MAX_U32_VARINT_SIZE).await?;
+        let (next_offset, item_info) = find_item(&mut header, offset)?;
 
-        // Decode item - either directly from buffer or by chaining prefix with remainder
+        // Decode from the bytes we already have, chaining in only the missing suffix when the
+        // header probe did not include the full item payload.
         let (item_size, decoded) = match item_info {
-            ItemInfo::Complete {
-                varint_len,
-                data_len,
-            } => {
-                // Data follows varint in buffer
-                let data = buf.slice(varint_len..varint_len + data_len);
-                let decoded = decode_item::<V>(data, cfg, compressed)?;
+            ItemInfo::Complete { data_len } => {
+                // Item bytes are already fully available after varint consumption.
+                let decoded = decode_item::<V>(header.take(data_len), cfg, compressed)?;
                 (data_len as u32, decoded)
             }
             ItemInfo::Incomplete {
@@ -279,13 +264,12 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 prefix_len,
                 total_len,
             } => {
-                // Read remainder and chain with prefix to avoid copying
-                let prefix = buf.slice(varint_len..varint_len + prefix_len);
+                // Read the missing suffix and chain it onto the already buffered prefix without
+                // copying the prefix into a temporary `Vec`.
                 let read_offset = offset + varint_len as u64 + prefix_len as u64;
                 let remainder_len = total_len - prefix_len;
-                let mut remainder = vec![0u8; remainder_len];
-                blob.read_into(&mut remainder, read_offset).await?;
-                let chained = prefix.chain(IoBuf::from(remainder));
+                let remainder = blob.read_at(read_offset, remainder_len).await?;
+                let chained = header.chain(remainder);
                 let decoded = decode_item::<V>(chained, cfg, compressed)?;
                 (total_len as u32, decoded)
             }

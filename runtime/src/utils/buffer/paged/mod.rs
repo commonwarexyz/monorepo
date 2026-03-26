@@ -23,7 +23,7 @@
 //! full or partial. A partial page's logical bytes are immutable on commit, and if it's re-written,
 //! it's only to add more bytes after the existing ones.
 
-use crate::{Blob, Buf, BufMut, Error, IoBuf};
+use crate::{Blob, Buf, BufMut, BufferPool, Error, IoBuf};
 use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{crc32, Crc32};
 
@@ -39,19 +39,26 @@ use tracing::{debug, error};
 // A checksum record contains two u16 lengths and two CRCs (each 4 bytes).
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 
-/// Read the designated page from the underlying blob and return its logical bytes as a vector if it
-/// passes the integrity check, returning error otherwise. Safely handles partial pages. Caller can
-/// check the length of the returned vector to determine if the page was partial vs full.
-async fn get_page_from_blob(
+/// Read one physical page from the underlying blob and return its validated logical bytes.
+///
+/// This allocates a physical-page-sized buffer from `pool`, reads directly into it, validates the
+/// trailing CRC record, and returns an immutable slice over just the logical bytes. Partial pages
+/// are therefore returned as shorter `IoBuf` views without copying them into a new buffer.
+async fn read_page_from_blob(
     blob: &impl Blob,
     page_num: u64,
     logical_page_size: u64,
+    pool: &BufferPool,
 ) -> Result<IoBuf, Error> {
     let physical_page_size = logical_page_size + CHECKSUM_SIZE;
     let physical_page_start = page_num * physical_page_size;
 
     let page = blob
-        .read_at(physical_page_start, physical_page_size as usize)
+        .read_at_buf(
+            physical_page_start,
+            physical_page_size as usize,
+            pool.alloc(physical_page_size as usize),
+        )
         .await?
         .coalesce();
 
