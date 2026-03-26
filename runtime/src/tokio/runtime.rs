@@ -314,9 +314,9 @@ pub struct Executor {
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     runtime: Runtime,
-    thread_stack_size: usize,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
+    thread_stack_size: usize,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -456,9 +456,9 @@ impl crate::Runner for Runner {
             registry: Mutex::new(registry),
             metrics,
             runtime,
-            thread_stack_size: self.cfg.thread_stack_size,
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            thread_stack_size: self.cfg.thread_stack_size,
         });
 
         // Get metrics
