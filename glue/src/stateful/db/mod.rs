@@ -608,6 +608,8 @@ macro_rules! impl_state_sync_set {
                 let (completion_tx, mut completion_rx) = mpsc::channel(1);
                 let db_count = [$($idx,)+].len();
                 let coordinator_targets = targets.clone();
+                let first_db_error: Arc<commonware_utils::sync::Mutex<Option<String>>> =
+                    Arc::new(commonware_utils::sync::Mutex::new(None));
                 let coordinator_result: Arc<commonware_utils::sync::Mutex<Option<Anchor<D>>>> =
                     Arc::new(commonware_utils::sync::Mutex::new(None));
                 let finish_coordinator = {
@@ -716,6 +718,7 @@ macro_rules! impl_state_sync_set {
                 let synced = join!(
                     $(
                         async {
+                            let first_db_error = first_db_error.clone();
                             let mut reached_target_rx = db_channels.$idx.reached_rx;
                             let mut generation_rx = Some(db_channels.$idx.generation_rx);
                             let mut current_generation = 0usize;
@@ -811,12 +814,22 @@ macro_rules! impl_state_sync_set {
                                         core::any::type_name::<$T>(),
                                     )
                                 });
+                            if let Err(err) = &result {
+                                let mut first = first_db_error.lock();
+                                if first.is_none() {
+                                    *first = Some(err.clone());
+                                }
+                            }
                             let _ = completion_signal.send_lossy(()).await;
                             result
                         },
                     )+
                     finish_coordinator,
                 );
+
+                if let Some(err) = first_db_error.lock().take() {
+                    return Err(err);
+                }
 
                 let synced = ($(synced.$idx?,)+);
                 let Some(converged_anchor) = coordinator_result.lock().take() else {
@@ -1274,6 +1287,10 @@ mod tests {
 
     struct FailingStateSyncDb;
 
+    struct FinishClosedSyncDb {
+        final_target: u64,
+    }
+
     struct ObservedSlowSyncDb {
         final_target: u64,
     }
@@ -1456,6 +1473,34 @@ mod tests {
 
         async fn sync_target(&self) -> Self::SyncTarget {
             0
+        }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl<E: Send> ManagedDb<E> for FinishClosedSyncDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            unreachable!("FinishClosedSyncDb is only constructed through state sync in tests")
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            self.final_target
         }
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -1653,6 +1698,9 @@ mod tests {
     #[derive(Debug)]
     struct TestSyncError;
 
+    #[derive(Debug)]
+    struct FinishClosedSyncError;
+
     impl<E: Send> StateSyncDb<E, ()> for FailingStateSyncDb {
         type SyncError = TestSyncError;
 
@@ -1686,6 +1734,32 @@ mod tests {
             _progress_tx: Option<mpsc::Sender<SyncProgress>>,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self)
+        }
+    }
+
+    impl<E: Send> StateSyncDb<E, ()> for FinishClosedSyncDb {
+        type SyncError = FinishClosedSyncError;
+
+        async fn sync_db(
+            _context: E,
+            _config: Self::Config,
+            _resolver: (),
+            target: Self::SyncTarget,
+            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+            _progress_tx: Option<mpsc::Sender<SyncProgress>>,
+        ) -> Result<Self, Self::SyncError> {
+            let Some(finish_rx) = finish.as_mut() else {
+                panic!("finish receiver should be provided");
+            };
+            match finish_rx.recv().await {
+                Some(()) => Ok(Self {
+                    final_target: target,
+                }),
+                None => Err(FinishClosedSyncError),
+            }
         }
     }
 
@@ -2273,6 +2347,46 @@ mod tests {
             assert!(
                 err.contains("FailingStateSyncDb"),
                 "error should include failing database type: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn tuple_state_sync_preserves_original_failure_when_peer_finish_channel_closes() {
+        deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
+            let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
+
+            let result = <(
+                Arc<AsyncRwLock<FinishClosedSyncDb>>,
+                Arc<AsyncRwLock<FailingStateSyncDb>>,
+            ) as StateSyncSet<deterministic::Context, ((), ()), sha256::Digest>>::sync(
+                context,
+                ((), ()),
+                ((), ()),
+                anchor(0),
+                (0, 0),
+                tip_rx,
+                SyncEngineConfig {
+                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                    apply_batch_size: 1,
+                    max_outstanding_requests: 1,
+                    update_channel_size: NonZeroUsize::new(1).unwrap(),
+                    max_retained_roots: 0,
+                },
+            )
+            .await;
+
+            let err = match result {
+                Ok(_) => panic!("tuple state sync should return the database sync error"),
+                Err(err) => err,
+            };
+            assert!(
+                err.contains("state sync failed (index 1, db"),
+                "error should include failing database index, got: {err}",
+            );
+            assert!(
+                err.contains("FailingStateSyncDb"),
+                "error should include failing database type, got: {err}",
             );
         });
     }
