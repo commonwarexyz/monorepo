@@ -2,6 +2,9 @@
 
 use core::hash::{BuildHasher, Hash, Hasher};
 
+// Golden-ratio-derived mixing constant (2^64 / phi, truncated to odd).
+const MIXING_CONSTANT: u64 = 0x517cc1b727220a95;
+
 /// Translate keys into a new representation (often a smaller one).
 ///
 /// # Warning
@@ -35,10 +38,6 @@ pub trait Translator: Clone + BuildHasher + Send + Sync + 'static {
 ///
 /// This hasher is not suitable for general use. If the hasher is called on a byte slice longer
 /// than `size_of::<u64>()`, it will panic.
-
-// Golden-ratio-derived mixing constant (2^64 / phi, truncated to odd).
-const MIXING_CONSTANT: u64 = 0x517cc1b727220a95;
-
 #[derive(Default, Clone)]
 pub struct UintIdentity {
     value: u64,
