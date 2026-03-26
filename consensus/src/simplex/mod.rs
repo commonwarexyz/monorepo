@@ -3197,7 +3197,6 @@ mod tests {
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
                         latest = monitor.recv().await.expect("event missing");
-                        panic!("latest: {latest}");
                     }
                 }));
             }
@@ -3236,6 +3235,13 @@ mod tests {
     fn test_impersonator() {
         for seed in 0..5 {
             impersonator::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinPk, _>);
+            impersonator::<_, _, Random>(seed, bls12381_threshold_vrf::fixture::<MinSig, _>);
+            impersonator::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinPk, _>);
+            impersonator::<_, _, RoundRobin>(seed, bls12381_threshold_std::fixture::<MinSig, _>);
+            impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinPk, _>);
+            impersonator::<_, _, RoundRobin>(seed, bls12381_multisig::fixture::<MinSig, _>);
+            impersonator::<_, _, RoundRobin>(seed, ed25519::fixture);
+            impersonator::<_, _, RoundRobin>(seed, secp256r1::fixture);
         }
     }
 
