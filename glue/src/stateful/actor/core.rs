@@ -36,11 +36,23 @@ type AnchoredUpdate<A, E> = (
     Anchor<BlockDigest<A, E>>,
     <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets,
 );
-type HeldVerify<E, A> = (
-    (E, <A as Application<E>>::Context),
-    ErasedAncestorStream<<A as Application<E>>::Block>,
-    oneshot::Sender<bool>,
-);
+
+/// Buffered verify request while startup sync is in progress.
+struct HeldVerify<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    context: (E, A::Context),
+    ancestry: ErasedAncestorStream<A::Block>,
+    response: oneshot::Sender<bool>,
+}
+
+/// Buffered finalization while startup sync is in progress.
+struct HeldFinalization<B> {
+    block: B,
+    acknowledgement: Exact,
+}
 
 const STATE_SYNC_METADATA_SUFFIX: &str = "_state_sync_metadata";
 
@@ -114,7 +126,7 @@ where
     ///
     /// Marshal bounds in-flight application updates by `max_pending_acks`,
     /// so this list is also bounded by protocol behavior.
-    held_finalizations: Vec<(A::Block, Exact)>,
+    held_finalizations: Vec<HeldFinalization<A::Block>>,
 }
 
 impl<E, A, R> SyncingState<E, A, R>
@@ -338,10 +350,12 @@ where
                     (Mode::Syncing(syncing), Message::Verify { context, ancestry, response }) => {
                         syncing
                             .held_verify_requests
-                            .retain(|(_, _, r)| !r.is_closed());
-                        syncing
-                            .held_verify_requests
-                            .push((context, ancestry, response));
+                            .retain(|request| !request.response.is_closed());
+                        syncing.held_verify_requests.push(HeldVerify {
+                            context,
+                            ancestry,
+                            response,
+                        });
                         debug!(
                             held_verify_requests = syncing.held_verify_requests.len(),
                             "verify held: state sync in progress"
@@ -358,7 +372,10 @@ where
                             height = block.height().get(),
                             "finalization held during sync"
                         );
-                        syncing.held_finalizations.push((block, acknowledgement));
+                        syncing.held_finalizations.push(HeldFinalization {
+                            block,
+                            acknowledgement,
+                        });
                     }
                     (Mode::Syncing(syncing), Message::Tip { height, digest }) => {
                         handle_tip(&mut self.shared, syncing, height, digest).await;
@@ -466,8 +483,7 @@ async fn handle_tip<E, A, P, R>(
     };
 
     let anchored_update = (Anchor { height, digest }, A::sync_targets(&block));
-    let tip_sender = syncing.tip_sender.clone();
-    if tip_sender.try_send(anchored_update).is_err() {
+    if syncing.tip_sender.try_send(anchored_update).is_err() {
         debug!(
             height = height.get(),
             "tip update channel unavailable, keeping existing sync target"
@@ -502,7 +518,11 @@ where
 
     // In case any finalizations were delivered after the floor was updated,
     // process them now to ensure we progress marshal.
-    for (block, acknowledgement) in syncing.held_finalizations.drain(..) {
+    for HeldFinalization {
+        block,
+        acknowledgement,
+    } in syncing.held_finalizations.drain(..)
+    {
         if block.height() <= last_processed.height {
             // Block is already persisted at or below the reconciled floor.
             // The acknowledgement can be dropped, since marshal cancels
@@ -515,7 +535,12 @@ where
 
     // In case any verification requests were delivered after the floor was updated,
     // process them now to ensure we progress consensus.
-    for (request_context, ancestry, response) in syncing.held_verify_requests.drain(..) {
+    for HeldVerify {
+        context: request_context,
+        ancestry,
+        response,
+    } in syncing.held_verify_requests.drain(..)
+    {
         processor
             .verify(
                 context,

@@ -96,11 +96,6 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// Returns true when `block` is already covered by committed state.
-    fn is_already_processed(&self, block: &A::Block) -> bool {
-        block.height() <= self.last_processed.height
-    }
-
     /// Create a new processor with the given application, databases, and
     /// the last finalized block's anchor.
     pub(super) fn new(
@@ -193,14 +188,7 @@ where
             response.send_lossy(None);
             return;
         };
-        self.pending.insert(
-            block.digest(),
-            PendingEntry {
-                round,
-                parent: parent_digest,
-                merkleized,
-            },
-        );
+        self.cache_pending(block.digest(), parent_digest, round, merkleized);
         let _ = self.metrics.pending_blocks.try_set(self.pending.len());
         response.send_lossy(Some(block));
     }
@@ -301,14 +289,7 @@ where
             response.send_lossy(false);
             return;
         };
-        self.pending.insert(
-            block_digest,
-            PendingEntry {
-                round,
-                parent: parent_digest,
-                merkleized,
-            },
-        );
+        self.cache_pending(block_digest, parent_digest, round, merkleized);
         let _ = self.metrics.pending_blocks.try_set(self.pending.len());
         response.send_lossy(true);
     }
@@ -326,9 +307,8 @@ where
     {
         // Rebuild pending state if no pending state exists for the parent and the
         // parent is not the processed tip.
-        let needs_rebuild = self.last_processed.digest != parent_digest
-            && !self.pending.contains_key(&parent_digest);
-        if needs_rebuild {
+        if self.last_processed.digest != parent_digest && !self.pending.contains_key(&parent_digest)
+        {
             self.rebuild_pending(context, provider, parent_digest, response)
                 .await?;
         }
@@ -438,7 +418,7 @@ where
                 timer.cancel();
                 return Err(PrepareBatchesError::Cancelled);
             };
-            let batches = batches?;
+            let batches = batches.expect("rebuild replay parent must be available");
 
             let Some(merkleized) = await_or_cancel(
                 response,
@@ -451,14 +431,7 @@ where
                 return Err(PrepareBatchesError::Cancelled);
             };
 
-            self.pending.insert(
-                digest,
-                PendingEntry {
-                    round,
-                    parent: parent_digest,
-                    merkleized,
-                },
-            );
+            self.cache_pending(digest, parent_digest, round, merkleized);
         }
 
         let _ = self.metrics.pending_blocks.try_set(self.pending.len());
@@ -474,6 +447,8 @@ where
         }
 
         let _timer = self.metrics.finalize_duration.timer();
+        let block_context = block.context();
+        let round = Round::new(block_context.epoch(), block_context.view());
 
         // Marshal finalization is ordered. A pending miss means we can safely
         // apply this block on top of finalized state.
@@ -481,13 +456,10 @@ where
             Some(entry) => entry.merkleized,
             None => {
                 let batches = self.databases.new_batches().await;
-                self.app
-                    .apply((context.clone(), block.context()), &block, batches)
-                    .await
+                self.app.apply((context.clone(), block_context), &block, batches).await
             }
         };
 
-        let round = Round::new(block.context().epoch(), block.context().view());
         self.databases.finalize(batch).await;
         self.prune_pending_after_finalize(&digest, round);
         self.last_processed = Anchor { height, digest };
@@ -538,6 +510,29 @@ where
         self.metrics.pruned_forks.inc_by(pruned as u64);
         let _ = self.metrics.pending_blocks.try_set(self.pending.len());
     }
+
+    /// Cache merkleized pending state for a block digest.
+    fn cache_pending(
+        &mut self,
+        digest: PendingDigest<A, E>,
+        parent: PendingDigest<A, E>,
+        round: Round,
+        merkleized: PendingBatches<A, E>,
+    ) {
+        self.pending.insert(
+            digest,
+            PendingEntry {
+                round,
+                parent,
+                merkleized,
+            },
+        );
+    }
+
+    /// Returns true when `block` is already covered by committed state.
+    fn is_already_processed(&self, block: &A::Block) -> bool {
+        block.height() <= self.last_processed.height
+    }
 }
 
 /// Wait for `future` unless the response receiver is dropped.
@@ -556,7 +551,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{FinalizeStatus, PendingEntry, PrepareBatchesError, Processor};
+    use super::{FinalizeStatus, PrepareBatchesError, Processor};
     use crate::stateful::{
         actor::metrics::Metrics as ProcessorMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
@@ -900,14 +895,8 @@ mod tests {
                 range: non_empty_range!(Location::new(0), Location::new(1)),
             };
             let round = Round::new(Epoch::zero(), view);
-            self.processor.pending.insert(
-                block.digest(),
-                PendingEntry {
-                    round,
-                    parent: parent.digest(),
-                    merkleized,
-                },
-            );
+            self.processor
+                .cache_pending(block.digest(), parent.digest(), round, merkleized);
             self.provider.insert(block.clone());
             block
         }
