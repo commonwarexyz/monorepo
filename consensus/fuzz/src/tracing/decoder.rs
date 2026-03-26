@@ -182,9 +182,17 @@ pub fn parse_itf_vote(v: &Value, block_map: &mut HashMap<String, String>) -> Opt
     let inner = v.get("value")?;
     match tag {
         "Notarize" => {
-            let view = parse_int(&inner["view"]);
+            let view = parse_int(
+                inner
+                    .get("proposal")
+                    .map(|proposal| &proposal["view"])
+                    .unwrap_or(&inner["view"]),
+            );
             let sig = inner["sig"].as_str()?.to_string();
-            let block_name = inner["block"].as_str()?;
+            let block_name = inner
+                .get("proposal")
+                .and_then(|proposal| proposal["payload"].as_str())
+                .or_else(|| inner["block"].as_str())?;
             let block = block_to_hex(block_name, block_map);
             Some(TracedVote::Notarize { view, sig, block })
         }
@@ -194,9 +202,17 @@ pub fn parse_itf_vote(v: &Value, block_map: &mut HashMap<String, String>) -> Opt
             Some(TracedVote::Nullify { view, sig })
         }
         "Finalize" => {
-            let view = parse_int(&inner["view"]);
+            let view = parse_int(
+                inner
+                    .get("proposal")
+                    .map(|proposal| &proposal["view"])
+                    .unwrap_or(&inner["view"]),
+            );
             let sig = inner["sig"].as_str()?.to_string();
-            let block_name = inner["block"].as_str()?;
+            let block_name = inner
+                .get("proposal")
+                .and_then(|proposal| proposal["payload"].as_str())
+                .or_else(|| inner["block"].as_str())?;
             let block = block_to_hex(block_name, block_map);
             Some(TracedVote::Finalize { view, sig, block })
         }
@@ -210,8 +226,16 @@ pub fn parse_itf_cert(v: &Value, block_map: &mut HashMap<String, String>) -> Opt
     let inner = v.get("value")?;
     match tag {
         "Notarization" => {
-            let view = parse_int(&inner["view"]);
-            let block_name = inner["block"].as_str()?;
+            let view = parse_int(
+                inner
+                    .get("proposal")
+                    .map(|proposal| &proposal["view"])
+                    .unwrap_or(&inner["view"]),
+            );
+            let block_name = inner
+                .get("proposal")
+                .and_then(|proposal| proposal["payload"].as_str())
+                .or_else(|| inner["block"].as_str())?;
             let block = block_to_hex(block_name, block_map);
             let signers: Vec<String> = parse_set(&inner["signatures"])
                 .iter()
@@ -239,8 +263,16 @@ pub fn parse_itf_cert(v: &Value, block_map: &mut HashMap<String, String>) -> Opt
             })
         }
         "Finalization" => {
-            let view = parse_int(&inner["view"]);
-            let block_name = inner["block"].as_str()?;
+            let view = parse_int(
+                inner
+                    .get("proposal")
+                    .map(|proposal| &proposal["view"])
+                    .unwrap_or(&inner["view"]),
+            );
+            let block_name = inner
+                .get("proposal")
+                .and_then(|proposal| proposal["payload"].as_str())
+                .or_else(|| inner["block"].as_str())?;
             let block = block_to_hex(block_name, block_map);
             let signers: Vec<String> = parse_set(&inner["signatures"])
                 .iter()
@@ -426,16 +458,28 @@ fn insert_vote_signer(
     let Some(inner) = vote_val.get("value") else {
         return;
     };
-    let view = parse_int(&inner["view"]);
     let sig = inner["sig"].as_str().unwrap_or("").to_string();
     match tag {
         "Notarize" => {
+            let view = parse_int(
+                inner
+                    .get("proposal")
+                    .map(|proposal| &proposal["view"])
+                    .unwrap_or(&inner["view"]),
+            );
             notarize_signers.entry(view).or_default().insert(sig);
         }
         "Nullify" => {
+            let view = parse_int(&inner["view"]);
             nullify_signers.entry(view).or_default().insert(sig);
         }
         "Finalize" => {
+            let view = parse_int(
+                inner
+                    .get("proposal")
+                    .map(|proposal| &proposal["view"])
+                    .unwrap_or(&inner["view"]),
+            );
             finalize_signers.entry(view).or_default().insert(sig);
         }
         _ => {}
@@ -471,8 +515,17 @@ pub fn extract_expected_state(
                 };
                 match tag {
                     "Notarization" => {
-                        let view = parse_int(&inner["view"]);
-                        let block_name = inner["block"].as_str().unwrap_or("");
+                        let view = parse_int(
+                            inner
+                                .get("proposal")
+                                .map(|proposal| &proposal["view"])
+                                .unwrap_or(&inner["view"]),
+                        );
+                        let block_name = inner
+                            .get("proposal")
+                            .and_then(|proposal| proposal["payload"].as_str())
+                            .or_else(|| inner["block"].as_str())
+                            .unwrap_or("");
                         let hex = block_map.get(block_name).cloned().unwrap_or_default();
                         notarizations.insert(view, hex);
                     }
@@ -481,8 +534,17 @@ pub fn extract_expected_state(
                         nullifications.insert(view);
                     }
                     "Finalization" => {
-                        let view = parse_int(&inner["view"]);
-                        let block_name = inner["block"].as_str().unwrap_or("");
+                        let view = parse_int(
+                            inner
+                                .get("proposal")
+                                .map(|proposal| &proposal["view"])
+                                .unwrap_or(&inner["view"]),
+                        );
+                        let block_name = inner
+                            .get("proposal")
+                            .and_then(|proposal| proposal["payload"].as_str())
+                            .or_else(|| inner["block"].as_str())
+                            .unwrap_or("");
                         let hex = block_map.get(block_name).cloned().unwrap_or_default();
                         finalizations.insert(view, hex);
                     }
