@@ -1,28 +1,27 @@
-//! Helpers for spawning OS threads with the platform default stack size.
+//! Helpers for resolving the default system thread stack size.
 
 use std::{sync::OnceLock, thread};
 
-/// Cached default system thread stack size.
-static SYSTEM_DEFAULT_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
+/// Cached system thread stack size.
+static SYSTEM_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
 
 /// Rust's default thread stack size when no explicit size is set.
 ///
 /// See <https://doc.rust-lang.org/std/thread/#stack-size>.
 pub(crate) const RUST_DEFAULT_THREAD_STACK_SIZE: usize = 2 * 1024 * 1024;
 
-/// Returns the system default thread stack size.
+/// Returns the system thread stack size.
 ///
 /// This uses the operating system's default spawned-thread stack size when it
 /// can be queried, and otherwise falls back to Rust's default spawned-thread
 /// stack size.
-pub(crate) fn system_default_thread_stack_size() -> usize {
-    *SYSTEM_DEFAULT_THREAD_STACK_SIZE.get_or_init(|| {
-        system_default_thread_stack_size_impl().unwrap_or(RUST_DEFAULT_THREAD_STACK_SIZE)
-    })
+pub(crate) fn system_thread_stack_size() -> usize {
+    *SYSTEM_THREAD_STACK_SIZE
+        .get_or_init(|| system_thread_stack_size_impl().unwrap_or(RUST_DEFAULT_THREAD_STACK_SIZE))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn system_default_thread_stack_size_impl() -> Option<usize> {
+fn system_thread_stack_size_impl() -> Option<usize> {
     let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
 
     // SAFETY: `attr` points to uninitialized storage reserved for
@@ -48,7 +47,7 @@ fn system_default_thread_stack_size_impl() -> Option<usize> {
 }
 
 #[cfg(target_os = "macos")]
-fn system_default_thread_stack_size_impl() -> Option<usize> {
+fn system_thread_stack_size_impl() -> Option<usize> {
     // macOS uses different defaults for the main thread and spawned threads:
     // the main thread stack is 8 MiB, while secondary threads default to
     // 512 KiB. We use `RLIMIT_STACK` here to avoid inheriting the smaller
@@ -73,7 +72,7 @@ fn system_default_thread_stack_size_impl() -> Option<usize> {
 }
 
 #[cfg(not(unix))]
-const fn system_default_thread_stack_size_impl() -> Option<usize> {
+const fn system_thread_stack_size_impl() -> Option<usize> {
     None
 }
 
@@ -95,8 +94,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn test_spawn_uses_system_default_thread_stack_size() {
-        let expected = system_default_thread_stack_size();
+    fn test_spawn_with_system_thread_stack_size() {
+        let expected = system_thread_stack_size();
         let observed = spawn(expected, || {
             let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
 
@@ -132,7 +131,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn test_spawn_uses_system_default_thread_stack_size() {
+    fn test_spawn_with_system_thread_stack_size() {
         let pthread_default = {
             let mut attr = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
 
@@ -163,10 +162,10 @@ mod tests {
 
             pthread_default
         };
-        let expected = system_default_thread_stack_size();
+        let expected = system_thread_stack_size();
 
         // On macOS, `pthread_attr_init` exposes the secondary-thread default,
-        // while `system_default_stack_size()` uses `RLIMIT_STACK` instead.
+        // while `system_thread_stack_size()` uses `RLIMIT_STACK` instead.
         assert!(
             expected >= pthread_default,
             "macOS system stack size should differ from the pthread secondary-thread default"

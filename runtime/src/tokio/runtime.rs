@@ -179,7 +179,7 @@ impl Config {
         Self {
             worker_threads: 2,
             max_blocking_threads: 512,
-            thread_stack_size: utils::thread::system_default_thread_stack_size(),
+            thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
@@ -897,7 +897,7 @@ mod tests {
         let cfg = Config::new();
         assert_eq!(
             cfg.thread_stack_size(),
-            utils::thread::system_default_thread_stack_size()
+            utils::thread::system_thread_stack_size()
         );
     }
 

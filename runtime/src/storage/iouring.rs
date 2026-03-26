@@ -602,7 +602,7 @@ mod tests {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
             },
-            thread::system_default_thread_stack_size(),
+            thread::system_thread_stack_size(),
             &mut Registry::default(),
             pool,
         );
