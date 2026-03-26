@@ -16,10 +16,10 @@ use crate::{
         operation::Key,
         Error,
     },
+    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
 use futures::stream::Stream;
 
 /// Proof information for verifying a key has a particular value in the database.
@@ -38,7 +38,7 @@ pub type Db<E, C, K, V, I, H, const N: usize> =
 
 // Shared read-only functionality.
 impl<
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Contiguous<Item = Operation<K, V>>,
         K: Key,
         V: ValueEncoding,
@@ -133,7 +133,7 @@ where
 }
 
 impl<
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<K, V>>,
         K: Key,
         V: ValueEncoding,

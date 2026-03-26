@@ -15,11 +15,10 @@ use crate::{
         build_snapshot_from_log, delete_known_loc, operation::Operation as OperationTrait,
         update_known_loc, Error,
     },
-    Persistable,
+    Context, Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use core::num::NonZeroU64;
 use std::collections::HashMap;
 
@@ -50,7 +49,7 @@ enum SnapshotUndo<K> {
 /// - [crate::qmdb::any::unordered::fixed::Db]
 /// - [crate::qmdb::any::unordered::variable::Db]
 pub struct Db<
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: CodecShared>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
@@ -90,7 +89,7 @@ pub struct Db<
 // Shared read-only functionality.
 impl<E, U, C, I, H> Db<E, C, I, H, U>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -165,7 +164,7 @@ where
 // Functionality requiring Mutable journal.
 impl<E, U, C, I, H> Db<E, C, I, H, U>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Mutable<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -363,7 +362,7 @@ where
 // Functionality requiring Mutable + Persistable journal.
 impl<E, U, C, I, H> Db<E, C, I, H, U>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
@@ -440,7 +439,7 @@ where
 
 impl<E, U, C, I, H> Persistable for Db<E, C, I, H, U>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,

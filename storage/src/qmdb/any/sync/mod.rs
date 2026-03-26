@@ -37,10 +37,10 @@ use crate::{
         operation::{Committable, Key, Operation},
     },
     translator::Translator,
+    Context,
 };
 use commonware_codec::{CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
 
@@ -58,7 +58,7 @@ async fn build_db<E, O, I, H, U, C>(
     apply_batch_size: usize,
 ) -> Result<Db<E, C, I, H, U>, qmdb::Error>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     O: Operation + Committable + CodecShared + Send + Sync + 'static,
     I: crate::index::Unordered<Value = Location>,
     H: Hasher,
@@ -92,7 +92,7 @@ where
 
 impl<E, K, V, H, T> qmdb::sync::Database for UnorderedFixedDb<E, K, V, H, T>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher,
@@ -134,7 +134,7 @@ where
 
 impl<E, K, V, H, T> qmdb::sync::Database for UnorderedVariableDb<E, K, V, H, T>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher,
@@ -177,7 +177,7 @@ where
 
 impl<E, K, V, H, T> qmdb::sync::Database for OrderedFixedDb<E, K, V, H, T>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher,
@@ -219,7 +219,7 @@ where
 
 impl<E, K, V, H, T> qmdb::sync::Database for OrderedVariableDb<E, K, V, H, T>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher,

@@ -17,23 +17,17 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
 pub type Db<E, K, V, H, T, const N: usize> =
     super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, Index<T, Location>, H, N>;
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > Db<E, K, V, H, T, N>
+impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, const N: usize>
+    Db<E, K, V, H, T, N>
 {
     /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -59,9 +53,9 @@ pub mod partitioned {
             Error,
         },
         translator::Translator,
+        Context,
     };
     use commonware_cryptography::Hasher;
-    use commonware_runtime::{Clock, Metrics, Storage as RStorage};
     use commonware_utils::Array;
 
     /// A partitioned variant of [super::Db].
@@ -82,7 +76,7 @@ pub mod partitioned {
         >;
 
     impl<
-            E: RStorage + Clock + Metrics,
+            E: Context,
             K: Array,
             V: FixedValue,
             H: Hasher,

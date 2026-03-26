@@ -29,12 +29,11 @@ use crate::{
         operation::Operation as _,
         Error,
     },
-    Persistable,
+    Context, Persistable,
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, sequence::prefixed_u64::U64, sync::AsyncMutex};
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
@@ -50,7 +49,7 @@ const PRUNED_CHUNKS_PREFIX: u8 = 1;
 
 /// A Current QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 pub struct Db<
-    E: Storage + Clock + Metrics,
+    E: Context,
     C: Contiguous<Item: CodecShared>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
@@ -94,7 +93,7 @@ pub struct Db<
 // Shared read-only functionality.
 impl<E, C, I, H, U, const N: usize> Db<E, C, I, H, U, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -140,7 +139,7 @@ where
 // Functionality requiring non-mutable journal.
 impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -247,7 +246,7 @@ where
 // Functionality requiring mutable journal.
 impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Mutable<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -506,7 +505,7 @@ where
 // Functionality requiring mutable + persistable journal.
 impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
@@ -540,7 +539,7 @@ where
 
 impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update + 'static,
     C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
@@ -580,7 +579,7 @@ where
 
 impl<E, U, C, I, H, const N: usize> Persistable for Db<E, C, I, H, U, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update,
     C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
@@ -821,7 +820,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
 ///   the pruned chunks.
 ///
 /// Returns `(metadata_handle, pruned_chunks, pinned_node_digests)`.
-pub(super) async fn init_metadata<E: Storage + Clock + Metrics, D: Digest>(
+pub(super) async fn init_metadata<E: Context, D: Digest>(
     context: E,
     partition: &str,
 ) -> Result<(Metadata<E, U64, Vec<u8>>, usize, Vec<D>), Error> {

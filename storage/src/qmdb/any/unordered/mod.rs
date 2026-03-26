@@ -13,10 +13,10 @@ use crate::{
         operation::{Committable, Key, Operation as OperationTrait},
         Error,
     },
+    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 
 pub mod fixed;
 pub mod variable;
@@ -24,7 +24,7 @@ pub mod variable;
 pub use crate::qmdb::any::operation::{update::Unordered as Update, Unordered as Operation};
 
 impl<
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding,
         C: Contiguous<Item = Operation<K, V>>,
@@ -60,7 +60,7 @@ where
 }
 
 impl<
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = O>,
         O: OperationTrait + Codec + Committable + Send + Sync,
         I: Index<Value = Location>,
@@ -107,7 +107,7 @@ impl<
 crate::qmdb::any::traits::impl_db_any! {
     [E, K, V, C, I, H] Db<E, C, I, H, Update<K, V>>
     where {
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: PersistableMutableLog<Operation<K, V>>,
@@ -123,7 +123,7 @@ crate::qmdb::any::traits::impl_db_any! {
 crate::qmdb::any::traits::impl_provable! {
     [E, K, V, C, I, H] Db<E, C, I, H, Update<K, V>>
     where {
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: PersistableMutableLog<Operation<K, V>>,

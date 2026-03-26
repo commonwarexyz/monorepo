@@ -18,10 +18,10 @@ use crate::{
         operation::{Key, Operation as OperationTrait},
         update_known_loc, Error,
     },
+    Context,
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::{
@@ -247,7 +247,7 @@ where
         db: &Db<E, C, I, H, U>,
     ) -> Result<Operation<U>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Contiguous<Item = Operation<U>>,
         I: UnorderedIndex<Value = Location>,
     {
@@ -284,7 +284,7 @@ where
         db: &Db<E, C, I, H, U>,
     ) -> Vec<Location>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Contiguous<Item = Operation<U>>,
         I: UnorderedIndex<Value = Location>,
     {
@@ -318,7 +318,7 @@ where
         db: &Db<E, C, I, H, U>,
     ) -> bool
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Contiguous<Item = Operation<U>>,
         I: UnorderedIndex<Value = Location>,
     {
@@ -366,7 +366,7 @@ where
         db: &Db<E, C, I, H, U>,
     ) -> Result<bool, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Contiguous<Item = Operation<U>>,
         I: UnorderedIndex<Value = Location>,
     {
@@ -416,7 +416,7 @@ where
         db: &Db<E, C, I, H, U>,
     ) -> Result<MerkleizedBatch<H::Digest, U>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Contiguous<Item = Operation<U>>,
         I: UnorderedIndex<Value = Location>,
     {
@@ -531,7 +531,7 @@ where
         db: &Db<E, C, I, H, U>,
     ) -> Result<Option<U::Value>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Contiguous<Item = Operation<U>>,
         I: UnorderedIndex<Value = Location> + 'static,
     {
@@ -560,7 +560,7 @@ where
         db: &Db<E, C, I, H, update::Unordered<K, V>>,
     ) -> Result<MerkleizedBatch<H::Digest, update::Unordered<K, V>>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location>,
     {
@@ -577,7 +577,7 @@ where
         db: &Db<E, C, I, H, update::Unordered<K, V>>,
     ) -> Result<MerkleizedBatch<H::Digest, update::Unordered<K, V>>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location>,
     {
@@ -688,7 +688,7 @@ where
         db: &Db<E, C, I, H, update::Ordered<K, V>>,
     ) -> Result<MerkleizedBatch<H::Digest, update::Ordered<K, V>>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location>,
     {
@@ -705,7 +705,7 @@ where
         db: &Db<E, C, I, H, update::Ordered<K, V>>,
     ) -> Result<MerkleizedBatch<H::Digest, update::Ordered<K, V>>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location>,
     {
@@ -982,7 +982,7 @@ where
         db: &Db<E, C, I, H, U>,
     ) -> Result<Option<U::Value>, Error>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Contiguous<Item = Operation<U>>,
         I: UnorderedIndex<Value = Location> + 'static,
         H: Hasher<Digest = D>,
@@ -1167,7 +1167,7 @@ where
 
 impl<E, C, I, H, U> Db<E, C, I, H, U>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -1193,7 +1193,7 @@ where
 
 impl<E, C, I, H, U> Db<E, C, I, H, U>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: update::Update + Send + Sync + 'static,
     C: Mutable<Item = Operation<U>> + crate::Persistable<Error = crate::journal::Error>,
     I: UnorderedIndex<Value = Location>,
@@ -1264,7 +1264,7 @@ where
 
 impl<E, C, I, H, U> Db<E, C, I, H, U>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: update::Update + Send + Sync,
     C: Contiguous<Item = Operation<U>>,
     I: UnorderedIndex<Value = Location>,
@@ -1311,7 +1311,7 @@ mod trait_impls {
         K: Key,
         V: ValueEncoding + 'static,
         H: Hasher,
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location>,
         Operation<update::Unordered<K, V>>: Codec,
@@ -1341,7 +1341,7 @@ mod trait_impls {
         K: Key,
         V: ValueEncoding + 'static,
         H: Hasher,
-        E: Storage + Clock + Metrics,
+        E: Context,
         C: Mutable<Item = Operation<update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location>,
         Operation<update::Ordered<K, V>>: Codec,
@@ -1384,7 +1384,7 @@ mod trait_impls {
 
     impl<E, K, V, C, I, H> BatchableDb for Db<E, C, I, H, update::Unordered<K, V>>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<update::Unordered<K, V>>>
@@ -1412,7 +1412,7 @@ mod trait_impls {
 
     impl<E, K, V, C, I, H> BatchableDb for Db<E, C, I, H, update::Ordered<K, V>>
     where
-        E: Storage + Clock + Metrics,
+        E: Context,
         K: Key,
         V: ValueEncoding + 'static,
         C: Mutable<Item = Operation<update::Ordered<K, V>>>

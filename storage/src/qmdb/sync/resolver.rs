@@ -17,9 +17,9 @@ use crate::{
         operation::Key,
     },
     translator::Translator,
+    Context,
 };
 use commonware_cryptography::{Digest, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{channel::oneshot, sync::AsyncRwLock, Array};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
@@ -83,7 +83,7 @@ macro_rules! impl_resolver {
     ($db:ident, $op:ident, $val_bound:ident, $($key_bound:tt)+) => {
         impl<E, K, V, H, T> Resolver for Arc<$db<E, K, V, H, T>>
         where
-            E: Storage + Clock + Metrics,
+            E: Context,
             K: $($key_bound)+,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -120,7 +120,7 @@ macro_rules! impl_resolver {
 
         impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<E, K, V, H, T>>>
         where
-            E: Storage + Clock + Metrics,
+            E: Context,
             K: $($key_bound)+,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -157,7 +157,7 @@ macro_rules! impl_resolver {
 
         impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<E, K, V, H, T>>>>
         where
-            E: Storage + Clock + Metrics,
+            E: Context,
             K: $($key_bound)+,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
