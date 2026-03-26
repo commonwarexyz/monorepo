@@ -327,7 +327,8 @@ where
         I: UnorderedIndex<Value = Location>,
     {
         let mut locations = Vec::new();
-        let reader = db.log.reader().await;
+        let mut snapshot_candidates = BTreeSet::new();
+        let mut snapshot_keys = BTreeSet::new();
 
         for key in mutations.keys() {
             if let Some(entry) = self.base_diff.get(key) {
@@ -337,13 +338,21 @@ where
                 continue;
             }
 
-            let candidates: Vec<Location> = db.snapshot.get(key).copied().collect();
-            for loc in candidates {
-                let op = reader.read(*loc).await?;
-                if op.key() == Some(key) {
-                    locations.push(loc);
-                    break;
-                }
+            snapshot_candidates.extend(db.snapshot.get(key).copied());
+            snapshot_keys.insert(key);
+        }
+
+        let futures = snapshot_candidates
+            .iter()
+            .map(|&loc| self.read_op(loc, &[], db));
+        let results = try_join_all(futures).await?;
+
+        for (op, &loc) in results.iter().zip(snapshot_candidates.iter()) {
+            let Some(key) = op.key() else {
+                continue;
+            };
+            if snapshot_keys.contains(key) {
+                locations.push(loc);
             }
         }
 
