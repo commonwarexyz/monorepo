@@ -57,6 +57,7 @@ use commonware_consensus::types::Height;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Metrics, Spawner};
+use commonware_storage::qmdb::sync::SyncProgress;
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc},
     sync::AsyncRwLock,
@@ -78,6 +79,8 @@ pub mod current;
 pub mod immutable;
 pub mod keyless;
 pub mod p2p;
+
+mod sync_metrics;
 
 /// Mutable batch state before merkleization.
 ///
@@ -286,6 +289,7 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
+        progress_tx: Option<mpsc::Sender<SyncProgress>>,
     ) -> impl Future<Output = Result<Self, Self::SyncError>> + Send;
 }
 
@@ -364,7 +368,7 @@ impl<E: Clone + Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<A
 
 impl<E, T, R, D> StateSyncSet<E, R, D> for Arc<AsyncRwLock<T>>
 where
-    E: Clone + Send + Sync,
+    E: Clone + Send + Sync + Metrics,
     T: StateSyncDb<E, R> + 'static,
     R: Send + 'static,
     D: Digest,
@@ -384,6 +388,10 @@ where
         let (finish_tx, finish_rx) = mpsc::channel(1);
         let (reached_tx, mut reached_rx) = mpsc::channel(1);
 
+        let metrics = sync_metrics::SyncMetrics::new(&context);
+        metrics.record_target_height(0, anchor.height.get());
+        let (progress_tx, progress_drain) = sync_metrics::progress_channel(metrics.clone(), 0);
+
         let sync = T::sync_db(
             context,
             config,
@@ -393,6 +401,7 @@ where
             Some(finish_rx),
             Some(reached_tx),
             sync_config,
+            Some(progress_tx),
         );
 
         let coordinator = async {
@@ -418,6 +427,7 @@ where
                             continue;
                         }
                         latest_anchor = new_anchor;
+                        metrics.record_target_height(0, latest_anchor.height.get());
                         if !target_tx.send_lossy(new_target).await {
                             return latest_anchor;
                         }
@@ -426,7 +436,7 @@ where
             }
         };
 
-        let (db_result, converged_anchor) = join!(sync, coordinator);
+        let (db_result, converged_anchor, _) = join!(sync, coordinator, progress_drain);
         let database = db_result?;
         Ok((Self::new(AsyncRwLock::new(database)), converged_anchor))
     }
@@ -570,6 +580,11 @@ macro_rules! impl_state_sync_set {
                 tip_updates: mpsc::Receiver<(Anchor<D>, Self::SyncTargets)>,
                 sync_config: SyncEngineConfig,
             ) -> Result<(Self, Anchor<D>), Self::Error> {
+                let sync_metrics = sync_metrics::SyncMetrics::new(&context);
+                $(sync_metrics.record_target_height($idx, anchor.height.get());)+
+                let progress_channels = ($(
+                    sync_metrics::progress_channel(sync_metrics.clone(), $idx),
+                )+);
                 let db_channels = ($(
                     DbSyncChannels::<<$T as ManagedDb<E>>::SyncTarget>::new(
                         sync_config.update_channel_size.get(),
@@ -597,6 +612,7 @@ macro_rules! impl_state_sync_set {
                     Arc::new(commonware_utils::sync::Mutex::new(None));
                 let finish_coordinator = {
                     let coordinator_result = coordinator_result.clone();
+                    let coord_metrics = sync_metrics;
                     async move {
                         // Keep ownership of the original per-database senders inside this task so
                         // they are dropped as soon as the coordinator exits.
@@ -641,8 +657,10 @@ macro_rules! impl_state_sync_set {
                                     generation,
                                     targets: dispatch_targets,
                                 } => {
+                                    let dispatch_height = state.anchor_height(generation);
                                     $(
                                         if state.should_dispatch($idx) {
+                                            coord_metrics.record_target_height($idx, dispatch_height);
                                             let dispatch_target = dispatch_targets.$idx.clone();
                                             if !coordinator_senders.$idx
                                                 .generation_tx
@@ -713,6 +731,7 @@ macro_rules! impl_state_sync_set {
                                 Some(db_channels.$idx.finish_rx),
                                 Some(db_channels.$idx.reached_tx),
                                 sync_config,
+                                Some(progress_channels.$idx.0),
                             );
                             let forward_reached = async move {
                                 loop {
@@ -781,7 +800,8 @@ macro_rules! impl_state_sync_set {
                                     };
                                 }
                             };
-                            let (sync_result, _) = join!(sync, forward_reached);
+                            let progress_drain = progress_channels.$idx.1;
+                            let (sync_result, _, _) = join!(sync, forward_reached, progress_drain);
                             let result = sync_result
                                 .map(|database| Arc::new(AsyncRwLock::new(database)))
                                 .map_err(|err| {
@@ -890,6 +910,15 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
             latest_tip: None,
             last_dispatched_anchor: anchor,
         }
+    }
+
+    /// Return the anchor height for a given generation.
+    fn anchor_height(&self, generation: usize) -> u64 {
+        self.generation_state
+            .get(&generation)
+            .map_or(self.last_dispatched_anchor.height.get(), |(anchor, _)| {
+                anchor.height.get()
+            })
     }
 
     /// Record that database `idx` reached `generation`.
@@ -1120,7 +1149,7 @@ mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, CoordinatorAction, CoordinatorState,
         DatabaseSet, ManagedDb, Merkleized, StateSyncDb, StateSyncSet, SyncEngineConfig,
-        Unmerkleized,
+        SyncProgress, Unmerkleized,
     };
     use commonware_consensus::types::Height;
     use commonware_cryptography::sha256;
@@ -1489,6 +1518,7 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
+            _progress_tx: Option<mpsc::Sender<SyncProgress>>,
         ) -> Result<Self, Self::SyncError> {
             while !release.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
@@ -1554,6 +1584,7 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
+            _progress_tx: Option<mpsc::Sender<SyncProgress>>,
         ) -> Result<Self, Self::SyncError> {
             done.store(true, Ordering::SeqCst);
             let mut final_target = target;
@@ -1618,6 +1649,7 @@ mod tests {
             _finish: Option<mpsc::Receiver<()>>,
             _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
+            _progress_tx: Option<mpsc::Sender<SyncProgress>>,
         ) -> Result<Self, Self::SyncError> {
             Err(TestSyncError)
         }
@@ -1635,6 +1667,7 @@ mod tests {
             _finish: Option<mpsc::Receiver<()>>,
             _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
+            _progress_tx: Option<mpsc::Sender<SyncProgress>>,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self)
         }
@@ -1655,6 +1688,7 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
+            _progress_tx: Option<mpsc::Sender<SyncProgress>>,
         ) -> Result<Self, Self::SyncError> {
             while !controller.release.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
@@ -1744,6 +1778,7 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
+            _progress_tx: Option<mpsc::Sender<SyncProgress>>,
         ) -> Result<Self, Self::SyncError> {
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);

@@ -22,6 +22,7 @@
 //! response channel, in-progress work stops at the next await point via
 //! [`await_or_cancel`].
 
+use super::metrics::Metrics as ProcessorMetrics;
 use crate::stateful::{
     db::{Anchor, DatabaseSet},
     Application, Proposed,
@@ -33,7 +34,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Digestible;
 use commonware_macros::select;
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, Spawner};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand::Rng;
 use std::{
@@ -87,6 +88,7 @@ where
     databases: A::Databases,
     pending: PendingMap<A, E>,
     last_processed: Anchor<PendingDigest<A, E>>,
+    metrics: ProcessorMetrics<E>,
 }
 
 impl<E, A> Processor<E, A>
@@ -105,12 +107,14 @@ where
         app: A,
         databases: A::Databases,
         last_processed: Anchor<PendingDigest<A, E>>,
+        metrics: ProcessorMetrics<E>,
     ) -> Self {
         Self {
             app,
             databases,
             pending: HashMap::new(),
             last_processed,
+            metrics,
         }
     }
 
@@ -135,7 +139,10 @@ where
         P: BlockProvider<Block = A::Block> + Clone,
         BP: BlockProvider<Block = A::Block>,
     {
+        let timer = self.metrics.propose_duration.timer();
+
         let Some(parent) = ancestry.peek() else {
+            timer.cancel();
             response.send_lossy(None);
             return;
         };
@@ -148,10 +155,12 @@ where
         {
             Ok(batches) => batches,
             Err(PrepareBatchesError::Invalid) => {
+                timer.cancel();
                 response.send_lossy(None);
                 return;
             }
             Err(PrepareBatchesError::Cancelled) => {
+                timer.cancel();
                 debug!(
                     ?parent_digest,
                     "proposal request cancelled during prepare_batches"
@@ -173,12 +182,14 @@ where
         {
             Some(result) => result,
             None => {
+                timer.cancel();
                 debug!(?parent_digest, "proposal request cancelled during propose");
                 return;
             }
         };
 
         let Some(Proposed { block, merkleized }) = proposed else {
+            timer.cancel();
             response.send_lossy(None);
             return;
         };
@@ -190,6 +201,7 @@ where
                 merkleized,
             },
         );
+        let _ = self.metrics.pending_blocks.try_set(self.pending.len());
         response.send_lossy(Some(block));
     }
 
@@ -207,7 +219,10 @@ where
         P: BlockProvider<Block = A::Block> + Clone,
         BP: BlockProvider<Block = A::Block>,
     {
+        let timer = self.metrics.verify_duration.timer();
+
         let Some(block) = ancestry.peek() else {
+            timer.cancel();
             response.send_lossy(false);
             return;
         };
@@ -225,6 +240,7 @@ where
         // `last_processed.height` is only advanced from finalized state
         // (genesis, startup reconciliation, or finalize/ack path).
         if self.is_already_processed(block) {
+            timer.cancel();
             response.send_lossy(true);
             return;
         }
@@ -236,6 +252,7 @@ where
         {
             Ok(batches) => batches,
             Err(PrepareBatchesError::Invalid) => {
+                timer.cancel();
                 warn!(
                     ?parent_digest,
                     ?block_digest,
@@ -247,6 +264,7 @@ where
                 return;
             }
             Err(PrepareBatchesError::Cancelled) => {
+                timer.cancel();
                 debug!(
                     ?parent_digest,
                     "verification request cancelled during prepare_batches"
@@ -264,6 +282,7 @@ where
         {
             Some(result) => result,
             None => {
+                timer.cancel();
                 debug!(
                     ?parent_digest,
                     "verification request cancelled during verify"
@@ -273,6 +292,7 @@ where
         };
 
         let Some(merkleized) = verified else {
+            timer.cancel();
             warn!(
                 ?parent_digest,
                 ?block_digest,
@@ -289,6 +309,7 @@ where
                 merkleized,
             },
         );
+        let _ = self.metrics.pending_blocks.try_set(self.pending.len());
         response.send_lossy(true);
     }
 
@@ -344,6 +365,8 @@ where
     where
         P: BlockProvider<Block = A::Block> + Clone,
     {
+        let timer = self.metrics.rebuild_pending_duration.timer();
+
         // Walk backward until we hit a known safe anchor.
         let mut replay_path = Vec::new();
         let mut cursor = target;
@@ -351,6 +374,7 @@ where
             let Some(fetched) =
                 await_or_cancel(response, provider.clone().fetch_block(cursor)).await
             else {
+                timer.cancel();
                 return Err(PrepareBatchesError::Cancelled);
             };
 
@@ -371,6 +395,7 @@ where
 
             let block_height = block.height();
             if block_height <= self.last_processed.height {
+                timer.cancel();
                 warn!(
                     ?target,
                     ?cursor,
@@ -384,6 +409,7 @@ where
 
             // By definition, there are no blocks below height 0.
             if block_height.previous().is_none() {
+                timer.cancel();
                 warn!(
                     ?target,
                     ?cursor,
@@ -399,6 +425,8 @@ where
             replay_path.push(block);
         }
 
+        let depth = replay_path.len();
+
         // Replay from oldest to newest and cache intermediate tips.
         for block in replay_path.into_iter().rev() {
             let (digest, parent_digest) = (block.digest(), block.parent());
@@ -407,6 +435,7 @@ where
 
             let Some(batches) = await_or_cancel(response, self.fork_batches(&parent_digest)).await
             else {
+                timer.cancel();
                 return Err(PrepareBatchesError::Cancelled);
             };
             let batches = batches?;
@@ -418,6 +447,7 @@ where
             )
             .await
             else {
+                timer.cancel();
                 return Err(PrepareBatchesError::Cancelled);
             };
 
@@ -431,15 +461,19 @@ where
             );
         }
 
+        let _ = self.metrics.pending_blocks.try_set(self.pending.len());
+        let _ = self.metrics.rebuild_pending_depth.try_set(depth);
         Ok(())
     }
 
     /// Persist finalized state and prune dead in-memory forks.
     pub(super) async fn finalize(&mut self, context: &E, block: A::Block) -> FinalizeStatus {
         let (height, digest) = (block.height(), block.digest());
-        if self.last_processed.digest == digest {
+        if height <= self.last_processed.height {
             return FinalizeStatus::Duplicate;
         }
+
+        let _timer = self.metrics.finalize_duration.timer();
 
         // Marshal finalization is ordered. A pending miss means we can safely
         // apply this block on top of finalized state.
@@ -496,9 +530,13 @@ where
             }
         }
 
+        let before = self.pending.len();
         self.pending.retain(|candidate_digest, entry| {
             entry.round > finalized_round && compatible.contains(candidate_digest)
         });
+        let pruned = before - self.pending.len();
+        self.metrics.pruned_forks.inc_by(pruned as u64);
+        let _ = self.metrics.pending_blocks.try_set(self.pending.len());
     }
 }
 
@@ -520,6 +558,7 @@ where
 mod tests {
     use super::{FinalizeStatus, PendingEntry, PrepareBatchesError, Processor};
     use crate::stateful::{
+        actor::metrics::Metrics as ProcessorMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
         Application, Proposed,
     };
@@ -827,6 +866,7 @@ mod tests {
                 deterministic::Context,
             >>::init(context.with_label("db_set"), config.clone())
             .await;
+            let metrics = ProcessorMetrics::new(context.clone());
             Self {
                 context_cell: ContextCell::new(context),
                 processor: Processor::new(
@@ -836,6 +876,7 @@ mod tests {
                         height: Height::zero(),
                         digest: Block::genesis().digest(),
                     },
+                    metrics,
                 ),
                 provider,
                 db_config: config,

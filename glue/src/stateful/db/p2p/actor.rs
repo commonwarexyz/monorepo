@@ -1,6 +1,6 @@
 //! Resolver service actor for QMDB sync over P2P.
 
-use super::{handler, mailbox, Mailbox};
+use super::{handler, mailbox, metrics::Metrics as ResolverMetrics, Mailbox};
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
@@ -8,7 +8,7 @@ use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{p2p, Resolver as _};
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::status::{self, CounterExt},
+    telemetry::metrics::status::{self, CounterExt, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
 use commonware_storage::qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver};
@@ -95,7 +95,7 @@ where
     config: Config<P, D, B, DB>,
     mailbox_rx: mpsc::Receiver<mailbox::Message<DB, Op<DB>, DatabaseRoot<DB>>>,
     state: State<DB>,
-    serve_requests: status::Counter,
+    metrics: ResolverMetrics,
     pending: PendingSubs<DB>,
 }
 
@@ -111,14 +111,11 @@ where
 {
     /// Create a new resolver actor and mailbox.
     pub fn new(context: E, mut cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<DB>) {
-        let serve_requests = status::Counter::default();
-        context.register(
-            "serve_requests",
-            "QMDB resolver serve requests by status",
-            serve_requests.clone(),
-        );
-
-        let state = cfg.database.take().map_or(State::NoDb, State::HasDb);
+        let metrics = ResolverMetrics::new(&context);
+        let state = cfg.database.take().map_or(State::NoDb, |db| {
+            let _ = metrics.has_database.try_set(1i64);
+            State::HasDb(db)
+        });
         let (mailbox_tx, mailbox_rx) = mpsc::channel(cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_tx);
         let actor = Self {
@@ -126,7 +123,7 @@ where
             config: cfg,
             mailbox_rx,
             state,
-            serve_requests,
+            metrics,
             pending: HashMap::new(),
         };
         (actor, mailbox)
@@ -220,6 +217,7 @@ where
                 let replacing_existing = matches!(self.state, State::HasDb(_));
                 info!(replacing_existing, "attached resolver database");
                 self.state = State::HasDb(db);
+                let _ = self.metrics.has_database.try_set(1i64);
                 MailboxAction::None
             }
             mailbox::Message::GetOperations { request, response } => {
@@ -231,10 +229,14 @@ where
                     }
                 }
                 self.pending.insert(request.clone(), vec![response]);
+                self.metrics.fetch_requests.inc();
+                let _ = self.metrics.pending_requests.try_set(self.pending.len());
                 MailboxAction::Fetch(request)
             }
             mailbox::Message::CancelOperations { request } => {
                 if self.should_cancel_request(&request) {
+                    self.metrics.cancel_requests.inc();
+                    let _ = self.metrics.pending_requests.try_set(self.pending.len());
                     MailboxAction::Cancel(request)
                 } else {
                     MailboxAction::None
@@ -266,9 +268,12 @@ where
         // Only accept responses for keys we currently have in-flight.
         // Unknown keys are unsolicited/stale deliveries and are ignored.
         let Some(subscribers) = self.pending.remove(&key) else {
+            self.metrics.deliveries.inc(status::Status::Dropped);
             response.send_lossy(true);
             return;
         };
+        let _ = self.metrics.pending_requests.try_set(self.pending.len());
+
         // `max_ops` is sourced from the original local request key above.
         let max_ops = key.max_ops.get() as usize;
         let decoded =
@@ -276,6 +281,8 @@ where
                 Ok(decoded) => decoded,
                 Err(_) => {
                     self.pending.insert(key, subscribers);
+                    let _ = self.metrics.pending_requests.try_set(self.pending.len());
+                    self.metrics.deliveries.inc(status::Status::Invalid);
                     response.send_lossy(false);
                     return;
                 }
@@ -299,6 +306,7 @@ where
         }
 
         if approvals.is_empty() {
+            self.metrics.deliveries.inc(status::Status::Success);
             response.send_lossy(true);
             return;
         }
@@ -310,7 +318,10 @@ where
             }
         }
 
-        if !peer_valid {
+        if peer_valid {
+            self.metrics.deliveries.inc(status::Status::Success);
+        } else {
+            self.metrics.deliveries.inc(status::Status::Failure);
             debug!(?key, "downstream marked response as peer-invalid");
         }
         response.send_lossy(peer_valid);
@@ -323,7 +334,7 @@ where
         response: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasDb(database) = &self.state else {
-            self.serve_requests.inc(status::Status::Dropped);
+            self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
         let (_cancel_tx, cancel_rx) = oneshot::channel();
@@ -338,7 +349,7 @@ where
             .await;
 
         let Ok(fetch) = result else {
-            self.serve_requests.inc(status::Status::Failure);
+            self.metrics.serve_requests.inc(status::Status::Failure);
             return;
         };
 
@@ -350,7 +361,7 @@ where
             }
             .encode(),
         );
-        self.serve_requests.inc(status::Status::Success);
+        self.metrics.serve_requests.inc(status::Status::Success);
     }
 }
 

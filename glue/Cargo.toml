@@ -25,6 +25,7 @@ commonware-runtime.workspace = true
 commonware-storage.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
+prometheus-client.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 thiserror.workspace = true
@@ -40,7 +41,6 @@ commonware-p2p.workspace = true
 commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-storage.workspace = true
-prometheus-client.workspace = true
 tracing-subscriber.workspace = true
 
 [features]

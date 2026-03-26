@@ -5,6 +5,7 @@ use crate::stateful::{
     actor::{
         bootstrap::{bootstrap, BootstrapConfig, Mode as BootstrapMode},
         mailbox::{ErasedAncestorStream, Message},
+        metrics::Metrics as ProcessorMetrics,
         processor::{FinalizeStatus, Processor},
         Mailbox,
     },
@@ -273,7 +274,7 @@ where
         let bootstrap_config = BootstrapConfig {
             context: service.shared.context.as_present().with_label("state_sync"),
             db_config: self.db_config,
-            metadata_partition: format!("{}{}", self.partition_prefix, STATE_SYNC_METADATA_SUFFIX),
+            metadata_partition: format!("{}{STATE_SYNC_METADATA_SUFFIX}", self.partition_prefix),
             sync_config: self.sync_config,
             resolvers: bootstrap_resolvers,
             mode: bootstrap_mode,
@@ -496,7 +497,8 @@ where
         .sync_resolvers
         .attach_databases(databases.clone())
         .await;
-    let mut processor = Processor::new(app, databases, last_processed);
+    let metrics = ProcessorMetrics::new(context.clone());
+    let mut processor = Processor::new(app, databases, last_processed, metrics);
 
     // In case any finalizations were delivered after the floor was updated,
     // process them now to ensure we progress marshal.
