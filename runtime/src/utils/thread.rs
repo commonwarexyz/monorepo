@@ -192,6 +192,7 @@ mod tests {
         .join()
         .expect("thread should complete successfully");
 
-        assert_eq!(observed, expected);
+        // macOS may round the requested stack size up when creating the thread
+        assert!(observed >= expected);
     }
 }
