@@ -6,9 +6,9 @@ use crate::{
     mmr::{Location, Position},
     qmdb::{any::VariableValue, immutable::operation::Operation, Error},
     translator::Translator,
+    Context,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -93,7 +93,7 @@ where
     /// Create a batch from a committed DB (no parent chain).
     pub(super) fn new<E, T>(immutable: &Immutable<E, K, V, H, T>, journal_size: u64) -> Self
     where
-        E: RStorage + Clock + Metrics,
+        E: Context,
         T: Translator,
     {
         Self {
@@ -121,7 +121,7 @@ where
         db: &Immutable<E, K, V, H, T>,
     ) -> Result<Option<V>, Error>
     where
-        E: RStorage + Clock + Metrics,
+        E: Context,
         T: Translator,
     {
         // Check this batch's pending mutations.
@@ -191,7 +191,7 @@ impl<D: Digest, K: Array, V: VariableValue> MerkleizedBatch<D, K, V> {
         db: &Immutable<E, K, V, H, T>,
     ) -> Result<Option<V>, Error>
     where
-        E: RStorage + Clock + Metrics,
+        E: Context,
         H: CHasher<Digest = D>,
         T: Translator,
     {
@@ -278,7 +278,7 @@ impl<D: Digest, K: Array, V: VariableValue> MerkleizedBatch<D, K, V> {
 
 impl<E, K, V, H, T> Immutable<E, K, V, H, T>
 where
-    E: RStorage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: VariableValue,
     H: CHasher,

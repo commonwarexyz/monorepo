@@ -10,10 +10,10 @@ use crate::{
         segmented::variable,
         Error,
     },
-    Persistable,
+    Context, Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::{
     sync::{AsyncRwLockReadGuard, UpgradableAsyncRwLock},
     NZUsize,
@@ -97,7 +97,7 @@ impl<C> Config<C> {
 }
 
 /// Inner journal state protected by a lock for interior mutability.
-struct Inner<E: Clock + Storage + Metrics, V: Codec> {
+struct Inner<E: Context, V: Codec> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
 
@@ -119,7 +119,7 @@ struct Inner<E: Clock + Storage + Metrics, V: Codec> {
     pruning_boundary: u64,
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> Inner<E, V> {
+impl<E: Context, V: CodecShared> Inner<E, V> {
     /// Read the item at the given position using the provided offsets reader.
     ///
     /// # Errors
@@ -184,7 +184,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Inner<E, V> {
 /// Note that we don't recover from the case where offsets.bounds().start >
 /// data.bounds().start. This should never occur because we always prune the data journal
 /// before the offsets journal.
-pub struct Journal<E: Clock + Storage + Metrics, V: Codec> {
+pub struct Journal<E: Context, V: Codec> {
     /// Inner state for data journal metadata.
     ///
     /// Serializes persistence and write operations (`sync`, `append`, `prune`, `rewind`) to prevent
@@ -205,13 +205,13 @@ pub struct Journal<E: Clock + Storage + Metrics, V: Codec> {
 }
 
 /// A reader guard that holds a consistent snapshot of the variable journal's bounds.
-pub struct Reader<'a, E: Clock + Storage + Metrics, V: Codec> {
+pub struct Reader<'a, E: Context, V: Codec> {
     guard: AsyncRwLockReadGuard<'a, Inner<E, V>>,
     offsets: fixed::Reader<'a, E, u64>,
     items_per_section: u64,
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> super::Reader for Reader<'_, E, V> {
+impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
     type Item = V;
 
     fn bounds(&self) -> std::ops::Range<u64> {
@@ -262,7 +262,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> super::Reader for Reader<'_, 
     }
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
+impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -891,7 +891,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
 }
 
 // Implement Contiguous trait for variable-length items
-impl<E: Clock + Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> {
+impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
 
     async fn reader(&self) -> impl super::Reader<Item = V> + '_ {
@@ -903,7 +903,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Contiguous for Journal<E, V> 
     }
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> Mutable for Journal<E, V> {
+impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
     async fn append(&mut self, item: &Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
@@ -917,7 +917,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Mutable for Journal<E, V> {
     }
 }
 
-impl<E: Clock + Storage + Metrics, V: CodecShared> Persistable for Journal<E, V> {
+impl<E: Context, V: CodecShared> Persistable for Journal<E, V> {
     type Error = Error;
 
     async fn commit(&self) -> Result<(), Error> {
@@ -934,9 +934,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Persistable for Journal<E, V>
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<E: Clock + Storage + Metrics, V: CodecShared> crate::journal::authenticated::Inner<E>
-    for Journal<E, V>
-{
+impl<E: Context, V: CodecShared> crate::journal::authenticated::Inner<E> for Journal<E, V> {
     type Config = Config<V::Cfg>;
 
     async fn init<H: commonware_cryptography::Hasher>(
@@ -959,7 +957,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> crate::journal::authenticated
 }
 
 #[cfg(test)]
-impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
+impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Test helper: Read the item at the given position.
     pub(crate) async fn read(&self, position: u64) -> Result<V, Error> {
         self.reader().await.read(position).await
@@ -1016,7 +1014,7 @@ mod tests {
     use super::*;
     use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner, Storage};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::FutureExt as _;
     use std::num::NonZeroU16;

@@ -62,10 +62,10 @@ use crate::{
         Error,
     },
     metadata::{Config as MetadataConfig, Metadata},
-    Persistable,
+    Context, Persistable,
 };
 use commonware_codec::CodecFixedShared;
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage};
+use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::sync::{AsyncRwLockReadGuard, UpgradableAsyncRwLock};
 use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -97,7 +97,7 @@ pub struct Config {
 }
 
 /// Inner state protected by a single RwLock.
-struct Inner<E: Clock + Storage + Metrics, A: CodecFixedShared> {
+struct Inner<E: Context, A: CodecFixedShared> {
     /// The underlying segmented journal.
     journal: SegmentedJournal<E, A>,
 
@@ -117,7 +117,7 @@ struct Inner<E: Clock + Storage + Metrics, A: CodecFixedShared> {
     pruning_boundary: u64,
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
+impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Read the item at position `pos` in the journal.
     ///
     /// # Errors
@@ -171,7 +171,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
 /// the first invalid data read will be considered the new end of the journal (and the
 /// underlying blob will be truncated to the last valid item). Repair is performed
 /// by the underlying [SegmentedJournal] during init.
-pub struct Journal<E: Clock + Storage + Metrics, A: CodecFixedShared> {
+pub struct Journal<E: Context, A: CodecFixedShared> {
     /// Inner state with segmented journal and size.
     ///
     /// Serializes persistence and write operations (`sync`, `append`, `prune`, `rewind`) to prevent
@@ -183,12 +183,12 @@ pub struct Journal<E: Clock + Storage + Metrics, A: CodecFixedShared> {
 }
 
 /// A reader guard that holds a consistent snapshot of the journal's bounds.
-pub struct Reader<'a, E: Clock + Storage + Metrics, A: CodecFixedShared> {
+pub struct Reader<'a, E: Context, A: CodecFixedShared> {
     guard: AsyncRwLockReadGuard<'a, Inner<E, A>>,
     items_per_blob: u64,
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
+impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
     type Item = A;
 
     fn bounds(&self) -> std::ops::Range<u64> {
@@ -254,7 +254,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Reader for Reader
     }
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
+impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Size of each entry in bytes.
     pub const CHUNK_SIZE: usize = SegmentedJournal::<E, A>::CHUNK_SIZE;
 
@@ -826,7 +826,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 }
 
 // Implement Contiguous trait for fixed-length journals
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
+impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
 
     async fn reader(&self) -> impl super::Reader<Item = A> + '_ {
@@ -838,7 +838,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> super::Contiguous for Jo
     }
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Mutable for Journal<E, A> {
+impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
     async fn append(&mut self, item: &Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
@@ -852,7 +852,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Mutable for Journal<E, A
     }
 }
 
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Persistable for Journal<E, A> {
+impl<E: Context, A: CodecFixedShared> Persistable for Journal<E, A> {
     type Error = Error;
 
     async fn commit(&self) -> Result<(), Error> {
@@ -869,9 +869,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Persistable for Journal<
 }
 
 #[commonware_macros::stability(ALPHA)]
-impl<E: Clock + Storage + Metrics, A: CodecFixedShared> crate::journal::authenticated::Inner<E>
-    for Journal<E, A>
-{
+impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> for Journal<E, A> {
     type Config = Config;
 
     async fn init<H: commonware_cryptography::Hasher>(

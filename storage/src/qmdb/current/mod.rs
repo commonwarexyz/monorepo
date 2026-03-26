@@ -248,10 +248,10 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
 use std::sync::Arc;
 
@@ -302,7 +302,7 @@ pub(super) async fn init<E, U, H, T, I, J, const N: usize, NewIndex>(
     new_index: NewIndex,
 ) -> Result<db::Db<E, J, I, H, U, N>, Error>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,

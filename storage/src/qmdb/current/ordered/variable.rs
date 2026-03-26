@@ -18,22 +18,16 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 
 pub type Db<E, K, V, H, T, const N: usize> =
     super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, Index<T, Location>, H, N>;
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > Db<E, K, V, H, T, N>
+impl<E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, const N: usize>
+    Db<E, K, V, H, T, N>
 where
     Operation<K, V>: Codec,
 {
@@ -64,10 +58,10 @@ pub mod partitioned {
             Error,
         },
         translator::Translator,
+        Context,
     };
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
-    use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 
     /// A partitioned variant of [super::Db].
     ///
@@ -87,7 +81,7 @@ pub mod partitioned {
         >;
 
     impl<
-            E: RStorage + Clock + Metrics,
+            E: Context,
             K: Key,
             V: VariableValue,
             H: Hasher,

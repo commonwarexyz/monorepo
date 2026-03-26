@@ -83,10 +83,10 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use tracing::warn;
 
 pub mod batch;
@@ -128,7 +128,7 @@ pub(super) async fn init<E, U, H, T, I, J, F, NewIndex>(
     new_index: NewIndex,
 ) -> Result<db::Db<E, J, I, H, U>, Error>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
@@ -236,7 +236,7 @@ pub(crate) mod test {
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Clock, Metrics, Storage,
+        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Metrics,
     };
     use core::{future::Future, pin::Pin};
     use std::collections::HashMap;
@@ -250,7 +250,7 @@ pub(crate) mod test {
 
     impl<E, U, C, I, H> RewindableDb for AnyDb<E, C, I, H, U>
     where
-        E: Storage + Clock + Metrics,
+        E: crate::Context,
         U: UpdateTrait,
         C: Mutable<Item = AnyOperation<U>>,
         I: UnorderedIndex<Value = Location>,

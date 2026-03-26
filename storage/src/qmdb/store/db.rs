@@ -91,10 +91,9 @@ use crate::{
         update_key, Error, FloorHelper,
     },
     translator::Translator,
-    Persistable,
+    Context, Persistable,
 };
 use commonware_codec::{CodecShared, Read};
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use core::ops::Range;
 use std::collections::BTreeMap;
@@ -140,7 +139,7 @@ impl<K: Key, V: CodecShared + Clone, const N: usize> From<[(K, Option<V>); N]> f
 /// A mutable batch of writes and deletes staged against the current store state.
 pub struct Batch<'a, E, K, V, T>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -151,7 +150,7 @@ where
 
 impl<'a, E, K, V, T> Batch<'a, E, K, V, T>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -196,7 +195,7 @@ where
 /// An unauthenticated key-value database based off of an append-only [Journal] of operations.
 pub struct Db<E, K, V, T>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -234,7 +233,7 @@ where
 
 impl<E, K, V, T> Db<E, K, V, T>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -474,7 +473,7 @@ where
 
 impl<E, K, V, T> Persistable for Db<E, K, V, T>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: VariableValue,
     T: Translator,
@@ -504,7 +503,7 @@ mod test {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Metrics, Runner};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 

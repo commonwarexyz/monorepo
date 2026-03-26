@@ -14,10 +14,10 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
 pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
@@ -27,8 +27,7 @@ pub type Operation<K, V> = unordered::Operation<K, VariableEncoding<V>>;
 pub type Db<E, K, V, H, T> =
     super::Db<E, Journal<E, Operation<K, V>>, Index<T, Location>, H, Update<K, V>>;
 
-impl<E: Storage + Clock + Metrics, K: Key, V: VariableValue, H: Hasher, T: Translator>
-    Db<E, K, V, H, T>
+impl<E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator> Db<E, K, V, H, T>
 where
     Operation<K, V>: Codec,
 {
@@ -77,10 +76,10 @@ pub mod partitioned {
             Error,
         },
         translator::Translator,
+        Context,
     };
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
-    use commonware_runtime::{Clock, Metrics, Storage};
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -99,14 +98,8 @@ pub mod partitioned {
         Update<K, V>,
     >;
 
-    impl<
-            E: Storage + Clock + Metrics,
-            K: Key,
-            V: VariableValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-        > Db<E, K, V, H, T, P>
+    impl<E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, const P: usize>
+        Db<E, K, V, H, T, P>
     where
         Operation<K, V>: Codec,
     {
@@ -161,7 +154,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _,
+        BufferPooler, Metrics, Runner as _,
     };
     use commonware_utils::{test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
