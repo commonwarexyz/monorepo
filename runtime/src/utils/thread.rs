@@ -5,16 +5,24 @@ use std::{sync::OnceLock, thread};
 /// Cached system thread stack size.
 static SYSTEM_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
 
-/// Rust's default thread stack size when no explicit size is set.
+/// Rust's default thread stack size.
 ///
 /// See <https://doc.rust-lang.org/std/thread/#stack-size>.
-pub(crate) const RUST_DEFAULT_THREAD_STACK_SIZE: usize = 2 * 1024 * 1024;
+const RUST_DEFAULT_THREAD_STACK_SIZE: usize = 2 * 1024 * 1024;
 
 /// Returns the system thread stack size.
 ///
-/// This uses the operating system's default spawned-thread stack size when it
-/// can be queried, and otherwise falls back to Rust's default spawned-thread
-/// stack size.
+/// On Unix platforms other than macOS, this queries the default stack size for
+/// newly created pthreads via `pthread_attr_init` and `pthread_attr_getstacksize`.
+///
+/// On macOS, this instead uses `RLIMIT_STACK`. macOS distinguishes between the
+/// process stack limit and the smaller default stack size for secondary
+/// pthreads, so `pthread_attr_getstacksize` would otherwise resolve the wrong
+/// default for this use case. In practice, that means preferring the larger
+/// 8 MB process default over the 512 KB secondary-thread pthread default.
+///
+/// On other platforms, or if the platform-specific query fails, this falls back
+/// to [RUST_DEFAULT_THREAD_STACK_SIZE].
 pub(crate) fn system_thread_stack_size() -> usize {
     *SYSTEM_THREAD_STACK_SIZE
         .get_or_init(|| system_thread_stack_size_impl().unwrap_or(RUST_DEFAULT_THREAD_STACK_SIZE))
@@ -49,8 +57,8 @@ fn system_thread_stack_size_impl() -> Option<usize> {
 #[cfg(target_os = "macos")]
 fn system_thread_stack_size_impl() -> Option<usize> {
     // macOS uses different defaults for the main thread and spawned threads:
-    // the main thread stack is 8 MiB, while secondary threads default to
-    // 512 KiB. We use `RLIMIT_STACK` here to avoid inheriting the smaller
+    // the main thread stack is 8 MB, while secondary threads default to
+    // 512 KB. We use `RLIMIT_STACK` here to avoid inheriting the smaller
     // secondary-thread default through `pthread_attr_getstacksize`.
     let mut stack_limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
 

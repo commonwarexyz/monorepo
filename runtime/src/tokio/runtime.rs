@@ -148,6 +148,8 @@ pub struct Config {
     ///
     /// Defaults to the system stack size when the current platform exposes it,
     /// and otherwise falls back to Rust's default spawned-thread stack size.
+    ///
+    /// See [utils::thread::system_thread_stack_size].
     thread_stack_size: usize,
 
     /// Whether or not to catch panics.
