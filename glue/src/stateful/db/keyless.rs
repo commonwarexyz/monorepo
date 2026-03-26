@@ -56,6 +56,12 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> KeylessUnmerklei
         let db = self.db.read().await;
         self.batch.get(loc, &*db).await
     }
+
+    /// Append a value to the end of the database, returning its location.
+    pub fn append(mut self, value: V) -> Self {
+        self.batch = self.batch.append(value);
+        self
+    }
 }
 
 /// Wraps a keyless [`MerkleizedBatch`] with a reference to the parent

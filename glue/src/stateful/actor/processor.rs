@@ -98,7 +98,7 @@ where
 {
     /// Create a new processor with the given application, databases, and
     /// the last finalized block's anchor.
-    pub(super) fn new(
+    pub(super) const fn new(
         app: A,
         databases: A::Databases,
         last_processed: Anchor<PendingDigest<A, E>>,
