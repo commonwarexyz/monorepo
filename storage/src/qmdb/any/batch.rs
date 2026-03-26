@@ -792,13 +792,13 @@ where
             try_join_all(futures).await?
         };
 
-        for (op, &old_loc) in prev_results.iter().zip(&prev_locations) {
+        for (op, &old_loc) in prev_results.into_iter().zip(&prev_locations) {
             let data = match op {
                 Operation::Update(data) => data,
                 _ => unreachable!("expected update operation"),
             };
-            next_candidates.insert(data.next_key.clone());
-            prev_candidates.insert(data.key.clone(), (data.value.clone(), old_loc));
+            next_candidates.insert(data.next_key);
+            prev_candidates.insert(data.key, (data.value, old_loc));
         }
 
         // Add base-diff-created keys to candidate sets. These keys may be
