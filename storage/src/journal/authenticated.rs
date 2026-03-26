@@ -67,6 +67,35 @@ impl<H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<H, Item> {
         }
         MerkleizedBatch { inner: mmr, items }
     }
+
+    /// Hash and merkleize a shared items segment.
+    ///
+    /// Each item is encoded and hashed into the MMR, then the provided `Arc`
+    /// is used as-is in the resulting [`MerkleizedBatch`]. This lets callers
+    /// share a single `Arc<Vec<Item>>` across multiple consumers without
+    /// cloning the items themselves.
+    pub(crate) fn merkleize_shared(
+        mut self,
+        items: Arc<Vec<Item>>,
+    ) -> MerkleizedBatch<H::Digest, Item> {
+        debug_assert!(
+            self.items.is_empty(),
+            "merkleize_shared expects no items added via add"
+        );
+        for item in &*items {
+            let encoded = item.encode();
+            self.inner = self.inner.add(&self.hasher, &encoded);
+        }
+        let mmr = self.inner.merkleize(&self.hasher);
+        let mut parent_items = self.parent_items;
+        if !items.is_empty() {
+            parent_items.push(items);
+        }
+        MerkleizedBatch {
+            inner: mmr,
+            items: parent_items,
+        }
+    }
 }
 
 /// A speculative batch whose root digest has been computed, in contrast to [`UnmerkleizedBatch`].
