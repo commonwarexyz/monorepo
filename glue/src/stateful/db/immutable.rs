@@ -25,7 +25,7 @@ use commonware_storage::{
     translator::Translator,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 type ImmutableDbHandle<E, K, V, H, T> = Arc<AsyncRwLock<Immutable<E, K, V, H, T>>>;
 
@@ -44,6 +44,21 @@ where
     metadata: Option<V>,
 }
 
+impl<E, K, V, H, T> Deref for ImmutableUnmerkleized<E, K, V, H, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: VariableValue,
+    H: Hasher,
+    T: Translator,
+{
+    type Target = UnmerkleizedBatch<H, K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.batch
+    }
+}
+
 impl<E, K, V, H, T> ImmutableUnmerkleized<E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
@@ -52,14 +67,6 @@ where
     H: Hasher,
     T: Translator,
 {
-    /// Set a key to a value.
-    ///
-    /// The key must not already exist in the database or any ancestor batch.
-    pub fn set(mut self, key: K, value: V) -> Self {
-        self.batch = self.batch.set(key, value);
-        self
-    }
-
     /// Set commit metadata included in the next
     /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
     pub fn with_metadata(mut self, metadata: V) -> Self {
@@ -86,6 +93,21 @@ where
 {
     batch: MerkleizedBatch<H::Digest, K, V>,
     db: ImmutableDbHandle<E, K, V, H, T>,
+}
+
+impl<E, K, V, H, T> Deref for ImmutableMerkleized<E, K, V, H, T>
+where
+    E: Storage + Clock + Metrics,
+    K: Array,
+    V: VariableValue,
+    H: Hasher,
+    T: Translator,
+{
+    type Target = MerkleizedBatch<H::Digest, K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.batch
+    }
 }
 
 impl<E, K, V, H, T> ImmutableMerkleized<E, K, V, H, T>

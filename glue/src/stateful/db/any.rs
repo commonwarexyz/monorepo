@@ -38,7 +38,7 @@ use commonware_storage::{
     Persistable,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
-use std::sync::Arc;
+use std::{ops::Deref, sync::Arc};
 
 type AnyDbHandle<E, C, I, H, U> = Arc<AsyncRwLock<Db<E, C, I, H, U>>>;
 
@@ -55,6 +55,39 @@ where
 {
     batch: UnmerkleizedBatch<H, U>,
     db: AnyDbHandle<E, C, I, H, U>,
+    metadata: Option<U::Value>,
+}
+
+/// Key-value operations for the `any` unordered update kind.
+impl<E, C, I, H, K, V> AnyUnmerkleized<E, C, I, H, unordered::Update<K, V>>
+where
+    E: Storage + Clock + Metrics,
+    K: Key + Send,
+    V: ValueEncoding + Send + 'static,
+    C: Mutable<Item = Operation<unordered::Update<K, V>>>
+        + Persistable<Error = commonware_storage::journal::Error>,
+    I: UnorderedIndex<Value = Location> + 'static,
+    H: Hasher,
+    Operation<unordered::Update<K, V>>: Codec,
+{
+    /// Set commit metadata included in the next
+    /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
+    pub fn with_metadata(mut self, metadata: V::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    /// Read a value by key, falling back to committed state.
+    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
+        let db = self.db.read().await;
+        self.batch.get(key, &*db).await
+    }
+
+    /// Record a mutation. `Some(value)` for upsert, `None` for delete.
+    pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
+        self.batch = self.batch.write(key, value);
+        self
+    }
 }
 
 /// Wraps a QMDB [`MerkleizedBatch`] with a reference to the parent
@@ -72,7 +105,7 @@ where
     db: AnyDbHandle<E, C, I, H, U>,
 }
 
-impl<E, C, I, H, U> AnyMerkleized<E, C, I, H, U>
+impl<E, C, I, H, U> Deref for AnyUnmerkleized<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
     U: Update,
@@ -81,39 +114,26 @@ where
     H: Hasher,
     Operation<U>: Codec,
 {
-    /// Inactivity floor after merkleization.
-    pub const fn inactivity_floor(&self) -> Location {
-        self.batch.inactivity_floor()
-    }
+    type Target = UnmerkleizedBatch<H, U>;
 
-    /// Total operation count after merkleization.
-    pub const fn size(&self) -> Location {
-        self.batch.size()
+    fn deref(&self) -> &Self::Target {
+        &self.batch
     }
 }
 
-/// Key-value operations for the `any` unordered update kind.
-impl<E, C, I, H, K, V> AnyUnmerkleized<E, C, I, H, unordered::Update<K, V>>
+impl<E, C, I, H, U> Deref for AnyMerkleized<E, C, I, H, U>
 where
     E: Storage + Clock + Metrics,
-    K: Key + Send,
-    V: ValueEncoding + Send + 'static,
-    C: Mutable<Item = Operation<unordered::Update<K, V>>>
-        + Persistable<Error = commonware_storage::journal::Error>,
-    I: UnorderedIndex<Value = Location> + 'static,
+    U: Update,
+    C: Contiguous<Item = Operation<U>>,
+    I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<unordered::Update<K, V>>: Codec,
+    Operation<U>: Codec,
 {
-    /// Read a value by key, falling back to committed state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
-        let db = self.db.read().await;
-        self.batch.get(key, &*db).await
-    }
+    type Target = MerkleizedBatch<H::Digest, U>;
 
-    /// Record a mutation. `Some(value)` for upsert, `None` for delete.
-    pub fn write(mut self, key: K, value: Option<V::Value>) -> Self {
-        self.batch = self.batch.write(key, value);
-        self
+    fn deref(&self) -> &Self::Target {
+        &self.batch
     }
 }
 
@@ -159,7 +179,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(None, &*db).await?;
+        let merkleized = self.batch.merkleize(self.metadata, &*db).await?;
         Ok(AnyMerkleized {
             batch: merkleized,
             db: self.db.clone(),
@@ -184,7 +204,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error> {
         let db = self.db.read().await;
-        let merkleized = self.batch.merkleize(None, &*db).await?;
+        let merkleized = self.batch.merkleize(self.metadata, &*db).await?;
         Ok(AnyMerkleized {
             batch: merkleized,
             db: self.db.clone(),
@@ -214,6 +234,7 @@ where
         AnyUnmerkleized {
             batch: self.batch.new_batch::<H>(),
             db: self.db.clone(),
+            metadata: None,
         }
     }
 }
@@ -268,6 +289,7 @@ where
         AnyUnmerkleized {
             batch: inner.new_batch(),
             db: db.clone(),
+            metadata: None,
         }
     }
 
@@ -345,6 +367,7 @@ where
         AnyUnmerkleized {
             batch: inner.new_batch(),
             db: db.clone(),
+            metadata: None,
         }
     }
 
