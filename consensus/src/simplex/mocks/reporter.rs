@@ -110,6 +110,13 @@ where
             self.participants.key(leader).cloned().unwrap()
         });
     }
+
+    pub fn assert_no_invalid(&self) {
+        let invalid_votes = self.invalid_votes.lock();
+        let invalid_certificates = self.invalid_certificates.lock();
+        assert_eq!(*invalid_votes, 0, "invalid votes detected");
+        assert_eq!(*invalid_certificates, 0, "invalid certificates detected");
+    }
 }
 
 impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>

@@ -797,10 +797,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
 
                 // Ensure certificates for all views
@@ -1068,10 +1065,7 @@ mod tests {
                     assert!(faults.is_empty());
                 }
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
 
                 // Ensure no blocked connections
@@ -1704,10 +1698,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
 
                 // Ensure offline node is never active
@@ -1954,10 +1945,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
 
                 // Ensure the slow validator never emits notarize or finalize
@@ -2180,10 +2168,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
 
                 // Ensure quick recovery.
@@ -2408,10 +2393,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
             }
 
@@ -2573,10 +2555,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
             }
 
@@ -2856,10 +2835,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
             }
             assert!(count_conflicting > 0);
@@ -3214,10 +3190,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
             }
 
@@ -3720,10 +3693,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
             }
 
@@ -3904,10 +3874,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
             }
             assert!(count_nullify_and_finalize > 0);
@@ -4077,10 +4044,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
             }
 
@@ -4236,10 +4200,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
             }
 
@@ -4646,10 +4607,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0, "No invalid votes");
-                    assert_eq!(*invalid_certificates, 0, "No invalid certificates");
+                    reporter.assert_no_invalid();
                 }
 
                 // Check that we have certificates reported
@@ -5071,10 +5029,7 @@ mod tests {
                     assert!(faults.is_empty());
                 }
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
             }
             let blocked = oracle.blocked().await.unwrap();
@@ -5474,10 +5429,7 @@ mod tests {
 
                 // Ensure no invalid signatures
                 {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0);
-                    assert_eq!(*invalid_certificates, 0);
+                    reporter.assert_no_invalid();
                 }
 
                 // Ensure no forks
@@ -6082,10 +6034,7 @@ mod tests {
 
                 // Verify no invalid signatures were observed by honest replicas.
                 for reporter in reporters.iter().skip(honest_start) {
-                    let invalid_votes = reporter.invalid_votes.lock();
-                    let invalid_certificates = reporter.invalid_certificates.lock();
-                    assert_eq!(*invalid_votes, 0, "invalid votes detected");
-                    assert_eq!(*invalid_certificates, 0, "invalid certificates detected");
+                    reporter.assert_no_invalid();
                 }
 
                 // Ensure no honest signer appears under multiple payloads for the same view.
