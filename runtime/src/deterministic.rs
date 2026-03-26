@@ -1981,6 +1981,21 @@ mod tests {
     }
 
     #[test]
+    fn test_aborted_spawn_releases_reserved_task() {
+        let (context, executor, _) = Context::new(Config::default());
+        let context = context.with_label("worker");
+
+        // Abort the parent before spawn finishes so Tree::child rejects it.
+        context.tree.abort();
+
+        let handle = context.spawn(|_| async move {});
+        assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
+
+        // Reserved tasks that never install a future must not remain in `running`.
+        assert!(executor.tasks.running.lock().is_empty());
+    }
+
+    #[test]
     fn test_recover_time_persists() {
         // Initialize the first runtime
         let executor = deterministic::Runner::default();
