@@ -14,6 +14,8 @@ use std::{
 
 commonware_macros::stability_mod!(BETA, pub mod buffer);
 pub mod signal;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod thread;
 
 mod handle;
 pub use handle::Handle;

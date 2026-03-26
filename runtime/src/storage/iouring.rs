@@ -24,7 +24,7 @@
 use super::Header;
 use crate::{
     iouring::{self, should_retry, OpBuffer, OpFd, OpIovecs},
-    Buf, BufferPool, Error, IoBuf, IoBufs, IoBufsMut,
+    utils, Buf, BufferPool, Error, IoBuf, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_utils::{channel::oneshot, from_hex, hex};
@@ -95,7 +95,7 @@ impl Storage {
             pool,
         };
 
-        std::thread::spawn(move || iouring_loop.run());
+        utils::thread::spawn(move || iouring_loop.run());
         storage
     }
 }

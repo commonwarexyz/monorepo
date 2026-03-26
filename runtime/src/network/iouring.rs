@@ -25,7 +25,7 @@
 
 use crate::{
     iouring::{self, should_retry, OpBuffer, OpFd, OpIovecs},
-    Buf, BufferPool, Error, IoBuf, IoBufMut, IoBufs,
+    utils, Buf, BufferPool, Error, IoBuf, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::oneshot;
 use io_uring::{opcode, types::Fd};
@@ -136,13 +136,13 @@ impl Network {
         let sender_registry = registry.sub_registry_with_prefix("iouring_sender");
         let (send_submitter, send_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config.clone(), sender_registry);
-        std::thread::spawn(move || send_loop.run());
+        utils::thread::spawn(move || send_loop.run());
 
         // Create an io_uring instance to handle receive operations.
         let receiver_registry = registry.sub_registry_with_prefix("iouring_receiver");
         let (recv_submitter, recv_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config, receiver_registry);
-        std::thread::spawn(move || recv_loop.run());
+        utils::thread::spawn(move || recv_loop.run());
 
         Ok(Self {
             tcp_nodelay: cfg.tcp_nodelay,

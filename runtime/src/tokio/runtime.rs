@@ -17,7 +17,9 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard},
+    utils::{
+        self, add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard,
+    },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
 };
@@ -42,7 +44,6 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
     sync::Arc,
-    thread,
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
@@ -333,12 +334,15 @@ impl crate::Runner for Runner {
 
         // Initialize runtime
         let metrics = Arc::new(Metrics::init(runtime_registry));
-        let runtime = Builder::new_multi_thread()
+        let mut builder = Builder::new_multi_thread();
+        builder
             .worker_threads(self.cfg.worker_threads)
             .max_blocking_threads(self.cfg.max_blocking_threads)
-            .enable_all()
-            .build()
-            .expect("failed to create Tokio runtime");
+            .enable_all();
+        if let Some(stack_size) = utils::thread::system_default_stack_size() {
+            builder.thread_stack_size(stack_size);
+        }
+        let runtime = builder.build().expect("failed to create Tokio runtime");
 
         // Initialize panicker
         let (panicker, panicked) = Panicker::new(self.cfg.catch_panics);
@@ -580,7 +584,7 @@ impl crate::Spawner for Context {
         );
 
         if matches!(past, Execution::Dedicated) {
-            thread::spawn({
+            utils::thread::spawn({
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
                 move || {
