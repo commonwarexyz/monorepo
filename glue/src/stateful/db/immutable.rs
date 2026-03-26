@@ -79,6 +79,12 @@ where
         let db = self.db.read().await;
         self.batch.get(key, &*db).await
     }
+
+    /// Set `key` to `value` in the speculative batch.
+    pub fn set(mut self, key: K, value: V) -> Self {
+        self.batch = self.batch.set(key, value);
+        self
+    }
 }
 
 /// Wraps an immutable [`MerkleizedBatch`] with a reference to the parent
