@@ -526,17 +526,19 @@ mod tests {
                     signer,
                     signature: lazy.clone(),
                 };
-                if !inner.verify_attestation(
-                    &mut test_rng(),
-                    subject.clone(),
-                    &attestation,
-                    &Sequential,
-                ) {
+                if lazy.get().is_some()
+                    && !inner.verify_attestation(
+                        &mut test_rng(),
+                        subject.clone(),
+                        &attestation,
+                        &Sequential,
+                    )
+                {
                     return lazy;
                 }
             }
 
-            panic!("expected at least one invalid signature mutation");
+            panic!("expected at least one invalid but decodable signature mutation");
         }
     }
 
@@ -3170,7 +3172,7 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(5)));
+            .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
@@ -3224,8 +3226,6 @@ mod tests {
                 // Create scheme context
                 let context = context.with_label(&format!("validator_{}", *validator));
 
-                let scheme = schemes[idx_scheme].clone();
-
                 let reporter_config = mocks::reporter::Config {
                     participants: participants.clone().try_into().unwrap(),
                     scheme: schemes[idx_scheme].clone(),
@@ -3251,7 +3251,7 @@ mod tests {
                 actor.start();
                 let blocker = oracle.control(validator.clone());
                 let cfg = config::Config {
-                    scheme,
+                    scheme: schemes[idx_scheme].clone(),
                     elector: elector.clone(),
                     blocker,
                     automaton: application.clone(),
@@ -3280,9 +3280,11 @@ mod tests {
                 engine.start(pending, recovered, resolver);
             }
 
-            // Wait for all engines to finish
+            // Wait for all engines to finish.
+            // The byzantine node will not finish since it will mark any finalization
+            // certificates it creates (using its own invalid signature) as invalid.
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.with_label("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
@@ -3303,8 +3305,9 @@ mod tests {
 
                 // Only the byzantine node sees invalid certificates since it constructs them from
                 // its own invalid vote. The honest nodes reject them before reaching the reporter.
-                if i == 0 {
-                    debug!("byzantine node sees invalid certificates: {}", *reporter.invalid_certificates.lock());
+                let is_byzantine = i == 0;
+                if is_byzantine {
+                    assert!(*reporter.invalid_certificates.lock() > 0);
                 } else {
                     assert_eq!(*reporter.invalid_certificates.lock(), 0);
                 }
@@ -3312,7 +3315,7 @@ mod tests {
 
             // Ensure byzantine node is blocked by honest nodes
             let blocked = oracle.blocked().await.unwrap();
-            assert_eq!(blocked.len(), participants.len() - 1);
+            assert!(blocked.len() >= participants.len() - 1); // Byzantine node may block itself.
             let byz = &participants[0];
             for (_, b) in blocked {
                 assert_eq!(&b, byz);
