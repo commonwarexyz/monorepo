@@ -35,6 +35,10 @@ pub trait Translator: Clone + BuildHasher + Send + Sync + 'static {
 ///
 /// This hasher is not suitable for general use. If the hasher is called on a byte slice longer
 /// than `size_of::<u64>()`, it will panic.
+
+// Golden-ratio-derived mixing constant (2^64 / phi, truncated to odd).
+const MIXING_CONSTANT: u64 = 0x517cc1b727220a95;
+
 #[derive(Default, Clone)]
 pub struct UintIdentity {
     value: u64,
@@ -71,7 +75,10 @@ impl Hasher for UintIdentity {
 
     #[inline]
     fn finish(&self) -> u64 {
-        self.value
+        // Multiply by the mixing constant to spread low-order bits across all 64 bits.
+        // Without this, hashbrown's h2 control bytes (top 7 bits) are all zero for small
+        // keys, defeating its SIMD fast-reject filter.
+        self.value.wrapping_mul(MIXING_CONSTANT)
     }
 }
 
@@ -366,7 +373,8 @@ mod tests {
     fn identity_hasher_works_on_small_slice() {
         let mut h = UintIdentity::default();
         h.write(b"abc");
-        assert_eq!(h.finish(), u64::from_le_bytes(cap::<8>(b"abc")));
+        let raw = u64::from_le_bytes(cap::<8>(b"abc"));
+        assert_eq!(h.finish(), raw.wrapping_mul(MIXING_CONSTANT));
     }
 
     #[test]
