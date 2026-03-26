@@ -18,14 +18,14 @@ use commonware_utils::{
 };
 use futures::future::{self, Either};
 use rand::Rng;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
 type Op<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Op;
 type DatabaseRoot<DB> = <Arc<AsyncRwLock<DB>> as SyncResolver>::Digest;
 type SyncMailbox<DB> = Mailbox<DB, Op<DB>, DatabaseRoot<DB>>;
 type Pending<Op, D> = oneshot::Sender<Result<FetchResult<Op, D>, mailbox::ResponseDropped>>;
-type PendingSubs<DB> = HashMap<handler::Request, Vec<Pending<Op<DB>, DatabaseRoot<DB>>>>;
+type PendingSubs<DB> = BTreeMap<handler::Request, Vec<Pending<Op<DB>, DatabaseRoot<DB>>>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -122,7 +122,7 @@ where
             mailbox_rx,
             state,
             metrics,
-            pending: HashMap::new(),
+            pending: BTreeMap::new(),
         };
         (actor, mailbox)
     }

@@ -38,7 +38,7 @@ use commonware_runtime::{telemetry::metrics::status::GaugeExt, Clock, Metrics, S
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand::Rng;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     future::Future,
 };
 use tracing::{debug, warn};
@@ -57,7 +57,7 @@ where
     merkleized: PendingBatches<A, E>,
 }
 
-type PendingMap<A, E> = HashMap<PendingDigest<A, E>, PendingEntry<A, E>>;
+type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
 
 /// Errors while preparing parent-relative batches for propose/verify.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,7 +107,7 @@ where
         Self {
             app,
             databases,
-            pending: HashMap::new(),
+            pending: BTreeMap::new(),
             last_processed,
             metrics,
         }
@@ -482,7 +482,7 @@ where
         finalized_digest: &<A::Block as Digestible>::Digest,
         finalized_round: Round,
     ) {
-        let mut children_by_parent = HashMap::new();
+        let mut children_by_parent = BTreeMap::new();
         for (candidate_digest, entry) in &self.pending {
             children_by_parent
                 .entry(entry.parent)
