@@ -84,7 +84,7 @@ mod tests {
         Automaton, CertifiableAutomaton,
     };
     use commonware_codec::FixedSize;
-    use commonware_coding::ReedSolomon;
+    use commonware_coding::ReedSolomon16;
     use commonware_cryptography::{
         certificate::{mocks::Fixture, ConstantProvider},
         sha256::Sha256,
@@ -639,7 +639,7 @@ mod tests {
                 parent: (View::new(1), parent_commitment),
             };
             let block_a = make_coding_block(context_a, parent.digest(), Height::new(2), 200);
-            let coded_block_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+            let coded_block_a: CodedBlock<_, ReedSolomon16<Sha256>, Sha256> =
                 CodedBlock::new(block_a, coding_config, &Sequential);
             let commitment_a = coded_block_a.commitment();
 
@@ -1469,11 +1469,11 @@ mod tests {
             };
             let block1 = make_coding_block(block1_ctx, genesis.digest(), Height::new(1), 100);
 
-            let coded_block_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+            let coded_block_a: CodedBlock<_, ReedSolomon16<Sha256>, Sha256> =
                 CodedBlock::new(block1.clone(), coding_config_a, &Sequential);
             let commitment_a = coded_block_a.commitment();
 
-            let coded_block_b: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
+            let coded_block_b: CodedBlock<_, ReedSolomon16<Sha256>, Sha256> =
                 CodedBlock::new(block1.clone(), coding_config_b, &Sequential);
             let commitment_b = coded_block_b.commitment();
 

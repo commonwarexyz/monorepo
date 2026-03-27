@@ -1490,7 +1490,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::Encode;
     use commonware_coding::{
-        CodecConfig, Config as CodingConfig, PhasedAsScheme, ReedSolomon, Zoda,
+        CodecConfig, Config as CodingConfig, PhasedAsScheme, ReedSolomon16, Zoda,
     };
     use commonware_cryptography::{
         certificate::Subject,
@@ -1622,7 +1622,7 @@ mod tests {
     type B = MockBlock<Sha256Digest, ()>;
     type H = Sha256;
     type P = PublicKey;
-    type C = ReedSolomon<H>;
+    type C = ReedSolomon16<H>;
     type X = Control<P, deterministic::Context>;
     type O = Oracle<P, deterministic::Context>;
     type Prov = MultiEpochProvider;

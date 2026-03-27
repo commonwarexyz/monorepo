@@ -19,7 +19,7 @@ commonware_macros::stability_scope!(ALPHA {
 
     mod reed_solomon;
     pub use reed_solomon::{
-        Engine, Error as ReedSolomonError, Gf16, Gf8, ReedSolomon, ReedSolomon8,
+        Engine, Error as ReedSolomonError, Gf16, Gf8, ReedSolomon16, ReedSolomon8,
     };
 
     mod zoda;
@@ -93,14 +93,14 @@ commonware_macros::stability_scope!(ALPHA {
     ///
     /// # Example
     /// ```
-    /// use commonware_coding::{Config, ReedSolomon, Scheme as _};
+    /// use commonware_coding::{Config, ReedSolomon16, Scheme as _};
     /// use commonware_cryptography::Sha256;
     /// use commonware_parallel::Sequential;
     /// use commonware_utils::NZU16;
     ///
     /// const STRATEGY: Sequential = Sequential;
     ///
-    /// type RS = ReedSolomon<Sha256>;
+    /// type RS = ReedSolomon16<Sha256>;
     ///
     /// let config = Config {
     ///     minimum_shards: NZU16!(2),
@@ -522,7 +522,7 @@ mod test {
 
     mod scheme {
         use super::*;
-        use crate::{reed_solomon::ReedSolomon, PhasedAsScheme, Scheme, Zoda};
+        use crate::{reed_solomon::ReedSolomon16, PhasedAsScheme, Scheme, Zoda};
         use commonware_codec::Encode;
         use commonware_parallel::Sequential;
 
@@ -590,7 +590,7 @@ mod test {
                 extra_shards: NZU16!(1),
             };
 
-            decode_rejects_mixed_commitments::<ReedSolomon<Sha256>>(
+            decode_rejects_mixed_commitments::<ReedSolomon16<Sha256>>(
                 &config,
                 b"alpha payload",
                 b"bravo payload",
@@ -600,7 +600,7 @@ mod test {
                 b"alpha payload",
                 b"bravo payload",
             );
-            decode_rejects_empty_checked_shards::<ReedSolomon<Sha256>>(&config, b"alpha payload");
+            decode_rejects_empty_checked_shards::<ReedSolomon16<Sha256>>(&config, b"alpha payload");
             decode_rejects_empty_checked_shards::<PhasedAsScheme<Zoda<Sha256>>>(
                 &config,
                 b"alpha payload",
@@ -615,7 +615,7 @@ mod test {
             };
             let selected: Vec<u16> = (0..30).collect();
 
-            roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
+            roundtrip::<ReedSolomon16<Sha256>>(&config, b"", &selected);
             roundtrip::<ReedSolomon8<Sha256>>(&config, b"", &selected);
             roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, b"", &selected);
         }
@@ -629,7 +629,7 @@ mod test {
             let data = vec![0x67; 1 << 16];
             let selected: Vec<u16> = (0..8).collect();
 
-            roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+            roundtrip::<ReedSolomon16<Sha256>>(&config, &data, &selected);
             roundtrip::<ReedSolomon8<Sha256>>(&config, &data, &selected);
             roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, &data, &selected);
         }
@@ -638,7 +638,7 @@ mod test {
         fn minifuzz_roundtrip_reed_solomon() {
             minifuzz::test(|u| {
                 let (config, data, selected) = generate_case(u)?;
-                roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+                roundtrip::<ReedSolomon16<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
         }

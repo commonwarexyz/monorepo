@@ -2,7 +2,7 @@
 //!
 //! This engine delegates to `reed-solomon-simd`'s Leopard-RS FFT-based algorithm,
 //! which supports up to 65535 total shards. It is the default engine used by
-//! [`super::ReedSolomon`].
+//! [`super::ReedSolomon16`].
 
 use super::Engine;
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};

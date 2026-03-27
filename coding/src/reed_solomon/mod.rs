@@ -648,10 +648,10 @@ impl<H: Hasher, V: Engine> Scheme for ReedSolomonInner<H, V> {
     }
 }
 
-/// Backward-compatible type alias: Reed-Solomon over GF(2^16).
+/// Reed-Solomon over GF(2^16).
 ///
 /// Supports up to 65535 total shards. Uses `reed-solomon-simd` internally.
-pub type ReedSolomon<H> = ReedSolomonInner<H, Gf16>;
+pub type ReedSolomon16<H> = ReedSolomonInner<H, Gf16>;
 
 /// Reed-Solomon over GF(2^8) with SIMD-accelerated arithmetic.
 ///
@@ -667,7 +667,7 @@ mod tests {
     use commonware_utils::NZU16;
     use reed_solomon_simd::ReedSolomonEncoder;
 
-    type RS = ReedSolomon<Sha256>;
+    type RS = ReedSolomon16<Sha256>;
     const STRATEGY: Sequential = Sequential;
 
     fn checked(
