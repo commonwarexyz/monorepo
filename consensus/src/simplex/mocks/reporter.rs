@@ -111,6 +111,11 @@ where
         });
     }
 
+    pub fn assert_no_faults(&self) {
+        let faults = self.faults.lock();
+        assert!(faults.is_empty(), "faults detected");
+    }
+
     pub fn assert_no_invalid(&self) {
         let invalid_votes = self.invalid_votes.lock();
         let invalid_certificates = self.invalid_certificates.lock();

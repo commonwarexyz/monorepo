@@ -790,10 +790,7 @@ mod tests {
             let latest_complete = required_containers.saturating_sub(activity_timeout);
             for reporter in reporters.iter() {
                 // Ensure no faults
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
 
                 // Ensure no invalid signatures
                 reporter.assert_no_invalid();
@@ -1058,10 +1055,7 @@ mod tests {
             // Sanity check
             for reporter in reporters.iter() {
                 // Ensure no faults or invalid signatures
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
                 reporter.assert_no_invalid();
 
                 // Ensure no blocked connections
@@ -1241,8 +1235,7 @@ mod tests {
                         let supervised = supervised.lock();
                         for reporters in supervised.iter() {
                             for (_, reporter) in reporters.iter() {
-                                let faults = reporter.faults.lock();
-                                assert!(faults.is_empty());
+                                reporter.assert_no_faults();
                             }
                         }
                         true
@@ -1687,10 +1680,7 @@ mod tests {
             let offline = &participants[0];
             for reporter in reporters.iter() {
                 // Ensure no faults
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
 
                 // Ensure no invalid signatures
                 reporter.assert_no_invalid();
@@ -1932,10 +1922,7 @@ mod tests {
             let slow = &participants[0];
             for reporter in reporters.iter() {
                 // Ensure no faults
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
 
                 // Ensure no invalid signatures
                 reporter.assert_no_invalid();
@@ -2153,10 +2140,7 @@ mod tests {
             // Check reporters for correct activity
             for reporter in reporters.iter() {
                 // Ensure no faults
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
 
                 // Ensure no invalid signatures
                 reporter.assert_no_invalid();
@@ -2376,10 +2360,7 @@ mod tests {
             // Check reporters for correct activity
             for reporter in reporters.iter() {
                 // Ensure no faults
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
 
                 // Ensure no invalid signatures
                 reporter.assert_no_invalid();
@@ -2536,10 +2517,7 @@ mod tests {
             // Check reporters for correct activity
             for reporter in reporters.iter() {
                 // Ensure no faults
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
 
                 // Ensure no invalid signatures
                 reporter.assert_no_invalid();
@@ -2989,7 +2967,7 @@ mod tests {
             // Check all reporters for activity
             for (i, reporter) in reporters.iter().enumerate() {
                 // Ensure no faults
-                assert_eq!(reporter.faults.lock().len(), 0);
+                reporter.assert_no_faults();
 
                 // All nodes see invalid signatures since the honest reporters get unfiltered votes
                 // once they pass the view.
@@ -3169,10 +3147,7 @@ mod tests {
             let byz = &participants[0];
             for reporter in reporters.iter() {
                 // Ensure no faults
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
 
                 // Ensure no invalid signatures
                 reporter.assert_no_invalid();
@@ -3670,10 +3645,7 @@ mod tests {
             let byz = &participants[0];
             for reporter in reporters.iter() {
                 // Ensure no faults
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
 
                 // Ensure no invalid signatures
                 reporter.assert_no_invalid();
@@ -4017,10 +3989,7 @@ mod tests {
             // Check reporters for correct activity
             for reporter in reporters.iter() {
                 // Ensure no faults
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
 
                 // Ensure no invalid signatures
                 reporter.assert_no_invalid();
@@ -4171,10 +4140,7 @@ mod tests {
             // Check reporters for correct activity
             for reporter in reporters.iter() {
                 // Ensure no faults
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
 
                 // Ensure no invalid signatures
                 reporter.assert_no_invalid();
@@ -4576,10 +4542,7 @@ mod tests {
             // Verify filtering behavior based on scheme attributability
             for reporter in reporters.iter() {
                 // Ensure no faults (normal operation)
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty(), "No faults should be reported");
-                }
+                reporter.assert_no_faults();
 
                 // Ensure no invalid signatures
                 reporter.assert_no_invalid();
@@ -4998,10 +4961,7 @@ mod tests {
 
             // Sanity checks: no faults/invalid signatures, and no peers blocked
             for reporter in honest_reporters.iter() {
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
                 reporter.assert_no_invalid();
             }
             let blocked = oracle.blocked().await.unwrap();
@@ -5394,10 +5354,7 @@ mod tests {
             let latest_complete = target.saturating_sub(activity_timeout);
             for (_, reporter) in reporters.iter() {
                 // Ensure no faults
-                {
-                    let faults = reporter.faults.lock();
-                    assert!(faults.is_empty());
-                }
+                reporter.assert_no_faults();
 
                 // Ensure no invalid signatures
                 reporter.assert_no_invalid();
