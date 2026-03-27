@@ -1,12 +1,12 @@
 use crate::{simplex::elector, types::Round};
-use commonware_codec::{Encode, types::lazy::Lazy};
+use commonware_codec::{types::lazy::Lazy, Encode};
 use commonware_cryptography::{
-    Hasher as _,
     certificate::{Attestation, Verification},
     sha256::Sha256,
+    Hasher as _,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{Faults, Participant, test_rng};
+use commonware_utils::{test_rng, Faults, Participant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Behavior {
