@@ -480,7 +480,7 @@ impl crate::Runner for Runner {
             execution: Execution::default(),
             instrumented: false,
         };
-        let root = std::pin::pin!(f(context));
+        let root = Box::pin(f(context));
         let output = executor.runtime.block_on(panicked.interrupt(root));
         gauge.dec();
 
