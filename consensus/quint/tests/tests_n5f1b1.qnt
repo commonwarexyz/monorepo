@@ -60,6 +60,33 @@ module tests {
             .expect(all_invariants)
     }
 
+    run invalidParentNotarizationCertificateDoesNotTriggerFinalizeTest = {
+        val bad_proposal = {
+            payload: "val_b1",
+            view: 2,
+            parent: 2,
+        }
+        val bad_cert = notarization(bad_proposal, Set("n0", "n1", "n4"), "n4")
+
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n3", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
+            CERTIFY_ALL_TRUE
+        )
+            .then(on_certificate("n3", bad_cert))
+            .then(all {
+                assert(store_certificates.get("n3").exists(c =>
+                    is_notarization_cert(c)
+                        and cert_proposal(c) == Some(bad_proposal)
+                )),
+                assert(not(sent_finalize_votes.exists(v =>
+                    v.sig == "n3" and v.proposal == bad_proposal
+                ))),
+                assert(replica_state.get("n3").certified.get(2) == None),
+                unchanged_all,
+            })
+            .expect(all_invariants)
+    }
+
     action send_proposal(sender: Signature, proposal: Proposal): bool = all {
         sent_proposal' = sent_proposal.union(Set((sender, proposal))),
         sent_notarize_votes' = sent_notarize_votes,

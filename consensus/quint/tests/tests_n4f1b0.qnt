@@ -450,13 +450,13 @@ module tests {
             .expect(all_invariants)
         }
 
-        // View 1 leader proposes payload with wrong parent, replicas nullify.
+        // View 1 leader proposes a valid payload with an invalid parent, replicas nullify.
         // View 2 leader proposes correct payload with genesis parent, all replicas finalize.
         run wrongParentNullifyThenCorrectFinalizeTest = {
             val bad_proposal = {
-                payload: "inv_b3",
+                payload: "val_b0",
                 view: 1,
-                parent: GENESIS_VIEW,
+                parent: FIRST_VIEW,
             }
             val correct_proposal = {
                 payload: "val_b0",
@@ -468,12 +468,12 @@ module tests {
                 Map(0 -> "n2", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
                 CERTIFY_ALL_TRUE
             )
-            // View 1: n0 proposes val_b0 with wrong parent (val_b1 instead of genesis)
+            // View 1: n0 proposes val_b0 with an invalid parent (equal to the proposal view).
             .then(send_proposal("n0", bad_proposal))
-            .then(replica_receives_notarize_vote("n0", "inv_b3", 1, GENESIS_VIEW, "n0"))
-            .then(replica_receives_notarize_vote("n1", "inv_b3", 1, GENESIS_VIEW, "n0"))
-            .then(replica_receives_notarize_vote("n2", "inv_b3", 1, GENESIS_VIEW, "n0"))
-            .then(replica_receives_notarize_vote("n3", "inv_b3", 1, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", 1, FIRST_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 1, FIRST_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 1, FIRST_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n3", "val_b0", 1, FIRST_VIEW, "n0"))
             .then(all {
                 assert(CORRECT.forall(id => replica_state.get(id).nullified == true)),
                 assert(CORRECT.forall(id => sent_nullify_votes.exists(v => v.sig == id and v.view == FIRST_VIEW))),

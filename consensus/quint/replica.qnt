@@ -176,24 +176,12 @@ module replica {
         is_some(r.notarized.get(r.view))
     }
 
-    // Does a set of certificates have a notarization/finalization certificate for a view?
-    pure def is_view_notarized(view: ViewNumber, certificates: Set[Certificate]): bool = or {
-        view == GENESIS_VIEW,
-        certificates.exists(c => is_notarization_cert(c) and cert_view(c) == view),
-        certificates.exists(c => is_finalization_cert(c) and cert_view(c) == view)
-    }
-
     pure def is_proposal_notarized_votes(proposal: Proposal, votes: Set[NotarizeVote]): bool = or {
         proposal.view == GENESIS_VIEW and proposal.payload == GENESIS_PAYLOAD,
         votes
             .filter(v => v.proposal == proposal)
             .map(v => v.sig)
             .size() >= Q
-    }
-
-    pure def is_view_finalized(view: ViewNumber, certificates: Set[Certificate]): bool = or {
-        view == GENESIS_VIEW,
-        certificates.exists(c => is_finalization_cert(c) and cert_view(c) == view)
     }
 
     pure def is_proposal_finalized_votes(proposal: Proposal, votes: Set[FinalizeVote]): bool = or {
@@ -209,41 +197,33 @@ module replica {
         certificates.exists(c => is_nullification_cert(c) and cert_view(c) == view)
     }
 
-    pure def is_payload_notarized(view: ViewNumber, payload: Payload, certificates: Set[Certificate]): bool = or {
-        view == GENESIS_VIEW and payload == GENESIS_PAYLOAD,
-        certificates.exists(c => and {
-            cert_view(c) == view,
-            cert_payload(c) == Some(payload),
-            is_notarization_cert(c) or is_finalization_cert(c),
-        })
-    }
-
-    pure def is_payload_finalized(view: ViewNumber, payload: Payload, certificates: Set[Certificate]): bool = or {
-        view == GENESIS_VIEW and payload == GENESIS_PAYLOAD,
-        certificates.exists(c => and {
-            cert_view(c) == view,
-            cert_payload(c) == Some(payload),
-            is_finalization_cert(c),
-        })
-    }
-
     // Does a set of certificates contain nullification certificates for all views in (v1, v2)?
     pure def are_views_nullified(v1: ViewNumber, v2: ViewNumber, certificates: Set[Certificate]): bool = {
         VIEWS.filter(v => v > v1 and v < v2).forall(v => is_view_nullified(v, certificates))
     }
 
     pure def observe_leader_proposal(self: ReplicaState, proposal: Proposal): ReplicaState = {
+        val known = self.leader_proposal.get(proposal.view)
         {
             ...self,
-            leader_proposal: self.leader_proposal.put(proposal.view, Some(proposal))
+            leader_proposal: self.leader_proposal.put(
+                proposal.view,
+                match (known) {
+                    | Some(p) => Some(p)
+                    | None => Some(proposal)
+                }
+            ),
+            leader_proposal_conflicted: self.leader_proposal_conflicted.put(
+                proposal.view,
+                self.leader_proposal_conflicted.get(proposal.view)
+                    or option_has(known, p => p != proposal)
+            )
         }
     }
 
     pure def has_leader_proposal_conflict(self: ReplicaState, proposal: Proposal): bool = {
-        match (self.leader_proposal.get(proposal.view)) {
-            | Some(known) => known != proposal
-            | None => false
-        }
+        self.leader_proposal_conflicted.get(proposal.view)
+            or option_has(self.leader_proposal.get(proposal.view), known => known != proposal)
     }
 
     pure def list_contains_payload(chain: List[Payload], payload: Payload): bool = {
@@ -255,15 +235,18 @@ module replica {
           certificates: Set[Certificate]
       ): Option[Payload] = {
           val payloads =
-              certificates
-                  .filter(c => and {
-                      is_finalization_cert(c),
-                      cert_view(c) == view,
-                  })
-                  .map(c => cert_payload(c))
+              certificates.fold(Set(), (acc, c) =>
+                  if (is_finalization_cert(c) and cert_view(c) == view)
+                      match (cert_proposal(c)) {
+                          | Some(p) => acc.union(Set(p.payload))
+                          | None => acc
+                      }
+                  else
+                      acc
+              )
 
           if (payloads.size() == 1)
-              payloads.fold(None, (_acc, p) => p)
+              payloads.fold(None, (_acc, p) => Some(p))
           else
               None
       }
@@ -364,6 +347,7 @@ module replica {
                 last_finalized: GENESIS_VIEW,
                 notarized: VIEWS.mapBy(_ => None),
                 leader_proposal: VIEWS.mapBy(_ => None),
+                leader_proposal_conflicted: VIEWS.mapBy(_ => false),
                 certified: VIEWS.mapBy(_ => None),
                 propose_sent: false,
                 nullified: false,
@@ -565,6 +549,8 @@ module replica {
         val proposal = vote.proposal
         val view = proposal.view
         val payload = proposal.payload
+        val parent_ok = is_some(parent_payload(self, proposal.view, proposal.parent, certs))
+        val payload_ok = VALID_PAYLOADS.contains(payload)
         val is_leader_vote = (vote.sig == sig_of(leader.get(view)))
         val proposal_conflicted = has_leader_proposal_conflict(self, proposal)
         val can_process_as_proposal = and {
@@ -597,15 +583,13 @@ module replica {
             all {
                 view == self.view,
                 vote.sig == sig_of(leader.get(view)),
-                proposal.parent < view,
-                proposal.parent >= GENESIS_VIEW,
                 not(has_notarized(self)),
                 not(self.nullified),
-                is_some(parent_payload(self, proposal.view, proposal.parent, certs)),
 
                 any {
                     all {
-                        VALID_PAYLOADS.contains(payload),
+                        payload_ok,
+                        parent_ok,
 
                         sent_notarize_votes' = sent_notarize_votes.union(Set({
                             proposal: proposal,
@@ -628,7 +612,8 @@ module replica {
                     },
                     all {
                         or {
-                            not(VALID_PAYLOADS.contains(payload)),
+                            not(payload_ok),
+                            not(parent_ok),
                         },
 
                         sent_notarize_votes' = sent_notarize_votes,
@@ -714,9 +699,8 @@ module replica {
         val self = replica_state.get(id)
         all {
             votes != Set(),
-            val proposal = votes.fold(
-                { payload: GENESIS_PAYLOAD, view: GENESIS_VIEW, parent: GENESIS_VIEW },
-                (_acc, v) => v.proposal
+            nondet vote = votes.oneOf()
+            val proposal = vote.proposal
             )
             any {
                 all {
@@ -952,8 +936,13 @@ module replica {
                         | _ => { payload: cert_payload_val, view: cert_view_num, parent: GENESIS_VIEW }
                     }
                     val proposal_conflicted = has_leader_proposal_conflict(self, cert_prop)
+                    val locally_valid = and {
+                        VALID_PAYLOADS.contains(cert_prop.payload),
+                        is_some(parent_payload(self, cert_prop.view, cert_prop.parent, store_certificates.get(id))),
+                    }
                     val can_send_finalize = and {
                         can_certify(id, cert_payload_val),
+                        locally_valid,
                         not(proposal_conflicted),
                         self.certified.get(cert_view_num) == None,
                         not(has_sent_finalize(id, cert_view_num)),
@@ -1394,20 +1383,25 @@ module replica {
         val self = replica_state.get(id)
         VIEWS.forall(v =>
             is_some(self.notarized.get(v))
-                iff sent_notarize_votes.exists(vote => vote.sig == sig_of(id) and vote.proposal.view == v)
+                iff self.ghost_sent_votes.get(v).indices().exists(i =>
+                    self.ghost_sent_votes.get(v)[i] == NotarizeKind
+                )
         )
     })
 
 
-    def finalized_payloads_seen(view: ViewNumber): Set[Option[Payload]] = {
+    def finalized_payloads_seen(view: ViewNumber): Set[Payload] = {
         CORRECT.fold(Set(), (acc, id) =>
             acc.union(
-                store_certificates.get(id)
-                    .filter(c => and {
-                        is_finalization_cert(c),
-                        cert_view(c) == view,
-                    })
-                    .map(c => cert_payload(c))
+                store_certificates.get(id).fold(Set(), (cert_acc, c) =>
+                    if (is_finalization_cert(c) and cert_view(c) == view)
+                        match (cert_proposal(c)) {
+                            | Some(p) => cert_acc.union(Set(p.payload))
+                            | None => cert_acc
+                        }
+                    else
+                        cert_acc
+                )
             )
         )
     }
@@ -1521,7 +1515,7 @@ module replica {
 
     // Test invariants.
 
-    val correct_nodes_sent_certificatess_valid = sent_certificates
+    val correct_nodes_sent_certificates_valid = sent_certificates
         .filter(cert => cert_ghost_sender(cert).in(CorrectSigs))
         .forall(cert => cert_signatures(cert).size() >= Q)
 
@@ -1531,7 +1525,7 @@ module replica {
     })
 
     val certificates_are_valid = and {
-        correct_nodes_sent_certificatess_valid,
+        correct_nodes_sent_certificates_valid,
         store_certificates_are_valid
     }
 

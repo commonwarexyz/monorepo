@@ -174,6 +174,8 @@ module types {
         notarized: ViewNumber -> Option[Payload],
         // leader proposal learned for each view from leader vote/proposal or recovered certificates
         leader_proposal: ViewNumber -> Option[Proposal],
+        // once a conflicting leader proposal is observed for a view, keep that fact forever
+        leader_proposal_conflicted: ViewNumber -> bool,
         // payload this replica has certified per view
         certified: ViewNumber -> Option[Payload]
     }
