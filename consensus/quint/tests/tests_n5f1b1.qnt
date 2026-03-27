@@ -54,7 +54,7 @@ module tests {
             .then(on_timeout("n2"))
             .then(all {
                 assert(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == FIRST_VIEW)),
-                assert(replica_state.get("n2").nullified == true),
+                assert(replica_state.get("n2").broadcast_nullify == true),
                 unchanged_all,
             })
             .expect(test_invariants)

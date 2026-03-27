@@ -130,7 +130,7 @@ module tests {
             .then(all {
                 assert(store_nullify_votes.get("n1").exists(v => v.sig == "n0" and v.view == FIRST_VIEW)),
                 assert(sent_nullify_votes.exists(v => v.sig == "n1" and v.view == FIRST_VIEW)),
-                assert(replica_state.get("n1").nullified == true),
+                assert(replica_state.get("n1").broadcast_nullify == true),
                 assert(replica_state.get("n1").leader_timeout_cancelled == true),
                 assert(replica_state.get("n1").advance_timeout_cancelled == true),
                 assert(replica_state.get("n1").view == FIRST_VIEW),
@@ -148,7 +148,7 @@ module tests {
             .then(propose("n0", "val_b0", 1))
             .then(all {
                 assert(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == FIRST_VIEW)),
-                assert(replica_state.get("n0").nullified == true),
+                assert(replica_state.get("n0").broadcast_nullify == true),
                 assert(replica_state.get("n0").leader_timeout_cancelled == true),
                 assert(replica_state.get("n0").advance_timeout_cancelled == true),
                 assert(replica_state.get("n0").propose_sent == false),
@@ -250,7 +250,7 @@ module tests {
             .then(all {
                 assert(sent_nullify_votes.exists(v => v.sig == "n1" and v.view == FIRST_VIEW)),
                 assert(not(sent_notarize_votes.exists(v => v.sig == "n1" and v.proposal.view == FIRST_VIEW))),
-                assert(replica_state.get("n1").nullified == true),
+                assert(replica_state.get("n1").broadcast_nullify == true),
                 assert(replica_state.get("n1").leader_timeout_cancelled == true),
                 assert(replica_state.get("n1").advance_timeout_cancelled == true),
                 assert(replica_state.get("n1").view == FIRST_VIEW),
@@ -475,7 +475,7 @@ module tests {
             .then(replica_receives_notarize_vote("n2", "val_b0", 1, FIRST_VIEW, "n0"))
             .then(replica_receives_notarize_vote("n3", "val_b0", 1, FIRST_VIEW, "n0"))
             .then(all {
-                assert(CORRECT.forall(id => replica_state.get(id).nullified == true)),
+                assert(CORRECT.forall(id => replica_state.get(id).broadcast_nullify == true)),
                 assert(CORRECT.forall(id => sent_nullify_votes.exists(v => v.sig == id and v.view == FIRST_VIEW))),
                 unchanged_all,
             })

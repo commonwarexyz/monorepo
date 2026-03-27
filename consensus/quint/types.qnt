@@ -152,8 +152,10 @@ module types {
     type ReplicaState = {
         // Current view. Genesis is view 0, voting starts at view 1.
         view: ViewNumber,
-        // whether this replica has nullified this view, initially false
-        nullified: bool,
+        // whether this replica has broadcast nullify for the current view
+        broadcast_nullify: bool,
+        // whether this replica has broadcast finalize
+        broadcast_finalize: bool,
         // leader timeout (t_l) has been cancelled for current view.
         // Introduced to trigger early view transitions for unresponsive leaders.
         leader_timeout_cancelled: bool,

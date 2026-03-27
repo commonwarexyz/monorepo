@@ -35,7 +35,7 @@ module tests {
             .then(replica_receives_notarize_vote("n1", "inv_b3", FIRST_VIEW, GENESIS_VIEW, "n2"))
             .then(all {
                 assert(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == FIRST_VIEW)),
-                assert(replica_state.get("n0").nullified == true),
+                assert(replica_state.get("n0").broadcast_nullify == true),
                 assert(replica_state.get("n0").view == FIRST_VIEW),
                 unchanged_all,
             })
