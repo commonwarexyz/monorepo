@@ -26,7 +26,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::bitmap::Prunable as BitMap;
+use commonware_utils::bitmap::{BitMap, Prunable as PrunableBitMap};
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
@@ -39,21 +39,19 @@ fn apply_push_clear<const N: usize>(
     chunk: &mut [u8; N],
     chunk_start: u64,
     push_start: u64,
-    pushed_bits: &[bool],
+    pushed_bits: &BitMap<N>,
     cleared_bits: &[Location],
 ) {
     let chunk_end = chunk_start + BitMap::<N>::CHUNK_SIZE_BITS;
 
-    let push_end = push_start + pushed_bits.len() as u64;
+    let push_end = push_start + pushed_bits.len();
     if push_start < chunk_end && push_end > chunk_start {
         let abs_start = push_start.max(chunk_start);
         let abs_end = push_end.min(chunk_end);
-        let from = (abs_start - push_start) as usize;
-        let to = (abs_end - push_start) as usize;
         let rel_offset = (abs_start - chunk_start) as usize;
-        for (j, &bit) in pushed_bits[from..to].iter().enumerate() {
-            if bit {
-                let rel = rel_offset + j;
+        for abs_bit in abs_start..abs_end {
+            if pushed_bits.get(abs_bit - push_start) {
+                let rel = rel_offset + (abs_bit - abs_start) as usize;
                 chunk[rel / 8] |= 1 << (rel % 8);
             }
         }
@@ -90,12 +88,12 @@ pub trait BitmapRead<const N: usize> {
     }
     /// Return the value of a single bit.
     fn get_bit(&self, bit: u64) -> bool {
-        let chunk = self.get_chunk(BitMap::<N>::to_chunk_index(bit));
+        let chunk = self.get_chunk(PrunableBitMap::<N>::to_chunk_index(bit));
         BitMap::<N>::get_bit_from_chunk(&chunk, bit % BitMap::<N>::CHUNK_SIZE_BITS)
     }
 }
 
-impl<const N: usize> BitmapRead<N> for BitMap<N> {
+impl<const N: usize> BitmapRead<N> for PrunableBitMap<N> {
     fn complete_chunks(&self) -> usize {
         Self::complete_chunks(self)
     }
@@ -152,7 +150,7 @@ pub struct BitmapDiff<'a, B: BitmapRead<N>, const N: usize> {
     /// Number of bits in the base bitmap at diff creation time.
     base_len: u64,
     /// New bits appended beyond the base bitmap.
-    pushed_bits: Vec<bool>,
+    pushed_bits: BitMap<N>,
     /// Locations of base bits that have been deactivated.
     cleared_bits: Vec<Location>,
     /// Chunk indices containing cleared bits that need grafted MMR recomputation.
@@ -168,7 +166,7 @@ impl<'a, B: BitmapRead<N>, const N: usize> BitmapDiff<'a, B, N> {
         Self {
             base_len: base.len(),
             base,
-            pushed_bits: Vec::new(),
+            pushed_bits: BitMap::new(),
             cleared_bits: Vec::new(),
             dirty_chunks: HashSet::new(),
             old_grafted_leaves,
@@ -181,14 +179,14 @@ impl<'a, B: BitmapRead<N>, const N: usize> BitmapDiff<'a, B, N> {
 
     fn clear_bit(&mut self, loc: Location) {
         self.cleared_bits.push(loc);
-        let chunk = BitMap::<N>::to_chunk_index(*loc);
+        let chunk = PrunableBitMap::<N>::to_chunk_index(*loc);
         if chunk < self.old_grafted_leaves {
             self.dirty_chunks.insert(chunk);
         }
     }
 
     /// Consume the diff, returning the parts needed for a [`BitmapBatchLayer`].
-    fn into_parts(self) -> (u64, Vec<bool>, Vec<Location>) {
+    fn into_parts(self) -> (u64, BitMap<N>, Vec<Location>) {
         (self.base_len, self.pushed_bits, self.cleared_bits)
     }
 }
@@ -244,7 +242,7 @@ impl<B: BitmapRead<N>, const N: usize> BitmapRead<N> for BitmapDiff<'_, B, N> {
     }
 
     fn len(&self) -> u64 {
-        self.base_len + self.pushed_bits.len() as u64
+        self.base_len + self.pushed_bits.len()
     }
 }
 
@@ -314,7 +312,7 @@ where
     inner: any::batch::UnmerkleizedBatch<H, U>,
 
     /// Bitmap pushes accumulated by prior batches in the chain.
-    base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
+    base_bitmap_pushes: Vec<Arc<BitMap<N>>>,
 
     /// Bitmap clears accumulated by prior batches in the chain.
     base_bitmap_clears: Vec<Arc<Vec<Location>>>,
@@ -339,7 +337,7 @@ where
     inner: any::batch::MerkleizedBatch<D, U>,
 
     /// Accumulated bitmap pushes from all batches in the chain.
-    bitmap_pushes: Vec<Arc<Vec<bool>>>,
+    bitmap_pushes: Vec<Arc<BitMap<N>>>,
 
     /// Accumulated bitmap clears from all batches in the chain.
     bitmap_clears: Vec<Arc<Vec<Location>>>,
@@ -359,8 +357,8 @@ pub struct Changeset<K, D: Digest, Item: Send, const N: usize> {
     /// The inner any-layer changeset.
     pub(super) inner: any::batch::Changeset<K, D, Item>,
 
-    /// One bool per operation in the batch chain (pushes applied before clears).
-    pub(super) bitmap_pushes: Vec<bool>,
+    /// One bit per operation in the batch chain (pushes applied before clears).
+    pub(super) bitmap_pushes: BitMap<N>,
 
     /// Locations of bits to clear after pushing.
     pub(super) bitmap_clears: Vec<Location>,
@@ -380,7 +378,7 @@ where
 {
     pub(super) const fn new(
         inner: any::batch::UnmerkleizedBatch<H, U>,
-        base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
+        base_bitmap_pushes: Vec<Arc<BitMap<N>>>,
         base_bitmap_clears: Vec<Arc<Vec<Location>>>,
         grafted_parent: mmr::batch::MerkleizedBatch<H::Digest>,
         bitmap_parent: BitmapBatch<N>,
@@ -604,7 +602,7 @@ fn clear_ancestor_superseded<U, B, const N: usize>(
 async fn compute_current_layer<E, U, C, I, H, const N: usize>(
     inner: any::batch::MerkleizedBatch<H::Digest, U>,
     current_db: &super::db::Db<E, C, I, H, U, N>,
-    base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
+    base_bitmap_pushes: Vec<Arc<BitMap<N>>>,
     base_bitmap_clears: Vec<Arc<Vec<Location>>>,
     grafted_parent: &mmr::batch::MerkleizedBatch<H::Digest>,
     bitmap_parent: &BitmapBatch<N>,
@@ -724,7 +722,7 @@ where
 #[derive(Clone, Debug)]
 pub(crate) enum BitmapBatch<const N: usize> {
     /// Committed bitmap (chain terminal).
-    Base(Arc<BitMap<N>>),
+    Base(Arc<PrunableBitMap<N>>),
     /// Speculative layer on top of a parent batch.
     Layer(Arc<BitmapBatchLayer<N>>),
 }
@@ -736,7 +734,7 @@ pub(crate) struct BitmapBatchLayer<const N: usize> {
     /// Cached `parent.len()` at layer creation time.
     parent_len: u64,
     /// New bits appended contiguously from `parent_len`.
-    pushed_bits: Arc<Vec<bool>>,
+    pushed_bits: Arc<BitMap<N>>,
     /// Locations of parent bits that were deactivated.
     cleared_bits: Arc<Vec<Location>>,
 }
@@ -802,7 +800,7 @@ impl<const N: usize> BitmapRead<N> for BitmapBatch<N> {
     fn len(&self) -> u64 {
         match self {
             Self::Base(bm) => BitmapRead::<N>::len(bm.as_ref()),
-            Self::Layer(layer) => layer.parent_len + layer.pushed_bits.len() as u64,
+            Self::Layer(layer) => layer.parent_len + layer.pushed_bits.len(),
         }
     }
 }
@@ -811,7 +809,7 @@ impl<const N: usize> BitmapBatch<N> {
     /// Push a changeset as a new layer on top of this bitmap, mutating `self` in place.
     ///
     /// The old value becomes the parent of the new layer.
-    pub(super) fn push_changeset(&mut self, pushed_bits: Vec<bool>, cleared_bits: Vec<Location>) {
+    pub(super) fn push_changeset(&mut self, pushed_bits: BitMap<N>, cleared_bits: Vec<Location>) {
         if pushed_bits.is_empty() && cleared_bits.is_empty() {
             return;
         }
@@ -836,7 +834,7 @@ impl<const N: usize> BitmapBatch<N> {
 
         // Take ownership of the chain so that Arc refcounts are not
         // artificially inflated by a clone.
-        let mut owned = std::mem::replace(self, Self::Base(Arc::new(BitMap::default())));
+        let mut owned = std::mem::replace(self, Self::Base(Arc::new(PrunableBitMap::default())));
 
         // Collect layers from tip to base.
         let mut layers = Vec::new();
@@ -859,7 +857,7 @@ impl<const N: usize> BitmapBatch<N> {
         // Replay mutations from base to tip.
         let mut bitmap = Arc::try_unwrap(base).unwrap_or_else(|arc| (*arc).clone());
         for (pushed, cleared) in layers.into_iter().rev() {
-            for &bit in pushed.iter() {
+            for bit in pushed.iter() {
                 bitmap.push(bit);
             }
             for loc in cleared.iter() {
@@ -926,11 +924,13 @@ where
     where
         U: 'static,
     {
-        // Flatten accumulated bitmap pushes + clears into flat Vecs.
-        let total_pushes: usize = self.bitmap_pushes.iter().map(|s| s.len()).sum();
-        let mut bitmap_pushes = Vec::with_capacity(total_pushes);
+        // Flatten accumulated bitmap pushes + clears.
+        let total_pushes: u64 = self.bitmap_pushes.iter().map(|s| s.len()).sum();
+        let mut bitmap_pushes = BitMap::<N>::with_capacity(total_pushes);
         for seg in &self.bitmap_pushes {
-            bitmap_pushes.extend_from_slice(seg);
+            for bit in seg.iter() {
+                bitmap_pushes.push(bit);
+            }
         }
 
         let total_clears: usize = self.bitmap_clears.iter().map(|s| s.len()).sum();
@@ -968,7 +968,7 @@ where
             "current_db_size ({current_db_size}) < batch db_size ({})",
             self.inner.db_size
         );
-        let items_to_skip = (current_db_size - self.inner.db_size) as usize;
+        let items_to_skip = current_db_size - self.inner.db_size;
 
         // Determine how many complete batch segments have been committed.
         // Push segments have one entry per operation, so their cumulative
@@ -990,9 +990,11 @@ where
         }
 
         // Flatten uncommitted push segments.
-        let mut bitmap_pushes = Vec::new();
+        let mut bitmap_pushes = BitMap::<N>::new();
         for seg in &self.bitmap_pushes[segments_to_skip..] {
-            bitmap_pushes.extend_from_slice(seg);
+            for bit in seg.iter() {
+                bitmap_pushes.push(bit);
+            }
         }
 
         // Flatten uncommitted clear segments (1:1 with push segments).
@@ -1385,7 +1387,8 @@ mod tests {
         push_operation_bits::<U, Bm, N>(&mut bitmap, &segment, 0, &diff);
 
         // Expected: [true(key1 active), false(key2 superseded), false(delete), true(commit)]
-        assert_eq!(bitmap.pushed_bits, [true, false, false, true]);
+        let expected: Vec<bool> = bitmap.pushed_bits.iter().collect();
+        assert_eq!(expected, [true, false, false, true]);
     }
 
     // ---- clear_base_old_locs test ----
