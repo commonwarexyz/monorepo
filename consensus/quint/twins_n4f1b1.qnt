@@ -48,7 +48,7 @@ module twins {
   val notarized_consistency = i::notarized_consistency
   val unique_notarized_or_finalized_payload_per_view = i::unique_notarized_or_finalized_payload_per_view
   val finalize_vote_requires_notarization_cert = i::finalize_vote_requires_notarization_cert
-  val finalized_payloads_have_unique_parent = i::finalized_payloads_have_unique_parent
+  val finalized_views_have_unique_proposal = i::finalized_views_have_unique_proposal
   val finalized_certificates_are_committed = i::finalized_certificates_are_committed
   val committed_blocks_no_duplicates = i::committed_blocks_no_duplicates
   val certificates_require_sent_votes = i::certificates_require_sent_votes

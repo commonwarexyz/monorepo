@@ -701,7 +701,7 @@ module replica {
             votes != Set(),
             nondet vote = votes.oneOf()
             val proposal = vote.proposal
-            )
+
             any {
                 all {
                     votes.forall(v => v.proposal == proposal),
