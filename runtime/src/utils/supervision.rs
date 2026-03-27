@@ -12,24 +12,19 @@ use std::{
 /// a context finishes or is aborted, the runtime drains the node and aborts all descendant
 /// tasks (leaving siblings intact).
 pub(crate) struct Tree {
+    parent: Mutex<Option<Arc<Tree>>>,
     inner: Mutex<TreeInner>,
 }
 
 struct TreeInner {
-    // Hold a strong reference to the parent to keep an ancestry of unspawned contexts alive.
-    //
-    // Without this, the parent could drop immediately, leaving only weak pointers that
-    // cannot be upgraded during abort cascades.
-    _parent: Option<Arc<Tree>>,
     children: Vec<Weak<Tree>>,
     task: Option<Aborter>,
     aborted: bool,
 }
 
 impl TreeInner {
-    const fn new(parent: Option<Arc<Tree>>, aborted: bool) -> Self {
+    const fn new(aborted: bool) -> Self {
         Self {
-            _parent: parent,
             children: Vec::new(),
             task: None,
             aborted,
@@ -58,9 +53,6 @@ impl TreeInner {
         }
 
         self.aborted = true;
-        // Once a subtree is aborted, it no longer needs to keep its ancestry
-        // alive for future cascades.
-        self._parent = None;
         let task = self.task.take();
         let children = mem::take(&mut self.children);
         Some((task, children))
@@ -68,10 +60,24 @@ impl TreeInner {
 }
 
 impl Tree {
+    /// Drops a strong ancestry chain iteratively to avoid recursive `Arc` teardown.
+    fn drop_ancestry(parent: Arc<Self>) {
+        let mut pending = vec![parent];
+        while let Some(node) = pending.pop() {
+            if Arc::strong_count(&node) == 1 {
+                if let Some(parent) = node.parent.lock().take() {
+                    pending.push(parent);
+                }
+            }
+            drop(node);
+        }
+    }
+
     /// Returns a new root node without a parent.
     pub(crate) fn root() -> Arc<Self> {
         Arc::new(Self {
-            inner: Mutex::new(TreeInner::new(None, false)),
+            parent: Mutex::new(None),
+            inner: Mutex::new(TreeInner::new(false)),
         })
     }
 
@@ -80,7 +86,12 @@ impl Tree {
         let mut parent_inner = parent.inner.lock();
         let aborted = parent_inner.aborted;
         let child = Arc::new(Self {
-            inner: Mutex::new(TreeInner::new((!aborted).then(|| parent.clone()), aborted)),
+            // Hold a strong reference to the parent to keep an ancestry of
+            // unspawned contexts alive. Without this, the parent could drop
+            // immediately, leaving only weak pointers that cannot be upgraded
+            // during abort cascades.
+            parent: Mutex::new((!aborted).then(|| parent.clone())),
+            inner: Mutex::new(TreeInner::new(aborted)),
         });
         if !aborted {
             parent_inner.child(&child);
@@ -110,6 +121,7 @@ impl Tree {
         let mut pending = vec![Arc::clone(self)];
         while let Some(node) = pending.pop() {
             let result = {
+                node.parent.lock().take();
                 let mut inner = node.inner.lock();
                 inner.abort()
             };
@@ -122,6 +134,17 @@ impl Tree {
             }
 
             pending.extend(children.into_iter().filter_map(|child| child.upgrade()));
+        }
+    }
+}
+
+impl Drop for Tree {
+    fn drop(&mut self) {
+        if let Some(parent) = self.parent.get_mut().take() {
+            // If dropping this node makes its ancestors uniquely owned as well,
+            // release that lineage iteratively instead of recursing through
+            // nested `Arc` drops.
+            Self::drop_ancestry(parent);
         }
     }
 }
@@ -224,5 +247,21 @@ mod tests {
         for future in futures {
             assert!(future.is_aborted(), "descendant was not aborted");
         }
+    }
+
+    #[test]
+    fn drop_deep_clone_chain_without_stack_growth() {
+        let depth = 50_000;
+        let root = Tree::root();
+        let mut current = root.clone();
+
+        for _ in 0..depth {
+            let (child, aborted) = Tree::child(&current);
+            assert!(!aborted, "child node unexpectedly aborted");
+            current = child;
+        }
+
+        drop(current);
+        drop(root);
     }
 }
