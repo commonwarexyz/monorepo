@@ -8,7 +8,7 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|input: FuzzInput| {
     fuzz::<ReedSolomon16<Sha256>>(input.clone());
 
-    if input.min.saturating_add(input.recovery) <= 255 {
+    if input.total_shards() <= 255 {
         fuzz::<ReedSolomon8<Sha256>>(input);
     }
 });
