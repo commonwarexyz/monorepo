@@ -1337,6 +1337,7 @@ mod tests {
                 leader_timeout,
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
+                term_length: NZU64!(1),
             };
             let mut state = State::new(context.clone(), cfg);
             state.set_genesis(test_genesis());

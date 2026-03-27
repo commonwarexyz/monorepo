@@ -3052,7 +3052,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(10);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3147,6 +3147,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
