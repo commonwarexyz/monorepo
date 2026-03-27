@@ -252,18 +252,18 @@ fn encode_matrix_mul(
         return;
     }
 
-    if num_rows <= 6 {
-        if encode_matrix_mul_small(matrix, num_cols, output, input) {
-            return;
-        }
-    }
-
     // Fast path: when the entire output fits in a single group, fused SIMD kernels
     // overwrite all destination rows, so we can skip the explicit zero-fill.
     if num_rows <= GROUP_SIZE
         && gf_matrix_mul_zeroed_group(matrix, num_cols, output, input)
     {
         return;
+    }
+
+    if num_rows <= 6 {
+        if encode_matrix_mul_small(matrix, num_cols, output, input) {
+            return;
+        }
     }
 
     // Stack-allocated buffers for pre-filtered coefficients and destination pointers.
