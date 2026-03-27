@@ -5,6 +5,10 @@ use std::{
     sync::{Arc, Weak},
 };
 
+/// Delay reaping dropped children until enough stale weak pointers accumulate to
+/// amortize the cleanup cost for clone-heavy parents.
+const CHILD_REAP_THRESHOLD: usize = 64;
+
 /// Tracks the relationship between runtime contexts.
 ///
 /// Each [`Tree`] node corresponds to a single context instance. Cloning a context
@@ -18,6 +22,7 @@ pub(crate) struct Tree {
 
 struct TreeInner {
     children: Vec<Weak<Tree>>,
+    stale_children: usize,
     task: Option<Aborter>,
     aborted: bool,
 }
@@ -26,14 +31,19 @@ impl TreeInner {
     const fn new(aborted: bool) -> Self {
         Self {
             children: Vec::new(),
+            stale_children: 0,
             task: None,
             aborted,
         }
     }
 
     fn child(&mut self, child: &Arc<Tree>) {
-        // To avoid unbounded growth of children for clone-heavy loops, we reap dropped children here.
-        self.children.retain(|weak| weak.strong_count() > 0);
+        // Avoid scanning the entire child list on every clone. Instead, batch
+        // cleanup once enough dropped children have accumulated.
+        if self.stale_children >= CHILD_REAP_THRESHOLD {
+            self.children.retain(|weak| weak.strong_count() > 0);
+            self.stale_children = 0;
+        }
         self.children.push(Arc::downgrade(child));
     }
 
@@ -140,6 +150,17 @@ impl Tree {
 
 impl Drop for Tree {
     fn drop(&mut self) {
+        let children = self.inner.get_mut().children.drain(..).collect::<Vec<_>>();
+        if !children.is_empty() {
+            if let Some(parent) = self.parent.get_mut().as_ref() {
+                let mut parent_inner = parent.inner.lock();
+                let released = children
+                    .into_iter()
+                    .filter(|child| child.strong_count() == 0)
+                    .count();
+                parent_inner.stale_children = parent_inner.stale_children.saturating_add(released);
+            }
+        }
         if let Some(parent) = self.parent.get_mut().take() {
             // If dropping this node makes its ancestors uniquely owned as well,
             // release that lineage iteratively instead of recursing through
