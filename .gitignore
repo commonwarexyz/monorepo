@@ -8,6 +8,7 @@ examples/flood/assets
 */fuzz/corpus
 */fuzz/coverage
 */fuzz/target
+*/fuzz_html
 **/quint/_apalache-out/
 **/quint/out*/
 CLAUDE.md
