@@ -224,9 +224,10 @@ impl Engine for Gf8 {
     }
 }
 
-/// Maximum destinations per group. With ~127KB shards, 16 destinations use
-/// ~2MB of working set, fitting comfortably in L2 cache.
-const GROUP_SIZE: usize = 16;
+/// Maximum destinations per group. With ~127KB shards, 32 destinations use
+/// ~4MB of working set, which is acceptable on the current target hardware and
+/// reduces repeated source scans in the fused SIMD path.
+const GROUP_SIZE: usize = 32;
 
 /// Optimized matrix-vector multiply: `output[i] += sum_j matrix[i][j] * input[j]`.
 ///
