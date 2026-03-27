@@ -88,6 +88,28 @@ pub trait Mutable: Contiguous + Send + Sync {
         item: &Self::Item,
     ) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
 
+    /// Append multiple items to the journal, returning the position of the last item appended.
+    ///
+    /// The default implementation calls [Self::append] in a loop. Concrete implementations
+    /// may override this to acquire the write lock once for all items.
+    ///
+    /// No-ops if items is empty, returning the current size (next append position).
+    fn append_many(
+        &mut self,
+        items: &[Self::Item],
+    ) -> impl std::future::Future<Output = Result<u64, Error>> + Send
+    where
+        Self::Item: Sync,
+    {
+        async move {
+            let mut last_pos = self.size().await;
+            for item in items {
+                last_pos = self.append(item).await?;
+            }
+            Ok(last_pos)
+        }
+    }
+
     /// Prune items at positions strictly less than `min_position`.
     ///
     /// Returns `true` if any data was pruned, `false` otherwise.
@@ -130,28 +152,6 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
     /// Returns an error if the underlying storage operation fails.
     fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>> + Send;
-
-    /// Append multiple items to the journal, returning the position of the last item appended.
-    ///
-    /// The default implementation calls [Self::append] in a loop. Concrete implementations
-    /// may override this to acquire the write lock once for all items.
-    ///
-    /// No-ops if items is empty, returning the current size (next append position).
-    fn append_many(
-        &mut self,
-        items: &[Self::Item],
-    ) -> impl std::future::Future<Output = Result<u64, Error>> + Send
-    where
-        Self::Item: Sync,
-    {
-        async move {
-            let mut last_pos = self.size().await;
-            for item in items {
-                last_pos = self.append(item).await?;
-            }
-            Ok(last_pos)
-        }
-    }
 
     /// Rewinds the journal to the last item matching `predicate`. If no item matches, the journal
     /// is rewound to the pruning boundary, discarding all unpruned items.

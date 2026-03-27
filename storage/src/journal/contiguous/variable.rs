@@ -525,7 +525,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let mut inner = self.inner.write().await;
 
         let mut last_position = 0;
-        for item in items {
+        for (index, item) in items.iter().enumerate() {
             // Calculate which section this position belongs to.
             let section = position_to_section(inner.size, self.items_per_section);
 
@@ -537,15 +537,17 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             assert_eq!(offsets_pos, inner.size);
 
             // Return the current position.
-            let position = inner.size;
+            last_position = inner.size;
             inner.size += 1;
-            last_position = position;
 
             // The section was filled and must be synced. Downgrade so readers can continue
             // during the sync while mutators remain blocked.
             if inner.size.is_multiple_of(self.items_per_section) {
                 let inner_ref = inner.downgrade_to_upgradable();
                 futures::try_join!(inner_ref.data.sync(section), self.offsets.sync())?;
+                if index + 1 == items.len() {
+                    return Ok(last_position);
+                }
                 inner = inner_ref.upgrade().await;
             }
         }

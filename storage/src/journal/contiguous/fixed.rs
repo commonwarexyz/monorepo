@@ -666,11 +666,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let mut last_position = 0;
         for item in items {
             // Append the item to the journal.
-            let position = inner.size;
-            let (section, _) = self.position_to_section(position);
+            let (section, _) = self.position_to_section(inner.size);
             inner.journal.append(section, item).await?;
+            last_position = inner.size;
             inner.size += 1;
-            last_position = position;
 
             // The section was filled and must be synced. Downgrade so readers can continue
             // during the sync, but keep mutators blocked. After sync, upgrade again to create

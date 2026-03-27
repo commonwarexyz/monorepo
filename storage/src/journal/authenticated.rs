@@ -379,7 +379,7 @@ where
             self.journal.append_many(items).await?;
         }
         self.mmr.apply(batch.changeset)?;
-        debug_assert_eq!(*self.mmr.leaves(), self.journal.size().await);
+        assert_eq!(*self.mmr.leaves(), self.journal.size().await);
         Ok(())
     }
 
