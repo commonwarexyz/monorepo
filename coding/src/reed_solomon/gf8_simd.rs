@@ -263,6 +263,95 @@ fn gf_vect_mad_multi_scalar(dsts: &mut [&mut [u8]], src: &[u8], coeffs: &[u8]) {
     }
 }
 
+#[inline]
+pub(crate) fn gf_vect_dot_prod(dst: &mut [u8], srcs: &[&[u8]], coeffs: &[u8]) {
+    debug_assert_eq!(srcs.len(), coeffs.len());
+    debug_assert!(srcs.iter().all(|src| src.len() == dst.len()));
+
+    dst.fill(0);
+    for (&coeff, src) in coeffs.iter().zip(srcs.iter()) {
+        gf_vect_mad(dst, src, coeff);
+    }
+}
+
+#[inline]
+pub(crate) fn gf_2vect_dot_prod(dsts: &mut [&mut [u8]; 2], srcs: &[&[u8]], coeffs: &[[u8; 2]]) {
+    gf_vect_dot_prod_multi_impl(dsts, srcs, coeffs);
+}
+
+#[inline]
+pub(crate) fn gf_3vect_dot_prod(dsts: &mut [&mut [u8]; 3], srcs: &[&[u8]], coeffs: &[[u8; 3]]) {
+    gf_vect_dot_prod_multi_impl(dsts, srcs, coeffs);
+}
+
+#[inline]
+pub(crate) fn gf_4vect_dot_prod(dsts: &mut [&mut [u8]; 4], srcs: &[&[u8]], coeffs: &[[u8; 4]]) {
+    gf_vect_dot_prod_multi_impl(dsts, srcs, coeffs);
+}
+
+#[inline]
+pub(crate) fn gf_5vect_dot_prod(dsts: &mut [&mut [u8]; 5], srcs: &[&[u8]], coeffs: &[[u8; 5]]) {
+    gf_vect_dot_prod_multi_impl(dsts, srcs, coeffs);
+}
+
+#[inline]
+pub(crate) fn gf_6vect_dot_prod(dsts: &mut [&mut [u8]; 6], srcs: &[&[u8]], coeffs: &[[u8; 6]]) {
+    gf_vect_dot_prod_multi_impl(dsts, srcs, coeffs);
+}
+
+#[inline]
+fn gf_vect_dot_prod_multi_impl<const N: usize>(
+    dsts: &mut [&mut [u8]; N],
+    srcs: &[&[u8]],
+    coeffs: &[[u8; N]],
+) {
+    debug_assert_eq!(srcs.len(), coeffs.len());
+    let len = dsts[0].len();
+    debug_assert!(dsts.iter().all(|dst| dst.len() == len));
+    debug_assert!(srcs.iter().all(|src| src.len() == len));
+
+    for dst in dsts.iter_mut() {
+        dst.fill(0);
+    }
+
+    let mut dst_ptrs = [std::ptr::null_mut(); N];
+    for (slot, dst) in dst_ptrs.iter_mut().zip(dsts.iter_mut()) {
+        *slot = dst.as_mut_ptr();
+    }
+
+    let mut active_coeffs = [0u8; N];
+    for (src, coeff_row) in srcs.iter().zip(coeffs.iter()) {
+        let mut active = 0usize;
+        for (dst_idx, &coeff) in coeff_row.iter().enumerate() {
+            if coeff != 0 {
+                active_coeffs[active] = coeff;
+                dst_ptrs.swap(active, dst_idx);
+                active += 1;
+            }
+        }
+
+        if active == 0 {
+            continue;
+        }
+
+        if active == 1 {
+            // SAFETY: pointer comes from an initialized destination slice with `len` bytes.
+            let dst = unsafe { std::slice::from_raw_parts_mut(dst_ptrs[0], len) };
+            gf_vect_mad(dst, src, active_coeffs[0]);
+        } else {
+            // SAFETY: pointers come from distinct destination slices with identical length.
+            unsafe { gf_vect_mad_multi_raw(&dst_ptrs[..active], src, &active_coeffs[..active], len) };
+        }
+
+        for (dst_idx, _) in coeff_row.iter().enumerate().rev() {
+            if coeff_row[dst_idx] != 0 {
+                let active_idx = coeff_row[..=dst_idx].iter().filter(|&&c| c != 0).count() - 1;
+                dst_ptrs.swap(active_idx, dst_idx);
+            }
+        }
+    }
+}
+
 // ======================================================================
 // x86/x86_64 SIMD implementations
 // ======================================================================

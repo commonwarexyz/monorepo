@@ -9,7 +9,11 @@
 
 use super::{
     gf8_arithmetic::{inv, mul},
-    gf8_simd::{gf_matrix_mul_zeroed_group, gf_vect_mad, gf_vect_mad_multi_raw},
+    gf8_simd::{
+        gf_2vect_dot_prod, gf_3vect_dot_prod, gf_4vect_dot_prod, gf_5vect_dot_prod,
+        gf_6vect_dot_prod, gf_matrix_mul_zeroed_group, gf_vect_dot_prod, gf_vect_mad,
+        gf_vect_mad_multi_raw,
+    },
     Engine,
 };
 use std::{
@@ -231,6 +235,12 @@ fn encode_matrix_mul(
         return;
     }
 
+    if num_rows <= 6 {
+        if encode_matrix_mul_small(matrix, num_cols, output, input) {
+            return;
+        }
+    }
+
     // Stack-allocated buffers for pre-filtered coefficients and destination pointers.
     let mut coeffs = [0u8; GROUP_SIZE];
     let mut dsts_ptrs: [*mut u8; GROUP_SIZE] = [std::ptr::null_mut(); GROUP_SIZE];
@@ -288,11 +298,116 @@ fn encode_matrix_mul(
     }
 }
 
+fn encode_matrix_mul_small(
+    matrix: &[u8],
+    num_cols: usize,
+    output: &mut [Vec<u8>],
+    input: &[&[u8]],
+) -> bool {
+    match output.len() {
+        1 => {
+            let coeffs = &matrix[..num_cols];
+            gf_vect_dot_prod(output[0].as_mut_slice(), input, coeffs);
+            true
+        }
+        2 => {
+            let mut coeffs = vec![[0u8; 2]; num_cols];
+            for col in 0..num_cols {
+                coeffs[col][0] = matrix[col];
+                coeffs[col][1] = matrix[num_cols + col];
+            }
+            let (first, rest) = output.split_at_mut(1);
+            let mut dsts = [first[0].as_mut_slice(), rest[0].as_mut_slice()];
+            gf_2vect_dot_prod(&mut dsts, input, &coeffs);
+            true
+        }
+        3 => {
+            let mut coeffs = vec![[0u8; 3]; num_cols];
+            for col in 0..num_cols {
+                coeffs[col][0] = matrix[col];
+                coeffs[col][1] = matrix[num_cols + col];
+                coeffs[col][2] = matrix[2 * num_cols + col];
+            }
+            let (a, rest) = output.split_at_mut(1);
+            let (b, c) = rest.split_at_mut(1);
+            let mut dsts = [a[0].as_mut_slice(), b[0].as_mut_slice(), c[0].as_mut_slice()];
+            gf_3vect_dot_prod(&mut dsts, input, &coeffs);
+            true
+        }
+        4 => {
+            let mut coeffs = vec![[0u8; 4]; num_cols];
+            for col in 0..num_cols {
+                coeffs[col][0] = matrix[col];
+                coeffs[col][1] = matrix[num_cols + col];
+                coeffs[col][2] = matrix[2 * num_cols + col];
+                coeffs[col][3] = matrix[3 * num_cols + col];
+            }
+            let (a, rest) = output.split_at_mut(1);
+            let (b, rest) = rest.split_at_mut(1);
+            let (c, d) = rest.split_at_mut(1);
+            let mut dsts = [
+                a[0].as_mut_slice(),
+                b[0].as_mut_slice(),
+                c[0].as_mut_slice(),
+                d[0].as_mut_slice(),
+            ];
+            gf_4vect_dot_prod(&mut dsts, input, &coeffs);
+            true
+        }
+        5 => {
+            let mut coeffs = vec![[0u8; 5]; num_cols];
+            for col in 0..num_cols {
+                coeffs[col][0] = matrix[col];
+                coeffs[col][1] = matrix[num_cols + col];
+                coeffs[col][2] = matrix[2 * num_cols + col];
+                coeffs[col][3] = matrix[3 * num_cols + col];
+                coeffs[col][4] = matrix[4 * num_cols + col];
+            }
+            let (a, rest) = output.split_at_mut(1);
+            let (b, rest) = rest.split_at_mut(1);
+            let (c, rest) = rest.split_at_mut(1);
+            let (d, e) = rest.split_at_mut(1);
+            let mut dsts = [
+                a[0].as_mut_slice(),
+                b[0].as_mut_slice(),
+                c[0].as_mut_slice(),
+                d[0].as_mut_slice(),
+                e[0].as_mut_slice(),
+            ];
+            gf_5vect_dot_prod(&mut dsts, input, &coeffs);
+            true
+        }
+        6 => {
+            let mut coeffs = vec![[0u8; 6]; num_cols];
+            for col in 0..num_cols {
+                coeffs[col][0] = matrix[col];
+                coeffs[col][1] = matrix[num_cols + col];
+                coeffs[col][2] = matrix[2 * num_cols + col];
+                coeffs[col][3] = matrix[3 * num_cols + col];
+                coeffs[col][4] = matrix[4 * num_cols + col];
+                coeffs[col][5] = matrix[5 * num_cols + col];
+            }
+            let (a, rest) = output.split_at_mut(1);
+            let (b, rest) = rest.split_at_mut(1);
+            let (c, rest) = rest.split_at_mut(1);
+            let (d, rest) = rest.split_at_mut(1);
+            let (e, f) = rest.split_at_mut(1);
+            let mut dsts = [
+                a[0].as_mut_slice(),
+                b[0].as_mut_slice(),
+                c[0].as_mut_slice(),
+                d[0].as_mut_slice(),
+                e[0].as_mut_slice(),
+                f[0].as_mut_slice(),
+            ];
+            gf_6vect_dot_prod(&mut dsts, input, &coeffs);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Build the encoding matrix (m x k) for systematic Reed-Solomon.
-///
-/// The full code matrix has k identity rows on top (original shards pass through)
-/// and m encoding rows on bottom (recovery shards). This function returns only
-/// the bottom m rows (the encoding matrix).
 ///
 /// Uses a Vandermonde matrix with evaluation points 1..=n, then multiplies by the
 /// inverse of the top k x k submatrix to produce systematic form.
