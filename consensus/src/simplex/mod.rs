@@ -398,7 +398,7 @@ mod tests {
             mocks::{
                 scheme as scheme_mocks,
                 twins::{self, Elector as TwinsElector},
-                wrapped_scheme::{Behavior, WrappedConfig, WrappedScheme},
+                wrapped,
             },
             scheme::{
                 bls12381_multisig,
@@ -2901,11 +2901,11 @@ mod tests {
                 .map(|(idx, scheme)| {
                     let is_byzantine = idx == 0;
                     let behavior = if is_byzantine {
-                        Behavior::CorruptSignature
+                        wrapped::Behavior::CorruptSignature
                     } else {
-                        Behavior::Honest
+                        wrapped::Behavior::Honest
                     };
-                    WrappedScheme::new(scheme, behavior)
+                    wrapped::Scheme::new(scheme, behavior)
                 })
                 .collect();
 
@@ -2920,7 +2920,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = WrappedConfig(L::default());
+            let elector = wrapped::Config(L::default());
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             for (idx_scheme, validator) in participants.iter().enumerate() {
