@@ -43,7 +43,8 @@
 //! Loop behavior:
 //!   1) Drain CQEs.
 //!   2) Advance timeouts.
-//!   3) Stage cancels, ready requests, then new inbound requests into SQ.
+//!   3) Rarely rearm wake polling, then stage cancels, ready-queue requests,
+//!      and new inbound requests into SQ.
 //!   4) Submit and block in io_uring_enter until a CQE (data or wake) arrives.
 //! ```
 //!
@@ -65,6 +66,20 @@
 //! - If the original op CQE only makes partial/retryable progress after timeout, the caller
 //!   sees timeout and no follow-up SQE is issued
 //!
+//! ## Submission Policy
+//!
+//! A logical request may need multiple SQEs before it completes. The loop keeps
+//! such requests on a FIFO ready queue and stages work in this order:
+//! 1. Rarely, a wake poll rearm SQE when a prior multishot wake CQE ended the
+//!    existing poll registration.
+//! 2. Cancellation SQEs for timed-out requests.
+//! 3. Ready-queue requests that were already admitted and need another SQE.
+//! 4. Fresh requests drained from the channel, until waiter or SQ capacity is hit.
+//!
+//! During shutdown, there is no new channel work, so the drain phase continues
+//! servicing cancellations and the ready queue until requests complete, time
+//! out, or are abandoned by `shutdown_timeout`.
+//!
 //! ## Wake Handling
 //!
 //! To avoid submission latency while the loop is blocked in `submit_and_wait`, the loop maintains
@@ -85,8 +100,9 @@
 //!
 //! ## Liveness Model
 //!
-//! This loop enforces a configured upper bound on in-flight requests, and submissions are staged
-//! from a FIFO MPSC queue.
+//! This loop enforces a configured upper bound on in-flight requests. New submissions arrive
+//! through a FIFO MPSC queue, but already-admitted requests may be restaged ahead of that queue
+//! according to the submission policy above.
 //!
 //! This implies a bounded-liveness caveat: if all in-flight requests are waiting on operations
 //! that are still queued behind the capacity limit, the loop cannot make progress until some
@@ -453,11 +469,26 @@ impl IoUringLoop {
         }
     }
 
-    /// Stage inbound requests into the SQ.
+    /// Stage requeued requests from `ready_queue` in FIFO order.
     ///
-    /// Checks ready work first on every iteration. In the same pass, it rearms
-    /// wake polling if needed and stages pending cancellations before new
-    /// requests.
+    /// Stops when all queued requests are staged or the SQ reaches capacity.
+    /// Returns `true` when SQ capacity is hit and at least one ready request
+    /// remains queued.
+    fn stage_ready_requests(&mut self, sq: &mut SubmissionQueue<'_>) -> bool {
+        while !sq.is_full() {
+            let Some(waiter_id) = self.ready_queue.pop_front() else {
+                return false;
+            };
+            self.stage_request(waiter_id, sq);
+        }
+
+        !self.ready_queue.is_empty()
+    }
+
+    /// Stage pending submission work into the SQ.
+    ///
+    /// In one pass, this may rearm wake polling, stage cancellations, restage
+    /// ready-queue requests, and admit new requests.
     ///
     /// Advances `processed_seq` by exactly the number of drained submissions.
     ///
@@ -480,13 +511,14 @@ impl IoUringLoop {
             return Some(true);
         }
 
-        while !sq.is_full() {
-            // Ready queue has priority over new inbound requests.
-            if let Some(waiter_id) = self.ready_queue.pop_front() {
-                self.stage_request(waiter_id, &mut sq);
-                continue;
-            }
+        // Requeued work already owns waiter capacity, so restage it before
+        // admitting fresh channel requests.
+        if self.stage_ready_requests(&mut sq) {
+            return Some(true);
+        }
 
+        // Remaining SQ capacity can now be used to admit new requests.
+        while !sq.is_full() {
             // Active waiter capacity is bounded by `cfg.size`.
             if self.waiters.len() == self.cfg.size as usize {
                 break;
@@ -595,7 +627,7 @@ impl IoUringLoop {
                 }
             }
             CqeAction::Requeue => {
-                // Request needs another SQE. Add to ready queue.
+                // Request needs another SQE. Add it to the ready queue.
                 self.ready_queue.push_back(waiter_id);
             }
         }
@@ -662,12 +694,22 @@ impl IoUringLoop {
             }
 
             // Keep userspace deadline processing alive during shutdown so
-            // in-flight timed operations preserve their ETIMEDOUT semantics.
+            // in-flight timed operations preserve their ETIMEDOUT semantics,
+            // and continue staging requeued requests so partially-complete or
+            // retrying requests can keep making progress.
             self.advance_timeouts();
             {
                 let mut submission_queue = ring.submission();
                 self.stage_cancellations(&mut submission_queue);
+                self.stage_ready_requests(&mut submission_queue);
             }
+
+            // Staging can directly complete the last waiter (for example, when a
+            // timed-out requeued request is removed instead of reissued).
+            if self.waiters.is_empty() {
+                break;
+            }
+
             let timeout = match (remaining, self.timeout_wheel.next_deadline()) {
                 (Some(remaining), Some(deadline)) => Some(remaining.min(deadline)),
                 (Some(remaining), None) => Some(remaining),
@@ -789,6 +831,7 @@ mod tests {
     use prometheus_client::registry::Registry;
     use request::{RecvRequest, SendRequest, SyncRequest};
     use std::{
+        io::Write,
         os::{
             fd::{AsRawFd, FromRawFd, IntoRawFd},
             unix::net::UnixStream,
@@ -1479,6 +1522,66 @@ mod tests {
         handle.join().unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_shutdown_no_timeout_processes_ready_queue() {
+        let cfg = Config {
+            shutdown_timeout: None,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, iouring) = IoUringLoop::new(cfg, &mut registry);
+        let handle = std::thread::spawn(move || iouring.run());
+
+        // Use a socket pair so we can feed the recv in two phases and control
+        // exactly when the request is requeued.
+        let (left, right) = UnixStream::pair().unwrap();
+        left.set_nonblocking(true).unwrap();
+        right.set_nonblocking(true).unwrap();
+
+        let total = 100usize;
+        let (tx, rx) = oneshot::channel();
+
+        // Submit an exact recv large enough that the first short write cannot
+        // complete it. After the first CQE, the request must requeue itself.
+        submitter
+            .send(Request::Recv(RecvRequest {
+                fd: Arc::new(left.into()),
+                buf: IoBufMut::with_capacity(total),
+                len: total,
+                received: 0,
+                exact: true,
+                deadline: None,
+                sender: tx,
+            }))
+            .await
+            .unwrap();
+
+        // Deliver only part of the payload so the recv makes progress and lands
+        // in the ready queue awaiting a follow-up SQE.
+        (&right).write_all(&[1u8; 10]).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Trigger shutdown after the request has been requeued but before it
+        // has necessarily been restaged. Drain must continue servicing the
+        // ready queue from this point onward.
+        drop(submitter);
+
+        // Finish the request after shutdown has started. Drain must continue
+        // staging ready-queue work or this recv will hang forever.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        (&right).write_all(&[2u8; 90]).unwrap();
+
+        // The recv should still complete successfully even though shutdown was
+        // initiated between the first and second stages of the logical request.
+        let (_, result) = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("shutdown recv timed out")
+            .expect("missing shutdown recv completion");
+        assert_eq!(result.unwrap(), total);
+
+        handle.join().unwrap();
+    }
+
     #[tokio::test]
     async fn test_timeout_fires_while_request_in_ready_queue() {
         // Regression test: a request that made partial progress and was
@@ -1540,20 +1643,52 @@ mod tests {
         let (sender, iouring) = IoUringLoop::new(cfg, &mut registry);
         let uring_thread = std::thread::spawn(move || iouring.run());
 
-        // Submit a sync (Nop-equivalent).
-        let (sock_left, _) = UnixStream::pair().unwrap();
-        // SAFETY: sock_left is a valid fd that we own.
-        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
-        let (tx, rx) = oneshot::channel();
+        // Use a real request/response pair instead of a nop-style operation so
+        // the test proves that submissions and completions still work with the
+        // SINGLE_ISSUER ring configuration enabled.
+        let (sock_left, sock_right) = UnixStream::pair().unwrap();
+        let (recv_tx, recv_rx) = oneshot::channel();
+
+        // Queue the recv first so the send has a real consumer and we exercise
+        // the normal cross-request wake/completion path.
         sender
-            .send(Request::Sync(SyncRequest {
-                file: Arc::new(file),
-                sender: tx,
+            .send(Request::Recv(RecvRequest {
+                fd: Arc::new(sock_left.into()),
+                buf: IoBufMut::with_capacity(5),
+                len: 5,
+                received: 0,
+                exact: true,
+                deadline: None,
+                sender: recv_tx,
             }))
             .await
             .unwrap();
 
-        let _result = rx.await.unwrap();
+        let (send_tx, send_rx) = oneshot::channel();
+        sender
+            .send(Request::Send(SendRequest {
+                fd: Arc::new(sock_right.into()),
+                bufs: crate::IoBufs::from(IoBuf::from(b"hello")),
+                deadline: None,
+                sender: send_tx,
+            }))
+            .await
+            .unwrap();
+
+        // The recv must observe the full payload, which shows that the request
+        // made it through submission, wakeup, and completion successfully.
+        let (_, recv_result) = tokio::time::timeout(Duration::from_secs(2), recv_rx)
+            .await
+            .expect("recv timed out")
+            .expect("missing recv completion");
+        assert_eq!(recv_result.unwrap(), 5);
+
+        // The paired send must also complete cleanly.
+        let send_result = tokio::time::timeout(Duration::from_secs(2), send_rx)
+            .await
+            .expect("send timed out")
+            .expect("missing send completion");
+        assert!(send_result.is_ok());
 
         drop(sender);
         uring_thread.join().unwrap();
