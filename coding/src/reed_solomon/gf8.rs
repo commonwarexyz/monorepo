@@ -115,6 +115,29 @@ impl Engine for Gf8 {
             return Ok(vec![]);
         }
 
+        if provided_original.len() >= k {
+            let mut originals = vec![None; k];
+            for &(idx, shard) in provided_original.iter().take(k) {
+                if idx >= k {
+                    return Err(Error::InvalidOriginalShardIndex(idx));
+                }
+                if shard.len() != shard_len {
+                    return Err(Error::WrongShardLength {
+                        index: idx,
+                        got: shard.len(),
+                        expected: shard_len,
+                    });
+                }
+                if originals[idx].is_some() {
+                    return Err(Error::DuplicateShardIndex(idx));
+                }
+                originals[idx] = Some(shard.to_vec());
+            }
+            if let Some(result) = originals.into_iter().collect::<Option<Vec<_>>>() {
+                return Ok(result);
+            }
+        }
+
         let mut seen = vec![false; n];
         for &(idx, shard) in provided_original {
             if idx >= k {
@@ -168,31 +191,14 @@ impl Engine for Gf8 {
             selected.push((k + idx, data));
         }
 
-        // Build the k x k submatrix from selected rows of the full code matrix.
-        // The full code matrix is:
-        //   rows 0..k:   identity matrix (original shards)
-        //   rows k..n:   encoding matrix (recovery shards)
-        let mut submatrix = vec![0u8; k * k];
-        for (row, &(idx, _)) in selected.iter().enumerate() {
-            if idx < k {
-                // Identity row
-                submatrix[row * k + idx] = 1;
-            } else {
-                // Encoding matrix row
-                let enc_row = idx - k;
-                submatrix[row * k..row * k + k]
-                    .copy_from_slice(&enc_matrix[enc_row * k..enc_row * k + k]);
-            }
-        }
-
-        // Invert the submatrix
-        let inv_matrix = invert_matrix(&submatrix, k)?;
+        let selected_indices: Vec<usize> = selected.iter().map(|&(idx, _)| idx).collect();
+        let inv_matrix = get_decode_matrix(k, m, enc_matrix.as_ref(), &selected_indices)?;
 
         // Multiply: result[j] = sum_i inv_matrix[j][i] * selected_data[i]
         let mut result = vec![vec![0u8; shard_len]; k];
 
         let selected_data: Vec<&[u8]> = selected.iter().map(|&(_, data)| data).collect();
-        encode_matrix_mul(&inv_matrix, k, &mut result, &selected_data);
+        encode_matrix_mul(inv_matrix.as_ref(), k, &mut result, &selected_data);
 
         Ok(result)
     }
@@ -347,6 +353,47 @@ fn get_encoding_matrix(k: usize, m: usize) -> Result<Arc<[u8]>, Error> {
     let mut write = cache.write().expect("encoding matrix cache poisoned");
     Ok(Arc::clone(
         write.entry((k, m)).or_insert_with(|| Arc::clone(&matrix)),
+    ))
+}
+
+fn get_decode_matrix(
+    k: usize,
+    m: usize,
+    enc_matrix: &[u8],
+    selected_indices: &[usize],
+) -> Result<Arc<[u8]>, Error> {
+    type Cache = RwLock<HashMap<(usize, usize, Box<[usize]>), Arc<[u8]>>>;
+
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    let key = (k, m, selected_indices.to_vec().into_boxed_slice());
+
+    {
+        let read = cache.read().expect("decode matrix cache poisoned");
+        if let Some(matrix) = read.get(&key) {
+            return Ok(Arc::clone(matrix));
+        }
+    }
+
+    // Build the k x k submatrix from selected rows of the full code matrix.
+    // The full code matrix is:
+    //   rows 0..k:   identity matrix (original shards)
+    //   rows k..n:   encoding matrix (recovery shards)
+    let mut submatrix = vec![0u8; k * k];
+    for (row, &idx) in selected_indices.iter().enumerate() {
+        if idx < k {
+            submatrix[row * k + idx] = 1;
+        } else {
+            let enc_row = idx - k;
+            submatrix[row * k..row * k + k]
+                .copy_from_slice(&enc_matrix[enc_row * k..enc_row * k + k]);
+        }
+    }
+
+    let matrix: Arc<[u8]> = invert_matrix(&submatrix, k)?.into();
+    let mut write = cache.write().expect("decode matrix cache poisoned");
+    Ok(Arc::clone(
+        write.entry(key).or_insert_with(|| Arc::clone(&matrix)),
     ))
 }
 
