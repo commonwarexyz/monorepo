@@ -54,11 +54,8 @@ where
         let metric_handle = metric.clone();
         let task = async move {
             // Run future with panic catching and abort support
-            let result = Abortable::new(
-                AssertUnwindSafe(f).catch_unwind(),
-                abort_registration,
-            )
-            .await;
+            let result =
+                Abortable::new(AssertUnwindSafe(f).catch_unwind(), abort_registration).await;
 
             // Handle result
             match result {
