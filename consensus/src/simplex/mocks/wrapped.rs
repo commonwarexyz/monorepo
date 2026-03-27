@@ -21,7 +21,7 @@ pub struct Scheme<S> {
 }
 
 #[derive(Clone, Debug)]
-pub struct WrappedElector<E, S> {
+pub struct Elector<E, S> {
     inner: E,
     _phantom: std::marker::PhantomData<S>,
 }
@@ -113,7 +113,7 @@ where
     S: commonware_cryptography::certificate::Scheme,
     L: elector::Config<S>,
 {
-    type Elector = WrappedElector<L::Elector, S>;
+    type Elector = Elector<L::Elector, S>;
 
     fn build(
         self,
@@ -121,14 +121,14 @@ where
             <Scheme<S> as commonware_cryptography::certificate::Scheme>::PublicKey,
         >,
     ) -> Self::Elector {
-        WrappedElector {
+        Elector {
             inner: self.0.build(participants),
             _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<S, E> elector::Elector<Scheme<S>> for WrappedElector<E, S>
+impl<S, E> elector::Elector<Scheme<S>> for Elector<E, S>
 where
     S: commonware_cryptography::certificate::Scheme,
     E: elector::Elector<S>,
