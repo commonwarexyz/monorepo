@@ -54,8 +54,8 @@ pub enum Error {
 
 /// GF(2^8) Reed-Solomon engine with SIMD-accelerated field arithmetic.
 ///
-/// Supports up to 255 total shards (k + m <= 255). Uses the AES irreducible
-/// polynomial (0x11B) for compatibility with hardware GFNI instructions.
+/// Supports up to 255 total shards (k + m <= 255). Uses ISA-L-compatible
+/// field arithmetic and GFNI affine tables.
 #[derive(Clone, Debug)]
 pub struct Gf8;
 
@@ -409,43 +409,23 @@ fn encode_matrix_mul_small(
 
 /// Build the encoding matrix (m x k) for systematic Reed-Solomon.
 ///
-/// Uses a Vandermonde matrix with evaluation points 1..=n, then multiplies by the
-/// inverse of the top k x k submatrix to produce systematic form.
+/// This follows ISA-L's `gf_gen_rs_matrix` layout directly: the full code matrix
+/// is systematic, with identity rows for originals and parity rows generated from
+/// successive powers of generator `2`. We return only the parity rows.
 fn build_encoding_matrix(k: usize, m: usize) -> Result<Vec<u8>, Error> {
-    let n = k + m;
-    assert!(n <= MAX_SHARDS);
-
     if m == 0 {
         return Ok(vec![]);
     }
 
-    // Build Vandermonde matrix n x k
-    // V[i][j] = x_i^j where x_i = (i + 1)
-    let mut vander = vec![0u8; n * k];
-    for i in 0..n {
-        let x = (i + 1) as u8; // evaluation points 1..=n (all distinct, nonzero)
-        let mut xi: u8 = 1;
-        for j in 0..k {
-            vander[i * k + j] = xi;
-            xi = mul(xi, x);
-        }
-    }
-
-    // Extract top k x k submatrix and invert
-    let top = vander[..k * k].to_vec();
-    let inv_top = invert_matrix(&top, k)?;
-
-    // Multiply bottom m rows by inverse to get systematic encoding matrix:
-    // enc[i][j] = sum_l vander[k+i][l] * inv_top[l][j]
     let mut enc = vec![0u8; m * k];
+    let mut gen = 1u8;
     for i in 0..m {
-        for j in 0..k {
-            let mut sum = 0u8;
-            for l in 0..k {
-                sum ^= mul(vander[(k + i) * k + l], inv_top[l * k + j]);
-            }
-            enc[i * k + j] = sum;
+        let mut p = 1u8;
+        for value in &mut enc[i * k..(i + 1) * k] {
+            *value = p;
+            p = mul(p, gen);
         }
+        gen = mul(gen, 2);
     }
 
     Ok(enc)

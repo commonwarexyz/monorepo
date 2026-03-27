@@ -13,7 +13,7 @@
 //! 4. **NEON** (AArch64): split-nibble via `vqtbl1q_u8` -- 16 bytes per iteration
 //! 5. **Scalar**: log/exp table lookup -- 1 byte per iteration
 
-use super::gf8_arithmetic::mul;
+use super::gf8_arithmetic::{init_mul_table_gfni, mul};
 #[cfg(any(
     target_arch = "x86",
     target_arch = "x86_64",
@@ -641,7 +641,7 @@ mod gfni_avx2 {
     #[cfg(target_arch = "x86_64")]
     use core::arch::x86_64::*;
 
-    /// Single-destination MAD using GFNI+AVX2.
+    /// Single-destination MAD using ISA-L-style GFNI affine tables.
     ///
     /// # Safety
     /// Caller must ensure AVX2 and GFNI are available.
@@ -651,7 +651,8 @@ mod gfni_avx2 {
             return;
         }
 
-        let coeff_v = _mm256_set1_epi8(coeff as i8);
+        let table = init_mul_table_gfni(coeff);
+        let affine = _mm256_broadcastsi128_si256(_mm_loadu_si128(table.as_ptr().cast()));
         let len = dst.len();
         let chunks = len / 64;
 
@@ -664,11 +665,11 @@ mod gfni_avx2 {
 
             _mm256_storeu_si256(
                 dst.as_mut_ptr().add(offset).cast(),
-                _mm256_xor_si256(d0, _mm256_gf2p8mul_epi8(coeff_v, s0)),
+                _mm256_xor_si256(d0, _mm256_gf2p8affine_epi64_epi8(s0, affine, 0)),
             );
             _mm256_storeu_si256(
                 dst.as_mut_ptr().add(offset + 32).cast(),
-                _mm256_xor_si256(d1, _mm256_gf2p8mul_epi8(coeff_v, s1)),
+                _mm256_xor_si256(d1, _mm256_gf2p8affine_epi64_epi8(s1, affine, 0)),
             );
         }
 
@@ -676,9 +677,7 @@ mod gfni_avx2 {
         gf_vect_mad_scalar(&mut dst[tail_start..], &src[tail_start..], coeff);
     }
 
-    /// Multi-destination MAD using GFNI+AVX2.
-    ///
-    /// All coefficients must be nonzero. No internal heap allocation.
+    /// Multi-destination MAD using ISA-L-style GFNI affine tables.
     ///
     /// # Safety
     /// Caller must ensure AVX2 and GFNI are available.
@@ -690,16 +689,15 @@ mod gfni_avx2 {
     ) {
         let ndst = dsts.len();
 
-        // Precompute broadcast coefficients on the stack
-        let mut coeff_vs = [_mm256_setzero_si256(); 255];
+        let mut affines = [_mm256_setzero_si256(); 255];
         for i in 0..ndst {
-            coeff_vs[i] = _mm256_set1_epi8(coeffs[i] as i8);
+            let table = init_mul_table_gfni(coeffs[i]);
+            affines[i] = _mm256_broadcastsi128_si256(_mm_loadu_si128(table.as_ptr().cast()));
         }
 
         let len = src.len();
         let chunks = len / 64;
 
-        // Process 64 bytes per iteration (2x __m256i), unrolled
         for i in 0..chunks {
             let offset = i * 64;
             let s0 = _mm256_loadu_si256(src.as_ptr().add(offset).cast());
@@ -709,21 +707,20 @@ mod gfni_avx2 {
                 let d_ptr0 = dsts[d].as_mut_ptr().add(offset).cast::<__m256i>();
                 let d_ptr1 = dsts[d].as_mut_ptr().add(offset + 32).cast::<__m256i>();
 
-                let p0 = _mm256_gf2p8mul_epi8(coeff_vs[d], s0);
-                let p1 = _mm256_gf2p8mul_epi8(coeff_vs[d], s1);
+                let p0 = _mm256_gf2p8affine_epi64_epi8(s0, affines[d], 0);
+                let p1 = _mm256_gf2p8affine_epi64_epi8(s1, affines[d], 0);
 
                 _mm256_storeu_si256(d_ptr0, _mm256_xor_si256(_mm256_loadu_si256(d_ptr0), p0));
                 _mm256_storeu_si256(d_ptr1, _mm256_xor_si256(_mm256_loadu_si256(d_ptr1), p1));
             }
         }
 
-        // Tail
         let tail_start = chunks * 64;
         if tail_start + 32 <= len {
             let s = _mm256_loadu_si256(src.as_ptr().add(tail_start).cast());
             for d in 0..ndst {
                 let d_ptr = dsts[d].as_mut_ptr().add(tail_start).cast::<__m256i>();
-                let p = _mm256_gf2p8mul_epi8(coeff_vs[d], s);
+                let p = _mm256_gf2p8affine_epi64_epi8(s, affines[d], 0);
                 _mm256_storeu_si256(d_ptr, _mm256_xor_si256(_mm256_loadu_si256(d_ptr), p));
             }
             for (d, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
@@ -793,7 +790,8 @@ mod avx512 {
             for br in 0..block_rows {
                 let row = &matrix_rows[(row_start + br) * num_cols..(row_start + br + 1) * num_cols];
                 for j in 0..num_cols {
-                    coeff_vs[br][j] = _mm512_set1_epi8(row[j] as i8);
+                    let table = init_mul_table_gfni(row[j]);
+                    coeff_vs[br][j] = _mm512_broadcast_i32x4(_mm_loadu_si128(table.as_ptr().cast()));
                 }
             }
 
@@ -809,9 +807,9 @@ mod avx512 {
 
                     for br in 0..block_rows {
                         acc0[br] =
-                            _mm512_xor_si512(acc0[br], _mm512_gf2p8mul_epi8(coeff_vs[br][j], s0));
+                            _mm512_xor_si512(acc0[br], _mm512_gf2p8affine_epi64_epi8(s0, coeff_vs[br][j], 0));
                         acc1[br] =
-                            _mm512_xor_si512(acc1[br], _mm512_gf2p8mul_epi8(coeff_vs[br][j], s1));
+                            _mm512_xor_si512(acc1[br], _mm512_gf2p8affine_epi64_epi8(s1, coeff_vs[br][j], 0));
                     }
                 }
 
@@ -829,7 +827,7 @@ mod avx512 {
                     let s = _mm512_loadu_si512(input[j].as_ptr().add(tail_start).cast());
                     for br in 0..block_rows {
                         acc[br] =
-                            _mm512_xor_si512(acc[br], _mm512_gf2p8mul_epi8(coeff_vs[br][j], s));
+                            _mm512_xor_si512(acc[br], _mm512_gf2p8affine_epi64_epi8(s, coeff_vs[br][j], 0));
                     }
                 }
                 for br in 0..block_rows {

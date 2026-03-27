@@ -1,18 +1,20 @@
-//! GF(2^8) field arithmetic using the AES irreducible polynomial.
+//! GF(2^8) field arithmetic using ISA-L field conventions.
 //!
 //! This module provides GF(2^8) multiplication and inversion via precomputed
-//! log/exp tables. The AES polynomial `x^8 + x^4 + x^3 + x + 1` (0x11B) is
-//! used to match hardware GFNI instructions, ensuring scalar and SIMD paths
-//! produce identical results.
+//! log/exp tables. It matches ISA-L's Reed-Solomon field setup:
+//! - irreducible polynomial `x^8 + x^4 + x^3 + x^2 + 1` (0x11D)
+//! - primitive element `2`
+//!
+//! We also expose ISA-L's exact GFNI affine table so the SIMD layer can use
+//! the same pre-expanded coefficient representation as ISA-L.
 
-/// Irreducible polynomial for GF(2^8): x^8 + x^4 + x^3 + x + 1.
-const POLYNOMIAL: u16 = 0x11B;
+/// Irreducible polynomial for GF(2^8): x^8 + x^4 + x^3 + x^2 + 1.
+const POLYNOMIAL: u16 = 0x11D;
 
 /// Primitive element (generator of the multiplicative group).
-/// 3 (= x + 1) is a generator for GF(2^8) with the AES polynomial 0x11B.
-/// It has multiplicative order 255 = 2^8 - 1.
+/// ISA-L uses 2 as the generator for GF(2^8) with polynomial 0x11D.
 #[cfg(test)]
-const GENERATOR: u8 = 0x03;
+const GENERATOR: u8 = 0x02;
 
 /// `EXP[i] = GENERATOR^i mod POLYNOMIAL`.
 ///
@@ -24,14 +26,10 @@ const EXP: [u8; 512] = {
     let mut i = 0;
     while i < 255 {
         table[i] = val as u8;
-        // Multiply by GENERATOR (0x03 = x + 1) in GF(2^8):
-        // val * 3 = val * 2 XOR val = (val << 1) XOR val, with reduction
+        // ISA-L uses generator 2, so each step is multiply-by-2 with
+        // reduction by the 0x11D polynomial.
         let shifted = val << 1;
-        val = if shifted & 0x100 != 0 {
-            (shifted ^ POLYNOMIAL) ^ (val)
-        } else {
-            shifted ^ val
-        };
+        val = if shifted & 0x100 != 0 { shifted ^ POLYNOMIAL } else { shifted };
         i += 1;
     }
     // EXP[255] should wrap to EXP[0] = 1
@@ -56,6 +54,8 @@ const LOG: [u8; 256] = {
     }
     table
 };
+
+include!("gf8_gfni_table.rs");
 
 /// Multiply two GF(2^8) elements using log/exp tables.
 #[inline(always)]
@@ -97,6 +97,23 @@ pub const fn init_mul_table(c: u8) -> ([u8; 16], [u8; 16]) {
         i += 1;
     }
     (low, high)
+}
+
+/// ISA-L-style 32-byte GFNI affine table for multiplying by constant `c`.
+#[inline]
+pub const fn init_mul_table_gfni(c: u8) -> [u8; 32] {
+    let word = GFNI_AFFINE_TABLE[c as usize].to_le_bytes();
+    let mut out = [0u8; 32];
+    let mut i = 0;
+    while i < 4 {
+        let mut j = 0;
+        while j < 8 {
+            out[i * 8 + j] = word[j];
+            j += 1;
+        }
+        i += 1;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -226,8 +243,8 @@ mod tests {
 
     #[test]
     fn test_known_values() {
-        // Cross-check a few known GF(2^8) products with AES polynomial
-        assert_eq!(mul(0x53, 0xCA), 0x01); // from AES spec
-        assert_eq!(mul(2, 0x80), 0x1B); // 2 * 0x80 = x * x^7 = x^8 = x^4+x^3+x+1 = 0x1B
+        // Cross-check a few known GF(2^8) products with ISA-L's 0x11D field.
+        assert_eq!(mul(2, 0x80), 0x1D);
+        assert_eq!(mul(7, 11), 49);
     }
 }
