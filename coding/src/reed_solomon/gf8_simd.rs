@@ -556,6 +556,9 @@ mod avx2 {
             dst_ptrs[r] = output[r].as_mut_ptr();
         }
 
+        let mut coeff_cache = [_mm256_setzero_si256(); 256];
+        let mut coeff_init = [false; 256];
+
         let chunks = len / 64;
         let tail_start = chunks * 64;
 
@@ -568,7 +571,12 @@ mod avx2 {
             for br in 0..block_rows {
                 let row = &matrix_rows[(row_start + br) * num_cols..(row_start + br + 1) * num_cols];
                 for j in 0..num_cols {
-                    coeff_vs[br][j] = _mm256_set1_epi8(row[j] as i8);
+                    let idx = row[j] as usize;
+                    if !coeff_init[idx] {
+                        coeff_cache[idx] = _mm256_set1_epi8(row[j] as i8);
+                        coeff_init[idx] = true;
+                    }
+                    coeff_vs[br][j] = coeff_cache[idx];
                 }
             }
 
