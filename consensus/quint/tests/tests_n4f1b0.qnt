@@ -69,6 +69,7 @@ module tests {
             .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n2"))
             .then(all {
                 assert(store_certificates.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b0"))),
+                assert(option_has(replica_state.get("n0").notarization.get(FIRST_VIEW), n => n.proposal == proposal)),
                 assert(sent_finalize_votes.exists(v => v.sig == "n0" and v.proposal.view == FIRST_VIEW and v.proposal.payload == "val_b0")),
                 assert(sent_finalize_votes.exists(v => v.sig == "n1" and v.proposal.view == FIRST_VIEW and v.proposal.payload == "val_b0")),
                 assert(sent_finalize_votes.exists(v => v.sig == "n2" and v.proposal.view == FIRST_VIEW and v.proposal.payload == "val_b0")),
@@ -84,6 +85,7 @@ module tests {
             .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n2"))
             .then(all {
                 assert(store_certificates.get("n0").exists(c => cert_kind(c) == FinalizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b0"))),
+                assert(option_has(replica_state.get("n0").finalization.get(FIRST_VIEW), f => f.proposal == proposal)),
                 assert(replica_state.get("n0").last_finalized == FIRST_VIEW),
                 assert(ghost_committed_blocks.get("n0").length() == 1),
                 assert(ghost_committed_blocks.get("n0")[0] == "val_b0"),
@@ -130,9 +132,9 @@ module tests {
             .then(all {
                 assert(store_nullify_votes.get("n1").exists(v => v.sig == "n0" and v.view == FIRST_VIEW)),
                 assert(sent_nullify_votes.exists(v => v.sig == "n1" and v.view == FIRST_VIEW)),
-                assert(replica_state.get("n1").broadcast_nullify == true),
-                assert(replica_state.get("n1").leader_timeout_cancelled == true),
-                assert(replica_state.get("n1").advance_timeout_cancelled == true),
+                assert(replica_state.get("n1").broadcast_nullify.get(FIRST_VIEW) == true),
+                assert(replica_state.get("n1").leader_timeout.get(FIRST_VIEW) == Some(true)),
+                assert(replica_state.get("n1").advance_timeout.get(FIRST_VIEW) == Some(true)),
                 assert(replica_state.get("n1").view == FIRST_VIEW),
                 unchanged_all,
             })
@@ -148,9 +150,9 @@ module tests {
             .then(propose("n0", "val_b0", 1))
             .then(all {
                 assert(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == FIRST_VIEW)),
-                assert(replica_state.get("n0").broadcast_nullify == true),
-                assert(replica_state.get("n0").leader_timeout_cancelled == true),
-                assert(replica_state.get("n0").advance_timeout_cancelled == true),
+                assert(replica_state.get("n0").broadcast_nullify.get(FIRST_VIEW) == true),
+                assert(replica_state.get("n0").leader_timeout.get(FIRST_VIEW) == None),
+                assert(replica_state.get("n0").advance_timeout.get(FIRST_VIEW) == None),
                 assert(replica_state.get("n0").propose_sent == false),
                 assert(replica_state.get("n0").view == FIRST_VIEW),
                 assert(not(sent_proposal.exists(((s, p)) => s == "n0" and p.view == FIRST_VIEW))),
@@ -221,6 +223,7 @@ module tests {
             .then(replica_receives_nullify_vote("n0", FIRST_VIEW, "n2"))
             .then(all {
                 assert(store_certificates.get("n0").exists(c => cert_kind(c) == NullificationKind and cert_view(c) == FIRST_VIEW)),
+                assert(option_has(replica_state.get("n0").nullification.get(FIRST_VIEW), n => n.view == FIRST_VIEW)),
                 assert(replica_state.get("n0").view == 2),
                 unchanged_all,
             })
@@ -250,9 +253,9 @@ module tests {
             .then(all {
                 assert(sent_nullify_votes.exists(v => v.sig == "n1" and v.view == FIRST_VIEW)),
                 assert(not(sent_notarize_votes.exists(v => v.sig == "n1" and v.proposal.view == FIRST_VIEW))),
-                assert(replica_state.get("n1").broadcast_nullify == true),
-                assert(replica_state.get("n1").leader_timeout_cancelled == true),
-                assert(replica_state.get("n1").advance_timeout_cancelled == true),
+                assert(replica_state.get("n1").broadcast_nullify.get(FIRST_VIEW) == true),
+                assert(replica_state.get("n1").leader_timeout.get(FIRST_VIEW) == None),
+                assert(replica_state.get("n1").advance_timeout.get(FIRST_VIEW) == None),
                 assert(replica_state.get("n1").view == FIRST_VIEW),
                 unchanged_all,
             })
@@ -398,10 +401,10 @@ module tests {
                 CERTIFY_ALL_TRUE
             )
             // View 1: all replicas timeout
-            .then(on_timeout("n0"))
-            .then(on_timeout("n1"))
-            .then(on_timeout("n2"))
-            .then(on_timeout("n3"))
+            .then(on_timeout("n0", LeaderTimeoutKind))
+            .then(on_timeout("n1", LeaderTimeoutKind))
+            .then(on_timeout("n2", LeaderTimeoutKind))
+            .then(on_timeout("n3", LeaderTimeoutKind))
             .then(replica_receives_nullify_quorum("n0", FIRST_VIEW,  Set("n0", "n1", "n2")))
             .then(replica_receives_nullify_quorum("n1", FIRST_VIEW,  Set("n0", "n1", "n2")))
             .then(replica_receives_nullify_quorum("n2", FIRST_VIEW,  Set("n0", "n1", "n2")))
@@ -411,10 +414,10 @@ module tests {
                 unchanged_all,
             })
             // View 2: all replicas timeout
-            .then(on_timeout("n0"))
-            .then(on_timeout("n1"))
-            .then(on_timeout("n2"))
-            .then(on_timeout("n3"))
+            .then(on_timeout("n0", LeaderTimeoutKind))
+            .then(on_timeout("n1", LeaderTimeoutKind))
+            .then(on_timeout("n2", LeaderTimeoutKind))
+            .then(on_timeout("n3", LeaderTimeoutKind))
             .then(replica_receives_nullify_quorum("n0", 2, Set("n0", "n1", "n2")))
             .then(replica_receives_nullify_quorum("n1", 2, Set("n0", "n1", "n2")))
             .then(replica_receives_nullify_quorum("n2", 2, Set("n0", "n1", "n2")))
@@ -475,7 +478,7 @@ module tests {
             .then(replica_receives_notarize_vote("n2", "val_b0", 1, FIRST_VIEW, "n0"))
             .then(replica_receives_notarize_vote("n3", "val_b0", 1, FIRST_VIEW, "n0"))
             .then(all {
-                assert(CORRECT.forall(id => replica_state.get(id).broadcast_nullify == true)),
+                assert(CORRECT.forall(id => replica_state.get(id).broadcast_nullify.get(FIRST_VIEW) == true)),
                 assert(CORRECT.forall(id => sent_nullify_votes.exists(v => v.sig == id and v.view == FIRST_VIEW))),
                 unchanged_all,
             })
@@ -533,7 +536,7 @@ module tests {
                 CERTIFY_ALL_TRUE
             )
             // View 1: n0 times out (slow), n1 is leader and proposes
-            .then(on_timeout("n0"))
+            .then(on_timeout("n0", LeaderTimeoutKind))
             .then(send_proposal("n1", proposal1))
             .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
             .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
@@ -552,7 +555,7 @@ module tests {
             // n0 receives finalization cert to advance to view 2
             .then(on_certificate("n0", finalization(proposal1, Set("n1", "n2", "n3"), "n1")))
             // View 2: n0 times out again (slow), n2 is leader and proposes
-            .then(on_timeout("n0"))
+            .then(on_timeout("n0", LeaderTimeoutKind))
             .then(send_proposal("n2", proposal2))
             .then(replica_receives_notarize_vote("n1", "val_b1", 2, FIRST_VIEW, "n2"))
             .then(replica_receives_notarize_vote("n2", "val_b1", 2, FIRST_VIEW, "n2"))

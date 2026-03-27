@@ -51,10 +51,121 @@ module tests {
             Map(0 -> "n2", 1 -> "n4", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
             CERTIFY_ALL_TRUE
         )
-            .then(on_timeout("n2"))
+            .then(on_timeout("n2", LeaderTimeoutKind))
             .then(all {
                 assert(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == FIRST_VIEW)),
-                assert(replica_state.get("n2").broadcast_nullify == true),
+                assert(replica_state.get("n2").broadcast_nullify.get(FIRST_VIEW) == true),
+                unchanged_all,
+            })
+            .expect(test_invariants)
+    }
+
+    run leaderTimeoutBroadcastsCurrentViewNullifyTest = {
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n4", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
+            CERTIFY_ALL_TRUE
+        )
+            .then(set_timeout_state("n2", 2, false, Some(false), Some(false)))
+            .then(on_timeout("n2", LeaderTimeoutKind))
+            .then(all {
+                assert(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == 2)),
+                assert(not(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == FIRST_VIEW))),
+                assert(replica_state.get("n2").view == 2),
+                assert(replica_state.get("n2").broadcast_nullify.get(2) == true),
+                assert(replica_state.get("n2").leader_timeout.get(2) == Some(true)),
+                assert(replica_state.get("n2").advance_timeout.get(2) == Some(false)),
+                unchanged_all,
+            })
+            .expect(test_invariants)
+    }
+
+    run advanceTimeoutBroadcastsCurrentViewNullifyTest = {
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n4", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
+            CERTIFY_ALL_TRUE
+        )
+            .then(set_timeout_state("n2", 2, false, Some(true), Some(false)))
+            .then(on_timeout("n2", AdvanceTimeoutKind))
+            .then(all {
+                assert(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == 2)),
+                assert(not(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == FIRST_VIEW))),
+                assert(replica_state.get("n2").view == 2),
+                assert(replica_state.get("n2").broadcast_nullify.get(2) == true),
+                assert(replica_state.get("n2").leader_timeout.get(2) == Some(true)),
+                assert(replica_state.get("n2").advance_timeout.get(2) == Some(true)),
+                unchanged_all,
+            })
+            .expect(test_invariants)
+    }
+
+    run timeoutDoesNotBroadcastNullifyAfterFinalizeTest = {
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n4", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
+            CERTIFY_ALL_TRUE
+        )
+            .then(set_timeout_state("n2", 2, true, Some(false), Some(false)))
+            .then(on_timeout("n2", LeaderTimeoutKind))
+            .then(all {
+                assert(not(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == 2))),
+                assert(replica_state.get("n2").view == 2),
+                assert(replica_state.get("n2").broadcast_nullify.get(2) == false),
+                assert(replica_state.get("n2").broadcast_finalize.get(2) == true),
+                assert(replica_state.get("n2").leader_timeout.get(2) == Some(true)),
+                assert(replica_state.get("n2").advance_timeout.get(2) == Some(false)),
+                unchanged_all,
+            })
+            .expect(test_invariants)
+    }
+
+    run localNullificationConstructionCancelsTimersTest = {
+        initWithLeaderAndCertify(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4", 6 -> "n0"),
+            CERTIFY_ALL_TRUE
+        )
+            .then(on_timeout("n0", LeaderTimeoutKind))
+            .then(on_timeout("n1", LeaderTimeoutKind))
+            .then(on_timeout("n2", LeaderTimeoutKind))
+            .then(set_timeout_state("n2", 3, false, Some(false), Some(false)))
+            .then(on_nullify("n2", FIRST_VIEW, Set(
+                { view: FIRST_VIEW, sig: "n0" },
+                { view: FIRST_VIEW, sig: "n1" },
+                { view: FIRST_VIEW, sig: "n2" }
+            )))
+            .then(all {
+                assert(store_certificates.get("n2").exists(c =>
+                    is_nullification_cert(c) and cert_view(c) == FIRST_VIEW
+                )),
+                assert(option_has(replica_state.get("n2").nullification.get(FIRST_VIEW), n => n.view == FIRST_VIEW)),
+                assert(replica_state.get("n2").broadcast_nullification.get(FIRST_VIEW) == true),
+                assert(replica_state.get("n2").view == 3),
+                assert(replica_state.get("n2").leader_timeout.get(FIRST_VIEW) == None),
+                assert(replica_state.get("n2").advance_timeout.get(FIRST_VIEW) == None),
+                unchanged_all,
+            })
+            .expect(test_invariants)
+    }
+
+    run receivedNullificationCertificateCancelsTimersAndBroadcastsTest = {
+        val cert = nullification(FIRST_VIEW, Set("n0", "n1", "n2"), "n0")
+
+        initWithLeaderAndCertify(
+            Map(0 -> "n0", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n4", 6 -> "n0"),
+            CERTIFY_ALL_TRUE
+        )
+            .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n0" }))
+            .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n1" }))
+            .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n2" }))
+            .then(on_certificate("n2", cert))
+            .then(all {
+                assert(store_certificates.get("n2").exists(c =>
+                    is_nullification_cert(c) and cert_view(c) == FIRST_VIEW
+                )),
+                assert(option_has(replica_state.get("n2").nullification.get(FIRST_VIEW), n => n.view == FIRST_VIEW)),
+                assert(replica_state.get("n2").broadcast_nullification.get(FIRST_VIEW) == true),
+                assert(replica_state.get("n2").leader_timeout.get(FIRST_VIEW) == None),
+                assert(replica_state.get("n2").advance_timeout.get(FIRST_VIEW) == None),
+                assert(replica_state.get("n2").view == 2),
+                assert(sent_certificates.exists(c => is_nullification_cert(c) and cert_view(c) == FIRST_VIEW)),
                 unchanged_all,
             })
             .expect(test_invariants)
@@ -117,6 +228,55 @@ module tests {
 
     action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: ReplicaId): bool =
         on_nullify(id, view, Set({ view: view, sig: src }))
+
+    action send_nullify_vote(vote: NullifyVote): bool = all {
+        sent_proposal' = sent_proposal,
+        sent_notarize_votes' = sent_notarize_votes,
+        sent_nullify_votes' = sent_nullify_votes.union(Set(vote)),
+        sent_finalize_votes' = sent_finalize_votes,
+        sent_certificates' = sent_certificates,
+        store_notarize_votes' = store_notarize_votes,
+        store_nullify_votes' = store_nullify_votes,
+        store_finalize_votes' = store_finalize_votes,
+        store_certificates' = store_certificates,
+        ghost_proposal' = ghost_proposal,
+        ghost_committed_blocks' = ghost_committed_blocks,
+        leader' = leader,
+        replica_state' = replica_state,
+        certify_policy' = certify_policy,
+        lastAction' = "inject_vote",
+    }
+
+    action set_timeout_state(
+        id: ReplicaId,
+        view: ViewNumber,
+        broadcast_finalize: bool,
+        leader_timeout: Option[bool],
+        advance_timeout: Option[bool]
+    ): bool = all {
+        sent_proposal' = sent_proposal,
+        sent_notarize_votes' = sent_notarize_votes,
+        sent_nullify_votes' = sent_nullify_votes,
+        sent_finalize_votes' = sent_finalize_votes,
+        sent_certificates' = sent_certificates,
+        store_notarize_votes' = store_notarize_votes,
+        store_nullify_votes' = store_nullify_votes,
+        store_finalize_votes' = store_finalize_votes,
+        store_certificates' = store_certificates,
+        ghost_proposal' = ghost_proposal,
+        ghost_committed_blocks' = ghost_committed_blocks,
+        leader' = leader,
+        replica_state' = replica_state.set(id, {
+            ...replica_state.get(id),
+            view: view,
+            broadcast_nullify: replica_state.get(id).broadcast_nullify.set(view, false),
+            broadcast_finalize: replica_state.get(id).broadcast_finalize.set(view, broadcast_finalize),
+            leader_timeout: replica_state.get(id).leader_timeout.set(view, leader_timeout),
+            advance_timeout: replica_state.get(id).advance_timeout.set(view, advance_timeout)
+        }),
+        certify_policy' = certify_policy,
+        lastAction' = "set_timeout_state",
+    }
 
     action unchanged_all = all {
         sent_proposal' = sent_proposal,

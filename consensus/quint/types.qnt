@@ -33,6 +33,11 @@ module types {
     pure val NullificationKind = "NULLIFICATION_KIND"
     pure val FinalizationKind = "FINALIZATION_KIND"
 
+    type TimeoutKind = str
+
+    pure val LeaderTimeoutKind = "LEADER_TIMEOUT_KIND"
+    pure val AdvanceTimeoutKind = "ADVANCE_TIMEOUT_KIND"
+
     // Leader-proposal message
     type Proposal = {
         // proposed payload
@@ -152,18 +157,24 @@ module types {
     type ReplicaState = {
         // Current view. Genesis is view 0, voting starts at view 1.
         view: ViewNumber,
-        // whether this replica has broadcast nullify for the current view
-        broadcast_nullify: bool,
-        // whether this replica has broadcast finalize
-        broadcast_finalize: bool,
-        // leader timeout (t_l) has been cancelled for current view.
-        // Introduced to trigger early view transitions for unresponsive leaders.
-        leader_timeout_cancelled: bool,
-        // advance timeout (t_a) has been cancelled for current view
-        advance_timeout_cancelled: bool,
-        // NOTE: `proofs` are stored in a global variable `store_certificate`
-        // NOTE: messages are stored in global variables `store_vote`
-
+        // whether this replica has broadcast notarize for a view
+        broadcast_notarize: ViewNumber -> bool,
+        // whether this replica has broadcast nullify for a view
+        broadcast_nullify: ViewNumber -> bool,
+        // whether this replica has broadcast finalize for a view
+        broadcast_finalize: ViewNumber -> bool,
+        // whether this replica has broadcast notarization certificate for a view
+        broadcast_notarization: ViewNumber -> bool,
+        // whether this replica has broadcast nullification certificate for a view
+        broadcast_nullification: ViewNumber -> bool,
+        // whether this replica has broadcast finalization certificate for a view
+        broadcast_finalization: ViewNumber -> bool,
+        // leader timeout state per view:
+        // Some(false) = pending, Some(true) = expired, None = cancelled
+        leader_timeout: ViewNumber -> Option[bool],
+        // advance timeout state per view:
+        // Some(false) = pending, Some(true) = expired, None = cancelled
+        advance_timeout: ViewNumber -> Option[bool],
         // not in the original spec, the latest view that this replica has seen notarization votes for
         ghost_last_seen_notarization: ViewNumber,
         // sequence if the sent votes
@@ -174,6 +185,12 @@ module types {
         propose_sent: bool,
         // payload this replica has notarized per view
         notarized: ViewNumber -> Option[Payload],
+        // notarization certificates constructed by this replica per view
+        notarization: ViewNumber -> Option[NotarizationCert],
+        // nullification certificates constructed by this replica per view
+        nullification: ViewNumber -> Option[NullificationCert],
+        // finalization certificates constructed by this replica per view
+        finalization: ViewNumber -> Option[FinalizationCert],
         // leader proposal learned for each view from leader vote/proposal or recovered certificates
         leader_proposal: ViewNumber -> Option[Proposal],
         // once a conflicting leader proposal is observed for a view, keep that fact forever
