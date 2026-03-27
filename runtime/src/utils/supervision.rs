@@ -12,7 +12,7 @@ use std::{
 /// a context finishes or is aborted, the runtime drains the node and aborts all descendant
 /// tasks (leaving siblings intact).
 pub(crate) struct Tree {
-    parent: Mutex<Option<Arc<Tree>>>,
+    parent: Mutex<Option<Arc<Self>>>,
     inner: Mutex<TreeInner>,
 }
 
