@@ -533,7 +533,7 @@ mod avx2 {
     ) {
         const MAX_ROWS: usize = 34;
         const MAX_COLS: usize = 255;
-        const ROW_BLOCK: usize = 8;
+        const ROW_BLOCK: usize = 12;
 
         let rows = output.len();
         if rows == 0 || num_cols == 0 {
@@ -777,7 +777,7 @@ mod avx512 {
     ) {
         const MAX_ROWS: usize = 34;
         const MAX_COLS: usize = 255;
-        const ROW_BLOCK: usize = 8;
+        const ROW_BLOCK: usize = 12;
 
         let rows = output.len();
         if rows == 0 || num_cols == 0 {
