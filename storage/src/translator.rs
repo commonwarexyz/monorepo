@@ -2,8 +2,10 @@
 
 use core::hash::{BuildHasher, Hash, Hasher};
 
-// Golden-ratio-derived mixing constant (2^64 / phi, truncated to odd).
-const MIXING_CONSTANT: u64 = 0x517cc1b727220a95;
+// 64-bit golden-ratio-derived multiplicative hash constant:
+// floor(2^64 / phi) == 0x9e3779b97f4a7c15.
+// Since it is odd, multiplication by it is a bijection modulo 2^64.
+const MIXING_CONSTANT: u64 = 0x9e3779b97f4a7c15;
 
 /// Translate keys into a new representation (often a smaller one).
 ///
