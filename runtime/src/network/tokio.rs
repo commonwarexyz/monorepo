@@ -229,7 +229,7 @@ impl Default for Config {
             tcp_nodelay: Some(true),
             zero_linger: true,
             read_timeout: Duration::from_secs(60),
-            write_timeout: Duration::from_secs(30),
+            write_timeout: Duration::from_secs(60),
             read_buffer_size: 64 * 1024, // 64 KB
         }
     }
