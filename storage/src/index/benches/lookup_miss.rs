@@ -2,7 +2,7 @@ use super::DummyMetrics;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
     index::{unordered, Unordered},
-    translator::{EightCap, FourCap, Translator},
+    translator::{EightCap, FourCap, OneCap, Translator, TwoCap},
 };
 use criterion::{criterion_group, Criterion};
 use std::{
@@ -61,6 +61,8 @@ fn bench_lookup_miss(c: &mut Criterion) {
         .collect();
 
     for items in N_ITEMS {
+        run_lookup_miss(c, OneCap, "one_cap", items, &inserted_keys, &missing_keys);
+        run_lookup_miss(c, TwoCap, "two_cap", items, &inserted_keys, &missing_keys);
         run_lookup_miss(c, FourCap, "four_cap", items, &inserted_keys, &missing_keys);
         run_lookup_miss(
             c,
