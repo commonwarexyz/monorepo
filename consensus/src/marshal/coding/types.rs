@@ -520,7 +520,7 @@ mod test {
     use super::*;
     use crate::{marshal::mocks::block::Block as MockBlock, Block as _};
     use commonware_codec::{Decode, Encode};
-    use commonware_coding::{CodecConfig, ReedSolomon};
+    use commonware_coding::{CodecConfig, ReedSolomon16};
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Digest, Sha256};
 
     const MAX_SHARD_SIZE: CodecConfig = CodecConfig {
@@ -528,7 +528,7 @@ mod test {
     };
 
     type H = Sha256;
-    type RS = ReedSolomon<H>;
+    type RS = ReedSolomon16<H>;
     type RShard = Shard<RS, H>;
     type Block = MockBlock<<H as Hasher>::Digest, ()>;
 
@@ -682,7 +682,7 @@ mod test {
         use commonware_codec::conformance::CodecConformance;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Shard<ReedSolomon<Sha256>, Sha256>>,
+            CodecConformance<Shard<ReedSolomon16<Sha256>, Sha256>>,
         }
     }
 }
