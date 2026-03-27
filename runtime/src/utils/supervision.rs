@@ -47,6 +47,10 @@ impl TreeInner {
         self.children.push(Arc::downgrade(child));
     }
 
+    const fn note_stale_child(&mut self) {
+        self.stale_children = self.stale_children.saturating_add(1);
+    }
+
     fn register(&mut self, aborter: Aborter) -> Result<(), Aborter> {
         if self.aborted {
             return Err(aborter);
@@ -150,6 +154,11 @@ impl Tree {
 
 impl Drop for Tree {
     fn drop(&mut self) {
+        if let Some(parent) = self.parent.get_mut().as_ref() {
+            let mut parent_inner = parent.inner.lock();
+            parent_inner.note_stale_child();
+        }
+
         let children = self.inner.get_mut().children.drain(..).collect::<Vec<_>>();
         if !children.is_empty() {
             if let Some(parent) = self.parent.get_mut().as_ref() {
@@ -283,6 +292,83 @@ mod tests {
         }
 
         drop(current);
+        drop(root);
+    }
+
+    #[test]
+    fn child_reaping_batches_compaction_for_clone_heavy_parent() {
+        let root = Tree::root();
+        let mut dropped = Vec::with_capacity(CHILD_REAP_THRESHOLD);
+
+        for _ in 0..CHILD_REAP_THRESHOLD {
+            let (child, aborted) = Tree::child(&root);
+            assert!(!aborted, "child node unexpectedly aborted");
+            dropped.push(child);
+        }
+
+        for child in dropped {
+            drop(child);
+        }
+
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.len(), CHILD_REAP_THRESHOLD);
+            assert_eq!(inner.stale_children, CHILD_REAP_THRESHOLD);
+        }
+
+        let (child, aborted) = Tree::child(&root);
+        assert!(!aborted, "child node unexpectedly aborted");
+
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.len(), 1, "stale children were not reaped");
+            assert_eq!(inner.stale_children, 0, "stale child count was not reset");
+        }
+
+        drop(child);
+        drop(root);
+    }
+
+    #[test]
+    fn abort_wide_sibling_fanout_after_batched_reaping() {
+        let root = Tree::root();
+        let (parent, aborted) = Tree::child(&root);
+        assert!(!aborted, "parent node unexpectedly aborted");
+
+        let mut live = Vec::new();
+        let mut dropped = Vec::new();
+        let total = CHILD_REAP_THRESHOLD * 2;
+        for idx in 0..total {
+            let (child, aborted) = Tree::child(&parent);
+            assert!(!aborted, "child node unexpectedly aborted");
+
+            let (aborter, future) = aborter();
+            child.register(aborter);
+            if idx % 3 == 0 {
+                live.push((child, future));
+            } else {
+                dropped.push(child);
+            }
+        }
+
+        for child in dropped {
+            drop(child);
+        }
+
+        let (trigger, aborted) = Tree::child(&parent);
+        assert!(!aborted, "trigger child unexpectedly aborted");
+        let (trigger_aborter, trigger_future) = aborter();
+        trigger.register(trigger_aborter);
+
+        parent.abort();
+
+        assert!(trigger_future.is_aborted(), "trigger child was not aborted");
+        for (child, future) in live {
+            assert!(future.is_aborted(), "live child was not aborted");
+            drop(child);
+        }
+
+        drop(trigger);
         drop(root);
     }
 }
