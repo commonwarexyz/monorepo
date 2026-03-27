@@ -274,10 +274,6 @@ fn encode_matrix_mul(
         let group_len = group_end - group_start;
         let matrix_rows = &matrix[group_start * num_cols..group_end * num_cols];
 
-        for row in &mut output[group_start..group_end] {
-            row.fill(0);
-        }
-
         // Fast path: GFNI+AVX2 fused matrix multiply for zero-initialized output.
         // This avoids repeated destination read-modify-write cycles in the inner loop.
         if gf_matrix_mul_zeroed_group(
@@ -287,6 +283,10 @@ fn encode_matrix_mul(
             input,
         ) {
             continue;
+        }
+
+        for row in &mut output[group_start..group_end] {
+            row.fill(0);
         }
 
         for j in 0..num_cols {

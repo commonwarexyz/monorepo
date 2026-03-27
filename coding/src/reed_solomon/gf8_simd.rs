@@ -617,12 +617,13 @@ mod avx2 {
 
             if scalar_start < len {
                 for br in 0..block_rows {
-                    let row =
-                        &matrix_rows[(row_start + br) * num_cols..(row_start + br + 1) * num_cols];
                     let dst_tail = std::slice::from_raw_parts_mut(
                         dst_ptrs[row_start + br].add(scalar_start),
                         len - scalar_start,
                     );
+                    dst_tail.fill(0);
+                    let row =
+                        &matrix_rows[(row_start + br) * num_cols..(row_start + br + 1) * num_cols];
                     for j in 0..num_cols {
                         gf_vect_mad_scalar(dst_tail, &input[j][scalar_start..], row[j]);
                     }
@@ -856,12 +857,13 @@ mod avx512 {
 
             if scalar_start < len {
                 for br in 0..block_rows {
-                    let row =
-                        &matrix_rows[(row_start + br) * num_cols..(row_start + br + 1) * num_cols];
                     let dst_tail = std::slice::from_raw_parts_mut(
                         dst_ptrs[row_start + br].add(scalar_start),
                         len - scalar_start,
                     );
+                    dst_tail.fill(0);
+                    let row =
+                        &matrix_rows[(row_start + br) * num_cols..(row_start + br + 1) * num_cols];
                     for j in 0..num_cols {
                         gf_vect_mad_scalar(dst_tail, &input[j][scalar_start..], row[j]);
                     }
