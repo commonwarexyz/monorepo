@@ -90,8 +90,10 @@ impl<B: Readable<N>, const N: usize> FloorScan for BitmapScan<'_, B, N> {
         // Within the bitmap: find the next set bit at or after floor.
         if loc < bitmap_len {
             let bound = bitmap_len.min(tip);
-            if let Some(idx) = self.bitmap.ones_iter_from(loc).find(|&i| i < bound) {
-                return Some(Location::new(idx));
+            if let Some(idx) = self.bitmap.ones_iter_from(loc).next() {
+                if idx < bound {
+                    return Some(Location::new(idx));
+                }
             }
         }
         // Beyond the bitmap: uncommitted ops from prior batches in the
