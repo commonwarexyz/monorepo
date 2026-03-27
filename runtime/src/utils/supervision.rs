@@ -58,6 +58,9 @@ impl TreeInner {
         }
 
         self.aborted = true;
+        // Once a subtree is aborted, it no longer needs to keep its ancestry
+        // alive for future cascades.
+        self._parent = None;
         let task = self.task.take();
         let children = mem::take(&mut self.children);
         Some((task, children))
@@ -77,7 +80,7 @@ impl Tree {
         let mut parent_inner = parent.inner.lock();
         let aborted = parent_inner.aborted;
         let child = Arc::new(Self {
-            inner: Mutex::new(TreeInner::new(Some(parent.clone()), aborted)),
+            inner: Mutex::new(TreeInner::new((!aborted).then(|| parent.clone()), aborted)),
         });
         if !aborted {
             parent_inner.child(&child);
@@ -102,24 +105,23 @@ impl Tree {
 
     /// Aborts the task and all descendants rooted at this node.
     pub(crate) fn abort(self: &Arc<Self>) {
-        let result = {
-            let mut inner = self.inner.lock();
-            inner.abort()
-        };
-        let Some((task, children)) = result else {
-            return;
-        };
+        // Walk the supervision tree iteratively so deep clone/spawn chains do
+        // not exhaust the thread stack while propagating aborts.
+        let mut pending = vec![Arc::clone(self)];
+        while let Some(node) = pending.pop() {
+            let result = {
+                let mut inner = node.inner.lock();
+                inner.abort()
+            };
+            let Some((task, children)) = result else {
+                continue;
+            };
 
-        // Abort the task
-        if let Some(aborter) = task {
-            aborter.abort();
-        }
-
-        // Drain children so the subtree cannot be aborted twice.
-        for child in children {
-            if let Some(child) = child.upgrade() {
-                child.abort();
+            if let Some(aborter) = task {
+                aborter.abort();
             }
+
+            pending.extend(children.into_iter().filter_map(|child| child.upgrade()));
         }
     }
 }
@@ -198,5 +200,29 @@ mod tests {
             !child1_future.is_aborted(),
             "child1 was aborted by descendant task"
         );
+    }
+
+    #[test]
+    fn abort_deep_chain_without_stack_growth() {
+        let depth = 50_000;
+        let root = Tree::root();
+        let mut current = root.clone();
+        let mut futures = Vec::with_capacity(depth);
+
+        for _ in 0..depth {
+            let (child, aborted) = Tree::child(&current);
+            assert!(!aborted, "child node unexpectedly aborted");
+
+            let (child_aborter, child_future) = aborter();
+            child.register(child_aborter);
+            futures.push(child_future);
+            current = child;
+        }
+
+        root.abort();
+
+        for future in futures {
+            assert!(future.is_aborted(), "descendant was not aborted");
+        }
     }
 }
