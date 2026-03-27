@@ -77,8 +77,8 @@ impl Default for Config {
     fn default() -> Self {
         let iouring_config = iouring::Config::default();
         Self {
-            tcp_nodelay: None,
-            zero_linger: false,
+            tcp_nodelay: Some(true),
+            zero_linger: true,
             read_write_timeout: iouring_config.max_op_timeout,
             iouring_config,
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
