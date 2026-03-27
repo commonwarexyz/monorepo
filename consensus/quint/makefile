@@ -36,13 +36,13 @@ MAX_STEPS ?= 100
 MAX_SAMPLES ?= 1000
 run:
 	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
-		--invariant=all_invariants main_n4f1b0.qnt
+		--invariant=safe_invariants main_n4f1b0.qnt
 	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
-		--invariant=all_invariants main_n4f1b1.qnt
+		--invariant=safe_invariants main_n4f1b1.qnt
 	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
-		--invariant=all_invariants main_n5f1b1.qnt
+		--invariant=safe_invariants main_n5f1b1.qnt
 	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
-    	--invariant=all_invariants twins_n4f1b1.qnt
+    	--invariant=safe_invariants twins_n4f1b1.qnt
 
 
 get_fuzz_traces:
@@ -122,7 +122,7 @@ generate_itf:
 	@for i in $$(seq 1 $(ITF_SAMPLES)); do \
 		quint run --main=itf_main --max-steps=$(ITF_STEPS) \
 			--out-itf=$(ITF_DIR)/trace_$$i.itf.json \
-			--invariant=all_invariants itf_n4f1b1.qnt || true; \
+			--invariant=safe_invariants itf_n4f1b1.qnt || true; \
 	done
 	@echo "Generated ITF traces in $(ITF_DIR)/"
 
@@ -173,7 +173,7 @@ generate_itf_test:
 	@for dir in $(FUZZ_TRACES_ROOT)/*/; do \
 		quint test --main=itf_main --max-steps=$(ITF_STEPS) \
 			--out-itf=$(ITF_DIR)/trace_$$i.itf.json \
-			--invariant=all_invariants itf_n4f1b1.qnt || true; \
+			--invariant=safe_invariants itf_n4f1b1.qnt || true; \
 	done
 	@echo "Generated ITF traces in $(ITF_DIR)/"
 

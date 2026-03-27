@@ -7,6 +7,7 @@ use super::{
     sniffer::{TraceEntry, TracedCert, TracedVote},
 };
 use crate::replayer::compare::{ExpectedNodeState, ExpectedState};
+use serde_json::json;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -308,22 +309,57 @@ fn cert_view(cert: &TracedCert) -> u64 {
     }
 }
 
-/// Collects stored votes for each node from `store_vote` in a state.
-pub fn collect_store_vote(state: &Value) -> HashMap<String, Vec<Value>> {
-    let mut result = HashMap::new();
-    for (k, v) in parse_map(get_var(state, "store_vote")) {
+fn wrap_tagged_value(tag: &str, value: &Value) -> Value {
+    json!({
+        "tag": tag,
+        "value": value.clone(),
+    })
+}
+
+fn collect_typed_vote_store(
+    state: &Value,
+    var_name: &str,
+    tag: &str,
+    result: &mut HashMap<String, Vec<Value>>,
+) {
+    for (k, v) in parse_map(get_var(state, var_name)) {
         if let Some(node) = k.as_str() {
-            let votes: Vec<Value> = parse_set(v).into_iter().cloned().collect();
-            result.insert(node.to_string(), votes);
+            let votes = result.entry(node.to_string()).or_default();
+            votes.extend(parse_set(v).into_iter().map(|vote| wrap_tagged_value(tag, vote)));
         }
     }
+}
+
+/// Collects stored votes for each node from the split Quint vote stores.
+/// Falls back to the legacy `store_vote` map when decoding older ITF traces.
+pub fn collect_store_vote(state: &Value) -> HashMap<String, Vec<Value>> {
+    let mut result = HashMap::new();
+    let legacy_store_vote = get_var(state, "store_vote");
+    if !legacy_store_vote.is_null() {
+        for (k, v) in parse_map(legacy_store_vote) {
+            if let Some(node) = k.as_str() {
+                let votes: Vec<Value> = parse_set(v).into_iter().cloned().collect();
+                result.insert(node.to_string(), votes);
+            }
+        }
+        return result;
+    }
+    collect_typed_vote_store(state, "store_notarize_votes", "Notarize", &mut result);
+    collect_typed_vote_store(state, "store_nullify_votes", "Nullify", &mut result);
+    collect_typed_vote_store(state, "store_finalize_votes", "Finalize", &mut result);
     result
 }
 
-/// Collects stored certificates for each node from `store_certificate` in a state.
+/// Collects stored certificates for each node from `store_certificates` in a state.
+/// Falls back to the legacy `store_certificate` map when decoding older ITF traces.
 pub fn collect_store_certificate(state: &Value) -> HashMap<String, Vec<Value>> {
     let mut result = HashMap::new();
-    for (k, v) in parse_map(get_var(state, "store_certificate")) {
+    let cert_var = if get_var(state, "store_certificates").is_null() {
+        "store_certificate"
+    } else {
+        "store_certificates"
+    };
+    for (k, v) in parse_map(get_var(state, cert_var)) {
         if let Some(node) = k.as_str() {
             let certs: Vec<Value> = parse_set(v).into_iter().cloned().collect();
             result.insert(node.to_string(), certs);
@@ -390,20 +426,37 @@ pub fn diff_store_certificate(
     new_entries
 }
 
-/// Collects `sent_vote` (global set of all sent votes) from an ITF state.
+/// Collects the global set of sent votes from the split Quint sent-vote sets.
+/// Falls back to the legacy `sent_vote` set when decoding older ITF traces.
 pub fn collect_sent_vote(state: &Value) -> Vec<Value> {
-    parse_set(get_var(state, "sent_vote"))
-        .into_iter()
-        .cloned()
-        .collect()
+    let legacy_sent_vote = get_var(state, "sent_vote");
+    if !legacy_sent_vote.is_null() {
+        return parse_set(legacy_sent_vote).into_iter().cloned().collect();
+    }
+
+    let mut votes = Vec::new();
+    votes.extend(
+        parse_set(get_var(state, "sent_notarize_votes"))
+            .into_iter()
+            .map(|vote| wrap_tagged_value("Notarize", vote)),
+    );
+    votes.extend(
+        parse_set(get_var(state, "sent_nullify_votes"))
+            .into_iter()
+            .map(|vote| wrap_tagged_value("Nullify", vote)),
+    );
+    votes.extend(
+        parse_set(get_var(state, "sent_finalize_votes"))
+            .into_iter()
+            .map(|vote| wrap_tagged_value("Finalize", vote)),
+    );
+    votes
 }
 
-/// Extracts vote signers from `store_vote` and `sent_vote` for a given node.
-///
-/// `store_vote[node]` tracks votes delivered via the network (may or may not
-/// include self-delivery). `sent_vote` is the global set of all sent votes.
-/// We union in the node's own sent votes so the result always includes self,
-/// matching the Rust Reporter which always records self-constructed votes.
+/// Extracts vote signers from the normalized store/sent vote collections for a
+/// given node. We union in the node's own sent votes so the result always
+/// includes self, matching the Rust Reporter which always records
+/// self-constructed votes.
 #[allow(clippy::type_complexity)]
 fn extract_vote_signers(
     store_vote_map: &HashMap<String, Vec<Value>>,
@@ -625,10 +678,24 @@ pub fn count_nodes(state: &Value) -> usize {
             all_nodes.insert(node.to_string());
         }
     }
-    // Collect from store_vote keys
-    for (k, _) in parse_map(get_var(state, "store_vote")) {
-        if let Some(node) = k.as_str() {
-            all_nodes.insert(node.to_string());
+    let legacy_store_vote = get_var(state, "store_vote");
+    if !legacy_store_vote.is_null() {
+        for (k, _) in parse_map(legacy_store_vote) {
+            if let Some(node) = k.as_str() {
+                all_nodes.insert(node.to_string());
+            }
+        }
+        return all_nodes.len();
+    }
+    for var_name in [
+        "store_notarize_votes",
+        "store_nullify_votes",
+        "store_finalize_votes",
+    ] {
+        for (k, _) in parse_map(get_var(state, var_name)) {
+            if let Some(node) = k.as_str() {
+                all_nodes.insert(node.to_string());
+            }
         }
     }
     all_nodes.len()

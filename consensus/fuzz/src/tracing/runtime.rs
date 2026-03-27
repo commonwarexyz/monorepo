@@ -104,12 +104,7 @@ impl TraceSelectionStrategy for CurrentTraceSelectionStrategy {
     }
 
     fn is_interesting(&self, metrics: &TraceMetrics) -> bool {
-        metrics.byzantine_distance > 3.0
-            && metrics.byzantine_vote_types >= 2
-            && metrics.certs_by_n0 > 0
-            && metrics.notarize_by_n0 > 1
-            && metrics.nullify_by_n0 > 1
-            && metrics.finalize_by_n0 > 1
+        metrics.certificate_entries > 0 && metrics.unique_blocks > 1
     }
 }
 
@@ -227,28 +222,12 @@ struct TraceMetrics {
     last_finalized_view: u64,
     max_view: u64,
     view_signatures: Vec<ViewTraceSignature>,
-    notarization_certificates: u64,
-    nullification_certificates: u64,
-    finalization_certificates: u64,
-    notarize_by_n0: u64,
-    nullify_by_n0: u64,
-    finalize_by_n0: u64,
-    certs_by_n0: u64,
-    byzantine_vote_types: u64,
-    byzantine_distance: f64,
 }
 
 impl TraceMetrics {
     fn from_entries(entries: &[TraceEntry], faults: usize, n: usize, max_view: u64) -> Self {
         let mut vote_entries = 0;
         let mut certificate_entries = 0;
-        let mut notarization_certificates = 0;
-        let mut nullification_certificates = 0;
-        let mut finalization_certificates = 0;
-        let mut notarize_by_n0 = 0;
-        let mut nullify_by_n0 = 0;
-        let mut finalize_by_n0 = 0;
-        let mut certs_by_n0 = 0;
         let mut last_finalized_view = 0;
         let mut unique_blocks = HashSet::new();
         let correct_nodes = n.saturating_sub(faults);
@@ -280,9 +259,6 @@ impl TraceMetrics {
                                 }
                             }
                             unique_blocks.insert(block.clone());
-                            if sig == "n0" {
-                                notarize_by_n0 += 1;
-                            }
                         }
                         TracedVote::Nullify { view, sig } => {
                             if let Some(correct_idx) = correct_node_offset(sig, faults, n) {
@@ -300,9 +276,6 @@ impl TraceMetrics {
                                         correct_nodes,
                                     );
                                 }
-                            }
-                            if sig == "n0" {
-                                nullify_by_n0 += 1;
                             }
                         }
                         TracedVote::Finalize { view, sig, block } => {
@@ -324,21 +297,14 @@ impl TraceMetrics {
                                 }
                             }
                             unique_blocks.insert(block.clone());
-                            if sig == "n0" {
-                                finalize_by_n0 += 1;
-                            }
                         }
                     }
                 }
                 TraceEntry::Certificate { sender, cert, .. } => {
                     certificate_entries += 1;
-                    if sender == "n0" {
-                        certs_by_n0 += 1;
-                    }
                     match cert {
                         TracedCert::Notarization { view, block, .. } => {
                             if sender != "n0" {
-                                notarization_certificates += 1;
                                 if let Some(correct_idx) = correct_node_offset(sender, faults, n) {
                                     increment_view_vector(
                                         &mut per_view_vectors,
@@ -354,7 +320,6 @@ impl TraceMetrics {
                         }
                         TracedCert::Nullification { view, .. } => {
                             if sender != "n0" {
-                                nullification_certificates += 1;
                                 if let Some(correct_idx) = correct_node_offset(sender, faults, n) {
                                     increment_view_vector(
                                         &mut per_view_vectors,
@@ -369,7 +334,6 @@ impl TraceMetrics {
                         }
                         TracedCert::Finalization { view, block, .. } => {
                             if sender != "n0" {
-                                finalization_certificates += 1;
                                 if let Some(correct_idx) = correct_node_offset(sender, faults, n) {
                                     increment_view_vector(
                                         &mut per_view_vectors,
@@ -389,18 +353,6 @@ impl TraceMetrics {
             }
         }
 
-        let byzantine_distance = [
-            notarize_by_n0 as f64,
-            nullify_by_n0 as f64,
-            finalize_by_n0 as f64,
-            certs_by_n0 as f64,
-        ]
-        .iter()
-        .map(|x| x * x)
-        .sum::<f64>()
-        .sqrt();
-        let byzantine_vote_types =
-            (notarize_by_n0 > 0) as u64 + (nullify_by_n0 > 0) as u64 + (finalize_by_n0 > 0) as u64;
         let view_signatures = per_view_vectors
             .into_iter()
             .map(|(view, vector)| ViewTraceSignature { view, vector })
@@ -414,15 +366,6 @@ impl TraceMetrics {
             last_finalized_view,
             max_view,
             view_signatures,
-            notarization_certificates,
-            nullification_certificates,
-            finalization_certificates,
-            notarize_by_n0,
-            nullify_by_n0,
-            finalize_by_n0,
-            certs_by_n0,
-            byzantine_vote_types,
-            byzantine_distance,
         }
     }
 
@@ -636,7 +579,7 @@ fn log_trace_selection(
     }
     let verdict = if selected { "selected" } else { "skipping" };
     let line = format!(
-        "{verdict} trace (strategy={}, entries={}, votes={}, certs={}, unique_blocks={}, last_finalized_view={}, max_view={}, view_signature=[{}], cert_signature=[nullification={}, notarization={}, finalization={}], distance={:.2}, vote_types={}, notarize_n0={}, nullify_n0={}, finalize_n0={}, certs_n0={})",
+        "{verdict} trace (strategy={}, entries={}, votes={}, certs={}, unique_blocks={}, last_finalized_view={}, max_view={}, view_signature=[{}])",
         strategy.name(),
         metrics.entry_count,
         metrics.vote_entries,
@@ -645,15 +588,6 @@ fn log_trace_selection(
         metrics.last_finalized_view,
         metrics.max_view,
         format_view_signatures(&metrics.view_signatures),
-        metrics.nullification_certificates,
-        metrics.notarization_certificates,
-        metrics.finalization_certificates,
-        metrics.byzantine_distance,
-        metrics.byzantine_vote_types,
-        metrics.notarize_by_n0,
-        metrics.nullify_by_n0,
-        metrics.finalize_by_n0,
-        metrics.certs_by_n0,
     );
     emit_trace_log(strategy, artifacts_dir, &line);
 }

@@ -358,7 +358,7 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
         for action in *chunk {
             writeln!(out, "            .then({})", action).unwrap();
         }
-        writeln!(out, "            .expect(all_invariants)").unwrap();
+        writeln!(out, "            .expect(safe_invariants)").unwrap();
         writeln!(out).unwrap();
     }
 
@@ -370,7 +370,7 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     };
     writeln!(out, "    run traceTest =").unwrap();
     writeln!(out, "        {}", last_part).unwrap();
-    writeln!(out, "            .expect(all_invariants)").unwrap();
+    writeln!(out, "            .expect(safe_invariants)").unwrap();
     // Assert that all correct nodes finalized the expected number of containers
     if cfg.required_containers > 0 {
         for i in cfg.faults..cfg.n {
@@ -599,7 +599,11 @@ fn build_actions(
                             receiver: sig.clone(),
                             view: *view,
                             block: bn.clone(),
-                            vote: format!("finalize({}, \"{}\")", proposal_ref(*view, &bn), sig),
+                            vote: format!(
+                                "{{ proposal: {}, sig: \"{}\" }}",
+                                proposal_ref(*view, &bn),
+                                sig
+                            ),
                         });
                     }
 
@@ -625,7 +629,11 @@ fn build_actions(
                         receiver: receiver.clone(),
                         view: *view,
                         block: bn.clone(),
-                        vote: format!("finalize({}, \"{}\")", proposal_ref(*view, &bn), sig),
+                        vote: format!(
+                            "{{ proposal: {}, sig: \"{}\" }}",
+                            proposal_ref(*view, &bn),
+                            sig
+                        ),
                     });
                 }
                 TracedVote::Nullify { view, sig } => {
@@ -654,7 +662,7 @@ fn build_actions(
                                 receiver: sig.clone(),
                                 view: *view,
                                 block: String::new(),
-                                vote: format!("nullify({}, \"{}\")", view, sig),
+                                vote: format!("{{ view: {}, sig: \"{}\" }}", view, sig),
                             });
                         }
                     }
@@ -680,7 +688,7 @@ fn build_actions(
                         receiver: receiver.clone(),
                         view: *view,
                         block: String::new(),
-                        vote: format!("nullify({}, \"{}\")", view, sig),
+                        vote: format!("{{ view: {}, sig: \"{}\" }}", view, sig),
                     });
                 }
             },
@@ -789,7 +797,7 @@ fn build_actions(
 /// view, block) key into single calls with combined Sets. Barriers act
 /// as fences: votes on opposite sides of a barrier are never merged.
 ///
-/// For example, 9 individual `on_vote_finalize` calls (3 signers x 3
+/// For example, 9 individual finalize deliveries (3 signers x 3
 /// receivers) become 3 calls (one per receiver, each with 3 votes in
 /// the Set), reducing quint evaluation steps by ~3x per view.
 fn group_vote_deliveries(items: Vec<ActionItem>) -> Vec<String> {
@@ -848,13 +856,10 @@ fn flush_vote_group(pending: &mut Vec<ActionItem>, result: &mut Vec<String>) {
         }
     }
 
-    for (receiver, kind, view, block, votes) in groups {
+    for (receiver, kind, view, _block, votes) in groups {
         let vote_set = votes.join(", ");
         let s = match kind {
-            VoteKind::Finalize => format!(
-                "on_finalize(\"{}\", {}, \"{}\", Set({}))",
-                receiver, view, block, vote_set
-            ),
+            VoteKind::Finalize => format!("on_finalize(\"{}\", Set({}))", receiver, vote_set),
             VoteKind::Nullify => format!(
                 "on_nullify(\"{}\", {}, Set({}))",
                 receiver, view, vote_set
@@ -1171,11 +1176,41 @@ fn inject_byzantine_cert_votes(
 /// Writes the standard helper actions used by test modules.
 fn write_helpers(out: &mut String) {
     writeln!(out, "    action inject_vote(vote: Vote): bool = all {{").unwrap();
-    writeln!(out, "        sent_vote' = sent_vote.union(Set(vote)),").unwrap();
+    writeln!(out, "        match (vote) {{").unwrap();
+    writeln!(out, "            | Notarize(v) => all {{").unwrap();
+    writeln!(
+        out,
+        "                sent_notarize_votes' = sent_notarize_votes.union(Set(v)),"
+    )
+    .unwrap();
+    writeln!(out, "                sent_nullify_votes' = sent_nullify_votes,").unwrap();
+    writeln!(out, "                sent_finalize_votes' = sent_finalize_votes,").unwrap();
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "            | Nullify(v) => all {{").unwrap();
+    writeln!(out, "                sent_notarize_votes' = sent_notarize_votes,").unwrap();
+    writeln!(
+        out,
+        "                sent_nullify_votes' = sent_nullify_votes.union(Set(v)),"
+    )
+    .unwrap();
+    writeln!(out, "                sent_finalize_votes' = sent_finalize_votes,").unwrap();
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "            | Finalize(v) => all {{").unwrap();
+    writeln!(out, "                sent_notarize_votes' = sent_notarize_votes,").unwrap();
+    writeln!(out, "                sent_nullify_votes' = sent_nullify_votes,").unwrap();
+    writeln!(
+        out,
+        "                sent_finalize_votes' = sent_finalize_votes.union(Set(v)),"
+    )
+    .unwrap();
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "        }},").unwrap();
     writeln!(out, "        sent_proposal' = sent_proposal,").unwrap();
-    writeln!(out, "        sent_certificate' = sent_certificate,").unwrap();
-    writeln!(out, "        store_vote' = store_vote,").unwrap();
-    writeln!(out, "        store_certificate' = store_certificate,").unwrap();
+    writeln!(out, "        sent_certificates' = sent_certificates,").unwrap();
+    writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
+    writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
+    writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
+    writeln!(out, "        store_certificates' = store_certificates,").unwrap();
     writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
     writeln!(
         out,
