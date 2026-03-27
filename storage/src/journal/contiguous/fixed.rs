@@ -654,13 +654,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Append multiple items to the journal, returning the position of the last item appended.
     ///
     /// Acquires the write lock once for all items instead of per-item.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::Empty] if items is empty.
+    /// No-ops if items is empty, returning the current size (next append position).
     pub async fn append_many(&self, items: &[A]) -> Result<u64, Error> {
         if items.is_empty() {
-            return Err(Error::Empty);
+            return Ok(self.inner.read().await.size);
         }
 
         // Mutating operations are serialized by taking the write guard.
@@ -668,13 +665,16 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         let mut last_position = 0;
         for item in items {
+            // Append the item to the journal.
             let position = inner.size;
             let (section, _) = self.position_to_section(position);
             inner.journal.append(section, item).await?;
             inner.size += 1;
             last_position = position;
 
-            // Handle section-full sync.
+            // The section was filled and must be synced. Downgrade so readers can continue
+            // during the sync, but keep mutators blocked. After sync, upgrade again to create
+            // the next tail section before any append can proceed.
             if inner.size.is_multiple_of(self.items_per_blob) {
                 let inner_ref = inner.downgrade_to_upgradable();
                 inner_ref.journal.sync(section).await?;
