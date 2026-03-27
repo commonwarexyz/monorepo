@@ -531,7 +531,7 @@ mod avx2 {
         output: &mut [Vec<u8>],
         input: &[&[u8]],
     ) {
-        const MAX_ROWS: usize = 32;
+        const MAX_ROWS: usize = 34;
         const MAX_COLS: usize = 255;
         const ROW_BLOCK: usize = 8;
 
@@ -767,7 +767,7 @@ mod avx512 {
         output: &mut [Vec<u8>],
         input: &[&[u8]],
     ) {
-        const MAX_ROWS: usize = 32;
+        const MAX_ROWS: usize = 34;
         const MAX_COLS: usize = 255;
         const ROW_BLOCK: usize = 8;
 
