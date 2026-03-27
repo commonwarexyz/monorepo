@@ -91,7 +91,12 @@ impl Engine for Gf8 {
         }
 
         let enc_matrix = get_encoding_matrix(k, m)?;
-        let mut recovery = vec![vec![0u8; shard_len]; m];
+        let mut recovery = Vec::with_capacity(m);
+        for _ in 0..m {
+            let mut shard = Vec::with_capacity(shard_len);
+            shard.resize(shard_len, 0);
+            recovery.push(shard);
+        }
 
         encode_matrix_mul(enc_matrix.as_ref(), k, &mut recovery, original);
 
@@ -249,6 +254,10 @@ fn encode_matrix_mul(
         let group_end = (group_start + GROUP_SIZE).min(num_rows);
         let group_len = group_end - group_start;
         let matrix_rows = &matrix[group_start * num_cols..group_end * num_cols];
+
+        for row in &mut output[group_start..group_end] {
+            row.fill(0);
+        }
 
         // Fast path: GFNI+AVX2 fused matrix multiply for zero-initialized output.
         // This avoids repeated destination read-modify-write cycles in the inner loop.
