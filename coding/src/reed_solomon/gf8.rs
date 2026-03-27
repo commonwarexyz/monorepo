@@ -59,6 +59,22 @@ pub enum Error {
 #[derive(Clone, Debug)]
 pub struct Gf8;
 
+fn alloc_encode_recovery_shards(m: usize, shard_len: usize) -> Vec<Vec<u8>> {
+    let mut recovery = Vec::with_capacity(m);
+    for _ in 0..m {
+        let mut shard = Vec::with_capacity(shard_len);
+        // SAFETY: encode_matrix_mul always overwrites every byte of every recovery
+        // shard before any read occurs. The small-output path zero-initializes its
+        // destinations internally, and the grouped path zero-fills each destination
+        // shard before falling back to accumulate kernels.
+        unsafe {
+            shard.set_len(shard_len);
+        }
+        recovery.push(shard);
+    }
+    recovery
+}
+
 impl Engine for Gf8 {
     type Error = Error;
 
@@ -91,12 +107,7 @@ impl Engine for Gf8 {
         }
 
         let enc_matrix = get_encoding_matrix(k, m)?;
-        let mut recovery = Vec::with_capacity(m);
-        for _ in 0..m {
-            let mut shard = Vec::with_capacity(shard_len);
-            shard.resize(shard_len, 0);
-            recovery.push(shard);
-        }
+        let mut recovery = alloc_encode_recovery_shards(m, shard_len);
 
         encode_matrix_mul(enc_matrix.as_ref(), k, &mut recovery, original);
 
@@ -244,6 +255,14 @@ fn encode_matrix_mul(
         if encode_matrix_mul_small(matrix, num_cols, output, input) {
             return;
         }
+    }
+
+    // Fast path: when the entire output fits in a single group, fused SIMD kernels
+    // overwrite all destination rows, so we can skip the explicit zero-fill.
+    if num_rows <= GROUP_SIZE
+        && gf_matrix_mul_zeroed_group(matrix, num_cols, output, input)
+    {
+        return;
     }
 
     // Stack-allocated buffers for pre-filtered coefficients and destination pointers.
