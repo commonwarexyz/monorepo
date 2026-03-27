@@ -376,9 +376,7 @@ where
         }
 
         for items in &batch.items {
-            if !items.is_empty() {
-                self.journal.append_many(items).await?;
-            }
+            self.journal.append_many(items).await?;
         }
         self.mmr.apply(batch.changeset)?;
         debug_assert_eq!(*self.mmr.leaves(), self.journal.size().await);
