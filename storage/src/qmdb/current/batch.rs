@@ -88,6 +88,11 @@ impl<B: Readable<N>, const N: usize> FloorScan for BitmapScan<'_, B, N> {
         }
         let bitmap_len = self.bitmap.len();
         // Within the bitmap: find the next set bit at or after floor.
+        // ones_iter_from yields indices in ascending order so the first
+        // result is the only possible candidate below bound. tip >=
+        // bitmap_len always holds (base_size == bitmap_parent.len()),
+        // so bound == bitmap_len and the iterator's own length check
+        // prevents any scanning past bound.
         if loc < bitmap_len {
             let bound = bitmap_len.min(tip);
             if let Some(idx) = self.bitmap.ones_iter_from(loc).next() {
