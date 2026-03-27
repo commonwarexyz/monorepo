@@ -18,7 +18,9 @@ commonware_macros::stability_scope!(ALPHA {
     use thiserror::Error;
 
     mod reed_solomon;
-    pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
+    pub use reed_solomon::{
+        Engine, Error as ReedSolomonError, Gf16, Gf8, ReedSolomon, ReedSolomon8,
+    };
 
     mod zoda;
     pub use zoda::{Error as ZodaError, Zoda};
@@ -614,6 +616,7 @@ mod test {
             let selected: Vec<u16> = (0..30).collect();
 
             roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
+            roundtrip::<ReedSolomon8<Sha256>>(&config, b"", &selected);
             roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, b"", &selected);
         }
 
@@ -627,6 +630,7 @@ mod test {
             let selected: Vec<u16> = (0..8).collect();
 
             roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+            roundtrip::<ReedSolomon8<Sha256>>(&config, &data, &selected);
             roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, &data, &selected);
         }
 
@@ -635,6 +639,15 @@ mod test {
             minifuzz::test(|u| {
                 let (config, data, selected) = generate_case(u)?;
                 roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn minifuzz_roundtrip_reed_solomon_8() {
+            minifuzz::test(|u| {
+                let (config, data, selected) = generate_case(u)?;
+                roundtrip::<ReedSolomon8<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
         }
