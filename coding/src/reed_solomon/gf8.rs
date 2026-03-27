@@ -274,8 +274,8 @@ fn encode_matrix_mul(
         let group_len = group_end - group_start;
         let matrix_rows = &matrix[group_start * num_cols..group_end * num_cols];
 
-        // Fast path: GFNI+AVX2 fused matrix multiply for zero-initialized output.
-        // This avoids repeated destination read-modify-write cycles in the inner loop.
+        // Fast path: GFNI+AVX2 fused matrix multiply overwrites the full group,
+        // including any scalar tail, so it can run before explicit zeroing.
         if gf_matrix_mul_zeroed_group(
             matrix_rows,
             num_cols,
