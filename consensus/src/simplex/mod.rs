@@ -796,7 +796,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
 
                 // Ensure certificates for all views
@@ -1063,9 +1062,7 @@ mod tests {
                     let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
-                {
-                    reporter.assert_no_invalid();
-                }
+                reporter.assert_no_invalid();
 
                 // Ensure no blocked connections
                 let blocked = oracle.blocked().await.unwrap();
@@ -1696,7 +1693,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
 
                 // Ensure offline node is never active
@@ -1942,7 +1938,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
 
                 // Ensure the slow validator never emits notarize or finalize
@@ -2164,7 +2159,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
 
                 // Ensure quick recovery.
@@ -2388,7 +2382,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
             }
 
@@ -2549,7 +2542,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
             }
 
@@ -2828,7 +2820,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
             }
             assert!(count_conflicting > 0);
@@ -3184,7 +3175,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
             }
 
@@ -3686,7 +3676,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
             }
 
@@ -3866,7 +3855,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
             }
             assert!(count_nullify_and_finalize > 0);
@@ -4035,7 +4023,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
             }
 
@@ -4190,7 +4177,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
             }
 
@@ -4596,7 +4582,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
 
                 // Check that we have certificates reported
@@ -5017,9 +5002,7 @@ mod tests {
                     let faults = reporter.faults.lock();
                     assert!(faults.is_empty());
                 }
-                {
-                    reporter.assert_no_invalid();
-                }
+                reporter.assert_no_invalid();
             }
             let blocked = oracle.blocked().await.unwrap();
             assert!(blocked.is_empty(), "blocked peers: {blocked:?}");
@@ -5417,7 +5400,6 @@ mod tests {
                 }
 
                 // Ensure no invalid signatures
-
                 reporter.assert_no_invalid();
 
                 // Ensure no forks
