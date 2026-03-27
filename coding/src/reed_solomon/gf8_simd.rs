@@ -365,6 +365,20 @@ mod avx2 {
     #[cfg(target_arch = "x86_64")]
     use core::arch::x86_64::*;
 
+    #[target_feature(enable = "avx2,gfni")]
+    unsafe fn coeff_broadcast_table() -> &'static [__m256i; 256] {
+        static TABLE: OnceLock<[__m256i; 256]> = OnceLock::new();
+        TABLE.get_or_init(|| {
+            let mut table = [_mm256_setzero_si256(); 256];
+            let mut idx = 0;
+            while idx < 256 {
+                table[idx] = _mm256_set1_epi8(idx as i8);
+                idx += 1;
+            }
+            table
+        })
+    }
+
     /// Single-destination MAD using AVX2 split-nibble technique.
     ///
     /// # Safety
@@ -556,8 +570,7 @@ mod avx2 {
             dst_ptrs[r] = output[r].as_mut_ptr();
         }
 
-        let mut coeff_cache = [_mm256_setzero_si256(); 256];
-        let mut coeff_init = [false; 256];
+        let coeff_cache = coeff_broadcast_table();
 
         let chunks = len / 64;
         let tail_start = chunks * 64;
@@ -572,10 +585,6 @@ mod avx2 {
                 let row = &matrix_rows[(row_start + br) * num_cols..(row_start + br + 1) * num_cols];
                 for j in 0..num_cols {
                     let idx = row[j] as usize;
-                    if !coeff_init[idx] {
-                        coeff_cache[idx] = _mm256_set1_epi8(row[j] as i8);
-                        coeff_init[idx] = true;
-                    }
                     coeff_vs[br][j] = coeff_cache[idx];
                 }
             }
@@ -751,17 +760,18 @@ mod avx512 {
     use core::arch::x86_64::*;
 
     #[inline]
-    unsafe fn cached_affine_broadcast(
-        coeff: u8,
-        cache: &mut [__m512i; 256],
-        init: &mut [bool; 256],
-    ) -> __m512i {
-        let idx = coeff as usize;
-        if !init[idx] {
-            cache[idx] = _mm512_set1_epi64(GFNI_AFFINE_TABLE[idx] as i64);
-            init[idx] = true;
-        }
-        cache[idx]
+    #[target_feature(enable = "avx512f,avx512bw,avx512vl,gfni")]
+    unsafe fn affine_broadcast_table() -> &'static [__m512i; 256] {
+        static TABLE: OnceLock<[__m512i; 256]> = OnceLock::new();
+        TABLE.get_or_init(|| {
+            let mut table = [_mm512_setzero_si512(); 256];
+            let mut idx = 0;
+            while idx < 256 {
+                table[idx] = _mm512_set1_epi64(GFNI_AFFINE_TABLE[idx] as i64);
+                idx += 1;
+            }
+            table
+        })
     }
 
     /// Fused matrix multiply for zero-initialized destination rows using AVX-512 GFNI.
@@ -795,8 +805,7 @@ mod avx512 {
         debug_assert!(output.iter().all(|r| r.len() == len));
         debug_assert!(input.iter().all(|s| s.len() == len));
 
-        let mut affine_cache = [_mm512_setzero_si512(); 256];
-        let mut affine_init = [false; 256];
+        let affine_cache = affine_broadcast_table();
 
         let mut dst_ptrs = [core::ptr::null_mut(); MAX_ROWS];
         for r in 0..rows {
@@ -814,8 +823,7 @@ mod avx512 {
             for br in 0..block_rows {
                 let row = &matrix_rows[(row_start + br) * num_cols..(row_start + br + 1) * num_cols];
                 for j in 0..num_cols {
-                    coeff_vs[br][j] =
-                        cached_affine_broadcast(row[j], &mut affine_cache, &mut affine_init);
+                    coeff_vs[br][j] = affine_cache[row[j] as usize];
                 }
             }
 
