@@ -342,21 +342,15 @@ fn encode<V: Engine, H: Hasher, S: Strategy>(
     let recovery_shards =
         V::encode(k, m, &original_refs).map_err(|e| Error::Engine(e.to_string()))?;
 
-    // Collect recovery into a contiguous buffer
-    let mut recovery_buf = Vec::with_capacity(m * shard_len);
-    for shard in &recovery_shards {
-        recovery_buf.extend_from_slice(shard);
-    }
-
-    // Create zero-copy Bytes views into the original and recovery buffers
+    // Create zero-copy Bytes views into the original buffer and keep recovery shards
+    // in-place to avoid a second full copy before hashing and proof generation.
     let originals: Bytes = padded.into();
-    let recoveries: Bytes = recovery_buf.into();
 
     // Build Merkle tree
     let mut builder = Builder::<H>::new(n);
     let shard_slices: Vec<Bytes> = (0..k)
         .map(|i| originals.slice(i * shard_len..(i + 1) * shard_len))
-        .chain((0..m).map(|i| recoveries.slice(i * shard_len..(i + 1) * shard_len)))
+        .chain(recovery_shards.into_iter().map(Bytes::from))
         .collect();
     let shard_hashes = strategy.map_init_collect_vec(&shard_slices, H::new, |hasher, shard| {
         hasher.update(shard);

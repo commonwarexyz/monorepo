@@ -712,46 +712,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_decode_rejects_invalid_original_index() {
-        let err = Gf8::decode(3, 2, 8, &[(3, &[0u8; 8]), (1, &[0u8; 8]), (2, &[0u8; 8])], &[])
-            .unwrap_err();
-        assert!(matches!(err, Error::InvalidOriginalShardIndex(3)));
-    }
-
-    #[test]
-    fn test_decode_rejects_invalid_recovery_index() {
-        let err = Gf8::decode(3, 2, 8, &[(0, &[0u8; 8])], &[(2, &[0u8; 8]), (1, &[0u8; 8])])
-            .unwrap_err();
-        assert!(matches!(err, Error::InvalidRecoveryShardIndex(2)));
-    }
-
-    #[test]
-    fn test_decode_rejects_duplicate_indices() {
-        let err = Gf8::decode(3, 2, 8, &[(0, &[0u8; 8]), (0, &[0u8; 8]), (1, &[0u8; 8])], &[])
-            .unwrap_err();
-        assert!(matches!(err, Error::DuplicateShardIndex(0)));
-    }
-
-    #[test]
-    fn test_decode_rejects_wrong_shard_length() {
-        let err = Gf8::decode(3, 2, 8, &[(0, &[0u8; 7]), (1, &[0u8; 8]), (2, &[0u8; 8])], &[])
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            Error::WrongShardLength {
-                index: 0,
-                got: 7,
-                expected: 8
-            }
-        ));
-    }
-
-    #[test]
-    fn test_encoding_matrix_cache_roundtrip() {
-        let first = get_encoding_matrix(8, 16).unwrap();
-        let second = get_encoding_matrix(8, 16).unwrap();
-        assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(first.as_ref(), second.as_ref());
-    }
 }

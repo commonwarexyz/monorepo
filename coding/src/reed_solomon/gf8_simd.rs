@@ -109,6 +109,13 @@ pub(crate) fn gf_matrix_mul_zeroed_group(
 ) -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
+        if has_gfni_avx512() {
+            // SAFETY: feature detection above guarantees AVX-512BW/VL/F+GFNI availability.
+            unsafe {
+                avx512::matrix_mul_zeroed_group(matrix_rows, num_cols, output, input);
+            }
+            return true;
+        }
         if has_gfni_avx2() {
             // SAFETY: feature detection above guarantees AVX2+GFNI availability.
             unsafe {
@@ -127,6 +134,23 @@ fn has_gfni_avx2() -> bool {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             std::is_x86_feature_detected!("gfni") && std::is_x86_feature_detected!("avx2")
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            false
+        }
+    })
+}
+
+fn has_gfni_avx512() -> bool {
+    static HAS: OnceLock<bool> = OnceLock::new();
+    *HAS.get_or_init(|| {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            std::is_x86_feature_detected!("gfni")
+                && std::is_x86_feature_detected!("avx512f")
+                && std::is_x86_feature_detected!("avx512bw")
+                && std::is_x86_feature_detected!("avx512vl")
         }
         #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
         {
@@ -619,6 +643,124 @@ mod gfni_avx2 {
         } else {
             for (d, &coeff) in dsts.iter_mut().zip(coeffs.iter()) {
                 gf_vect_mad_scalar(&mut d[tail_start..], &src[tail_start..], coeff);
+            }
+        }
+    }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod avx512 {
+    use super::*;
+
+    #[cfg(target_arch = "x86")]
+    use core::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use core::arch::x86_64::*;
+
+    /// Fused matrix multiply for zero-initialized destination rows using AVX-512 GFNI.
+    ///
+    /// # Safety
+    /// Caller must ensure AVX-512F/BW/VL and GFNI are available.
+    #[target_feature(enable = "avx512f,avx512bw,avx512vl,gfni")]
+    pub(super) unsafe fn matrix_mul_zeroed_group(
+        matrix_rows: &[u8],
+        num_cols: usize,
+        output: &mut [Vec<u8>],
+        input: &[&[u8]],
+    ) {
+        const MAX_ROWS: usize = 16;
+        const MAX_COLS: usize = 255;
+        const ROW_BLOCK: usize = 4;
+
+        let rows = output.len();
+        if rows == 0 || num_cols == 0 {
+            return;
+        }
+        debug_assert!(rows <= MAX_ROWS);
+        debug_assert!(num_cols <= MAX_COLS);
+        debug_assert_eq!(input.len(), num_cols);
+        debug_assert_eq!(matrix_rows.len(), rows * num_cols);
+
+        let len = output[0].len();
+        if len == 0 {
+            return;
+        }
+        debug_assert!(output.iter().all(|r| r.len() == len));
+        debug_assert!(input.iter().all(|s| s.len() == len));
+
+        let mut dst_ptrs = [core::ptr::null_mut(); MAX_ROWS];
+        for r in 0..rows {
+            dst_ptrs[r] = output[r].as_mut_ptr();
+        }
+
+        let chunks = len / 128;
+        let tail_start = chunks * 128;
+
+        for row_start in (0..rows).step_by(ROW_BLOCK) {
+            let row_end = (row_start + ROW_BLOCK).min(rows);
+            let block_rows = row_end - row_start;
+
+            let mut coeff_vs = [[_mm512_setzero_si512(); MAX_COLS]; ROW_BLOCK];
+            for br in 0..block_rows {
+                let row = &matrix_rows[(row_start + br) * num_cols..(row_start + br + 1) * num_cols];
+                for j in 0..num_cols {
+                    coeff_vs[br][j] = _mm512_set1_epi8(row[j] as i8);
+                }
+            }
+
+            for i in 0..chunks {
+                let offset = i * 128;
+                let mut acc0 = [_mm512_setzero_si512(); ROW_BLOCK];
+                let mut acc1 = [_mm512_setzero_si512(); ROW_BLOCK];
+
+                for j in 0..num_cols {
+                    let src_ptr = input[j].as_ptr().add(offset);
+                    let s0 = _mm512_loadu_si512(src_ptr.cast());
+                    let s1 = _mm512_loadu_si512(src_ptr.add(64).cast());
+
+                    for br in 0..block_rows {
+                        acc0[br] =
+                            _mm512_xor_si512(acc0[br], _mm512_gf2p8mul_epi8(coeff_vs[br][j], s0));
+                        acc1[br] =
+                            _mm512_xor_si512(acc1[br], _mm512_gf2p8mul_epi8(coeff_vs[br][j], s1));
+                    }
+                }
+
+                for br in 0..block_rows {
+                    let dst_ptr = dst_ptrs[row_start + br].add(offset);
+                    _mm512_storeu_si512(dst_ptr.cast(), acc0[br]);
+                    _mm512_storeu_si512(dst_ptr.add(64).cast(), acc1[br]);
+                }
+            }
+
+            let mut scalar_start = tail_start;
+            if tail_start + 64 <= len {
+                let mut acc = [_mm512_setzero_si512(); ROW_BLOCK];
+                for j in 0..num_cols {
+                    let s = _mm512_loadu_si512(input[j].as_ptr().add(tail_start).cast());
+                    for br in 0..block_rows {
+                        acc[br] =
+                            _mm512_xor_si512(acc[br], _mm512_gf2p8mul_epi8(coeff_vs[br][j], s));
+                    }
+                }
+                for br in 0..block_rows {
+                    _mm512_storeu_si512(dst_ptrs[row_start + br].add(tail_start).cast(), acc[br]);
+                }
+                scalar_start += 64;
+            }
+
+            if scalar_start < len {
+                for br in 0..block_rows {
+                    let row =
+                        &matrix_rows[(row_start + br) * num_cols..(row_start + br + 1) * num_cols];
+                    let dst_tail = std::slice::from_raw_parts_mut(
+                        dst_ptrs[row_start + br].add(scalar_start),
+                        len - scalar_start,
+                    );
+                    for j in 0..num_cols {
+                        gf_vect_mad_scalar(dst_tail, &input[j][scalar_start..], row[j]);
+                    }
+                }
             }
         }
     }
