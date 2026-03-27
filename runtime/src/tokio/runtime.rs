@@ -94,17 +94,15 @@ pub struct NetworkConfig {
     /// Defaults to `Some(true)`.
     tcp_nodelay: Option<bool>,
 
-    /// Whether or not to set the `SO_LINGER` socket option.
+    /// Whether to set `SO_LINGER` to zero on the socket.
     ///
-    /// When `None`, the system default is used. When
-    /// `Some(duration)`, `SO_LINGER` is enabled with the given timeout.
-    /// `Some(Duration::ZERO)` causes an immediate RST on close, avoiding
+    /// When enabled, causes an immediate RST on close, avoiding
     /// `TIME_WAIT` state. This is useful in adversarial environments to
     /// reclaim socket resources immediately when closing connections to
     /// misbehaving peers.
     ///
-    /// Defaults to `Some(Duration::ZERO)`.
-    so_linger: Option<Duration>,
+    /// Defaults to `true`.
+    zero_linger: bool,
 
     /// Read/write timeout for network operations.
     ///
@@ -118,7 +116,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             tcp_nodelay: Some(true),
-            so_linger: Some(Duration::ZERO),
+            zero_linger: true,
             read_write_timeout: Duration::from_secs(60),
         }
     }
@@ -208,8 +206,8 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_so_linger(mut self, l: Option<Duration>) -> Self {
-        self.network_cfg.so_linger = l;
+    pub const fn with_zero_linger(mut self, l: bool) -> Self {
+        self.network_cfg.zero_linger = l;
         self
     }
     /// See [Config]
@@ -255,8 +253,8 @@ impl Config {
         self.network_cfg.tcp_nodelay
     }
     /// See [Config]
-    pub const fn so_linger(&self) -> Option<Duration> {
-        self.network_cfg.so_linger
+    pub const fn zero_linger(&self) -> bool {
+        self.network_cfg.zero_linger
     }
     /// See [Config]
     pub const fn storage_directory(&self) -> &PathBuf {
@@ -397,7 +395,7 @@ impl crate::Runner for Runner {
                     runtime_registry.sub_registry_with_prefix("iouring_network");
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
-                    so_linger: self.cfg.network_cfg.so_linger,
+                    zero_linger: self.cfg.network_cfg.zero_linger,
                     read_write_timeout: self.cfg.network_cfg.read_write_timeout,
                     iouring_config: iouring::Config {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
@@ -422,7 +420,7 @@ impl crate::Runner for Runner {
                     .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
-                    .with_so_linger(self.cfg.network_cfg.so_linger);
+                    .with_zero_linger(self.cfg.network_cfg.zero_linger);
                 let network = MeteredNetwork::new(
                     TokioNetwork::new(config, network_buffer_pool.clone()),
                     runtime_registry,
