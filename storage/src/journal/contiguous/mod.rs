@@ -131,6 +131,28 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// Returns an error if the underlying storage operation fails.
     fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
+    /// Append multiple items to the journal, returning the position of the last item appended.
+    ///
+    /// The default implementation calls [Self::append] in a loop. Concrete implementations
+    /// may override this to acquire the write lock once for all items.
+    ///
+    /// Returns [Error::Empty] if items is empty.
+    fn append_many(
+        &mut self,
+        items: &[Self::Item],
+    ) -> impl std::future::Future<Output = Result<u64, Error>> + Send
+    where
+        Self::Item: Sync,
+    {
+        async move {
+            let mut last_pos = None;
+            for item in items {
+                last_pos = Some(self.append(item).await?);
+            }
+            last_pos.ok_or(Error::Empty)
+        }
+    }
+
     /// Rewinds the journal to the last item matching `predicate`. If no item matches, the journal
     /// is rewound to the pruning boundary, discarding all unpruned items.
     ///

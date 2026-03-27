@@ -648,32 +648,42 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
     pub async fn append(&self, item: &A) -> Result<u64, Error> {
+        self.append_many(std::slice::from_ref(item)).await
+    }
+
+    /// Append multiple items to the journal, returning the position of the last item appended.
+    ///
+    /// Acquires the write lock once for all items instead of per-item.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::Empty] if items is empty.
+    pub async fn append_many(&self, items: &[A]) -> Result<u64, Error> {
+        if items.is_empty() {
+            return Err(Error::Empty);
+        }
+
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
-        // Append the item to the journal.
-        let position = inner.size;
-        let (section, _pos_in_section) = self.position_to_section(position);
-        inner.journal.append(section, item).await?;
-        inner.size += 1;
+        let mut last_position = 0;
+        for item in items {
+            let position = inner.size;
+            let (section, _) = self.position_to_section(position);
+            inner.journal.append(section, item).await?;
+            inner.size += 1;
+            last_position = position;
 
-        // Return early if no sync is needed (section not full).
-        if !inner.size.is_multiple_of(self.items_per_blob) {
-            return Ok(position);
+            // Handle section-full sync.
+            if inner.size.is_multiple_of(self.items_per_blob) {
+                let inner_ref = inner.downgrade_to_upgradable();
+                inner_ref.journal.sync(section).await?;
+                inner = inner_ref.upgrade().await;
+                inner.journal.ensure_section_exists(section + 1).await?;
+            }
         }
 
-        // The section was filled and must be synced. Downgrade so readers can continue during the
-        // sync, but keep mutators blocked. After sync, upgrade again to create the next tail
-        // section before any append can proceed.
-        let inner = inner.downgrade_to_upgradable();
-        inner.journal.sync(section).await?;
-
-        // Ensure the new tail section exists, as required to maintain the invariant. This must
-        // happen after the previous section is synced.
-        let mut inner = inner.upgrade().await;
-        inner.journal.ensure_section_exists(section + 1).await?;
-
-        Ok(position)
+        Ok(last_position)
     }
 
     /// Rewind the journal to the given `size`. Returns [Error::InvalidRewind] if the rewind point
@@ -841,6 +851,10 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
     async fn append(&mut self, item: &Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
+    }
+
+    async fn append_many(&mut self, items: &[Self::Item]) -> Result<u64, Error> {
+        Self::append_many(self, items).await
     }
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
