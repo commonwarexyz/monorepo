@@ -37,8 +37,8 @@ module tests {
             .then(replica_receives_notarize_vote("n2", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(on_certificate("n3", cert))
             .then(all {
-                assert(store_certificate.get("n3").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b1"))),
-                assert(sent_vote.exists(v => vote_sig(v) == "n3" and vote_view(v) == FIRST_VIEW and is_finalize(v) and vote_payload(v) == Some("val_b1"))),
+                assert(store_certificates.get("n3").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b1"))),
+                assert(sent_finalize_votes.exists(v => v.sig == "n3" and v.proposal.view == FIRST_VIEW and v.proposal.payload == "val_b1")),
                 assert(replica_state.get("n3").certified.get(FIRST_VIEW) == Some("val_b1")),
                 assert(replica_state.get("n3").view == 2),
                 unchanged_all,
@@ -53,39 +53,29 @@ module tests {
         )
             .then(on_timeout("n2"))
             .then(all {
-                assert(sent_vote.exists(v => vote_sig(v) == "n2" and vote_view(v) == FIRST_VIEW and is_nullify(v))),
+                assert(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == FIRST_VIEW)),
                 assert(replica_state.get("n2").nullified == true),
                 unchanged_all,
             })
             .expect(all_invariants)
     }
 
-    action inject_proposal(sender: Signature, proposal: Proposal): bool = all {
+    action send_proposal(sender: Signature, proposal: Proposal): bool = all {
         sent_proposal' = sent_proposal.union(Set((sender, proposal))),
-        sent_vote' = sent_vote,
-        sent_certificate' = sent_certificate,
-        store_vote' = store_vote,
-        store_certificate' = store_certificate,
+        sent_notarize_votes' = sent_notarize_votes,
+        sent_nullify_votes' = sent_nullify_votes,
+        sent_finalize_votes' = sent_finalize_votes,
+        sent_certificates' = sent_certificates,
+        store_notarize_votes' = store_notarize_votes,
+        store_nullify_votes' = store_nullify_votes,
+        store_finalize_votes' = store_finalize_votes,
+        store_certificates' = store_certificates,
         ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state,
         certify_policy' = certify_policy,
         lastAction' = "inject_proposal",
-    }
-
-    action inject_vote(vote: Vote): bool = all {
-        sent_proposal' = sent_proposal,
-        sent_vote' = sent_vote.union(Set(vote)),
-        sent_certificate' = sent_certificate,
-        store_vote' = store_vote,
-        store_certificate' = store_certificate,
-        ghost_proposal' = ghost_proposal,
-        ghost_committed_blocks' = ghost_committed_blocks,
-        leader' = leader,
-        replica_state' = replica_state,
-        certify_policy' = certify_policy,
-        lastAction' = "inject_vote",
     }
 
     action replica_receives_notarize_vote(id: ReplicaId, payload: Payload, view: ViewNumber, parent: ViewNumber, src: ReplicaId): bool = {
@@ -95,18 +85,22 @@ module tests {
 
     action replica_receives_finalize_vote(id: ReplicaId, payload: Payload, view: ViewNumber, parent: ViewNumber, src: ReplicaId): bool = {
         val p: Proposal = { payload: payload, view: view, parent: parent }
-        on_finalize(id, view, payload, Set(finalize(p, src)))
+        on_finalize(id, Set({ proposal: p, sig: src }))
     }
 
     action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: ReplicaId): bool =
-        on_nullify(id, view, Set(nullify(view, src)))
+        on_nullify(id, view, Set({ view: view, sig: src }))
 
     action unchanged_all = all {
         sent_proposal' = sent_proposal,
-        sent_vote' = sent_vote,
-        sent_certificate' = sent_certificate,
-        store_vote' = store_vote,
-        store_certificate' = store_certificate,
+        sent_notarize_votes' = sent_notarize_votes,
+        sent_nullify_votes' = sent_nullify_votes,
+        sent_finalize_votes' = sent_finalize_votes,
+        sent_certificates' = sent_certificates,
+        store_notarize_votes' = store_notarize_votes,
+        store_nullify_votes' = store_nullify_votes,
+        store_finalize_votes' = store_finalize_votes,
+        store_certificates' = store_certificates,
         ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,

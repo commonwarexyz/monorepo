@@ -29,7 +29,6 @@ module replica {
     pure def sig_of(id: ReplicaId): ReplicaKey = REPLICA_KEYS.get(id)
 
     pure val AllPayloads = VALID_PAYLOADS.union(Set(GENESIS_PAYLOAD)).union(INVALID_PAYLOADS)
-    pure val ParentTrackedPayloads = AllPayloads
     pure val CorrectSigs = CORRECT.map(id => sig_of(id))
     pure val ByzantineSigs = BYZANTINE.map(id => sig_of(id))
     pure val LEADER_INACTIVITY_WINDOW = 2
@@ -42,14 +41,18 @@ module replica {
     // proposals sent by the replicas, correct and byzantine
     var sent_proposal: Set[(Signature, Proposal)]
     // votes sent by the replicas, correct and byzantine
-    var sent_vote: Set[Vote]
+    var sent_notarize_votes: Set[NotarizeVote]
+    var sent_nullify_votes: Set[NullifyVote]
+    var sent_finalize_votes: Set[FinalizeVote]
     // certificates sent by the replicas, correct and byzantine
-    var sent_certificate: Set[Certificate]
+    var sent_certificates: Set[Certificate]
 
     // votes received by the correct replicas
-    var store_vote: ReplicaId -> Set[Vote]
+    var store_notarize_votes: ReplicaId -> Set[NotarizeVote]
+    var store_nullify_votes: ReplicaId -> Set[NullifyVote]
+    var store_finalize_votes: ReplicaId -> Set[FinalizeVote]
     // certificates received or assembled by the correct replicas
-    var store_certificate: ReplicaId -> Set[Certificate]
+    var store_certificates: ReplicaId -> Set[Certificate]
 
     // history of received proposals
     var ghost_proposal: ReplicaId -> Set[Proposal]
@@ -61,67 +64,6 @@ module replica {
     var lastAction: str
 
     // Filter votes by view and kind.
-    pure def vote_view(v: Vote): ViewNumber = {
-        match (v) {
-            | Notarize(n) => n.proposal.view
-            | Nullify(n) => n.view
-            | Finalize(f) => f.proposal.view
-        }
-    }
-
-    pure def vote_sig(v: Vote): Signature = {
-        match (v) {
-            | Notarize(n) => n.sig
-            | Nullify(n) => n.sig
-            | Finalize(f) => f.sig
-        }
-    }
-
-    pure def vote_payload(v: Vote): Option[Payload] = {
-        match (v) {
-            | Notarize(n) => Some(n.proposal.payload)
-            | Nullify(_) => None
-            | Finalize(f) => Some(f.proposal.payload)
-        }
-    }
-
-    pure def vote_proposal(v: Vote): Option[Proposal] = {
-        match (v) {
-            | Notarize(n) => Some(n.proposal)
-            | Nullify(_) => None
-            | Finalize(f) => Some(f.proposal)
-        }
-    }
-
-    pure def vote_kind(v: Vote): Kind = {
-        match (v) {
-            | Notarize(_) => NotarizeKind
-            | Nullify(_) => NullifyKind
-            | Finalize(_) => FinalizeKind
-        }
-    }
-
-    pure def is_notarize(v: Vote): bool = {
-        match (v) {
-            | Notarize(_) => true
-            | _ => false
-        }
-    }
-
-    pure def is_nullify(v: Vote): bool = {
-        match (v) {
-            | Nullify(_) => true
-            | _ => false
-        }
-    }
-
-    pure def is_finalize(v: Vote): bool = {
-        match (v) {
-            | Finalize(_) => true
-            | _ => false
-        }
-    }
-
     pure def cert_view(c: Certificate): ViewNumber = {
         match (c) {
             | Notarization(n) => n.proposal.view
@@ -191,12 +133,14 @@ module replica {
         }
     }
 
-    pure def select_votes(view: ViewNumber, kind: Kind, votes: Set[Vote]): Set[Vote] = {
-        votes.filter(v => vote_kind(v) == kind and vote_view(v) == view)
-    }
-
     def has_sent_vote(id: ReplicaId, view: ViewNumber, kind: Kind): bool = {
-        sent_vote.exists(v => vote_sig(v) == sig_of(id) and vote_view(v) == view and vote_kind(v) == kind)
+        if (kind == NotarizeKind) {
+            sent_notarize_votes.exists(v => v.sig == sig_of(id) and v.proposal.view == view)
+        } else if (kind == NullifyKind) {
+            sent_nullify_votes.exists(v => v.sig == sig_of(id) and v.view == view)
+        } else {
+            sent_finalize_votes.exists(v => v.sig == sig_of(id) and v.proposal.view == view)
+        }
     }
 
     def has_sent_nullify(id: ReplicaId, view: ViewNumber): bool = {
@@ -208,7 +152,9 @@ module replica {
     }
 
     def has_participated_in_view(id: ReplicaId, view: ViewNumber): bool = or {
-        sent_vote.exists(v => vote_sig(v) == sig_of(id) and vote_view(v) == view),
+        sent_notarize_votes.exists(v => v.sig == sig_of(id) and v.proposal.view == view),
+        sent_nullify_votes.exists(v => v.sig == sig_of(id) and v.view == view),
+        sent_finalize_votes.exists(v => v.sig == sig_of(id) and v.proposal.view == view),
         sent_proposal.exists(((s, p)) => s == sig_of(id) and p.view == view),
     }
 
@@ -230,10 +176,6 @@ module replica {
         is_some(r.notarized.get(r.view))
     }
 
-    pure def has_notarized_view(id: ReplicaId, view: ViewNumber, votes: Set[Vote]): bool = {
-        votes.exists(v => vote_view(v) == view and is_notarize(v) and vote_sig(v) == sig_of(id))
-    }
-
     // Does a set of certificates have a notarization/finalization certificate for a view?
     pure def is_view_notarized(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
@@ -241,11 +183,11 @@ module replica {
         certificates.exists(c => is_finalization_cert(c) and cert_view(c) == view)
     }
 
-    pure def is_view_notarized_votes(view: ViewNumber, votes: Set[Vote], payload: Payload): bool = or {
-        view == GENESIS_VIEW and payload == GENESIS_PAYLOAD,
-        select_votes(view, NotarizeKind, votes)
-            .filter(v => vote_payload(v) == Some(payload))
-            .map(v => vote_sig(v))
+    pure def is_proposal_notarized_votes(proposal: Proposal, votes: Set[NotarizeVote]): bool = or {
+        proposal.view == GENESIS_VIEW and proposal.payload == GENESIS_PAYLOAD,
+        votes
+            .filter(v => v.proposal == proposal)
+            .map(v => v.sig)
             .size() >= Q
     }
 
@@ -254,24 +196,17 @@ module replica {
         certificates.exists(c => is_finalization_cert(c) and cert_view(c) == view)
     }
 
-    pure def is_view_finalized_votes(view: ViewNumber, votes: Set[Vote], payload: Payload): bool = or {
-        view == GENESIS_VIEW and payload == GENESIS_PAYLOAD,
-        select_votes(view, FinalizeKind, votes)
-            .filter(v => vote_payload(v) == Some(payload))
-            .map(v => vote_sig(v))
+    pure def is_proposal_finalized_votes(proposal: Proposal, votes: Set[FinalizeVote]): bool = or {
+        proposal.view == GENESIS_VIEW and proposal.payload == GENESIS_PAYLOAD,
+        votes
+            .filter(v => v.proposal == proposal)
+            .map(v => v.sig)
             .size() >= Q
     }
 
     pure def is_view_nullified(view: ViewNumber, certificates: Set[Certificate]): bool = or {
         view == GENESIS_VIEW,
         certificates.exists(c => is_nullification_cert(c) and cert_view(c) == view)
-    }
-
-    pure def is_view_nullified_votes(view: ViewNumber, votes: Set[Vote]): bool = {
-        select_votes(view, NullifyKind, votes)
-            .filter(v => is_nullify(v))
-            .map(v => vote_sig(v))
-            .size() >= Q
     }
 
     pure def is_payload_notarized(view: ViewNumber, payload: Payload, certificates: Set[Certificate]): bool = or {
@@ -308,17 +243,6 @@ module replica {
     pure def list_contains_payload(chain: List[Payload], payload: Payload): bool = {
         chain.indices().exists(i => chain[i] == payload)
     }
-
-    // Parent is valid if all intermediate views are nullified and the parent view
-    // is either finalized or notarized and locally certified.
-    pure def valid_parent(
-          self: ReplicaState,
-          view: ViewNumber,
-          parent: ViewNumber,
-          certificates: Set[Certificate]
-      ): bool = {
-          is_some(parent_payload(self, view, parent, certificates))
-      }
 
     pure def finalized_payload_at(
           view: ViewNumber,
@@ -379,12 +303,11 @@ module replica {
             }
     }
 
-    def create_nullification(id: ReplicaId, view: ViewNumber, votes: Set[Vote]): Option[Certificate] = {
-        val similar_votes: Set[Vote] = votes.filter(v => and {
-            vote_view(v) == view,
-            is_nullify(v)
+    def create_nullification(id: ReplicaId, view: ViewNumber, votes: Set[NullifyVote]): Option[Certificate] = {
+        val similar_votes = votes.filter(v => and {
+            v.view == view,
         })
-        val signers = similar_votes.map(v => vote_sig(v))
+        val signers = similar_votes.map(v => v.sig)
 
         if (signers.size() < Q)
             None
@@ -392,13 +315,9 @@ module replica {
             Some(nullification(view, signers, sig_of(id)))
     }
 
-    def create_notarization(id: ReplicaId, proposal: Proposal, votes: Set[Vote]): Option[Certificate] = {
-        val similar_votes: Set[Vote] = votes.filter(v => and {
-            vote_view(v) == proposal.view,
-            is_notarize(v),
-            vote_payload(v) == Some(proposal.payload)
-        })
-        val signers = similar_votes.map(v => vote_sig(v))
+    def create_notarization(id: ReplicaId, proposal: Proposal, votes: Set[NotarizeVote]): Option[Certificate] = {
+        val similar_votes: Set[NotarizeVote] = votes.filter(v => v.proposal == proposal)
+        val signers = similar_votes.map(v => v.sig)
 
         if (signers.size() < Q)
             None
@@ -406,13 +325,9 @@ module replica {
             Some(notarization(proposal, signers, sig_of(id)))
     }
 
-    def create_finalization(id: ReplicaId, proposal: Proposal, votes: Set[Vote]): Option[Certificate] = {
-        val similar_votes: Set[Vote] = votes.filter(v => and {
-            vote_view(v) == proposal.view,
-            is_finalize(v),
-            vote_payload(v) == Some(proposal.payload)
-        })
-        val signers = similar_votes.map(v => vote_sig(v))
+    def create_finalization(id: ReplicaId, proposal: Proposal, votes: Set[FinalizeVote]): Option[Certificate] = {
+        val similar_votes: Set[FinalizeVote] = votes.filter(v => v.proposal == proposal)
+        val signers = similar_votes.map(v => v.sig)
 
         if (signers.size() < Q)
             None
@@ -450,10 +365,14 @@ module replica {
                 ghost_sent_votes: VIEWS.mapBy(_ => List())
             }),
             sent_proposal' = Set(),
-            sent_vote' = Set(),
-            sent_certificate' = Set(),
-            store_vote' = CORRECT.mapBy(_ => Set()),
-            store_certificate' = CORRECT.mapBy(_ => Set()),
+            sent_notarize_votes' = Set(),
+            sent_nullify_votes' = Set(),
+            sent_finalize_votes' = Set(),
+            sent_certificates' = Set(),
+            store_notarize_votes' = CORRECT.mapBy(_ => Set()),
+            store_nullify_votes' = CORRECT.mapBy(_ => Set()),
+            store_finalize_votes' = CORRECT.mapBy(_ => Set()),
+            store_certificates' = CORRECT.mapBy(_ => Set()),
             ghost_committed_blocks' = CORRECT.mapBy(_ => List()),
             ghost_proposal' = CORRECT.mapBy(_ => Set()),
             leader' = l,
@@ -501,42 +420,36 @@ module replica {
                     on_timeout(id)
                 },
                 {
-                    val notarize_votes = sent_vote.fold(Set(), (acc, v) => match v {
-                        | Notarize(nv) => acc.union(Set(nv))
-                        | _ => acc
-                    })
+                    val notarize_votes = sent_notarize_votes
                     all {
                         notarize_votes != Set(),
-                        nondet nv = notarize_votes.oneOf()
-                        on_notarize(id, nv)
+                        nondet vote = notarize_votes.oneOf()
+                        on_notarize(id, vote)
+                    }
+                },
+                {
+                    val finalize_votes = sent_finalize_votes
+                    all {
+                        finalize_votes != Set(),
+                        nondet vote = finalize_votes.oneOf()
+                        val matching = finalize_votes.filter(v => v.proposal == vote.proposal)
+                        nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
+                        on_finalize(id, votes)
                     }
                 },
                 {
                     nondet view = VIEWS.oneOf()
-                    nondet payload = AllPayloads.oneOf()
-                    val matching = sent_vote.filter(v =>
-                        vote_view(v) == view and is_finalize(v) and vote_payload(v) == Some(payload)
-                    )
+                    val matching = sent_nullify_votes.filter(v => v.view == view)
                     all {
                         matching != Set(),
-                        nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
-                        on_finalize(id, view, payload, votes)
-                    }
-                },
-                {
-                    nondet view = VIEWS.oneOf()
-                    val matching = sent_vote.filter(v =>
-                        vote_view(v) == view and is_nullify(v)
-                    )
-                    all {
-                        matching != Set(),
-                        nondet votes = matching.powerset().exclude(Set(Set())).oneOf()
+                        nondet votes = matching
+                            .powerset().exclude(Set(Set())).oneOf()
                         on_nullify(id, view, votes)
                     }
                 },
                 all {
-                    sent_certificate != Set(),
-                    nondet cert = oneOf(sent_certificate)
+                    sent_certificates != Set(),
+                    nondet cert = oneOf(sent_certificates)
                     on_certificate(id, cert)
                 },
             }
@@ -549,14 +462,15 @@ module replica {
         new_payload: Payload,
         parent_view: ViewNumber
     ): bool = all {
-        val store = store_vote.get(id)
+        val store_notarize = store_notarize_votes.get(id)
+        val store_nullify = store_nullify_votes.get(id)
         val self = replica_state.get(id)
-        val certs = store_certificate.get(id)
+        val certs = store_certificates.get(id)
         all {
             id == leader.get(self.view),
             not(self.propose_sent),
             not(self.nullified),
-            if (VALID_PAYLOADS.contains(new_payload) and valid_parent(self, self.view, parent_view, certs)) {
+            if (VALID_PAYLOADS.contains(new_payload) and is_some(parent_payload(self, self.view, parent_view, certs))) {
                 // Proposal success path
                 val proposal: Proposal = {
                     view: self.view,
@@ -566,8 +480,18 @@ module replica {
 
                 all {
                     sent_proposal' = sent_proposal.union(Set((sig_of(id), proposal))),
-                    sent_vote' = sent_vote.union(Set(notarize(proposal, sig_of(id)))),
-                    store_vote' = store_vote.set(id, store.union(Set(notarize(proposal, sig_of(id))))),
+                    sent_notarize_votes' = sent_notarize_votes.union(Set({
+                        proposal: proposal,
+                        sig: sig_of(id),
+                    })),
+                    sent_nullify_votes' = sent_nullify_votes,
+                    sent_finalize_votes' = sent_finalize_votes,
+                    store_notarize_votes' = store_notarize_votes.set(id, store_notarize.union(Set({
+                        proposal: proposal,
+                        sig: sig_of(id),
+                    }))),
+                    store_nullify_votes' = store_nullify_votes,
+                    store_finalize_votes' = store_finalize_votes,
                     replica_state' = replica_state.set(id, {
                         ...self,
                         propose_sent: true,
@@ -578,8 +502,8 @@ module replica {
                     ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
 
                     // unchanged
-                    sent_certificate' = sent_certificate,
-                    store_certificate' = store_certificate,
+                    sent_certificates' = sent_certificates,
+                    store_certificates' = store_certificates,
                     leader' = leader,
                     ghost_committed_blocks' = ghost_committed_blocks,
                     certify_policy' = certify_policy
@@ -588,8 +512,18 @@ module replica {
                 // Proposal failure path: immediate timeout expiry
                 // Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
                 all {
-                    sent_vote' = sent_vote.union(Set(nullify(self.view, sig_of(id)))),
-                    store_vote' = store_vote.set(id, store.union(Set(nullify(self.view, sig_of(id))))),
+                    sent_notarize_votes' = sent_notarize_votes,
+                    sent_nullify_votes' = sent_nullify_votes.union(Set({
+                        view: self.view,
+                        sig: sig_of(id),
+                    })),
+                    sent_finalize_votes' = sent_finalize_votes,
+                    store_notarize_votes' = store_notarize_votes,
+                    store_nullify_votes' = store_nullify_votes.set(id, store_nullify.union(Set({
+                        view: self.view,
+                        sig: sig_of(id),
+                    }))),
+                    store_finalize_votes' = store_finalize_votes,
                     replica_state' = replica_state.set(id, {
                         ...self,
                         nullified: true,
@@ -600,8 +534,8 @@ module replica {
 
                     // unchanged
                     sent_proposal' = sent_proposal,
-                    sent_certificate' = sent_certificate,
-                    store_certificate' = store_certificate,
+                    sent_certificates' = sent_certificates,
+                    store_certificates' = store_certificates,
                     leader' = leader,
                     ghost_proposal' = ghost_proposal,
                     ghost_committed_blocks' = ghost_committed_blocks,
@@ -616,13 +550,14 @@ module replica {
     // - if from the leader: validate proposal and send notarize/nullify
     // - otherwise: collect vote, on 2f+1 create notarization cert
     action on_notarize(id: ReplicaId, vote: NotarizeVote): bool = all {
-        val store = store_vote.get(id)
+        val store_notarize = store_notarize_votes.get(id)
+        val store_nullify = store_nullify_votes.get(id)
+        val store_finalize = store_finalize_votes.get(id)
         val self = replica_state.get(id)
-        val certs = store_certificate.get(id)
+        val certs = store_certificates.get(id)
         val proposal = vote.proposal
         val view = proposal.view
         val payload = proposal.payload
-        val input = Notarize(vote)
         val is_leader_vote = (vote.sig == sig_of(leader.get(view)))
         val can_process_as_proposal = and {
             is_leader_vote,
@@ -633,7 +568,6 @@ module replica {
 
         if (can_process_as_proposal) {
             // Proposal processing: validate the leader's proposal and vote
-            val expected_parent = parent_payload(self, proposal.view, proposal.parent, certs)
             all {
                 view == self.view,
                 vote.sig == sig_of(leader.get(view)),
@@ -641,15 +575,24 @@ module replica {
                 proposal.parent >= GENESIS_VIEW,
                 not(has_notarized(self)),
                 not(self.nullified),
-                is_some(expected_parent),
+                is_some(parent_payload(self, proposal.view, proposal.parent, certs)),
 
                 any {
                     all {
                         VALID_PAYLOADS.contains(payload),
-                        valid_parent(self, view, proposal.parent, certs),
 
-                        sent_vote' = sent_vote.union(Set(notarize(proposal, sig_of(id)))),
-                        store_vote' = store_vote.set(id, store.union(Set(input, notarize(proposal, sig_of(id))))),
+                        sent_notarize_votes' = sent_notarize_votes.union(Set({
+                            proposal: proposal,
+                            sig: sig_of(id),
+                        })),
+                        sent_nullify_votes' = sent_nullify_votes,
+                        sent_finalize_votes' = sent_finalize_votes,
+                        store_notarize_votes' = store_notarize_votes.set(id, store_notarize.union(Set(vote, {
+                            proposal: proposal,
+                            sig: sig_of(id),
+                        }))),
+                        store_nullify_votes' = store_nullify_votes,
+                        store_finalize_votes' = store_finalize_votes,
                         replica_state' = replica_state.set(id, {
                             ...self,
                             leader_timeout_cancelled: true,
@@ -660,11 +603,20 @@ module replica {
                     all {
                         or {
                             not(VALID_PAYLOADS.contains(payload)),
-                            not(valid_parent(self, view, proposal.parent, certs)),
                         },
 
-                        sent_vote' = sent_vote.union(Set(nullify(view, sig_of(id)))),
-                        store_vote' = store_vote,
+                        sent_notarize_votes' = sent_notarize_votes,
+                        sent_nullify_votes' = sent_nullify_votes.union(Set({
+                            view: view,
+                            sig: sig_of(id),
+                        })),
+                        sent_finalize_votes' = sent_finalize_votes,
+                        store_notarize_votes' = store_notarize_votes,
+                        store_nullify_votes' = store_nullify_votes.set(id, store_nullify.union(Set({
+                            view: view,
+                            sig: sig_of(id),
+                        }))),
+                        store_finalize_votes' = store_finalize_votes,
                         replica_state' = replica_state.set(id, {
                             ...self,
                             nullified: true,
@@ -679,8 +631,8 @@ module replica {
 
                 // unchanged
                 sent_proposal' = sent_proposal,
-                sent_certificate' = sent_certificate,
-                store_certificate' = store_certificate,
+                sent_certificates' = sent_certificates,
+                store_certificates' = store_certificates,
                 leader' = leader,
                 ghost_committed_blocks' = ghost_committed_blocks,
                 certify_policy' = certify_policy,
@@ -688,26 +640,29 @@ module replica {
             }
         } else {
             // Vote aggregation: collect vote and check for notarization quorum
-            val new_store = store.union(Set(input))
+            val new_store_notarize = store_notarize.union(Set(vote))
             val had_notarization = certs.exists(c => and {
                 is_notarization_cert(c),
-                cert_view(c) == view,
-                cert_payload(c) == Some(payload),
+                cert_proposal(c) == Some(proposal),
             })
-            val now_notarized = is_view_notarized_votes(view, new_store, payload)
+            val now_notarized = is_proposal_notarized_votes(proposal, new_store_notarize)
 
             all {
-                store_vote' = store_vote.set(id, new_store),
+                store_notarize_votes' = store_notarize_votes.set(id, new_store_notarize),
 
-                match create_notarization(id, proposal, new_store) {
+                match create_notarization(id, proposal, new_store_notarize) {
                     | Some(cert) => all {
                         now_notarized,
                         _process_notarization_certificate(id, cert, not(had_notarization))
                     }
                     | None => all {
-                        store_certificate' = store_certificate,
-                        sent_certificate' = sent_certificate,
-                        sent_vote' = sent_vote,
+                        store_certificates' = store_certificates,
+                        sent_certificates' = sent_certificates,
+                        sent_notarize_votes' = sent_notarize_votes,
+                        sent_nullify_votes' = sent_nullify_votes,
+                        sent_finalize_votes' = sent_finalize_votes,
+                        store_nullify_votes' = store_nullify_votes,
+                        store_finalize_votes' = store_finalize_votes,
                         replica_state' = replica_state,
                         ghost_committed_blocks' = ghost_committed_blocks,
                     }
@@ -726,56 +681,52 @@ module replica {
     // Upon receiving votes for finalize(c, v):
     // - collect votes
     // - on 2f+1: create finalization cert and enter v+1
-    action on_finalize(id: ReplicaId, view: ViewNumber, payload: Payload, votes: Set[Vote]): bool = all {
-        val store = store_vote.get(id)
+    action on_finalize(id: ReplicaId, votes: Set[FinalizeVote]): bool = all {
+        val store_notarize = store_notarize_votes.get(id)
+        val store_nullify = store_nullify_votes.get(id)
+        val store_finalize = store_finalize_votes.get(id)
         all {
             votes != Set(),
-            votes.forall(v => and {
-                vote_view(v) == view,
-                is_finalize(v),
-                vote_payload(v) == Some(payload),
-            }),
-
-            val new_store = store.union(votes)
-            val certs = store_certificate.get(id)
-            val had_finalization = certs.exists(c => and {
-                is_finalization_cert(c),
-                cert_view(c) == view,
-                cert_payload(c) == Some(payload),
-            })
-            val now_finalized = is_view_finalized_votes(view, new_store, payload)
-            // Extract proposal from one of the matching votes
-            val matched_proposal = votes.fold(
-                { payload: payload, view: view, parent: GENESIS_VIEW },
-                (acc, v) => match v {
-                    | Finalize(fv) => fv.proposal
-                    | _ => acc
-                }
-            )
-
+            nondet vote = votes.oneOf()
             all {
-                store_vote' = store_vote.set(id, new_store),
+                votes.forall(v => v.proposal == vote.proposal),
 
-                match create_finalization(id, matched_proposal, new_store) {
-                    | Some(cert) => all {
-                        now_finalized,
-                        _process_finalization_certificate(id, cert, not(had_finalization))
-                    }
-                    | None => all {
-                        store_certificate' = store_certificate,
-                        sent_certificate' = sent_certificate,
-                        sent_vote' = sent_vote,
-                        replica_state' = replica_state,
-                        ghost_committed_blocks' = ghost_committed_blocks,
-                    }
-                },
+                val new_store_finalize = store_finalize.union(votes)
+                val certs = store_certificates.get(id)
+                val had_finalization = certs.exists(c => and {
+                    is_finalization_cert(c),
+                    cert_proposal(c) == Some(vote.proposal),
+                })
+                val now_finalized = is_proposal_finalized_votes(vote.proposal, new_store_finalize)
 
-                // unchanged
-                sent_proposal' = sent_proposal,
-                leader' = leader,
-                ghost_proposal' = ghost_proposal,
-                certify_policy' = certify_policy,
-                lastAction' = "on_finalize"
+                all {
+                    store_notarize_votes' = store_notarize_votes,
+                    store_nullify_votes' = store_nullify_votes,
+                    store_finalize_votes' = store_finalize_votes.set(id, new_store_finalize),
+
+                    match create_finalization(id, vote.proposal, new_store_finalize) {
+                        | Some(cert) => all {
+                            now_finalized,
+                            _process_finalization_certificate(id, cert, not(had_finalization))
+                        }
+                        | None => all {
+                            store_certificates' = store_certificates,
+                            sent_certificates' = sent_certificates,
+                            sent_notarize_votes' = sent_notarize_votes,
+                            sent_nullify_votes' = sent_nullify_votes,
+                            sent_finalize_votes' = sent_finalize_votes,
+                            replica_state' = replica_state,
+                            ghost_committed_blocks' = ghost_committed_blocks,
+                        }
+                    },
+
+                    // unchanged
+                    sent_proposal' = sent_proposal,
+                    leader' = leader,
+                    ghost_proposal' = ghost_proposal,
+                    certify_policy' = certify_policy,
+                    lastAction' = "on_finalize"
+                }
             }
         }
     }
@@ -787,47 +738,55 @@ module replica {
     // Additional Simplex rule:
     // if a non-leader replica receives nullify(v) from the current leader of view v,
     // it treats this as immediate timeout expiry and broadcasts nullify(v).
-    action on_nullify(id: ReplicaId, view: ViewNumber, votes: Set[Vote]): bool = all {
-        val store = store_vote.get(id)
+    action on_nullify(id: ReplicaId, view: ViewNumber, votes: Set[NullifyVote]): bool = all {
+        val store_notarize = store_notarize_votes.get(id)
+        val store_nullify = store_nullify_votes.get(id)
+        val store_finalize = store_finalize_votes.get(id)
         val self = replica_state.get(id)
         all {
             votes != Set(),
-            votes.forall(v => and {
-                vote_view(v) == view,
-                is_nullify(v),
-            }),
+            votes.forall(v => v.view == view),
 
-            val new_store = store.union(votes)
-            val certs = store_certificate.get(id)
+            val new_nullify_votes = store_nullify.union(votes)
+            val certs = store_certificates.get(id)
             val had_nullification = certs.exists(c => is_nullification_cert(c) and cert_view(c) == view)
-            val now_nullified = is_view_nullified_votes(view, new_store)
+            val now_nullified = new_nullify_votes.map(v => v.sig).size() >= Q
             val leader_nullify_trigger = and {
                 self.view == view,
                 id != leader.get(view),
                 not(self.nullified),
-                votes.exists(v => vote_sig(v) == sig_of(leader.get(view))),
+                votes.exists(v => v.sig == sig_of(leader.get(view))),
             }
 
             all {
-                store_vote' = store_vote.set(id, new_store),
-
-                match create_nullification(id, view, new_store) {
+                match create_nullification(id, view, new_nullify_votes) {
                     | Some(cert) => all {
                         now_nullified,
                         if (not(had_nullification))
                             all {
-                                store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
-                                sent_certificate' = sent_certificate.union(Set(cert)),
+                                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
+                                sent_certificates' = sent_certificates.union(Set(cert)),
                             }
                         else
                             all {
-                                store_certificate' = store_certificate,
-                                sent_certificate' = sent_certificate,
+                                store_certificates' = store_certificates,
+                                sent_certificates' = sent_certificates,
                             },
                         ghost_committed_blocks' = ghost_committed_blocks,
                         if (leader_nullify_trigger)
                             all {
-                                sent_vote' = sent_vote.union(Set(nullify(view, sig_of(id)))),
+                                sent_notarize_votes' = sent_notarize_votes,
+                                sent_nullify_votes' = sent_nullify_votes.union(Set({
+                                    view: view,
+                                    sig: sig_of(id),
+                                })),
+                                sent_finalize_votes' = sent_finalize_votes,
+                                store_notarize_votes' = store_notarize_votes,
+                                store_nullify_votes' = store_nullify_votes.set(id, new_nullify_votes.union(Set({
+                                    view: view,
+                                    sig: sig_of(id),
+                                }))),
+                                store_finalize_votes' = store_finalize_votes,
                                 replica_state' = replica_state.set(id, enter_view({
                                     ...self,
                                     nullified: true,
@@ -838,16 +797,29 @@ module replica {
                             }
                         else
                             all {
-                                sent_vote' = sent_vote,
+                                sent_notarize_votes' = sent_notarize_votes,
+                                sent_nullify_votes' = sent_nullify_votes,
+                                sent_finalize_votes' = sent_finalize_votes,
+                                store_notarize_votes' = store_notarize_votes,
+                                store_nullify_votes' = store_nullify_votes.set(id, new_nullify_votes),
+                                store_finalize_votes' = store_finalize_votes,
                                 replica_state' = replica_state.set(id, enter_view(self, cert_view(cert) + 1)),
                             }
                     }
                     | None => all {
-                        store_certificate' = store_certificate,
-                        sent_certificate' = sent_certificate,
+                        store_certificates' = store_certificates,
+                        sent_certificates' = sent_certificates,
+                        store_notarize_votes' = store_notarize_votes,
+                        store_nullify_votes' = store_nullify_votes.set(id, new_nullify_votes),
+                        store_finalize_votes' = store_finalize_votes,
                         if (leader_nullify_trigger)
                             all {
-                                sent_vote' = sent_vote.union(Set(nullify(view, sig_of(id)))),
+                                sent_notarize_votes' = sent_notarize_votes,
+                                sent_nullify_votes' = sent_nullify_votes.union(Set({
+                                    view: view,
+                                    sig: sig_of(id),
+                                })),
+                                sent_finalize_votes' = sent_finalize_votes,
                                 replica_state' = replica_state.set(id, {
                                     ...self,
                                     nullified: true,
@@ -858,7 +830,9 @@ module replica {
                             }
                         else
                             all {
-                                sent_vote' = sent_vote,
+                                sent_notarize_votes' = sent_notarize_votes,
+                                sent_nullify_votes' = sent_nullify_votes,
+                                sent_finalize_votes' = sent_finalize_votes,
                                 replica_state' = replica_state,
                             },
                         ghost_committed_blocks' = ghost_committed_blocks,
@@ -877,26 +851,34 @@ module replica {
 
     // Handle certificate message.
     action on_certificate(id: ReplicaId, cert: Certificate): bool = all {
-        val certs = store_certificate.get(id)
+        val certs = store_certificates.get(id)
         all {
             not(cert.in(certs)),
-            or {
-                is_notarization_cert(cert) and cert_signatures(cert).size() >= Q,
-                is_nullification_cert(cert) and cert_signatures(cert).size() >= Q,
-                is_finalization_cert(cert) and cert_signatures(cert).size() >= Q,
-            },
+            cert_signatures(cert).size() >= Q,
 
             if (is_notarization_cert(cert)) {
-                _process_notarization_certificate(id, cert, true)
+                all {
+                    store_notarize_votes' = store_notarize_votes,
+                    _process_notarization_certificate(id, cert, true)
+                }
             } else if (is_nullification_cert(cert)) {
-                _process_nullification_certificate(id, cert, true)
+                all {
+                    store_notarize_votes' = store_notarize_votes,
+                    store_nullify_votes' = store_nullify_votes,
+                    store_finalize_votes' = store_finalize_votes,
+                    _process_nullification_certificate(id, cert, true)
+                }
             } else {
-                _process_finalization_certificate(id, cert, true)
+                all {
+                    store_notarize_votes' = store_notarize_votes,
+                    store_nullify_votes' = store_nullify_votes,
+                    store_finalize_votes' = store_finalize_votes,
+                    _process_finalization_certificate(id, cert, true)
+                }
             },
 
             // unchanged
             sent_proposal' = sent_proposal,
-            store_vote' = store_vote,
             leader' = leader,
             ghost_proposal' = ghost_proposal,
             certify_policy' = certify_policy,
@@ -911,11 +893,11 @@ module replica {
             cert_signatures(cert).size() >= Q,
 
             if (is_new_cert) all {
-                store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
-                sent_certificate' = sent_certificate.union(Set(cert)),
+                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
+                sent_certificates' = sent_certificates.union(Set(cert)),
             } else all {
-                store_certificate' = store_certificate,
-                sent_certificate' = sent_certificate,
+                store_certificates' = store_certificates,
+                sent_certificates' = sent_certificates,
             },
 
             val cert_view_num = cert_view(cert)
@@ -955,7 +937,20 @@ module replica {
 
                     if (can_send_finalize)
                         all {
-                            sent_vote' = sent_vote.union(Set(finalize(cert_prop, sig_of(id)))),
+                            sent_notarize_votes' = sent_notarize_votes,
+                            sent_nullify_votes' = sent_nullify_votes,
+                            sent_finalize_votes' = sent_finalize_votes.union(Set({
+                                proposal: cert_prop,
+                                sig: sig_of(id),
+                            })),
+                            store_nullify_votes' = store_nullify_votes,
+                            store_finalize_votes' = store_finalize_votes.set(
+                                id,
+                                store_finalize_votes.get(id).union(Set({
+                                    proposal: cert_prop,
+                                    sig: sig_of(id),
+                                }))
+                            ),
                             replica_state' = replica_state.set(id,
                                 enter_view({
                                     ...self,
@@ -969,7 +964,20 @@ module replica {
                         }
                     else if (can_send_nullify)
                         all {
-                            sent_vote' = sent_vote.union(Set(nullify(cert_view_num, sig_of(id)))),
+                            sent_notarize_votes' = sent_notarize_votes,
+                            sent_nullify_votes' = sent_nullify_votes.union(Set({
+                                view: cert_view_num,
+                                sig: sig_of(id),
+                            })),
+                            store_nullify_votes' = store_nullify_votes.set(
+                                id,
+                                store_nullify_votes.get(id).union(Set({
+                                    view: cert_view_num,
+                                    sig: sig_of(id),
+                                }))
+                            ),
+                            sent_finalize_votes' = sent_finalize_votes,
+                            store_finalize_votes' = store_finalize_votes,
                             replica_state' = replica_state.set(id, {
                                 ...self,
                                 nullified: true,
@@ -981,7 +989,11 @@ module replica {
                         }
                     else
                         all {
-                            sent_vote' = sent_vote,
+                            sent_notarize_votes' = sent_notarize_votes,
+                            sent_nullify_votes' = sent_nullify_votes,
+                            sent_finalize_votes' = sent_finalize_votes,
+                            store_nullify_votes' = store_nullify_votes,
+                            store_finalize_votes' = store_finalize_votes,
                             replica_state' = replica_state.set(id, {
                                 ...self,
                                 advance_timeout_cancelled: if (self.view == cert_view_num) true else self.advance_timeout_cancelled,
@@ -992,7 +1004,11 @@ module replica {
                 }
                 | None => all {
                     false,
-                    sent_vote' = sent_vote,
+                    sent_notarize_votes' = sent_notarize_votes,
+                    sent_nullify_votes' = sent_nullify_votes,
+                    sent_finalize_votes' = sent_finalize_votes,
+                    store_nullify_votes' = store_nullify_votes,
+                    store_finalize_votes' = store_finalize_votes,
                     replica_state' = replica_state,
                     ghost_committed_blocks' = ghost_committed_blocks,
                 }
@@ -1007,14 +1023,16 @@ module replica {
             cert_signatures(cert).size() >= Q,
 
             if (is_new_cert) all {
-                store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
-                sent_certificate' = sent_certificate.union(Set(cert)),
+                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
+                sent_certificates' = sent_certificates.union(Set(cert)),
             } else all {
-                store_certificate' = store_certificate,
-                sent_certificate' = sent_certificate,
+                store_certificates' = store_certificates,
+                sent_certificates' = sent_certificates,
             },
 
-            sent_vote' = sent_vote,
+            sent_notarize_votes' = sent_notarize_votes,
+            sent_nullify_votes' = sent_nullify_votes,
+            sent_finalize_votes' = sent_finalize_votes,
             replica_state' = replica_state.set(id, enter_view(self, cert_view(cert) + 1)),
             ghost_committed_blocks' = ghost_committed_blocks
         }
@@ -1027,11 +1045,11 @@ module replica {
             cert_signatures(cert).size() >= Q,
 
             if (is_new_cert) all {
-                store_certificate' = store_certificate.setBy(id, old => old.union(Set(cert))),
-                sent_certificate' = sent_certificate.union(Set(cert)),
+                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
+                sent_certificates' = sent_certificates.union(Set(cert)),
             } else all {
-                store_certificate' = store_certificate,
-                sent_certificate' = sent_certificate,
+                store_certificates' = store_certificates,
+                sent_certificates' = sent_certificates,
             },
 
             val cert_view_num = cert_view(cert)
@@ -1049,7 +1067,9 @@ module replica {
                         else
                             ghost_committed_blocks' = ghost_committed_blocks,
 
-                        sent_vote' = sent_vote,
+                        sent_notarize_votes' = sent_notarize_votes,
+                        sent_nullify_votes' = sent_nullify_votes,
+                        sent_finalize_votes' = sent_finalize_votes,
                         replica_state' = replica_state.set(id,
                             enter_view({
                                 ...self,
@@ -1061,7 +1081,9 @@ module replica {
                 }
                 | None => all {
                     false,
-                    sent_vote' = sent_vote,
+                    sent_notarize_votes' = sent_notarize_votes,
+                    sent_nullify_votes' = sent_nullify_votes,
+                    sent_finalize_votes' = sent_finalize_votes,
                     replica_state' = replica_state,
                     ghost_committed_blocks' = ghost_committed_blocks,
                 }
@@ -1072,6 +1094,7 @@ module replica {
     // On leader timeout or advance timeout firing, broadcast nullify(v).
     action on_timeout(id: ReplicaId): bool = all {
         val self = replica_state.get(id)
+        val store_nullify = store_nullify_votes.get(id)
         val leader_mode = not(self.leader_timeout_cancelled)
         val advance_mode = and { self.leader_timeout_cancelled, not(self.advance_timeout_cancelled) }
         all {
@@ -1080,7 +1103,18 @@ module replica {
                 leader_mode,
                 advance_mode
             },
-            sent_vote' = sent_vote.union(Set(nullify(self.view, sig_of(id)))),
+            sent_notarize_votes' = sent_notarize_votes,
+            sent_nullify_votes' = sent_nullify_votes.union(Set({
+                view: self.view,
+                sig: sig_of(id),
+            })),
+            sent_finalize_votes' = sent_finalize_votes,
+            store_notarize_votes' = store_notarize_votes,
+            store_nullify_votes' = store_nullify_votes.set(id, store_nullify.union(Set({
+                view: self.view,
+                sig: sig_of(id),
+            }))),
+            store_finalize_votes' = store_finalize_votes,
             replica_state' = replica_state.set(id, {
                 ...self,
                 nullified: true,
@@ -1091,15 +1125,49 @@ module replica {
 
             // unchanged
             sent_proposal' = sent_proposal,
-            store_vote' = store_vote,
-            sent_certificate' = sent_certificate,
-            store_certificate' = store_certificate,
+            sent_certificates' = sent_certificates,
+            store_certificates' = store_certificates,
             leader' = leader,
             ghost_committed_blocks' = ghost_committed_blocks,
             ghost_proposal' = ghost_proposal,
             certify_policy' = certify_policy,
             lastAction' = "timeout"
         }
+    }
+
+    action byzantine_votes(
+        sender: ReplicaId,
+        view: ViewNumber,
+        payload: Payload,
+        parent_view: ViewNumber,
+        kinds: Set[Kind]
+    ): bool = all {
+        sent_notarize_votes' = sent_notarize_votes.union(
+            kinds.filter(k => k == NotarizeKind).map(_ => {
+                proposal: {
+                    view: view,
+                    payload: payload,
+                    parent: parent_view,
+                },
+                sig: sig_of(sender),
+            })
+        ),
+        sent_nullify_votes' = sent_nullify_votes.union(
+            kinds.filter(k => k == NullifyKind).map(_ => {
+                view: view,
+                sig: sig_of(sender),
+            })
+        ),
+        sent_finalize_votes' = sent_finalize_votes.union(
+            kinds.filter(k => k == FinalizeKind).map(_ => {
+                proposal: {
+                    view: view,
+                    payload: payload,
+                    parent: parent_view,
+                },
+                sig: sig_of(sender),
+            })
+        )
     }
 
     // Byzantine behavior (completely adversarial)
@@ -1116,24 +1184,7 @@ module replica {
               nondet base = Set(NotarizeKind, NullifyKind, FinalizeKind).powerset().oneOf()
               nondet kind = Set(NotarizeKind, NullifyKind, FinalizeKind).oneOf()
               val kinds = base.union(Set(kind))
-
-              val byz_proposal: Proposal = {
-                  view: view,
-                  payload: payload,
-                  parent: parent_view,
-              }
-
-              val votes = kinds.map(k =>
-                  if (k == NotarizeKind) {
-                      notarize(byz_proposal, sender)
-                  } else if (k == NullifyKind) {
-                      nullify(view, sender)
-                  } else {
-                      finalize(byz_proposal, sender)
-                  }
-              )
-
-              sent_vote' = sent_vote.union(votes)
+              byzantine_votes(sender, view, payload, parent_view, kinds)
         },
 
         // Adversary may inject arbitrary certificates.
@@ -1150,33 +1201,26 @@ module replica {
                 parent: parent_view,
             }
 
-            val votes = if (kind == NotarizationKind) {
-                sent_vote.filter(v => and {
-                    vote_view(v) == view,
-                    is_notarize(v),
-                    vote_payload(v) == Some(payload)
-                })
+            val vote_sigs = if (kind == NotarizationKind) {
+                sent_notarize_votes.filter(v => and {
+                    v.proposal == byz_proposal,
+                }).map(v => v.sig)
             } else if (kind == NullificationKind) {
-                sent_vote.filter(v => and {
-                    vote_view(v) == view,
-                    is_nullify(v)
-                })
+                sent_nullify_votes.filter(v => v.view == view).map(v => v.sig)
             } else {
-                sent_vote.filter(v => and {
-                    vote_view(v) == view,
-                    is_finalize(v),
-                    vote_payload(v) == Some(payload)
-                })
+                sent_finalize_votes.filter(v => and {
+                    v.proposal == byz_proposal,
+                }).map(v => v.sig)
             }
-            nondet agg_sig = votes.map(v => vote_sig(v)).union(BYZANTINE).powerset().oneOf()
+            nondet agg_sig = vote_sigs.union(ByzantineSigs).powerset().oneOf()
             val cert = if (kind == NotarizationKind) {
-                notarization(byz_proposal, agg_sig, sender)
+                notarization(byz_proposal, agg_sig, sig_of(sender))
             } else if (kind == NullificationKind) {
-                nullification(view, agg_sig, sender)
+                nullification(view, agg_sig, sig_of(sender))
             } else {
-                finalization(byz_proposal, agg_sig, sender)
+                finalization(byz_proposal, agg_sig, sig_of(sender))
             }
-            sent_certificate' = sent_certificate.union(Set(cert))
+            sent_certificates' = sent_certificates.union(Set(cert))
         },
 
         // Adversary may inject arbitrary proposal.
@@ -1198,8 +1242,10 @@ module replica {
     action _unchanged_replica_state = all {
         ghost_committed_blocks' = ghost_committed_blocks,
         replica_state' = replica_state,
-        store_vote' = store_vote,
-        store_certificate' = store_certificate,
+        store_notarize_votes' = store_notarize_votes,
+        store_nullify_votes' = store_nullify_votes,
+        store_finalize_votes' = store_finalize_votes,
+        store_certificates' = store_certificates,
         leader' = leader,
         ghost_proposal' = ghost_proposal,
         certify_policy' = certify_policy
@@ -1265,7 +1311,7 @@ module replica {
     // No view may contain both nullification and finalization certificates.
     val nullified_views_seen = CORRECT.fold(Set(), (acc, id) =>
           acc.union(
-              store_certificate.get(id)
+              store_certificates.get(id)
                   .filter(c => is_nullification_cert(c))
                   .map(c => cert_view(c))
           )
@@ -1273,7 +1319,7 @@ module replica {
 
       val finalized_views_seen = CORRECT.fold(Set(), (acc, id) =>
           acc.union(
-              store_certificate.get(id)
+              store_certificates.get(id)
                   .filter(c => is_finalization_cert(c))
                   .map(c => cert_view(c))
           )
@@ -1300,14 +1346,17 @@ module replica {
 
     val notarized_consistency = CORRECT.forall(id => {
         val self = replica_state.get(id)
-        VIEWS.forall(v => is_some(self.notarized.get(v)) iff has_notarized_view(id, v, sent_vote))
+        VIEWS.forall(v =>
+            is_some(self.notarized.get(v))
+                iff sent_notarize_votes.exists(vote => vote.sig == sig_of(id) and vote.proposal.view == v)
+        )
     })
 
 
     def finalized_payloads_seen(view: ViewNumber): Set[Option[Payload]] = {
         CORRECT.fold(Set(), (acc, id) =>
             acc.union(
-                store_certificate.get(id)
+                store_certificates.get(id)
                     .filter(c => and {
                         is_finalization_cert(c),
                         cert_view(c) == view,
@@ -1324,7 +1373,7 @@ module replica {
 
     val unique_notarized_or_finalized_payload_per_view =
         tuples(CORRECT, VIEWS).forall(((id, v)) => {
-            val certs = store_certificate.get(id)
+            val certs = store_certificates.get(id)
             certs
                 .filter(c => and {
                     cert_view(c) == v,
@@ -1335,21 +1384,20 @@ module replica {
         })
 
     val finalize_vote_requires_notarization_cert = CORRECT.forall(id => {
-        val certs = store_certificate.get(id)
-        sent_vote
-            .filter(v => vote_sig(v) == sig_of(id) and is_finalize(v))
-            .forall(v => option_has(vote_payload(v), b =>
+        val certs = store_certificates.get(id)
+        sent_finalize_votes
+            .filter(v => v.sig == sig_of(id))
+            .forall(v =>
                 certs.exists(c => and {
                     is_notarization_cert(c),
-                    cert_view(c) == vote_view(v),
-                    cert_payload(c) == Some(b),
+                    cert_proposal(c) == Some(v.proposal),
                 })
-            ))
+            )
     })
 
     // A finalized (view, payload) must not have conflicting parent references.
     val finalized_payloads_have_unique_parent = CORRECT.forall(id => {
-        val certs = store_certificate.get(id)
+        val certs = store_certificates.get(id)
         certs
             .filter(c => is_finalization_cert(c))
             .forall(c => option_has(cert_payload(c), b => learned_parents(cert_view(c), b).size() <= 1))
@@ -1359,7 +1407,7 @@ module replica {
     val finalized_certificates_are_committed = CORRECT.forall(id => {
         val self = replica_state.get(id)
         val chain = ghost_committed_blocks.get(id)
-        val certs = store_certificate.get(id)
+        val certs = store_certificates.get(id)
         certs
             .filter(c => is_finalization_cert(c) and cert_view(c) <= self.last_finalized)
             .forall(c => option_has(cert_payload(c), b => list_contains_payload(chain, b)))
@@ -1381,35 +1429,24 @@ module replica {
      def supporting_vote_sigs(cert: Certificate): Set[Signature] = {
         match (cert) {
             | Notarization(n) =>
-                sent_vote
-                    .filter(v => and {
-                        is_notarize(v),
-                        vote_view(v) == n.proposal.view,
-                        vote_payload(v) == Some(n.proposal.payload),
-                    })
-                    .map(v => vote_sig(v))
+                sent_notarize_votes
+                    .filter(v => v.proposal == n.proposal)
+                    .map(v => v.sig)
 
             | Nullification(n) =>
-                sent_vote
-                    .filter(v => and {
-                        is_nullify(v),
-                        vote_view(v) == n.view,
-                    })
-                    .map(v => vote_sig(v))
+                sent_nullify_votes
+                    .filter(v => v.view == n.view)
+                    .map(v => v.sig)
 
             | Finalization(f) =>
-                sent_vote
-                    .filter(v => and {
-                        is_finalize(v),
-                        vote_view(v) == f.proposal.view,
-                        vote_payload(v) == Some(f.proposal.payload),
-                    })
-                    .map(v => vote_sig(v))
+                sent_finalize_votes
+                    .filter(v => v.proposal == f.proposal)
+                    .map(v => v.sig)
         }
     }
 
     val certificates_require_sent_votes =
-        sent_certificate
+        sent_certificates
             .filter(cert => cert_ghost_sender(cert).in(CorrectSigs))
             .forall(cert =>
                 cert_signatures(cert).subseteq(supporting_vote_sigs(cert))
@@ -1435,17 +1472,17 @@ module replica {
 
     // Test invariants.
 
-    val correct_nodes_sent_certificates_valid = sent_certificate
+    val correct_nodes_sent_certificatess_valid = sent_certificates
         .filter(cert => cert_ghost_sender(cert).in(CorrectSigs))
         .forall(cert => cert_signatures(cert).size() >= Q)
 
     val store_certificates_are_valid = CORRECT.forall(id => {
-        val certs = store_certificate.get(id)
+        val certs = store_certificates.get(id)
         certs.forall(cert => cert_signatures(cert).size() >= Q)
     })
 
     val certificates_are_valid = and {
-        correct_nodes_sent_certificates_valid,
+        correct_nodes_sent_certificatess_valid,
         store_certificates_are_valid
     }
 
@@ -1470,24 +1507,28 @@ module replica {
 
     // Check this invariant to see an example of having at least one vote.
     val one_vote_example = CORRECT.forall(id => {
-        store_vote.get(id).size() == 0
+        and {
+            store_notarize_votes.get(id).size() == 0,
+            store_nullify_votes.get(id).size() == 0,
+            store_finalize_votes.get(id).size() == 0,
+        }
     })
 
     // Check this invariant to see an example of having a notarization certificate.
     val notarization_example = CORRECT.forall(id => {
-        val certs = store_certificate.get(id)
+        val certs = store_certificates.get(id)
         certs.filter(c => is_notarization_cert(c)).size()==0
     })
 
     // Check this invariant to see an example of having a finalization certificate.
     val finalization_example = CORRECT.forall(id => {
-        val certs = store_certificate.get(id)
+        val certs = store_certificates.get(id)
         certs.filter(c => is_finalization_cert(c)).size()==0
     })
 
     // Check this invariant to see an example of having a nullification certificate.
     val nullification_example = CORRECT.forall(id => {
-        val certs = store_certificate.get(id)
+        val certs = store_certificates.get(id)
         certs.filter(c => is_nullification_cert(c)).size()==0
     })
 
