@@ -202,6 +202,9 @@ pub struct Journal<E: Clock + Storage + Metrics, V: Codec> {
     /// This value is immutable after initialization and must remain consistent
     /// across restarts. Changing this value will result in data loss or corruption.
     items_per_section: u64,
+
+    /// Optional compression level when encoding items.
+    compression: Option<u8>,
 }
 
 /// A reader guard that holds a consistent snapshot of the variable journal's bounds.
@@ -311,6 +314,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
             }),
             offsets,
             items_per_section,
+            compression: cfg.compression,
         })
     }
 
@@ -354,6 +358,7 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
             }),
             offsets,
             items_per_section: cfg.items_per_section.get(),
+            compression: cfg.compression,
         })
     }
 
@@ -509,14 +514,17 @@ impl<E: Clock + Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
     /// reopened to trigger alignment in [Journal::init].
     pub async fn append(&self, item: &V) -> Result<u64, Error> {
+        // Encode before grabbing write guard.
+        let (buf, _item_len) = variable::Journal::<E, V>::encode_item(self.compression, item)?;
+
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
         // Calculate which section this position belongs to
         let section = position_to_section(inner.size, self.items_per_section);
 
-        // Append to data journal, get offset
-        let (offset, _size) = inner.data.append(section, item).await?;
+        // Append pre-encoded data to the data journal, get offset
+        let offset = inner.data.append_raw(section, &buf).await?;
 
         // Append offset to offsets journal
         let offsets_pos = self.offsets.append(&offset).await?;

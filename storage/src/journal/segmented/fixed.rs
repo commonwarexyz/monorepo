@@ -134,19 +134,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok(position)
     }
 
-    /// Append a new pre-encoded item to the given section.
+    /// Append pre-encoded bytes to the given section.
     ///
-    /// Unlike [Self::append], does not return the position of the item, which avoids calling
-    /// `blob.size()`.
+    /// The buffer must contain exactly one encoded item of [Self::CHUNK_SIZE] bytes.
     ///
     /// # Panics
     ///
-    /// Panics if `item.len() != Self::CHUNK_SIZE`.
-    pub(crate) async fn append_raw(&mut self, section: u64, item: &[u8]) -> Result<(), Error> {
-        assert_eq!(item.len(), Self::CHUNK_SIZE);
+    /// Panics if `buf.len() != Self::CHUNK_SIZE`.
+    pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<(), Error> {
+        assert_eq!(buf.len(), Self::CHUNK_SIZE);
         let blob = self.manager.get_or_create(section).await?;
-        blob.append(item).await?;
-        trace!(section, "appended raw item");
+        blob.append(buf).await?;
+        trace!(section, "appended item");
         Ok(())
     }
 

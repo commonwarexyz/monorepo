@@ -641,7 +641,7 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// operation fails.
     pub async fn append(&self, item: &A) -> Result<u64, Error> {
         // Encode before grabbing write guard.
-        let buf = item.encode_mut();
+        let buf = item.encode();
 
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
