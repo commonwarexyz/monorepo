@@ -6,7 +6,7 @@ use commonware_utils::{
 use futures::{
     future::{select, Either},
     pin_mut,
-    stream::{AbortHandle, Abortable},
+    stream::{AbortHandle, Abortable, Aborted},
     FutureExt as _,
 };
 use prometheus_client::metrics::gauge::Gauge;
@@ -48,9 +48,11 @@ where
         let (sender, receiver) = oneshot::channel();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
-        // Wrap the future in a single async block to avoid constructing
-        // nested combinator types on the stack (which in debug builds
-        // multiplies the stack usage by the number of wrappers).
+        // Wrap the future with panic catching, abort support, and cleanup.
+        //
+        // Everything is done in a single async block (and the function is marked
+        // #[inline(always)]) so that stack usage is `size_of(F) + constant` rather than
+        // `N * size_of(F)` (which is what a combinator chain produces in debug builds).
         let metric_handle = metric.clone();
         let task = async move {
             // Run future with panic catching and abort support
@@ -66,7 +68,7 @@ where
                     panicker.notify(panic);
                     let _ = sender.send(Err(Error::Exited));
                 }
-                Err(_) => {}
+                Err(Aborted) => {}
             }
 
             // Mark the task as aborted and abort all descendants.
