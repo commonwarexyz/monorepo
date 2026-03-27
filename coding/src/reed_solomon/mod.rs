@@ -55,6 +55,8 @@ pub enum Error {
     Engine(String),
     #[error("inconsistent")]
     Inconsistent,
+    #[error("inconsistent shard lengths")]
+    InconsistentShardLengths,
     #[error("invalid proof")]
     InvalidProof,
     #[error("not enough chunks")]
@@ -418,6 +420,9 @@ fn decode<'a, V: Engine, H: Hasher, S: Strategy>(
         provided += 1;
         if &chunk.root != root {
             return Err(Error::CommitmentMismatch);
+        }
+        if chunk.shard.len() != shard_len {
+            return Err(Error::InconsistentShardLengths);
         }
         // Check for duplicate index
         let index = chunk.index;
@@ -1026,6 +1031,28 @@ mod tests {
         // Fail to decode
         let result = decode::<Gf16, Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::InvalidIndex(8))));
+    }
+
+    #[test]
+    fn test_gf8_rejects_mismatched_shard_lengths() {
+        let data = b"Testing GF8 shard length validation";
+        let total = 8u16;
+        let min = 3u16;
+
+        let (root, chunks) = encode::<Gf8, Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+
+        let mut pieces = vec![
+            checked(root, chunks[0].clone()),
+            checked(root, chunks[1].clone()),
+            checked(root, chunks[6].clone()),
+        ];
+        let mut shard = pieces[1].shard.to_vec();
+        shard.pop();
+        pieces[1].shard = shard.into();
+        pieces[1].digest = Sha256::hash(&pieces[1].shard);
+
+        let result = decode::<Gf8, Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY);
+        assert!(matches!(result, Err(Error::InconsistentShardLengths)));
     }
 
     #[test]

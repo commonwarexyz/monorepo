@@ -6,7 +6,7 @@ use std::iter;
 
 const STRATEGY: Sequential = Sequential;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Shuffle {
     choices: Vec<usize>,
 }
@@ -32,13 +32,19 @@ impl Shuffle {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FuzzInput {
     min: u16,
     recovery: u16,
     to_use: u16,
     data: Vec<u8>,
     shuffle: Shuffle,
+}
+
+impl FuzzInput {
+    pub fn total_shards(&self) -> u16 {
+        self.min.saturating_add(self.recovery)
+    }
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {

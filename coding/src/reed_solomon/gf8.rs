@@ -12,6 +12,10 @@ use super::{
     gf8_simd::{gf_matrix_mul_zeroed_group, gf_vect_mad, gf_vect_mad_multi_raw},
     Engine,
 };
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock, RwLock},
+};
 use thiserror::Error;
 
 /// Maximum total shards for GF(2^8): 255 distinct nonzero evaluation points.
@@ -24,10 +28,22 @@ pub enum Error {
     TooManyShards(usize),
     #[error("not enough shards for recovery")]
     NotEnoughShards,
+    #[error("duplicate shard index: {0}")]
+    DuplicateShardIndex(usize),
+    #[error("invalid original shard index: {0}")]
+    InvalidOriginalShardIndex(usize),
+    #[error("invalid recovery shard index: {0}")]
+    InvalidRecoveryShardIndex(usize),
     #[error("wrong number of original shards: got {got}, expected {expected}")]
     WrongShardCount { got: usize, expected: usize },
     #[error("inconsistent shard lengths")]
     InconsistentShardLengths,
+    #[error("wrong shard length at index {index}: got {got}, expected {expected}")]
+    WrongShardLength {
+        index: usize,
+        got: usize,
+        expected: usize,
+    },
     #[error("singular matrix (should not happen with valid parameters)")]
     SingularMatrix,
 }
@@ -70,10 +86,10 @@ impl Engine for Gf8 {
             }
         }
 
-        let enc_matrix = build_encoding_matrix(k, m)?;
+        let enc_matrix = get_encoding_matrix(k, m)?;
         let mut recovery = vec![vec![0u8; shard_len]; m];
 
-        encode_matrix_mul(&enc_matrix, k, &mut recovery, original);
+        encode_matrix_mul(enc_matrix.as_ref(), k, &mut recovery, original);
 
         Ok(recovery)
     }
@@ -99,8 +115,41 @@ impl Engine for Gf8 {
             return Ok(vec![]);
         }
 
+        let mut seen = vec![false; n];
+        for &(idx, shard) in provided_original {
+            if idx >= k {
+                return Err(Error::InvalidOriginalShardIndex(idx));
+            }
+            if shard.len() != shard_len {
+                return Err(Error::WrongShardLength {
+                    index: idx,
+                    got: shard.len(),
+                    expected: shard_len,
+                });
+            }
+            if std::mem::replace(&mut seen[idx], true) {
+                return Err(Error::DuplicateShardIndex(idx));
+            }
+        }
+        for &(idx, shard) in provided_recovery {
+            if idx >= m {
+                return Err(Error::InvalidRecoveryShardIndex(idx));
+            }
+            if shard.len() != shard_len {
+                return Err(Error::WrongShardLength {
+                    index: k + idx,
+                    got: shard.len(),
+                    expected: shard_len,
+                });
+            }
+            let full_idx = k + idx;
+            if std::mem::replace(&mut seen[full_idx], true) {
+                return Err(Error::DuplicateShardIndex(full_idx));
+            }
+        }
+
         // Build the encoding matrix (same as used for encoding)
-        let enc_matrix = build_encoding_matrix(k, m)?;
+        let enc_matrix = get_encoding_matrix(k, m)?;
 
         // Select exactly k shards for reconstruction, preferring originals
         // (identity rows require no computation).
@@ -201,7 +250,7 @@ fn encode_matrix_mul(
             // pointers on the stack. This eliminates branches in the SIMD inner loop.
             let mut count = 0;
             for gi in 0..group_len {
-                let c = matrix[(group_start + gi) * num_cols + j];
+                let c = matrix_rows[gi * num_cols + j];
                 if c != 0 {
                     coeffs[count] = c;
                     dsts_ptrs[count] = output[group_start + gi].as_mut_ptr();
@@ -279,6 +328,26 @@ fn build_encoding_matrix(k: usize, m: usize) -> Result<Vec<u8>, Error> {
     }
 
     Ok(enc)
+}
+
+fn get_encoding_matrix(k: usize, m: usize) -> Result<Arc<[u8]>, Error> {
+    type Cache = RwLock<HashMap<(usize, usize), Arc<[u8]>>>;
+
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+
+    {
+        let read = cache.read().expect("encoding matrix cache poisoned");
+        if let Some(matrix) = read.get(&(k, m)) {
+            return Ok(Arc::clone(matrix));
+        }
+    }
+
+    let matrix: Arc<[u8]> = build_encoding_matrix(k, m)?.into();
+    let mut write = cache.write().expect("encoding matrix cache poisoned");
+    Ok(Arc::clone(
+        write.entry((k, m)).or_insert_with(|| Arc::clone(&matrix)),
+    ))
 }
 
 /// Invert a k x k matrix in GF(2^8) via Gaussian elimination with partial pivoting.
@@ -508,6 +577,62 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_rejects_invalid_original_index() {
+        let result = Gf8::decode(3, 2, 8, &[(3, &[0u8; 8]), (1, &[0u8; 8]), (2, &[0u8; 8])], &[]);
+        assert!(matches!(result, Err(Error::InvalidOriginalShardIndex(3))));
+    }
+
+    #[test]
+    fn test_decode_rejects_invalid_recovery_index() {
+        let result = Gf8::decode(3, 2, 8, &[], &[(0, &[0u8; 8]), (1, &[0u8; 8]), (2, &[0u8; 8])]);
+        assert!(matches!(result, Err(Error::InvalidRecoveryShardIndex(2))));
+    }
+
+    #[test]
+    fn test_decode_rejects_duplicate_original_index() {
+        let result = Gf8::decode(
+            3,
+            2,
+            8,
+            &[(0, &[0u8; 8]), (0, &[1u8; 8]), (1, &[2u8; 8])],
+            &[],
+        );
+        assert!(matches!(result, Err(Error::DuplicateShardIndex(0))));
+    }
+
+    #[test]
+    fn test_decode_rejects_duplicate_recovery_index() {
+        let result = Gf8::decode(
+            3,
+            2,
+            8,
+            &[(0, &[0u8; 8])],
+            &[(1, &[1u8; 8]), (1, &[2u8; 8]), (0, &[3u8; 8])],
+        );
+        assert!(matches!(result, Err(Error::DuplicateShardIndex(4))));
+    }
+
+    #[test]
+    fn test_decode_rejects_wrong_shard_length() {
+        let result = Gf8::decode(3, 2, 8, &[(0, &[0u8; 8]), (1, &[1u8; 7]), (2, &[2u8; 8])], &[]);
+        assert!(matches!(
+            result,
+            Err(Error::WrongShardLength {
+                index: 1,
+                got: 7,
+                expected: 8
+            })
+        ));
+    }
+
+    #[test]
+    fn test_encoding_matrix_cache_reuses_matrix() {
+        let first = get_encoding_matrix(8, 4).unwrap();
+        let second = get_encoding_matrix(8, 4).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
     fn test_large_data() {
         let k = 33;
         let m = 67;
@@ -585,5 +710,48 @@ mod tests {
             let result = Gf8::decode(k, m, 16, &orig, &rec).unwrap();
             assert_eq!(result, data, "failed for mask={mask:#07b}");
         }
+    }
+
+    #[test]
+    fn test_decode_rejects_invalid_original_index() {
+        let err = Gf8::decode(3, 2, 8, &[(3, &[0u8; 8]), (1, &[0u8; 8]), (2, &[0u8; 8])], &[])
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidOriginalShardIndex(3)));
+    }
+
+    #[test]
+    fn test_decode_rejects_invalid_recovery_index() {
+        let err = Gf8::decode(3, 2, 8, &[(0, &[0u8; 8])], &[(2, &[0u8; 8]), (1, &[0u8; 8])])
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidRecoveryShardIndex(2)));
+    }
+
+    #[test]
+    fn test_decode_rejects_duplicate_indices() {
+        let err = Gf8::decode(3, 2, 8, &[(0, &[0u8; 8]), (0, &[0u8; 8]), (1, &[0u8; 8])], &[])
+            .unwrap_err();
+        assert!(matches!(err, Error::DuplicateShardIndex(0)));
+    }
+
+    #[test]
+    fn test_decode_rejects_wrong_shard_length() {
+        let err = Gf8::decode(3, 2, 8, &[(0, &[0u8; 7]), (1, &[0u8; 8]), (2, &[0u8; 8])], &[])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            Error::WrongShardLength {
+                index: 0,
+                got: 7,
+                expected: 8
+            }
+        ));
+    }
+
+    #[test]
+    fn test_encoding_matrix_cache_roundtrip() {
+        let first = get_encoding_matrix(8, 16).unwrap();
+        let second = get_encoding_matrix(8, 16).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.as_ref(), second.as_ref());
     }
 }
