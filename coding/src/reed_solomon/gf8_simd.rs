@@ -13,7 +13,7 @@
 //! 4. **NEON** (AArch64): split-nibble via `vqtbl1q_u8` -- 16 bytes per iteration
 //! 5. **Scalar**: log/exp table lookup -- 1 byte per iteration
 
-use super::gf8_arithmetic::{init_mul_table_gfni, mul};
+use super::gf8_arithmetic::{GFNI_AFFINE_TABLE, mul};
 #[cfg(any(
     target_arch = "x86",
     target_arch = "x86_64",
@@ -652,8 +652,7 @@ mod gfni_avx2 {
             return;
         }
 
-        let table = init_mul_table_gfni(coeff);
-        let affine = _mm256_broadcastsi128_si256(_mm_loadu_si128(table.as_ptr().cast()));
+        let affine = _mm256_set1_epi64x(GFNI_AFFINE_TABLE[coeff as usize] as i64);
         let len = dst.len();
         let chunks = len / 64;
 
@@ -692,8 +691,7 @@ mod gfni_avx2 {
 
         let mut affines = [_mm256_setzero_si256(); 255];
         for i in 0..ndst {
-            let table = init_mul_table_gfni(coeffs[i]);
-            affines[i] = _mm256_broadcastsi128_si256(_mm_loadu_si128(table.as_ptr().cast()));
+            affines[i] = _mm256_set1_epi64x(GFNI_AFFINE_TABLE[coeffs[i] as usize] as i64);
         }
 
         let len = src.len();
@@ -752,8 +750,7 @@ mod avx512 {
     ) -> __m512i {
         let idx = coeff as usize;
         if !init[idx] {
-            let table = init_mul_table_gfni(coeff);
-            cache[idx] = _mm512_broadcast_i32x4(_mm_loadu_si128(table.as_ptr().cast()));
+            cache[idx] = _mm512_set1_epi64(GFNI_AFFINE_TABLE[idx] as i64);
             init[idx] = true;
         }
         cache[idx]

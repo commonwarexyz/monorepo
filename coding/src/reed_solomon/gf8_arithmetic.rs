@@ -99,23 +99,6 @@ pub const fn init_mul_table(c: u8) -> ([u8; 16], [u8; 16]) {
     (low, high)
 }
 
-/// ISA-L-style 32-byte GFNI affine table for multiplying by constant `c`.
-#[inline]
-pub const fn init_mul_table_gfni(c: u8) -> [u8; 32] {
-    let word = GFNI_AFFINE_TABLE[c as usize].to_le_bytes();
-    let mut out = [0u8; 32];
-    let mut i = 0;
-    while i < 4 {
-        let mut j = 0;
-        while j < 8 {
-            out[i * 8 + j] = word[j];
-            j += 1;
-        }
-        i += 1;
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
