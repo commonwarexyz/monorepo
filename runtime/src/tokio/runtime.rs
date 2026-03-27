@@ -25,7 +25,7 @@ use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
 use commonware_utils::{sync::Mutex, NZUsize};
-use futures::{future::BoxFuture, FutureExt};
+use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
     metrics::{counter::Counter, family::Family, gauge::Gauge},
@@ -563,14 +563,14 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
-        let future: BoxFuture<'_, T> = if is_instrumented {
+        let future = if is_instrumented {
             let span = info_span!("task", name = %label.name());
             for (key, value) in &self.attributes {
                 span.set_attribute(key.clone(), value.clone());
             }
-            f(self).instrument(span).boxed()
+            Either::Left(f(self).instrument(span))
         } else {
-            f(self).boxed()
+            Either::Right(f(self))
         };
         let (f, handle) = Handle::init(
             future,
