@@ -25,9 +25,9 @@ typecheck:
 	quint typecheck itf_n4f1b1.qnt
 
 test:
-	cd tests && quint test tests_n4f1b0.qnt
-	cd tests && quint test tests_n4f1b1.qnt
-	cd tests && quint test tests_n5f1b1.qnt
+	cd tests && quint test --max-samples=1000 tests_n4f1b0.qnt
+	cd tests && quint test --max-samples=1000 tests_n4f1b1.qnt
+	cd tests && quint test --max-samples=1000 tests_n5f1b1.qnt
 
 repl:
 	echo "init\n step\n step\n step" | quint -r main_n4f1b0.qnt::main

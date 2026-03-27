@@ -232,12 +232,18 @@ module replica {
         VIEWS.filter(v => v > v1 and v < v2).forall(v => is_view_nullified(v, certificates))
     }
 
-    def learned_parents(view: ViewNumber, payload: Payload): Set[ViewNumber] = {
-        sent_proposal.filter(((_, p)) => p.view == view and p.payload == payload).map(((_, p)) => p.parent)
+    pure def observe_leader_proposal(self: ReplicaState, proposal: Proposal): ReplicaState = {
+        {
+            ...self,
+            leader_proposal: self.leader_proposal.put(proposal.view, Some(proposal))
+        }
     }
 
-    def has_parent_conflict(view: ViewNumber, payload: Payload): bool = {
-        learned_parents(view, payload).size() > 1
+    pure def has_leader_proposal_conflict(self: ReplicaState, proposal: Proposal): bool = {
+        match (self.leader_proposal.get(proposal.view)) {
+            | Some(known) => known != proposal
+            | None => false
+        }
     }
 
     pure def list_contains_payload(chain: List[Payload], payload: Payload): bool = {
@@ -357,6 +363,7 @@ module replica {
                 ghost_last_seen_notarization: GENESIS_VIEW,
                 last_finalized: GENESIS_VIEW,
                 notarized: VIEWS.mapBy(_ => None),
+                leader_proposal: VIEWS.mapBy(_ => None),
                 certified: VIEWS.mapBy(_ => None),
                 propose_sent: false,
                 nullified: false,
@@ -493,7 +500,7 @@ module replica {
                     store_nullify_votes' = store_nullify_votes,
                     store_finalize_votes' = store_finalize_votes,
                     replica_state' = replica_state.set(id, {
-                        ...self,
+                        ...observe_leader_proposal(self, proposal),
                         propose_sent: true,
                         leader_timeout_cancelled: true,
                         notarized: self.notarized.put(self.view, Some(new_payload)),
@@ -559,6 +566,7 @@ module replica {
         val view = proposal.view
         val payload = proposal.payload
         val is_leader_vote = (vote.sig == sig_of(leader.get(view)))
+        val proposal_conflicted = has_leader_proposal_conflict(self, proposal)
         val can_process_as_proposal = and {
             is_leader_vote,
             view == self.view,
@@ -566,7 +574,25 @@ module replica {
             not(self.nullified),
         }
 
-        if (can_process_as_proposal) {
+        if (proposal_conflicted) {
+            all {
+                sent_proposal' = sent_proposal,
+                sent_notarize_votes' = sent_notarize_votes,
+                sent_nullify_votes' = sent_nullify_votes,
+                sent_finalize_votes' = sent_finalize_votes,
+                sent_certificates' = sent_certificates,
+                store_notarize_votes' = store_notarize_votes,
+                store_nullify_votes' = store_nullify_votes,
+                store_finalize_votes' = store_finalize_votes,
+                store_certificates' = store_certificates,
+                replica_state' = replica_state,
+                ghost_proposal' = ghost_proposal,
+                ghost_committed_blocks' = ghost_committed_blocks,
+                leader' = leader,
+                certify_policy' = certify_policy,
+                lastAction' = "on_notarize"
+            }
+        } else if (can_process_as_proposal) {
             // Proposal processing: validate the leader's proposal and vote
             all {
                 view == self.view,
@@ -594,7 +620,7 @@ module replica {
                         store_nullify_votes' = store_nullify_votes,
                         store_finalize_votes' = store_finalize_votes,
                         replica_state' = replica_state.set(id, {
-                            ...self,
+                            ...observe_leader_proposal(self, proposal),
                             leader_timeout_cancelled: true,
                             notarized: self.notarized.put(self.view, Some(payload)),
                             ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
@@ -618,7 +644,7 @@ module replica {
                         }))),
                         store_finalize_votes' = store_finalize_votes,
                         replica_state' = replica_state.set(id, {
-                            ...self,
+                            ...observe_leader_proposal(self, proposal),
                             nullified: true,
                             leader_timeout_cancelled: true,
                             advance_timeout_cancelled: true,
@@ -685,29 +711,46 @@ module replica {
         val store_notarize = store_notarize_votes.get(id)
         val store_nullify = store_nullify_votes.get(id)
         val store_finalize = store_finalize_votes.get(id)
+        val self = replica_state.get(id)
         all {
             votes != Set(),
-            nondet vote = votes.oneOf()
-            all {
-                votes.forall(v => v.proposal == vote.proposal),
-
-                val new_store_finalize = store_finalize.union(votes)
-                val certs = store_certificates.get(id)
-                val had_finalization = certs.exists(c => and {
-                    is_finalization_cert(c),
-                    cert_proposal(c) == Some(vote.proposal),
-                })
-                val now_finalized = is_proposal_finalized_votes(vote.proposal, new_store_finalize)
-
+            val proposal = votes.fold(
+                { payload: GENESIS_PAYLOAD, view: GENESIS_VIEW, parent: GENESIS_VIEW },
+                (_acc, v) => v.proposal
+            )
+            any {
                 all {
+                    votes.forall(v => v.proposal == proposal),
+                    has_leader_proposal_conflict(self, proposal),
+                    sent_proposal' = sent_proposal,
+                    sent_notarize_votes' = sent_notarize_votes,
+                    sent_nullify_votes' = sent_nullify_votes,
+                    sent_finalize_votes' = sent_finalize_votes,
+                    sent_certificates' = sent_certificates,
                     store_notarize_votes' = store_notarize_votes,
                     store_nullify_votes' = store_nullify_votes,
-                    store_finalize_votes' = store_finalize_votes.set(id, new_store_finalize),
+                    store_finalize_votes' = store_finalize_votes,
+                    store_certificates' = store_certificates,
+                    replica_state' = replica_state,
+                    ghost_proposal' = ghost_proposal,
+                    ghost_committed_blocks' = ghost_committed_blocks,
+                    leader' = leader,
+                    certify_policy' = certify_policy
+                },
+                all {
+                    votes.forall(v => v.proposal == proposal),
+                    not(has_leader_proposal_conflict(self, proposal)),
+                    store_notarize_votes' = store_notarize_votes,
+                    store_nullify_votes' = store_nullify_votes,
+                    store_finalize_votes' = store_finalize_votes.set(id, store_finalize.union(votes)),
 
-                    match create_finalization(id, vote.proposal, new_store_finalize) {
+                    match create_finalization(id, proposal, store_finalize.union(votes)) {
                         | Some(cert) => all {
-                            now_finalized,
-                            _process_finalization_certificate(id, cert, not(had_finalization))
+                            is_proposal_finalized_votes(proposal, store_finalize.union(votes)),
+                            _process_finalization_certificate(id, cert, not(store_certificates.get(id).exists(c => and {
+                                is_finalization_cert(c),
+                                cert_proposal(c) == Some(proposal),
+                            })))
                         }
                         | None => all {
                             store_certificates' = store_certificates,
@@ -724,10 +767,10 @@ module replica {
                     sent_proposal' = sent_proposal,
                     leader' = leader,
                     ghost_proposal' = ghost_proposal,
-                    certify_policy' = certify_policy,
-                    lastAction' = "on_finalize"
+                    certify_policy' = certify_policy
                 }
-            }
+            },
+            lastAction' = "on_finalize"
         }
     }
 
@@ -904,10 +947,14 @@ module replica {
             match (cert_payload(cert)) {
                 | Some(cert_payload_val) => all {
                     val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
-                    val parent_conflicted = has_parent_conflict(cert_view_num, cert_payload_val)
+                    val cert_prop = match cert {
+                        | Notarization(n) => n.proposal
+                        | _ => { payload: cert_payload_val, view: cert_view_num, parent: GENESIS_VIEW }
+                    }
+                    val proposal_conflicted = has_leader_proposal_conflict(self, cert_prop)
                     val can_send_finalize = and {
                         can_certify(id, cert_payload_val),
-                        not(parent_conflicted),
+                        not(proposal_conflicted),
                         self.certified.get(cert_view_num) == None,
                         not(has_sent_finalize(id, cert_view_num)),
                         // NOTE: The protocol informal description (consensus/src/simplex/mod.rs) does not explicitly
@@ -929,11 +976,6 @@ module replica {
                         // The Rust voter implementation enforces that exclusion, so this model does that too.
                         not(has_sent_finalize(id, cert_view_num))
                     }
-                    // Extract proposal from the cert for finalize vote
-                    val cert_prop = match cert {
-                        | Notarization(n) => n.proposal
-                        | _ => { payload: cert_payload_val, view: cert_view_num, parent: GENESIS_VIEW }
-                    }
 
                     if (can_send_finalize)
                         all {
@@ -953,7 +995,7 @@ module replica {
                             ),
                             replica_state' = replica_state.set(id,
                                 enter_view({
-                                    ...self,
+                                    ...observe_leader_proposal(self, cert_prop),
                                     advance_timeout_cancelled: if (self.view == cert_view_num) true else self.advance_timeout_cancelled,
                                     ghost_last_seen_notarization: seen_notarization,
                                     certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
@@ -979,7 +1021,7 @@ module replica {
                             sent_finalize_votes' = sent_finalize_votes,
                             store_finalize_votes' = store_finalize_votes,
                             replica_state' = replica_state.set(id, {
-                                ...self,
+                                ...observe_leader_proposal(self, cert_prop),
                                 nullified: true,
                                 advance_timeout_cancelled: true,
                                 ghost_last_seen_notarization: seen_notarization,
@@ -995,7 +1037,7 @@ module replica {
                             store_nullify_votes' = store_nullify_votes,
                             store_finalize_votes' = store_finalize_votes,
                             replica_state' = replica_state.set(id, {
-                                ...self,
+                                ...observe_leader_proposal(self, cert_prop),
                                 advance_timeout_cancelled: if (self.view == cert_view_num) true else self.advance_timeout_cancelled,
                                 ghost_last_seen_notarization: seen_notarization
                             }),
@@ -1055,6 +1097,10 @@ module replica {
             val cert_view_num = cert_view(cert)
             match (cert_payload(cert)) {
                 | Some(cert_payload_val) => all {
+                    val cert_prop = match cert {
+                        | Finalization(f) => f.proposal
+                        | _ => { payload: cert_payload_val, view: cert_view_num, parent: GENESIS_VIEW }
+                    }
                     val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
                     val newer = cert_view_num > self.last_finalized
 
@@ -1072,7 +1118,7 @@ module replica {
                         sent_finalize_votes' = sent_finalize_votes,
                         replica_state' = replica_state.set(id,
                             enter_view({
-                                ...self,
+                                ...observe_leader_proposal(self, cert_prop),
                                 last_finalized: if (newer) cert_view_num else self.last_finalized,
                                 ghost_last_seen_notarization: seen_notarization
                             }, cert_view_num + 1)
@@ -1395,12 +1441,15 @@ module replica {
             )
     })
 
-    // A finalized (view, payload) must not have conflicting parent references.
-    val finalized_payloads_have_unique_parent = CORRECT.forall(id => {
+    // A finalized view must not contain multiple finalized proposals.
+    val finalized_views_have_unique_proposal = CORRECT.forall(id => {
         val certs = store_certificates.get(id)
-        certs
-            .filter(c => is_finalization_cert(c))
-            .forall(c => option_has(cert_payload(c), b => learned_parents(cert_view(c), b).size() <= 1))
+        VIEWS.forall(v =>
+            certs
+                .filter(c => is_finalization_cert(c) and cert_view(c) == v)
+                .map(c => cert_proposal(c))
+                .size() <= 1
+        )
     })
 
     // Upon finalization, the finalized payload must appear in the committed chain.
@@ -1462,7 +1511,7 @@ module replica {
         notarized_consistency,
         unique_notarized_or_finalized_payload_per_view,
         finalize_vote_requires_notarization_cert,
-        finalized_payloads_have_unique_parent,
+        finalized_views_have_unique_proposal,
         finalized_certificates_are_committed,
         committed_blocks_no_duplicates,
         certificates_require_sent_votes,

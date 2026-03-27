@@ -88,7 +88,8 @@ module tests {
     }
 
     // Byzantine n3 (leader) equivocates with two proposals having different parents.
-    // Parent conflict does NOT immediately trigger a nullify vote upon notarization.
+    // A conflicting recovered certificate teaches the replica the equivocation.
+    // This does NOT immediately trigger a nullify vote upon notarization.
     // Finalization is blocked by equivocation; the certification timeout handles nullification.
     run parentConflictDoesNotImmediatelyNullifyTest = {
         // Byzantine n3 sends two proposals: same (view, payload) but different parents.
@@ -139,9 +140,9 @@ module tests {
             .then(replica_receives_notarize_vote("n1", "val_b1", 2, 1, "n3"))
             .then(replica_receives_notarize_vote("n2", "val_b1", 2, 1, "n3"))
 
-            // Byzantine also injects proposal B with a different parent,
-            // creating a parent conflict in sent_proposal.
-            .then(send_proposal("n3", proposal_b))
+            // A recovered notarization for a conflicting proposal teaches n0
+            // that the leader equivocated in view 2.
+            .then(on_certificate("n0", notarization(proposal_b, Set("n0", "n1", "n3"), "n3")))
 
             // Byzantine n3 also sent a notarize vote.
             .then(send_notarize_vote({ proposal: proposal_a, sig: "n3" }))
@@ -154,8 +155,11 @@ module tests {
                 assert(store_certificates.get("n0").exists(c =>
                     is_notarization_cert(c) and cert_view(c) == 2
                     and cert_payload(c) == Some("val_b1"))),
+                assert(replica_state.get("n0").leader_proposal.get(2) == Some(proposal_a)
+                    or replica_state.get("n0").leader_proposal.get(2) == Some(proposal_b)),
                 // n0 is still in the current view (waiting for timeout).
                 assert(replica_state.get("n0").view == 2),
+                assert(not(sent_finalize_votes.exists(v => v.sig == "n0" and v.proposal.view == 2))),
                 unchanged_all,
             })
             .expect(all_invariants)
@@ -182,8 +186,7 @@ module tests {
             Map(0 -> "n1", 1 -> "n0", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
-            .then(send_proposal("n0", proposal_1))
-            .then(replica_receives_notarize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n0"))
+            .then(propose("n0", proposal_1.payload, proposal_1.parent))
             .then(replica_receives_notarize_vote("n1", "val_b0", 1, GENESIS_VIEW, "n0"))
             .then(replica_receives_notarize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n0"))
             .then(replica_receives_notarize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n1"))
@@ -269,6 +272,59 @@ module tests {
                     is_finalization_cert(c) and cert_proposal(c) == Some(proposal_b)
                 ))),
                 assert(replica_state.get("n0").last_finalized == 1),
+                unchanged_all,
+            })
+            .expect(all_invariants)
+    }
+
+    run leaderProposalFiltersConflictingVotesTest = {
+        val proposal_1 = {
+            payload: "val_b0",
+            view: 1,
+            parent: GENESIS_VIEW,
+        }
+        val proposal_a = {
+            payload: "val_b1",
+            view: 2,
+            parent: 1,
+        }
+        val proposal_b = {
+            payload: "val_b1",
+            view: 2,
+            parent: GENESIS_VIEW,
+        }
+
+        initWithLeaderAndCertify(
+            Map(0 -> "n1", 1 -> "n0", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
+            CERTIFY_ALL_TRUE
+        )
+            .then(propose("n0", proposal_1.payload, proposal_1.parent))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 1, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 1, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 1, GENESIS_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n2"))
+            .then(all {
+                assert(replica_state.get("n0").view == 2),
+                unchanged_all,
+            })
+            .then(propose("n0", proposal_a.payload, proposal_a.parent))
+            .then(replica_receives_notarize_vote("n0", "val_b1", 2, GENESIS_VIEW, "n3"))
+            .then(replica_receives_finalize_vote("n0", "val_b1", 2, GENESIS_VIEW, "n3"))
+            .then(all {
+                assert(replica_state.get("n0").leader_proposal.get(2) == Some(proposal_a)),
+                assert(not(store_notarize_votes.get("n0").exists(v =>
+                    v.sig == "n3" and v.proposal == proposal_b
+                ))),
+                assert(not(store_finalize_votes.get("n0").exists(v =>
+                    v.sig == "n3" and v.proposal == proposal_b
+                ))),
                 unchanged_all,
             })
             .expect(all_invariants)
