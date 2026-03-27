@@ -51,15 +51,13 @@ pub struct Config {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
     pub tcp_nodelay: Option<bool>,
-    /// Whether or not to set the `SO_LINGER` socket option.
+    /// Whether to set `SO_LINGER` to zero on the socket.
     ///
-    /// When `None`, the system default is used. When
-    /// `Some(duration)`, `SO_LINGER` is enabled with the given timeout.
-    /// `Some(Duration::ZERO)` causes an immediate RST on close, avoiding
+    /// When enabled, causes an immediate RST on close, avoiding
     /// `TIME_WAIT` state. This is useful in adversarial environments to
     /// reclaim socket resources immediately when closing connections to
     /// misbehaving peers.
-    pub so_linger: Option<Duration>,
+    pub zero_linger: bool,
     /// Timeout budget applied to each top-level send/recv call.
     ///
     /// This is a network-level policy and is independent from io_uring loop
@@ -79,8 +77,8 @@ impl Default for Config {
     fn default() -> Self {
         let iouring_config = iouring::Config::default();
         Self {
-            tcp_nodelay: None,
-            so_linger: None,
+            tcp_nodelay: Some(true),
+            zero_linger: true,
             read_write_timeout: iouring_config.max_op_timeout,
             iouring_config,
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
@@ -94,8 +92,8 @@ pub struct Network {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
     tcp_nodelay: Option<bool>,
-    /// Whether or not to set the `SO_LINGER` socket option.
-    so_linger: Option<Duration>,
+    /// Whether to set `SO_LINGER` to zero on the socket.
+    zero_linger: bool,
     /// Used to submit send operations to the send io_uring event loop.
     send_submitter: iouring::Submitter,
     /// Used to submit recv operations to the recv io_uring event loop.
@@ -146,7 +144,7 @@ impl Network {
 
         Ok(Self {
             tcp_nodelay: cfg.tcp_nodelay,
-            so_linger: cfg.so_linger,
+            zero_linger: cfg.zero_linger,
             send_submitter,
             recv_submitter,
             read_write_timeout: cfg.read_write_timeout,
@@ -165,7 +163,7 @@ impl crate::Network for Network {
             .map_err(|_| Error::BindFailed)?;
         Ok(Listener {
             tcp_nodelay: self.tcp_nodelay,
-            so_linger: self.so_linger,
+            zero_linger: self.zero_linger,
             inner: listener,
             send_submitter: self.send_submitter.clone(),
             recv_submitter: self.recv_submitter.clone(),
@@ -190,9 +188,9 @@ impl crate::Network for Network {
             }
         }
 
-        // Set SO_LINGER if configured
-        if let Some(so_linger) = self.so_linger {
-            if let Err(err) = stream.set_linger(Some(so_linger)) {
+        // Set SO_LINGER to zero if configured
+        if self.zero_linger {
+            if let Err(err) = stream.set_zero_linger() {
                 warn!(?err, "failed to set SO_LINGER");
             }
         }
@@ -228,8 +226,8 @@ pub struct Listener {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
     tcp_nodelay: Option<bool>,
-    /// Whether or not to set the `SO_LINGER` socket option.
-    so_linger: Option<Duration>,
+    /// Whether to set `SO_LINGER` to zero on the socket.
+    zero_linger: bool,
     inner: TcpListener,
     /// Used to submit send operations to the send io_uring event loop.
     send_submitter: iouring::Submitter,
@@ -261,9 +259,9 @@ impl crate::Listener for Listener {
             }
         }
 
-        // Set SO_LINGER if configured
-        if let Some(so_linger) = self.so_linger {
-            if let Err(err) = stream.set_linger(Some(so_linger)) {
+        // Set SO_LINGER to zero if configured
+        if self.zero_linger {
+            if let Err(err) = stream.set_zero_linger() {
                 warn!(?err, "failed to set SO_LINGER");
             }
         }
