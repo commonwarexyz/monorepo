@@ -6,7 +6,7 @@ use commonware_cryptography::{
     Hasher as _,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{test_rng, Faults, Participant};
+use commonware_utils::{modulo, test_rng, Faults, Participant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Behavior {
@@ -66,12 +66,20 @@ impl<S> Scheme<S> {
     {
         let encoded = signature.encode().to_vec();
         let bit_len = encoded.len() * 8;
+
+        // Hash the signer and signature bytes to derive a deterministic starting
+        // point for the single-bit flip search.
         let mut hasher = Sha256::default();
         hasher.update(&signer.encode());
         hasher.update(&encoded);
         let digest = hasher.finalize();
-        let start = usize::from(digest.as_ref()[0]) % bit_len;
 
+        // Start from a deterministic but non-trivial bit so tests do not always
+        // mutate the same low-order bit first.
+        let start = modulo(digest.as_ref(), bit_len as u64) as usize;
+
+        // Search all single-bit mutations, wrapping around from `start`, until
+        // we find one that still decodes as a signature but fails verification.
         (0..bit_len)
             .find_map(|offset| {
                 let flip = (start + offset) % bit_len;
@@ -79,6 +87,9 @@ impl<S> Scheme<S> {
                 let bit = flip % 8;
                 let mut corrupted = encoded.clone();
                 corrupted[byte] ^= 1 << bit;
+
+                // `Lazy` lets us reject undecodable byte patterns before asking
+                // the wrapped scheme whether the mutated attestation verifies.
                 let lazy = Lazy::deferred(&mut corrupted.as_slice(), ());
                 let attestation = Attestation {
                     signer,
