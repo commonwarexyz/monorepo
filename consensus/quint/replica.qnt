@@ -293,9 +293,7 @@ module replica {
     }
 
     def create_nullification(id: ReplicaId, view: ViewNumber, votes: Set[NullifyVote]): Option[Certificate] = {
-        val similar_votes = votes.filter(v => and {
-            v.view == view,
-        })
+        val similar_votes = votes.filter(v => v.view == view)
         val signers = similar_votes.map(v => v.sig)
 
         if (signers.size() < Q)
@@ -1495,7 +1493,7 @@ module replica {
                 cert_signatures(cert).subseteq(supporting_vote_sigs(cert))
             )
 
-    val all_invariants = all {
+    val safe_invariants = all {
         no_proposal_equivocation,
         agreement,
         no_vote_equivocation_inv,
@@ -1511,8 +1509,6 @@ module replica {
         certificates_require_sent_votes,
     }
 
-    val safe = all_invariants
-
     // Test invariants.
 
     val correct_nodes_sent_certificates_valid = sent_certificates
@@ -1527,6 +1523,11 @@ module replica {
     val certificates_are_valid = and {
         correct_nodes_sent_certificates_valid,
         store_certificates_are_valid
+    }
+
+    val test_invariants = all {
+        safe_invariants,
+        certificates_are_valid
     }
 
     // Examples.

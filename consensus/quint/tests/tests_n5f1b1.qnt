@@ -43,7 +43,7 @@ module tests {
                 assert(replica_state.get("n3").view == 2),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     run timeoutBroadcastsNullifyTest = {
@@ -57,7 +57,7 @@ module tests {
                 assert(replica_state.get("n2").nullified == true),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     run invalidParentNotarizationCertificateDoesNotTriggerFinalizeTest = {
@@ -84,7 +84,7 @@ module tests {
                 assert(replica_state.get("n3").certified.get(2) == None),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     action send_proposal(sender: Signature, proposal: Proposal): bool = all {

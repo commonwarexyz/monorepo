@@ -89,7 +89,7 @@ module tests {
                 assert(ghost_committed_blocks.get("n0")[0] == "val_b0"),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     run certificationAlwaysTrueTriggersFinalizeTest = {
@@ -118,7 +118,7 @@ module tests {
                 assert(replica_state.get("n0").view == 2),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     run leaderNullifyTest = {
@@ -136,7 +136,7 @@ module tests {
                 assert(replica_state.get("n1").view == FIRST_VIEW),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     run localProposalFailureTest = {
@@ -156,7 +156,7 @@ module tests {
                 assert(not(sent_proposal.exists(((s, p)) => s == "n0" and p.view == FIRST_VIEW))),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     run runCertifyTest = {
@@ -231,7 +231,7 @@ module tests {
                 assert(not(sent_proposal.exists(((s, p)) => s == "n0" and p.view == 2 and p.parent == FIRST_VIEW))),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     run localVerificationFailureTest = {
@@ -256,7 +256,7 @@ module tests {
                 assert(replica_state.get("n1").view == FIRST_VIEW),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     // Receiving a notarization for a past view where certification fails must NOT
@@ -311,7 +311,7 @@ module tests {
                     assert(replica_state.get("n3").view == 2),
                     unchanged_all,
                 })
-                .expect(all_invariants)
+                .expect(test_invariants)
         }
 
         // All correct replicas finalize two consecutive blocks.
@@ -382,7 +382,7 @@ module tests {
                 assert(CORRECT.forall(id => replica_state.get(id).last_finalized == 2)),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
         }
 
         // Views 1 and 2 timeout, then view 3 leader proposes and all replicas finalize.
@@ -447,7 +447,7 @@ module tests {
                 assert(CORRECT.forall(id => replica_state.get(id).last_finalized == 3)),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
         }
 
         // View 1 leader proposes a valid payload with an invalid parent, replicas nullify.
@@ -512,7 +512,7 @@ module tests {
                 assert(CORRECT.forall(id => replica_state.get(id).last_finalized == 2)),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
         }
 
         // Replica n0 is very slow (always nullifies), but n1, n2, n3 finalize 2 payloads.
@@ -579,7 +579,7 @@ module tests {
                 assert(ghost_committed_blocks.get("n0")[0] == "val_b0"),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
         }
 
     action send_proposal(sender: Signature, proposal: Proposal): bool = all {

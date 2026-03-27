@@ -9,10 +9,10 @@ PANE_NAMES=("quint-run" "quint-verify" "quint-script-invariant" "quint-script-ve
 
 # Commands to run in each session/pane
 COMMANDS=(
-    "JVM_ARGS=-Xmx40G quint run --invariant=safe main_n4f1b1.qnt --max-samples 20000 --max-steps 50"
-    "JVM_ARGS=-Xmx40G quint verify --invariant=safe main_n4f1b0.qnt --max-steps 7"
+    "JVM_ARGS=-Xmx40G quint run --invariant=safe_invariants main_n4f1b1.qnt --max-samples 20000 --max-steps 50"
+    "JVM_ARGS=-Xmx40G quint verify --invariant=safe_invariants main_n4f1b0.qnt --max-steps 7"
     "./scripts/invariant.sh run ./twins_n4f1b1.qnt 18 --random-transitions"
-    "./scripts/verify.sh random ./main_n4f1b0.qnt safe 10 1 10"
+    "./scripts/verify.sh random ./main_n4f1b0.qnt safe_invariants 10 1 10"
 )
 
 run_split() {

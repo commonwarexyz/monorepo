@@ -47,7 +47,7 @@ module tests {
                 assert(replica_state.get("n0").view == 2),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     run finalizationCertificateAdvancesViewTest = {
@@ -84,7 +84,7 @@ module tests {
                 assert(ghost_committed_blocks.get("n2")[0] == "val_b0"),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     // Byzantine n3 (leader) equivocates with two proposals having different parents.
@@ -162,7 +162,7 @@ module tests {
                 assert(not(sent_finalize_votes.exists(v => v.sig == "n0" and v.proposal.view == 2))),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     run mixedParentNotarizeVotesDoNotFormCertificateTest = {
@@ -219,7 +219,7 @@ module tests {
                 ))),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     run leaderProposalConflictIsStickyTest = {
@@ -275,7 +275,7 @@ module tests {
                 ))),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     run mixedParentFinalizeVotesDoNotFormCertificateTest = {
@@ -330,7 +330,7 @@ module tests {
                 assert(replica_state.get("n0").last_finalized == 1),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     run leaderProposalFiltersConflictingVotesTest = {
@@ -383,7 +383,7 @@ module tests {
                 ))),
                 unchanged_all,
             })
-            .expect(all_invariants)
+            .expect(test_invariants)
     }
 
     action send_proposal(sender: Signature, proposal: Proposal): bool = all {

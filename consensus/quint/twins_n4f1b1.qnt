@@ -37,8 +37,8 @@ module twins {
 
   action step = i::correct_replica_step
 
-  val safe = i::safe
-  val all_invariants = safe
+  val safe_invariants = i::safe_invariants
+  val test_invariants = i::test_invariants
   val no_proposal_equivocation = i::no_proposal_equivocation
   val agreement = i::agreement
   val no_vote_equivocation_inv = i::no_vote_equivocation_inv

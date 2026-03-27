@@ -34,6 +34,5 @@ module itf_main {
 
     action step = r::step
 
-    val safe = r::safe
-    val all_invariants = r::all_invariants
+    val safe_invariants = r::safe_invariants
 }
