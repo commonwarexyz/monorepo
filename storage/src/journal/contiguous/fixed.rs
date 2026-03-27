@@ -573,14 +573,6 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         })
     }
 
-    /// Convert a global position to (section, position_in_section).
-    #[inline]
-    const fn position_to_section(&self, position: u64) -> (u64, u64) {
-        let section = position / self.items_per_blob;
-        let pos_in_section = position % self.items_per_blob;
-        (section, pos_in_section)
-    }
-
     /// Sync any pending updates to disk.
     ///
     /// Only the tail section can have pending updates since historical sections are synced
@@ -648,13 +640,16 @@ impl<E: Clock + Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
     pub async fn append(&self, item: &A) -> Result<u64, Error> {
+        // Encode before grabbing write guard.
+        let buf = item.encode_mut();
+
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
-        // Append the item to the journal.
+        // Append the pre-encoded item to the journal.
         let position = inner.size;
-        let (section, _pos_in_section) = self.position_to_section(position);
-        inner.journal.append(section, item).await?;
+        let section = position / self.items_per_blob;
+        inner.journal.append_raw(section, &buf).await?;
         inner.size += 1;
 
         // Return early if no sync is needed (section not full).
