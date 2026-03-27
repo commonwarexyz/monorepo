@@ -97,9 +97,9 @@ use commonware_codec::{CodecShared, Read};
 use commonware_utils::Array;
 use core::ops::Range;
 use std::collections::BTreeMap;
+use tracing::{debug, warn};
 
 type Error = crate::qmdb::Error<crate::mmr::Family>;
-use tracing::{debug, warn};
 
 /// Configuration for initializing a [Db].
 #[derive(Clone)]

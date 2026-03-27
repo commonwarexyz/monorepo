@@ -173,7 +173,7 @@ fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfi
 pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyFixedConfig {
-        mmr_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
         translator: EightCap,
     }
@@ -194,7 +194,7 @@ pub fn any_var_digest_cfg(
 ) -> AnyVariableConfig<EightCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        mmr_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         translator: EightCap,
     }
@@ -217,7 +217,7 @@ pub fn any_var_vec_cfg(
 ) -> AnyVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        mmr_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         translator: EightCap,
     }

@@ -142,7 +142,7 @@ fn test_config(
 ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
-        mmr_config: MmrConfig {
+        merkle_config: MmrConfig {
             journal_partition: format!("{test_name}-mmr"),
             metadata_partition: format!("{test_name}-meta"),
             items_per_blob: NZU64!(3),

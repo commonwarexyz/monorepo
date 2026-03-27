@@ -1,12 +1,11 @@
 //! Batch mutation API for Current QMDBs.
 //!
-//! Wraps the [`any::batch`] API, layering bitmap and grafted MMR
-//! computation on top during [`UnmerkleizedBatch::merkleize()`].
+//! Wraps the [`any::batch`] API.
 
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
-    merkle::storage::Storage as MmrStorage,
+    merkle::storage::Storage as MerkleStorage,
     mmr::{self, Location, Position, Readable, StandardHasher},
     qmdb::{
         any::{
@@ -253,12 +252,12 @@ impl<B: BitmapRead<N>, const N: usize> BitmapRead<N> for BitmapDiff<'_, B, N> {
 ///
 /// Tries the batch chain's sync [`Readable`] first (which covers nodes appended or overwritten
 /// by the batch, plus anything still in the in-memory MMR). Falls through to the base's async
-/// [`MmrStorage`].
+/// [`MerkleStorage`].
 struct BatchStorageAdapter<
     'a,
     D: Digest,
     R: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
-    S: MmrStorage<mmr::Family, Digest = D>,
+    S: MerkleStorage<mmr::Family, Digest = D>,
 > {
     batch: &'a R,
     base: &'a S,
@@ -269,7 +268,7 @@ impl<
         'a,
         D: Digest,
         R: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
-        S: MmrStorage<mmr::Family, Digest = D>,
+        S: MerkleStorage<mmr::Family, Digest = D>,
     > BatchStorageAdapter<'a, D, R, S>
 {
     const fn new(batch: &'a R, base: &'a S) -> Self {
@@ -284,8 +283,8 @@ impl<
 impl<
         D: Digest,
         R: Readable<Family = mmr::Family, Digest = D, Error = mmr::Error>,
-        S: MmrStorage<mmr::Family, Digest = D>,
-    > MmrStorage<mmr::Family> for BatchStorageAdapter<'_, D, R, S>
+        S: MerkleStorage<mmr::Family, Digest = D>,
+    > MerkleStorage<mmr::Family> for BatchStorageAdapter<'_, D, R, S>
 {
     type Digest = D;
 

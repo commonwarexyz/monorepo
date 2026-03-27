@@ -64,7 +64,7 @@ where
         let mmr = Mmr::init_sync(
             context.with_label("mmr"),
             crate::mmr::journaled::SyncConfig {
-                config: db_config.mmr.clone(),
+                config: db_config.merkle_config.clone(),
                 range,
                 pinned_nodes,
             },
@@ -163,7 +163,7 @@ mod tests {
 
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            mmr: crate::mmr::journaled::Config {
+            merkle_config: crate::mmr::journaled::Config {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),

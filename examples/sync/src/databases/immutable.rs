@@ -29,7 +29,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
         NZUsize!(10),
     );
     Config {
-        mmr: MmrConfig {
+        merkle_config: MmrConfig {
             journal_partition: "mmr-journal".into(),
             metadata_partition: "mmr-metadata".into(),
             items_per_blob: NZU64!(4096),

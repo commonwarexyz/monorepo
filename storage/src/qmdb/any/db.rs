@@ -369,7 +369,7 @@ where
     }
 }
 
-// Functionality requiring Mutable + Persistable journal: init_from_log.
+// Functionality requiring Mutable + Persistable journal.
 impl<F, E, U, C, I, H> Db<F, E, C, I, H, U>
 where
     F: Family,
@@ -430,19 +430,7 @@ where
             _update: core::marker::PhantomData,
         })
     }
-}
 
-// Functionality requiring Mutable + Persistable journal.
-impl<F, E, U, C, I, H> Db<F, E, C, I, H, U>
-where
-    F: Family,
-    E: Context,
-    U: Update,
-    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    Operation<F, U>: Codec,
-{
     /// Sync all database state to disk.
     pub async fn sync(&self) -> Result<(), crate::qmdb::Error<F>> {
         self.log.sync().await.map_err(Into::into)

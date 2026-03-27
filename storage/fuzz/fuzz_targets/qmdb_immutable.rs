@@ -95,7 +95,7 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
 fn db_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, (RangeCfg<usize>, ())> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
-        mmr: MerkleConfig {
+        merkle_config: MerkleConfig {
             journal_partition: format!("journal-{suffix}"),
             metadata_partition: format!("metadata-{suffix}"),
             items_per_blob: NZU64!(ITEMS_PER_BLOB),

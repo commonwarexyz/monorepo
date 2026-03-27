@@ -116,7 +116,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 NZUsize!(PAGE_CACHE_SIZE),
             );
             let cfg = Config::<EightCap> {
-                mmr_config: MerkleConfig {
+                merkle_config: MerkleConfig {
                     journal_partition: format!("test-qmdb-mmr-journal-{suffix}"),
                     metadata_partition: format!("test-qmdb-mmr-metadata-{suffix}"),
                     items_per_blob: NZU64!(500000),

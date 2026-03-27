@@ -959,7 +959,7 @@ impl<E: Context, V: CodecShared> crate::journal::authenticated::Inner<E> for Jou
 
     async fn init<F: crate::merkle::Family, H: commonware_cryptography::Hasher>(
         context: E,
-        mmr_cfg: crate::merkle::journaled::Config,
+        merkle_cfg: crate::merkle::journaled::Config,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&V) -> bool,
     ) -> Result<
@@ -968,7 +968,7 @@ impl<E: Context, V: CodecShared> crate::journal::authenticated::Inner<E> for Jou
     > {
         crate::journal::authenticated::Journal::<F, E, Self, H>::new(
             context,
-            mmr_cfg,
+            merkle_cfg,
             journal_cfg,
             rewind_predicate,
         )

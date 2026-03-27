@@ -20,9 +20,6 @@ const COMMIT_CONTEXT: u8 = 1;
 ///
 /// Unlike mutable database operations, immutable operations only support
 /// setting new values and committing - no updates or deletions.
-///
-/// This type is family-agnostic: it does not store any [`Location`] and implements
-/// [`OperationTrait<F>`] for every [`Family`] `F`.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Operation<K: Array, V: VariableValue> {
     /// Set a key to a value. The key must not already exist.

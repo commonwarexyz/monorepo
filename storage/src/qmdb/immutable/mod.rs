@@ -62,7 +62,7 @@ use crate::{
             Contiguous as _, Mutable as _, Reader,
         },
     },
-    merkle::{self, journaled::Config as MmrConfig, Family, Location, Proof},
+    merkle::{journaled::Config as MmrConfig, Family, Location, Proof},
     qmdb::{any::VariableValue, build_snapshot_from_log, delete_known_loc, Error},
     translator::Translator,
     Context,
@@ -86,7 +86,7 @@ pub mod sync;
 #[derive(Clone)]
 pub struct Config<T: Translator, C> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub mmr: MmrConfig,
+    pub merkle_config: MmrConfig,
 
     /// Configuration for the variable-size operations log journal.
     pub log: JournalConfig<C>,
@@ -234,7 +234,7 @@ impl<F: Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: Translato
     ///
     /// - Returns [`crate::qmdb::Error::PruneBeyondMinRequired`] if `prune_loc` > last commit
     ///   location.
-    /// - Returns [merkle::Error::LocationOverflow] if `prune_loc` > [Family::MAX_LEAVES].
+    /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` > [`Family::MAX_LEAVES`].
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), crate::qmdb::Error<F>> {
         if loc > self.last_commit_loc {
             return Err(crate::qmdb::Error::PruneBeyondMinRequired(
@@ -345,7 +345,7 @@ impl<F: Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: Translato
 }
 
 // Initialization.
-impl<F: merkle::Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator>
+impl<F: Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator>
     Immutable<F, E, K, V, H, T>
 {
     /// Returns an [Immutable] qmdb initialized from `cfg`. Any uncommitted log operations will be
@@ -356,7 +356,7 @@ impl<F: merkle::Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: T
     ) -> Result<Self, crate::qmdb::Error<F>> {
         let mut journal = Journal::new(
             context.clone(),
-            cfg.mmr,
+            cfg.merkle_config,
             cfg.log,
             Operation::<K, V>::is_commit,
         )
@@ -465,16 +465,17 @@ impl<F: merkle::Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: T
 pub(super) mod test {
     use super::*;
     use crate::{merkle::mmr, qmdb::verify_proof, translator::TwoCap};
-    use mmr::Location;
-    type Error = crate::qmdb::Error<mmr::Family>;
-    type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
     use commonware_cryptography::{sha256, sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
+    use mmr::Location;
     use std::num::{NonZeroU16, NonZeroUsize};
+
+    type Error = crate::qmdb::Error<mmr::Family>;
+    type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
@@ -486,7 +487,7 @@ pub(super) mod test {
     ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            mmr: MmrConfig {
+            merkle_config: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),

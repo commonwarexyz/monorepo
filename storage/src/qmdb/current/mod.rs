@@ -257,12 +257,13 @@ use std::sync::Arc;
 pub mod batch;
 pub mod db;
 mod grafting;
-type Error = crate::qmdb::Error<mmr::Family>;
 
 pub mod ordered;
 pub mod proof;
 pub(crate) mod sync;
 pub mod unordered;
+
+type Error = crate::qmdb::Error<mmr::Family>;
 
 /// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
@@ -283,7 +284,7 @@ pub struct Config<T: Translator, J> {
 impl<T: Translator, J> From<Config<T, J>> for AnyConfig<T, J> {
     fn from(cfg: Config<T, J>) -> Self {
         Self {
-            mmr_config: cfg.mmr_config,
+            merkle_config: cfg.mmr_config,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
         }

@@ -103,7 +103,7 @@ pub mod unordered;
 #[derive(Clone)]
 pub struct Config<T: Translator, J> {
     /// Configuration for the Merkle structure backing the authenticated journal.
-    pub mmr_config: MerkleConfig,
+    pub merkle_config: MerkleConfig,
 
     /// Configuration for the operations log journal.
     pub journal_config: J,
@@ -140,7 +140,7 @@ where
 {
     let mut log = J::init::<F, H>(
         context.with_label("log"),
-        cfg.mmr_config,
+        cfg.merkle_config,
         cfg.journal_config,
         Operation::is_commit,
     )
@@ -195,7 +195,7 @@ pub(crate) mod test {
     ) -> FixedConfig<T> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            mmr_config: MerkleConfig {
+            merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -219,7 +219,7 @@ pub(crate) mod test {
     ) -> VariableConfig<T, ((), ())> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            mmr_config: MerkleConfig {
+            merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),

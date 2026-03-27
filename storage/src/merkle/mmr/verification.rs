@@ -55,5 +55,3 @@ pub async fn multi_proof<D: Digest, S: Storage<Family, Digest = D>>(
 ) -> Result<Proof<D>, Error> {
     crate::merkle::verification::multi_proof(mmr, locations).await
 }
-
-// Tests have been moved to the generic crate::merkle::verification module.

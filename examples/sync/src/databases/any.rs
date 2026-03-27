@@ -32,7 +32,7 @@ pub type Operation = FixedOperation<Key, Value>;
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {
     let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
     Config {
-        mmr_config: MmrConfig {
+        merkle_config: MmrConfig {
             journal_partition: "mmr-journal".into(),
             metadata_partition: "mmr-metadata".into(),
             items_per_blob: NZU64!(4096),
