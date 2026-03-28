@@ -98,6 +98,8 @@ mod tests {
         ]);
         let expected = message.clone().coalesce();
 
+        // Spawn a server and read exactly the logical message size. The receive
+        // side should observe the same byte stream regardless of send chunking.
         join!(
             async move {
                 let (_, sink, mut stream) = listener.accept().await.expect("Failed to accept");
