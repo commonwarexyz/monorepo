@@ -17,8 +17,8 @@ stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring-
 #[cfg(test)]
 mod tests {
     use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
-    use futures::join;
     use commonware_utils::channel::{mpsc, oneshot};
+    use futures::join;
     use std::{net::SocketAddr, sync::Arc};
     use tokio::sync::Barrier;
 
