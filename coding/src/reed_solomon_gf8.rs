@@ -8,6 +8,8 @@ use commonware_parallel::Strategy;
 use commonware_storage::bmt::Builder;
 use std::{collections::BTreeSet, marker::PhantomData};
 
+commonware_utils::thread_local_cache!(static CACHED_GF8_WORKSPACE: Workspace);
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("incompatible shard count for ISA-L gf8 backend: original={original_count}, recovery={recovery_count}")]
@@ -52,6 +54,69 @@ impl From<ReedSolomonError> for Error {
 const MAX_ORIGINAL_SHARDS: usize = 127;
 const MAX_TOTAL_SHARDS: usize = 255;
 
+struct Workspace {
+    encode_matrix: Vec<u8>,
+    temp_matrix: Vec<u8>,
+    invert_matrix: Vec<u8>,
+    decode_rows: Vec<u8>,
+    g_tbls: Vec<u8>,
+    availability: Vec<bool>,
+    indices: Vec<usize>,
+    missing_originals: BTreeSet<usize>,
+    data_ptrs: Vec<*const u8>,
+    recovery_ptrs: Vec<*mut u8>,
+    original_buf: Vec<u8>,
+    recovery_buf: Vec<u8>,
+    recovered_buf: Vec<u8>,
+}
+
+impl Workspace {
+    fn new() -> Self {
+        Self {
+            encode_matrix: Vec::new(),
+            temp_matrix: Vec::new(),
+            invert_matrix: Vec::new(),
+            decode_rows: Vec::new(),
+            g_tbls: Vec::new(),
+            availability: Vec::new(),
+            indices: Vec::new(),
+            missing_originals: BTreeSet::new(),
+            data_ptrs: Vec::new(),
+            recovery_ptrs: Vec::new(),
+            original_buf: Vec::new(),
+            recovery_buf: Vec::new(),
+            recovered_buf: Vec::new(),
+        }
+    }
+
+    fn reset_for_encode(&mut self, original_count: usize, recovery_count: usize, shard_len: usize) {
+        let total = original_count + recovery_count;
+        self.encode_matrix.resize(total * original_count, 0);
+        self.decode_rows.clear();
+        self.g_tbls.resize(original_count * recovery_count * 32, 0);
+        self.indices.clear();
+        self.data_ptrs.clear();
+        self.recovery_ptrs.clear();
+        self.recovery_buf.resize(recovery_count * shard_len, 0);
+    }
+
+    fn reset_for_decode(&mut self, original_count: usize, recovery_count: usize, shard_len: usize) {
+        let total = original_count + recovery_count;
+        self.encode_matrix.resize(total * original_count, 0);
+        self.temp_matrix.resize(original_count * original_count, 0);
+        self.invert_matrix.resize(original_count * original_count, 0);
+        self.availability.resize(total, false);
+        self.indices.clear();
+        self.missing_originals.clear();
+        self.decode_rows.clear();
+        self.data_ptrs.clear();
+        self.recovery_ptrs.clear();
+        self.original_buf.resize(original_count * shard_len, 0);
+        self.recovered_buf.resize(total * shard_len, 0);
+        self.g_tbls.resize(original_count * recovery_count * 32, 0);
+    }
+}
+
 fn total_shards(config: &Config) -> Result<u16, Error> {
     let total = config.total_shards();
     total
@@ -76,15 +141,19 @@ fn validate_counts(total: u16, min: u16) -> Result<(usize, usize), Error> {
     Ok((k, m))
 }
 
-fn encode_recovery(originals: &[&[u8]], recovery_count: usize) -> Vec<Vec<u8>> {
+fn encode_recovery<'a>(
+    workspace: &'a mut Workspace,
+    originals: &[&[u8]],
+    recovery_count: usize,
+) -> &'a [u8] {
     let shard_len = originals
         .first()
         .map(|shard| shard.len())
         .expect("at least one original shard");
     let original_count = originals.len();
     let total = original_count + recovery_count;
-
-    let mut encode_matrix = vec![0u8; total * original_count];
+    workspace.reset_for_encode(original_count, recovery_count, shard_len);
+    let encode_matrix = &mut workspace.encode_matrix;
     // SAFETY: `encode_matrix` is valid for `total * original_count` bytes.
     unsafe {
         libisal_sys::gf_gen_cauchy1_matrix(
@@ -93,8 +162,6 @@ fn encode_recovery(originals: &[&[u8]], recovery_count: usize) -> Vec<Vec<u8>> {
             original_count as i32,
         );
     }
-
-    let mut g_tbls = vec![0u8; original_count * recovery_count * 32];
     // SAFETY: buffers are sized per ISA-L requirements and live for the duration
     // of the call. We only pass valid input pointers for shard_len bytes each.
     unsafe {
@@ -102,13 +169,20 @@ fn encode_recovery(originals: &[&[u8]], recovery_count: usize) -> Vec<Vec<u8>> {
             original_count as i32,
             recovery_count as i32,
             encode_matrix[original_count * original_count..].as_ptr(),
-            g_tbls.as_mut_ptr(),
+            workspace.g_tbls.as_mut_ptr(),
         );
     }
-
-    let data_ptrs: Vec<*const u8> = originals.iter().map(|shard| shard.as_ptr()).collect();
-    let mut recovery = vec![vec![0u8; shard_len]; recovery_count];
-    let mut recovery_ptrs: Vec<*mut u8> = recovery.iter_mut().map(|shard| shard.as_mut_ptr()).collect();
+    workspace.data_ptrs.clear();
+    workspace
+        .data_ptrs
+        .extend(originals.iter().map(|shard| shard.as_ptr()));
+    workspace.recovery_ptrs.clear();
+    for i in 0..recovery_count {
+        let start = i * shard_len;
+        workspace
+            .recovery_ptrs
+            .push(workspace.recovery_buf[start..start + shard_len].as_mut_ptr());
+    }
     // SAFETY: `data_ptrs` and `recovery_ptrs` reference non-overlapping shard
     // buffers of exactly `shard_len` bytes. Tables were initialized for this
     // `(original_count, recovery_count)` pair.
@@ -117,23 +191,25 @@ fn encode_recovery(originals: &[&[u8]], recovery_count: usize) -> Vec<Vec<u8>> {
             shard_len as i32,
             original_count as i32,
             recovery_count as i32,
-            g_tbls.as_ptr(),
-            data_ptrs.as_ptr(),
-            recovery_ptrs.as_mut_ptr(),
+            workspace.g_tbls.as_ptr(),
+            workspace.data_ptrs.as_ptr(),
+            workspace.recovery_ptrs.as_mut_ptr(),
         );
     }
-    recovery
+    &workspace.recovery_buf[..recovery_count * shard_len]
 }
 
 fn decode_originals(
+    workspace: &mut Workspace,
     provided_originals: &[(usize, &[u8])],
     provided_recoveries: &[(usize, &[u8])],
     original_count: usize,
     recovery_count: usize,
     shard_len: usize,
-) -> Result<Vec<Vec<u8>>, Error> {
+) -> Result<usize, Error> {
     let total = original_count + recovery_count;
-    let mut encode_matrix = vec![0u8; total * original_count];
+    workspace.reset_for_decode(original_count, recovery_count, shard_len);
+    let encode_matrix = &mut workspace.encode_matrix;
     // SAFETY: `encode_matrix` is valid for `total * original_count` bytes.
     unsafe {
         libisal_sys::gf_gen_cauchy1_matrix(
@@ -142,60 +218,68 @@ fn decode_originals(
             original_count as i32,
         );
     }
-
-    let mut available = vec![false; total];
-    let mut recover_srcs = Vec::with_capacity(original_count);
-    let mut decode_index = Vec::with_capacity(original_count);
+    workspace.availability[..total].fill(false);
+    workspace.data_ptrs.clear();
+    workspace.indices.clear();
 
     for &(idx, shard) in provided_originals {
-        available[idx] = true;
-        recover_srcs.push(shard);
-        decode_index.push(idx);
+        workspace.availability[idx] = true;
+        workspace.data_ptrs.push(shard.as_ptr());
+        workspace.indices.push(idx);
     }
     for &(idx, shard) in provided_recoveries {
         let absolute = original_count + idx;
-        available[absolute] = true;
-        recover_srcs.push(shard);
-        decode_index.push(absolute);
+        workspace.availability[absolute] = true;
+        workspace.data_ptrs.push(shard.as_ptr());
+        workspace.indices.push(absolute);
     }
-    if recover_srcs.len() < original_count {
+    if workspace.data_ptrs.len() < original_count {
         return Err(Error::NotEnoughChunks);
     }
-
-    let missing: Vec<usize> = (0..total).filter(|idx| !available[*idx]).collect();
-    let missing_originals: BTreeSet<usize> = missing
-        .iter()
-        .copied()
-        .filter(|idx| *idx < original_count)
-        .collect();
-
-    let mut temp_matrix = vec![0u8; original_count * original_count];
-    for (row, source_index) in decode_index.iter().take(original_count).copied().enumerate() {
-        let src_row = &encode_matrix[source_index * original_count..(source_index + 1) * original_count];
-        let dst_row =
-            &mut temp_matrix[row * original_count..(row + 1) * original_count];
-        dst_row.copy_from_slice(src_row);
+    workspace.missing_originals.clear();
+    workspace.indices.truncate(workspace.data_ptrs.len());
+    workspace.decode_rows.clear();
+    workspace.recovery_ptrs.clear();
+    let missing = (0..total)
+        .filter(|&idx| !workspace.availability[idx])
+        .collect::<Vec<_>>();
+    for idx in 0..total {
+        if !workspace.availability[idx] {
+            if idx < original_count {
+                workspace.missing_originals.insert(idx);
+            }
+        }
     }
 
-    let mut invert_matrix = vec![0u8; original_count * original_count];
+    for (row, source_index) in workspace
+        .indices
+        .iter()
+        .take(original_count)
+        .copied()
+        .enumerate()
+    {
+        let src_row = &encode_matrix[source_index * original_count..(source_index + 1) * original_count];
+        let dst_row =
+            &mut workspace.temp_matrix[row * original_count..(row + 1) * original_count];
+        dst_row.copy_from_slice(src_row);
+    }
     // SAFETY: both matrices are allocated as `original_count x original_count`.
     let invert_ok = unsafe {
         libisal_sys::gf_invert_matrix(
-            temp_matrix.as_mut_ptr(),
-            invert_matrix.as_mut_ptr(),
+            workspace.temp_matrix.as_mut_ptr(),
+            workspace.invert_matrix.as_mut_ptr(),
             original_count as i32,
         )
     } == 0;
     if !invert_ok {
         return Err(Error::Inconsistent);
     }
-
-    let mut missing_decode_rows = Vec::with_capacity(missing.len() * original_count);
+    workspace.decode_rows.clear();
     for &missing_index in &missing {
         if missing_index < original_count {
             let row =
-                &invert_matrix[missing_index * original_count..(missing_index + 1) * original_count];
-            missing_decode_rows.extend_from_slice(row);
+                &workspace.invert_matrix[missing_index * original_count..(missing_index + 1) * original_count];
+            workspace.decode_rows.extend_from_slice(row);
             continue;
         }
 
@@ -207,60 +291,74 @@ fn decode_originals(
                 // SAFETY: GF multiplication is pure for any byte pair.
                 value ^= unsafe {
                     libisal_sys::gf_mul(
-                        invert_matrix[entry * original_count + column],
+                        workspace.invert_matrix[entry * original_count + column],
                         encode_row[entry],
                     )
                 };
             }
-            missing_decode_rows.push(value);
+            workspace.decode_rows.push(value);
         }
     }
-
-    if missing_decode_rows.is_empty() {
-        let mut originals = vec![vec![0u8; shard_len]; original_count];
+    if workspace.decode_rows.is_empty() {
+        workspace.original_buf[..original_count * shard_len].fill(0);
         for &(idx, shard) in provided_originals {
-            originals[idx].copy_from_slice(shard);
+            let start = idx * shard_len;
+            workspace.original_buf[start..start + shard_len].copy_from_slice(shard);
         }
-        return Ok(originals);
+        return Ok(shard_len);
     }
-
-    let mut g_tbls = vec![0u8; original_count * missing.len() * 32];
     // SAFETY: buffers are sized per ISA-L requirements and `missing_decode_rows`
     // contains exactly `missing.len() * original_count` coefficients.
     unsafe {
         libisal_sys::ec_init_tables(
             original_count as i32,
             missing.len() as i32,
-            missing_decode_rows.as_ptr(),
-            g_tbls.as_mut_ptr(),
+            workspace.decode_rows.as_ptr(),
+            workspace.g_tbls.as_mut_ptr(),
         );
     }
-
-    let source_ptrs: Vec<*const u8> = recover_srcs.iter().take(original_count).map(|shard| shard.as_ptr()).collect();
-    let mut recovered = vec![vec![0u8; shard_len]; missing.len()];
-    let mut recovered_ptrs: Vec<*mut u8> = recovered.iter_mut().map(|shard| shard.as_mut_ptr()).collect();
+    workspace.data_ptrs.clear();
+    workspace
+        .data_ptrs
+        .extend(
+            provided_originals
+                .iter()
+                .map(|(_, shard)| shard.as_ptr())
+                .chain(provided_recoveries.iter().map(|(_, shard)| shard.as_ptr()))
+                .take(original_count),
+        );
+    workspace.recovery_ptrs.clear();
+    for i in 0..missing.len() {
+        let start = i * shard_len;
+        workspace
+            .recovery_ptrs
+            .push(workspace.recovered_buf[start..start + shard_len].as_mut_ptr());
+    }
     // SAFETY: all sources and outputs are valid for `shard_len` bytes and non-overlapping.
     unsafe {
         libisal_sys::ec_encode_data(
             shard_len as i32,
             original_count as i32,
             missing.len() as i32,
-            g_tbls.as_ptr(),
-            source_ptrs.as_ptr(),
-            recovered_ptrs.as_mut_ptr(),
+            workspace.g_tbls.as_ptr(),
+            workspace.data_ptrs.as_ptr(),
+            workspace.recovery_ptrs.as_mut_ptr(),
         );
     }
-
-    let mut originals = vec![vec![0u8; shard_len]; original_count];
+    workspace.original_buf[..original_count * shard_len].fill(0);
     for &(idx, shard) in provided_originals {
-        originals[idx].copy_from_slice(shard);
+        let start = idx * shard_len;
+        workspace.original_buf[start..start + shard_len].copy_from_slice(shard);
     }
-    for (missing_index, shard) in missing.into_iter().zip(recovered.into_iter()) {
-        if missing_originals.contains(&missing_index) {
-            originals[missing_index] = shard;
+    for (recovered_idx, &missing_index) in missing.iter().enumerate() {
+        if workspace.missing_originals.contains(&missing_index) {
+            let src_start = recovered_idx * shard_len;
+            let dst_start = missing_index * shard_len;
+            workspace.original_buf[dst_start..dst_start + shard_len]
+                .copy_from_slice(&workspace.recovered_buf[src_start..src_start + shard_len]);
         }
     }
-    Ok(originals)
+    Ok(shard_len)
 }
 
 fn encode<H: Hasher, S: Strategy>(
@@ -276,13 +374,11 @@ fn encode<H: Hasher, S: Strategy>(
 
     let (padded, shard_len) = prepare_data(&data, k);
     let originals: Vec<&[u8]> = padded.chunks(shard_len).collect();
-    let recovery = encode_recovery(&originals, m);
+    let mut workspace = Workspace::new();
+    let recovery = encode_recovery(&mut workspace, &originals, m);
 
     let originals: Bytes = padded.into();
-    let recovery = recovery
-        .into_iter()
-        .flat_map(|shard| shard.into_iter())
-        .collect::<Vec<_>>();
+    let recovery = recovery.iter().copied().collect::<Vec<_>>();
     let recoveries: Bytes = recovery.into();
 
     let n = total as usize;
@@ -292,7 +388,7 @@ fn encode<H: Hasher, S: Strategy>(
         .collect();
 
     let mut builder = Builder::<H>::new(n);
-    let shard_hashes = strategy.map_init_collect_vec(&shard_slices, H::new, |hasher, shard| {
+    let shard_hashes = strategy.map_init_collect_vec(&shard_slices, H::new, |hasher: &mut H, shard| {
         hasher.update(shard);
         hasher.finalize()
     });
@@ -353,12 +449,24 @@ fn decode<'a, H: Hasher, S: Strategy>(
         return Err(Error::NotEnoughChunks);
     }
 
-    let originals = decode_originals(&provided_originals, &provided_recoveries, k, m, shard_len)?;
-    let original_refs: Vec<&[u8]> = originals.iter().map(Vec::as_slice).collect();
-    let recoveries = encode_recovery(&original_refs, m);
+    let mut workspace = Workspace::new();
+    decode_originals(
+        &mut workspace,
+        &provided_originals,
+        &provided_recoveries,
+        k,
+        m,
+        shard_len,
+    )?;
+    let original_chunks = workspace.original_buf[..k * shard_len]
+        .chunks(shard_len)
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    let original_refs: Vec<&[u8]> = original_chunks.iter().map(Vec::as_slice).collect();
+    let recoveries = encode_recovery(&mut workspace, &original_refs, m);
 
-    let mut shards: Vec<&[u8]> = originals.iter().map(Vec::as_slice).collect();
-    shards.extend(recoveries.iter().map(Vec::as_slice));
+    let mut shards: Vec<&[u8]> = original_refs;
+    shards.extend(recoveries.chunks(shard_len));
 
     for (i, digest) in strategy.map_init_collect_vec(
         shard_digests
