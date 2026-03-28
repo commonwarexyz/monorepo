@@ -2018,7 +2018,7 @@ pub(super) mod test {
     fn test_immutable_child_root_matches_between_pending_and_committed_paths() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut db = open_db(context.with_label("db")).await;
+            let mut db = open_db_generic::<mmr::Family>(context.with_label("db")).await;
 
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
