@@ -19,6 +19,7 @@ mod tests {
     use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
     use futures::join;
     use std::net::SocketAddr;
+    use tokio::sync::{mpsc, oneshot};
 
     const CLIENT_SEND_DATA: &[u8] = b"client_send_data";
     const SERVER_SEND_DATA: &[u8] = b"server_send_data";
@@ -48,6 +49,10 @@ mod tests {
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         let runtime = tokio::runtime::Handle::current();
+        // Keep the server socket alive until the client confirms it received the
+        // response. This avoids immediate zero-linger closes resetting the
+        // connection before the peer drains the bytes.
+        let (client_done_tx, client_done_rx) = oneshot::channel();
 
         // Spawn server
         let server = runtime.spawn(async move {
@@ -61,6 +66,9 @@ mod tests {
             sink.send(IoBuf::from(SERVER_SEND_DATA))
                 .await
                 .expect("Failed to send");
+            client_done_rx
+                .await
+                .expect("Client completion signal missing");
         });
 
         // Spawn client, connect to server, send and receive data over connection
@@ -80,6 +88,7 @@ mod tests {
                 .await
                 .expect("Failed to receive data");
             assert_eq!(received.coalesce(), SERVER_SEND_DATA);
+            client_done_tx.send(()).expect("Failed to notify server");
         });
 
         // Wait for both tasks to complete
@@ -100,6 +109,9 @@ mod tests {
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         let runtime = tokio::runtime::Handle::current();
+        // Keep the client socket alive until the server confirms it drained the
+        // full payload.
+        let (server_done_tx, server_done_rx) = oneshot::channel();
 
         // Build one logical message from multiple chunks so this test exercises
         // the `IoBufs` send path (instead of the single-buffer fast path).
@@ -119,6 +131,7 @@ mod tests {
                 .await
                 .expect("Failed to receive");
             assert_eq!(received.coalesce(), expected.as_ref());
+            server_done_tx.send(()).expect("Failed to notify client");
         });
 
         // Spawn client
@@ -131,6 +144,9 @@ mod tests {
 
             // Send the pre-built vectored message.
             sink.send(message).await.expect("Failed to send data");
+            server_done_rx
+                .await
+                .expect("Server completion signal missing");
         });
 
         // Wait for both tasks to complete
@@ -142,6 +158,7 @@ mod tests {
     // Test handling multiple clients
     async fn test_network_multiple_clients<N: crate::Network>(network: N) {
         let runtime = tokio::runtime::Handle::current();
+        let (client_done_tx, mut client_done_rx) = mpsc::unbounded_channel();
 
         // Start a server
         let mut listener = network
@@ -165,6 +182,10 @@ mod tests {
                 sink.send(IoBuf::from(SERVER_SEND_DATA))
                     .await
                     .expect("Failed to send");
+                client_done_rx
+                    .recv()
+                    .await
+                    .expect("Client completion signal missing");
             }
         });
 
@@ -189,6 +210,7 @@ mod tests {
                     .expect("Failed to receive data");
                 // Verify the received data
                 assert_eq!(received.coalesce(), SERVER_SEND_DATA);
+                client_done_tx.send(()).expect("Failed to notify server");
             }
         });
 
@@ -210,6 +232,7 @@ mod tests {
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         let runtime = tokio::runtime::Handle::current();
+        let (client_done_tx, client_done_rx) = oneshot::channel();
         let server = runtime.spawn(async move {
             let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
 
@@ -221,6 +244,9 @@ mod tests {
                     .expect("Failed to receive chunk");
                 sink.send(received).await.expect("Failed to send chunk");
             }
+            client_done_rx
+                .await
+                .expect("Client completion signal missing");
         });
 
         // Client task
@@ -245,6 +271,7 @@ mod tests {
                     .expect("Failed to receive chunk");
                 assert_eq!(received.coalesce(), &pattern[..]);
             }
+            client_done_tx.send(()).expect("Failed to notify server");
         });
 
         // Wait for both tasks to complete
@@ -282,11 +309,15 @@ mod tests {
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         let runtime = tokio::runtime::Handle::current();
+        let (client_done_tx, client_done_rx) = oneshot::channel();
 
         // Server sends data
         let server = runtime.spawn(async move {
             let (_, mut sink, _) = listener.accept().await.expect("Failed to accept");
             sink.send(IoBuf::from(DATA)).await.expect("Failed to send");
+            client_done_rx
+                .await
+                .expect("Client completion signal missing");
         });
 
         // Client receives and tests peek
@@ -323,6 +354,7 @@ mod tests {
             // After consuming all data, peek should return empty
             let final_peek = stream.peek(100);
             assert!(final_peek.is_empty());
+            client_done_tx.send(()).expect("Failed to notify server");
         });
 
         let (server_result, client_result) = join!(server, client);
