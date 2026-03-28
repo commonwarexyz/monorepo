@@ -263,8 +263,7 @@ fn read_prefix_and_payload_len(shards: &[&[u8]]) -> Result<(usize, usize), Error
             prefix_len += read;
         }
         u32::from_be_bytes(prefix) as usize
-    }
-    ;
+    };
     let payload_len = total_len - u32::SIZE;
     if data_len > payload_len {
         return Err(Error::Inconsistent);
@@ -490,14 +489,12 @@ fn decode<'a, H: Hasher, S: Strategy>(
     }
 
     // Hash only the shards whose digests were not already checked.
-    for (i, digest) in strategy.map_init_collect_vec(
-        &missing_digest_shards,
-        H::new,
-        |hasher, (i, shard)| {
+    for (i, digest) in
+        strategy.map_init_collect_vec(&missing_digest_shards, H::new, |hasher, (i, shard)| {
             hasher.update(shard);
             (*i, hasher.finalize())
-        },
-    ) {
+        })
+    {
         shard_digests[i] = Some(digest);
     }
 
@@ -841,11 +838,13 @@ mod tests {
             extra_shards: NZU16!(2),
         };
         let payload = b"hello world";
-        let (expected_root, expected_chunks) = RS::encode(&config, payload.as_slice(), &STRATEGY).unwrap();
+        let (expected_root, expected_chunks) =
+            RS::encode(&config, payload.as_slice(), &STRATEGY).unwrap();
 
         let left = Bytes::from_static(b"hello ");
         let right = Bytes::from_static(b"world");
-        let (actual_root, actual_chunks) = RS::encode(&config, left.chain(right), &STRATEGY).unwrap();
+        let (actual_root, actual_chunks) =
+            RS::encode(&config, left.chain(right), &STRATEGY).unwrap();
 
         assert_eq!(actual_root, expected_root);
         assert_eq!(actual_chunks, expected_chunks);
