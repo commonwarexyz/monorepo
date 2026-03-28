@@ -29,6 +29,7 @@ crc-fast = { workspace = true, features = ["std"], optional = true }
 ctutils.workspace = true
 ecdsa.workspace = true
 ed25519-consensus = { workspace = true, default-features = false }
+libisal-sys = { workspace = true, optional = true }
 num-rational = { workspace = true, optional = true }
 num-traits = { workspace = true, optional = true }
 p256 = { workspace = true, features = ["ecdsa"] }
@@ -71,6 +72,7 @@ bench = false
 [features]
 default = [ "std" ]
 blake3-parallel = [ "blake3/rayon", "std" ]
+isa-l = [ "dep:libisal-sys", "std" ]
 sha2-asm = [ "sha2/asm" ]
 mocks = [ "std" ]
 arbitrary = [

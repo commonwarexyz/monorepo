@@ -20,6 +20,11 @@ commonware_macros::stability_scope!(ALPHA {
     mod reed_solomon;
     pub use reed_solomon::{Error as ReedSolomonError, ReedSolomon};
 
+    #[cfg(feature = "isa-l")]
+    mod reed_solomon_gf8;
+    #[cfg(feature = "isa-l")]
+    pub use reed_solomon_gf8::{Error as ReedSolomonGf8Error, ReedSolomonGf8};
+
     mod zoda;
     pub use zoda::{Error as ZodaError, Zoda};
 

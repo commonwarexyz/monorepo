@@ -50,18 +50,18 @@ fn total_shards(config: &Config) -> Result<u16, Error> {
 #[derive(Debug, Clone)]
 pub struct Chunk<D: Digest> {
     /// The shard of encoded data.
-    shard: Bytes,
+    pub(crate) shard: Bytes,
 
     /// The index of [`Chunk`] in the original data.
-    index: u16,
+    pub(crate) index: u16,
 
     /// The multi-proof of the shard in the [`bmt`] at the given index.
-    proof: bmt::Proof<D>,
+    pub(crate) proof: bmt::Proof<D>,
 }
 
 impl<D: Digest> Chunk<D> {
     /// Create a new [`Chunk`] from the given shard, index, and proof.
-    const fn new(shard: Bytes, index: u16, proof: bmt::Proof<D>) -> Self {
+    pub(crate) const fn new(shard: Bytes, index: u16, proof: bmt::Proof<D>) -> Self {
         Self {
             shard,
             index,
@@ -70,7 +70,7 @@ impl<D: Digest> Chunk<D> {
     }
 
     /// Verify a [`Chunk`] against the given root.
-    fn verify<H: Hasher<Digest = D>>(&self, index: u16, root: &D) -> Option<CheckedChunk<D>> {
+    pub(crate) fn verify<H: Hasher<Digest = D>>(&self, index: u16, root: &D) -> Option<CheckedChunk<D>> {
         // Ensure the index matches
         if index != self.index {
             return None;
@@ -102,14 +102,14 @@ impl<D: Digest> Chunk<D> {
 /// time to prevent cross-commitment shard mixing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckedChunk<D: Digest> {
-    root: D,
-    shard: Bytes,
-    index: u16,
-    digest: D,
+    pub(crate) root: D,
+    pub(crate) shard: Bytes,
+    pub(crate) index: u16,
+    pub(crate) digest: D,
 }
 
 impl<D: Digest> CheckedChunk<D> {
-    const fn new(root: D, shard: Bytes, index: u16, digest: D) -> Self {
+    pub(crate) const fn new(root: D, shard: Bytes, index: u16, digest: D) -> Self {
         Self {
             root,
             shard,
@@ -176,7 +176,7 @@ where
 /// Returns a contiguous buffer of `k` padded shards and the shard length.
 /// The buffer layout is `[length_prefix | data | zero_padding]` split into
 /// `k` equal-sized shards of `shard_len` bytes each.
-fn prepare_data(data: &[u8], k: usize) -> (Vec<u8>, usize) {
+pub(crate) fn prepare_data(data: &[u8], k: usize) -> (Vec<u8>, usize) {
     // Compute shard length
     let data_len = data.len();
     let prefixed_len = u32::SIZE + data_len;
@@ -200,7 +200,7 @@ fn prepare_data(data: &[u8], k: usize) -> (Vec<u8>, usize) {
 ///
 /// The first `k` shards, when concatenated, form `[length_prefix | data | padding]`.
 /// This function bulk-copies shard slices while skipping the 4-byte prefix.
-fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
+pub(crate) fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
     let shards = shards.get(..k).ok_or(Error::NotEnoughChunks)?;
     let (data_len, payload_len) = read_prefix_and_payload_len(shards)?;
     let mut payload = copy_payload_after_prefix(shards, payload_len);

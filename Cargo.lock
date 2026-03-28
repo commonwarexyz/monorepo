@@ -165,6 +165,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "autotools"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef941527c41b0fc0dd48511a8154cd5fc7e29200a0ff8b7203c5d777dbc795cf"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "aws-config"
 version = "1.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1116,6 +1125,7 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "criterion",
+ "libisal-sys",
  "num-rational",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -1279,6 +1289,7 @@ dependencies = [
  "ecdsa 0.16.9",
  "ed25519-consensus",
  "getrandom 0.2.16",
+ "libisal-sys",
  "num-rational",
  "num-traits",
  "p256 0.13.2",
@@ -3307,6 +3318,16 @@ checksum = "5037190e1f70cbeef565bd267599242926f724d3b8a9f510fd7e0b540cfa4404"
 dependencies = [
  "arbitrary",
  "cc",
+]
+
+[[package]]
+name = "libisal-sys"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5d628353b73410bccb2a0410eef95ac949182de46a274d51656a0b01dec50b8"
+dependencies = [
+ "autotools",
+ "pkg-config",
 ]
 
 [[package]]

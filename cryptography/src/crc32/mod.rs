@@ -1,7 +1,9 @@
 //! CRC32C implementation of the `Hasher` trait.
 //!
-//! This implementation uses the `crc-fast` crate to generate CRC32C (iSCSI/Castagnoli)
-//! checksums as specified in RFC 3720. CRC32C uses polynomial 0x1EDC6F41.
+//! This implementation uses the `crc-fast` crate by default to generate CRC32C
+//! (iSCSI/Castagnoli) checksums as specified in RFC 3720. When the `isa-l`
+//! feature is enabled, it uses ISA-L's `crc32_iscsi` implementation instead.
+//! CRC32C uses polynomial 0x1EDC6F41.
 //!
 //! # Warning
 //!
@@ -40,21 +42,102 @@ use rand_core::CryptoRngCore;
 /// Size of a CRC32 checksum in bytes.
 const SIZE: usize = 4;
 
-/// The CRC32 algorithm used (CRC32C/iSCSI/Castagnoli).
-const ALGORITHM: crc_fast::CrcAlgorithm = crc_fast::CrcAlgorithm::Crc32Iscsi;
+#[cfg(feature = "isa-l")]
+mod backend {
+    use core::ffi::{c_uchar, c_uint};
+    use libisal_sys as _;
+
+    pub type State = u32;
+
+    unsafe extern "C" {
+        fn crc32_iscsi(buffer: *mut c_uchar, len: i32, crc_init: c_uint) -> c_uint;
+    }
+
+    #[inline]
+    pub const fn new() -> State {
+        u32::MAX
+    }
+
+    #[inline]
+    pub fn checksum(data: &[u8]) -> u32 {
+        if data.is_empty() {
+            return 0;
+        }
+        let mut state = new();
+        update(&mut state, data);
+        !state
+    }
+
+    pub fn update(state: &mut State, mut data: &[u8]) {
+        while !data.is_empty() {
+            let len = data.len().min(i32::MAX as usize);
+            let (chunk, rest) = data.split_at(len);
+            // SAFETY: `chunk.as_ptr()` is valid for `len` bytes and ISA-L only reads
+            // the provided input buffer while returning the updated CRC32C state.
+            *state = unsafe {
+                crc32_iscsi(chunk.as_ptr() as *mut c_uchar, len as i32, *state as c_uint)
+            } as u32;
+            data = rest;
+        }
+    }
+
+    #[inline]
+    pub fn finalize_reset(state: &mut State) -> u32 {
+        let finalized = !*state;
+        *state = new();
+        finalized
+    }
+
+    #[inline]
+    pub fn reset(state: &mut State) {
+        *state = new();
+    }
+}
+
+#[cfg(not(feature = "isa-l"))]
+mod backend {
+    const ALGORITHM: crc_fast::CrcAlgorithm = crc_fast::CrcAlgorithm::Crc32Iscsi;
+
+    pub type State = crc_fast::Digest;
+
+    #[inline]
+    pub fn new() -> State {
+        crc_fast::Digest::new(ALGORITHM)
+    }
+
+    #[inline]
+    pub fn checksum(data: &[u8]) -> u32 {
+        crc_fast::checksum(ALGORITHM, data) as u32
+    }
+
+    #[inline]
+    pub fn update(state: &mut State, data: &[u8]) {
+        state.update(data);
+    }
+
+    #[inline]
+    pub fn finalize_reset(state: &mut State) -> u32 {
+        state.finalize_reset() as u32
+    }
+
+    #[inline]
+    pub fn reset(state: &mut State) {
+        *state = new();
+    }
+}
 
 /// CRC32C hasher.
 ///
 /// Uses the iSCSI polynomial (0x1EDC6F41) as specified in RFC 3720.
 #[derive(Debug)]
 pub struct Crc32 {
-    inner: crc_fast::Digest,
+    inner: backend::State,
 }
 
 impl Default for Crc32 {
     fn default() -> Self {
         Self {
-            inner: crc_fast::Digest::new(ALGORITHM),
+            inner: backend::new(),
         }
     }
 }
@@ -72,7 +155,7 @@ impl Crc32 {
     /// Returns the checksum as a `u32` directly.
     #[inline]
     pub fn checksum(data: &[u8]) -> u32 {
-        crc_fast::checksum(ALGORITHM, data) as u32
+        backend::checksum(data)
     }
 }
 
@@ -80,16 +163,16 @@ impl Hasher for Crc32 {
     type Digest = Digest;
 
     fn update(&mut self, message: &[u8]) -> &mut Self {
-        self.inner.update(message);
+        backend::update(&mut self.inner, message);
         self
     }
 
     fn finalize(&mut self) -> Self::Digest {
-        Self::Digest::from(self.inner.finalize_reset() as u32)
+        Self::Digest::from(backend::finalize_reset(&mut self.inner))
     }
 
     fn reset(&mut self) -> &mut Self {
-        self.inner = crc_fast::Digest::new(ALGORITHM);
+        backend::reset(&mut self.inner);
         self
     }
 }

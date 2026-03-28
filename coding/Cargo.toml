@@ -23,6 +23,7 @@ commonware-math.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
+libisal-sys = { workspace = true, optional = true }
 num-rational.workspace = true
 rand.workspace = true
 rand_core.workspace = true
@@ -42,6 +43,7 @@ rand.workspace = true
 rand_chacha.workspace = true
 
 [features]
+isa-l = [ "dep:libisal-sys", "commonware-cryptography/isa-l" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
