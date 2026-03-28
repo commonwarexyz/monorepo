@@ -248,22 +248,23 @@ fn read_prefix_and_payload_len(shards: &[&[u8]]) -> Result<(usize, usize), Error
         return Err(Error::Inconsistent);
     }
 
-    let data_len = if let Some(prefix) = first.get(..u32::SIZE) {
-        u32::from_be_bytes(prefix.try_into().expect("prefix length must match")) as usize
-    } else {
-        // Read the length prefix, which may span multiple shards.
-        let mut prefix = [0u8; u32::SIZE];
-        let mut prefix_len = 0usize;
-        for shard in shards {
-            if prefix_len == u32::SIZE {
-                break;
+    let data_len = first.get(..u32::SIZE).map_or_else(
+        || {
+            // Read the length prefix, which may span multiple shards.
+            let mut prefix = [0u8; u32::SIZE];
+            let mut prefix_len = 0usize;
+            for shard in shards {
+                if prefix_len == u32::SIZE {
+                    break;
+                }
+                let read = (u32::SIZE - prefix_len).min(shard.len());
+                prefix[prefix_len..prefix_len + read].copy_from_slice(&shard[..read]);
+                prefix_len += read;
             }
-            let read = (u32::SIZE - prefix_len).min(shard.len());
-            prefix[prefix_len..prefix_len + read].copy_from_slice(&shard[..read]);
-            prefix_len += read;
-        }
-        u32::from_be_bytes(prefix) as usize
-    };
+            u32::from_be_bytes(prefix) as usize
+        },
+        |prefix| u32::from_be_bytes(prefix.try_into().expect("prefix length must match")) as usize,
+    );
     let payload_len = total_len - u32::SIZE;
     if data_len > payload_len {
         return Err(Error::Inconsistent);
@@ -704,7 +705,7 @@ mod tests {
         let min = 3u16;
 
         // Encode the data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data, &STRATEGY).unwrap();
 
         // Use a mix of original and recovery pieces
         let pieces: Vec<_> = vec![
@@ -725,7 +726,7 @@ mod tests {
         let min = 4u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data, &STRATEGY).unwrap();
 
         // Try with fewer than min
         let pieces: Vec<_> = chunks
@@ -746,7 +747,7 @@ mod tests {
         let min = 3u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data, &STRATEGY).unwrap();
 
         // Include duplicate index by cloning the first chunk
         let pieces = [
@@ -767,7 +768,7 @@ mod tests {
         let min = 3u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data, &STRATEGY).unwrap();
 
         // Verify all proofs at invalid index
         for i in 0..total {
@@ -781,7 +782,7 @@ mod tests {
         let data = b"Test parameter validation";
 
         // total <= min should panic
-        encode::<Sha256, _>(3, 3, data.to_vec(), &STRATEGY).unwrap();
+        encode::<Sha256, _>(3, 3, data, &STRATEGY).unwrap();
     }
 
     #[test]
@@ -790,7 +791,7 @@ mod tests {
         let data = b"Test parameter validation";
 
         // min = 0 should panic
-        encode::<Sha256, _>(5, 0, data.to_vec(), &STRATEGY).unwrap();
+        encode::<Sha256, _>(5, 0, data, &STRATEGY).unwrap();
     }
 
     #[test]
@@ -800,7 +801,7 @@ mod tests {
         let min = 30u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data, &STRATEGY).unwrap();
 
         // Try to decode with min
         let minimal = chunks
@@ -858,7 +859,7 @@ mod tests {
 
         // Encode data correctly to get valid chunks
         let (_correct_root, chunks) =
-            encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+            encode::<Sha256, _>(total, min, data, &STRATEGY).unwrap();
 
         // Create a malicious/fake root (simulating a malicious encoder)
         let mut hasher = Sha256::new();
@@ -914,7 +915,7 @@ mod tests {
         let min = 3u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data, &STRATEGY).unwrap();
         let mut pieces: Vec<_> = chunks.into_iter().map(|c| checked(root, c)).collect();
 
         // Tamper with one of the checked chunks by modifying the shard data.
@@ -1048,7 +1049,7 @@ mod tests {
         let min = 3u16;
 
         // Encode the data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data, &STRATEGY).unwrap();
 
         // Use a mix of original and recovery pieces
         let mut invalid = checked(root, chunks[1].clone());
