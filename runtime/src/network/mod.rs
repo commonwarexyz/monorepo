@@ -146,9 +146,9 @@ mod tests {
 
         // Keep all sockets alive until every participant finishes.
         let barrier = Arc::new(Barrier::new(NUM_CLIENTS * 2));
-        let server_barrier = barrier.clone();
 
         // Server task
+        let server_barrier = barrier.clone();
         let server = tokio::spawn(async move {
             let mut set = JoinSet::new();
 
