@@ -257,8 +257,23 @@ fn bench_decode_breakdown(c: &mut Criterion) {
 fn bench_encode_breakdown(c: &mut Criterion) {
     let prepared = prepare_target_case();
     let k = TARGET_MIN as usize;
+    let n = TARGET_CHUNKS as usize;
     let recovery_refs: Vec<_> = prepared.recoveries.iter().map(Vec::as_slice).collect();
     let m = prepared.recoveries.len();
+    let shard_refs: Vec<_> = prepared
+        .originals
+        .iter()
+        .map(Vec::as_slice)
+        .chain(prepared.recoveries.iter().map(Vec::as_slice))
+        .collect();
+
+    let encode_tree = {
+        let mut builder = Builder::<Sha256>::new(prepared.digests.len());
+        for digest in &prepared.digests {
+            builder.add(digest);
+        }
+        builder.build()
+    };
 
     c.bench_function(
         &format!(
@@ -271,6 +286,52 @@ fn bench_encode_breakdown(c: &mut Criterion) {
                     buf.extend_from_slice(shard);
                 }
                 black_box(buf);
+            });
+        },
+    );
+
+    c.bench_function(
+        &format!(
+            "reed_solomon::encode_substeps/shard_hashing msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+        ),
+        |b| {
+            b.iter(|| {
+                let digests: Vec<_> = shard_refs.iter().map(|shard| Sha256::hash(shard)).collect();
+                black_box(digests);
+            });
+        },
+    );
+
+    c.bench_function(
+        &format!(
+            "reed_solomon::encode_substeps/bmt_build msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+        ),
+        |b| {
+            b.iter_batched(
+                || prepared.digests.clone(),
+                |digests| {
+                    let mut builder = Builder::<Sha256>::new(digests.len());
+                    for digest in &digests {
+                        builder.add(digest);
+                    }
+                    let root = builder.build().root();
+                    black_box(root);
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
+
+    c.bench_function(
+        &format!(
+            "reed_solomon::encode_substeps/proof_generation msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+        ),
+        |b| {
+            b.iter(|| {
+                let proofs: Vec<_> = (0..n)
+                    .map(|index| encode_tree.proof(index as u32).unwrap())
+                    .collect();
+                black_box(proofs);
             });
         },
     );
