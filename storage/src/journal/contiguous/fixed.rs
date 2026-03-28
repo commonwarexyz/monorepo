@@ -57,7 +57,7 @@
 use super::Reader as _;
 use crate::{
     journal::{
-        contiguous::Mutable,
+        contiguous::{Many, Mutable},
         segmented::fixed::{Config as SegmentedConfig, Journal as SegmentedJournal},
         Error,
     },
@@ -66,7 +66,10 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::buffer::paged::CacheRef;
-use commonware_utils::sync::{AsyncRwLockReadGuard, UpgradableAsyncRwLock};
+use commonware_utils::{
+    sync::{AsyncRwLockReadGuard, UpgradableAsyncRwLock},
+    AsSlice,
+};
 use futures::{stream::Stream, StreamExt};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::warn;
@@ -648,15 +651,20 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Append a new item to the journal. Return the item's position in the journal, or error if the
     /// operation fails.
     pub async fn append(&self, item: &A) -> Result<u64, Error> {
-        self.append_many(std::slice::from_ref(item)).await
+        self.append_many(Many::flat(std::slice::from_ref(item)))
+            .await
     }
 
-    /// Append multiple items to the journal, returning the position of the last item appended.
+    /// Append items to the journal, returning the position of the last item appended.
     ///
-    /// Acquires the write lock once for all items instead of per-item.
-    /// No-ops if items is empty, returning the current size (next append position).
-    pub async fn append_many(&self, items: &[A]) -> Result<u64, Error> {
-        if items.is_empty() {
+    /// Acquires the write lock once for all appended items instead of per-item.
+    /// No-ops if the input contains no items, returning the current size (next append position).
+    pub async fn append_many<'a, S>(&'a self, items: Many<'a, A, S>) -> Result<u64, Error>
+    where
+        S: AsSlice<A> + Sync,
+        A: Sync,
+    {
+        if !(0..items.batch_count()).any(|index| !items.batch(index).is_empty()) {
             return Ok(self.inner.read().await.size);
         }
 
@@ -664,21 +672,23 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let mut inner = self.inner.write().await;
 
         let mut last_position = 0;
-        for item in items {
-            // Append the item to the journal.
-            let (section, _) = self.position_to_section(inner.size);
-            inner.journal.append(section, item).await?;
-            last_position = inner.size;
-            inner.size += 1;
+        for batch_index in 0..items.batch_count() {
+            for item in items.batch(batch_index) {
+                // Append the item to the journal.
+                let (section, _) = self.position_to_section(inner.size);
+                inner.journal.append(section, item).await?;
+                last_position = inner.size;
+                inner.size += 1;
 
-            // The section was filled and must be synced. Downgrade so readers can continue
-            // during the sync, but keep mutators blocked. After sync, upgrade again to create
-            // the next tail section before any append can proceed.
-            if inner.size.is_multiple_of(self.items_per_blob) {
-                let inner_ref = inner.downgrade_to_upgradable();
-                inner_ref.journal.sync(section).await?;
-                inner = inner_ref.upgrade().await;
-                inner.journal.ensure_section_exists(section + 1).await?;
+                // The section was filled and must be synced. Downgrade so readers can continue
+                // during the sync, but keep mutators blocked. After sync, upgrade again to create
+                // the next tail section before any append can proceed.
+                if inner.size.is_multiple_of(self.items_per_blob) {
+                    let inner_ref = inner.downgrade_to_upgradable();
+                    inner_ref.journal.sync(section).await?;
+                    inner = inner_ref.upgrade().await;
+                    inner.journal.ensure_section_exists(section + 1).await?;
+                }
             }
         }
 
@@ -852,7 +862,14 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
         Self::append(self, item).await
     }
 
-    async fn append_many(&mut self, items: &[Self::Item]) -> Result<u64, Error> {
+    async fn append_many<'a, S>(
+        &'a mut self,
+        items: super::Many<'a, Self::Item, S>,
+    ) -> Result<u64, Error>
+    where
+        S: AsSlice<Self::Item> + Sync,
+        Self::Item: Sync,
+    {
         Self::append_many(self, items).await
     }
 
@@ -1038,6 +1055,30 @@ mod tests {
             let new_blobs = scan_partition(&context, &blobs_partition).await;
             assert!(legacy_blobs.is_empty());
             assert!(!new_blobs.is_empty());
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_append_many_nested() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(2));
+            let journal = Journal::init(context.with_label("batched"), cfg)
+                .await
+                .expect("failed to initialize journal");
+
+            let first = [test_digest(0), test_digest(1)];
+            let second = [test_digest(2)];
+            let pos = journal
+                .append_many(Many::nested(&[&first[..], &second[..]]))
+                .await
+                .expect("failed to append nested runs");
+            assert_eq!(pos, 2);
+            assert_eq!(journal.size().await, 3);
+
+            assert_eq!(journal.read(0).await.unwrap(), first[0]);
+            assert_eq!(journal.read(1).await.unwrap(), first[1]);
+            assert_eq!(journal.read(2).await.unwrap(), second[0]);
         });
     }
 
