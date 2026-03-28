@@ -47,8 +47,7 @@ mod tests {
             .expect("Failed to bind");
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
-        // `join!` keeps both futures alive until both complete, preventing
-        // socket close from causing errors on pending receives.
+        // Wait to drop any open sockets until both sides have completed.
         join!(
             async move {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
@@ -135,13 +134,12 @@ mod tests {
 
         // Keep all sockets alive until every participant finishes.
         let barrier = Arc::new(Barrier::new(NUM_CLIENTS * 2));
-
         let server_barrier = barrier.clone();
         let server = tokio::spawn(async move {
             let mut set = JoinSet::new();
             for _ in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
-                let b = server_barrier.clone();
+                let barrier = server_barrier.clone();
                 set.spawn(async move {
                     let received = stream
                         .recv(CLIENT_SEND_DATA.len())
@@ -151,7 +149,7 @@ mod tests {
                     sink.send(IoBuf::from(SERVER_SEND_DATA))
                         .await
                         .expect("Failed to send");
-                    b.wait().await;
+                    barrier.wait().await;
                 });
             }
             while let Some(result) = set.join_next().await {
@@ -162,7 +160,7 @@ mod tests {
         let mut set = JoinSet::new();
         for _ in 0..NUM_CLIENTS {
             let network = network.clone();
-            let b = barrier.clone();
+            let barrier = barrier.clone();
             set.spawn(async move {
                 let (mut sink, mut stream) = network
                     .dial(listener_addr)
@@ -176,10 +174,11 @@ mod tests {
                     .await
                     .expect("Failed to receive data");
                 assert_eq!(received.coalesce(), SERVER_SEND_DATA);
-                b.wait().await;
+                barrier.wait().await;
             });
         }
 
+        // Wait for all servers and clients to complete.
         while let Some(result) = set.join_next().await {
             result.expect("Client task failed");
         }
@@ -201,6 +200,7 @@ mod tests {
         join!(
             async move {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+
                 // Receive and echo large data in chunks
                 for _ in 0..NUM_CHUNKS {
                     let received = stream
@@ -218,6 +218,7 @@ mod tests {
                     .expect("Failed to dial server");
                 // Create a pattern of data
                 let pattern = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect::<Vec<_>>();
+
                 // Send and verify data in chunks
                 for _ in 0..NUM_CHUNKS {
                     sink.send(pattern.clone())
@@ -329,23 +330,20 @@ mod tests {
             .unwrap();
         let addr = listener.local_addr().unwrap();
 
-        // Keep all sockets alive until every participant finishes (otherwise,
-        // socket close may cause an error on receive).
+        // Spawn all servers.
         let barrier = Arc::new(Barrier::new(NUM_CLIENTS * 2));
-
-        // Spawn a server task that echoes messages from many clients.
         let server_barrier = barrier.clone();
         let server = tokio::spawn(async move {
             let mut set = JoinSet::new();
             for _ in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-                let b = server_barrier.clone();
+                let barrier = server_barrier.clone();
                 set.spawn(async move {
                     for _ in 0..NUM_MESSAGES {
                         let received = stream.recv(MESSAGE_SIZE).await.unwrap();
                         sink.send(received).await.unwrap();
                     }
-                    b.wait().await;
+                    barrier.wait().await;
                 });
             }
             while let Some(result) = set.join_next().await {
@@ -353,10 +351,11 @@ mod tests {
             }
         });
 
+        // Spawn all clients.
         let mut set = JoinSet::new();
         for _ in 0..NUM_CLIENTS {
             let network = network.clone();
-            let b = barrier.clone();
+            let barrier = barrier.clone();
             set.spawn(async move {
                 let (mut sink, mut stream) = network.dial(addr).await.unwrap();
                 let payload = vec![42u8; MESSAGE_SIZE];
@@ -365,10 +364,11 @@ mod tests {
                     let received = stream.recv(MESSAGE_SIZE).await.unwrap();
                     assert_eq!(received.coalesce(), &payload[..]);
                 }
-                b.wait().await;
+                barrier.wait().await;
             });
         }
 
+        // Wait for all servers and clients to complete.
         while let Some(result) = set.join_next().await {
             result.unwrap();
         }
