@@ -4,8 +4,8 @@ TEST_DIR ?= traces
 TRACE_TARGET ?= simplex_ed25519_quint_twins_disrupter
 FUZZ_RUNS ?= -1
 TRACE_SELECTION_STRATEGY ?= smallscope
-MIN_REQUIRED_CONTAINERS ?= 3
-MAX_REQUIRED_CONTAINERS ?= 10
+MIN_REQUIRED_CONTAINERS ?= 5
+MAX_REQUIRED_CONTAINERS ?= 20
 
 .PHONY: test typecheck repl check clean get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces tv tv_live tv_live_fuzz tv_live_watch generate_itf convert_itf replay_itf clean_mbt_traces conformance_roundtrip ist
 
@@ -46,9 +46,9 @@ run:
 
 
 get_fuzz_traces:
-	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
-	COMMONWARE_MIN_REQUIRED_CONTAINERS=$(MIN_REQUIRED_CONTAINERS) \
-	COMMONWARE_MAX_REQUIRED_CONTAINERS=$(MAX_REQUIRED_CONTAINERS) \
+	TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
+	MIN_REQUIRED_CONTAINERS=$(MIN_REQUIRED_CONTAINERS) \
+	MAX_REQUIRED_CONTAINERS=$(MAX_REQUIRED_CONTAINERS) \
 	cargo +nightly fuzz run $(TRACE_TARGET) -- -runs=$(FUZZ_RUNS)
 
 build_quint_tests_from_fuzz_traces:
@@ -59,7 +59,7 @@ build_quint_tests_from_fuzz_traces:
 	done
 
 test_traces:
-	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
+	TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
 	./scripts/test_traces.sh
 
 clean_fuzz_traces:
@@ -74,7 +74,7 @@ tv: clean_fuzz_traces clean_traces get_fuzz_traces build_quint_tests_from_fuzz_t
 
 tv_live: clean_fuzz_traces clean_traces
 	@bash -eu -o pipefail -c '\
-		COMMONWARE_TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
+		TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
 		./scripts/watch_new_traces.sh "$(TEST_DIR)" "$(FUZZ_TRACES_ROOT)" & \
 		watcher=$$!; \
 		cleanup() { \
@@ -82,9 +82,9 @@ tv_live: clean_fuzz_traces clean_traces
 			wait $$watcher 2>/dev/null || true; \
 		}; \
 		trap cleanup EXIT INT TERM; \
-		COMMONWARE_TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
-		COMMONWARE_MIN_REQUIRED_CONTAINERS="$(MIN_REQUIRED_CONTAINERS)" \
-		COMMONWARE_MAX_REQUIRED_CONTAINERS="$(MAX_REQUIRED_CONTAINERS)" \
+		TRACE_SELECTION_STRATEGY="$(TRACE_SELECTION_STRATEGY)" \
+		MIN_REQUIRED_CONTAINERS="$(MIN_REQUIRED_CONTAINERS)" \
+		MAX_REQUIRED_CONTAINERS="$(MAX_REQUIRED_CONTAINERS)" \
 		cargo +nightly fuzz run "$(TRACE_TARGET)" -- -runs=$(FUZZ_RUNS) & \
 		fuzz=$$!; \
 		while kill -0 $$watcher 2>/dev/null && kill -0 $$fuzz 2>/dev/null; do \
@@ -104,13 +104,13 @@ tv_live: clean_fuzz_traces clean_traces
 
 tv_live_fuzz:
 	rm -rf $(FUZZ_TRACES_ROOT)
-	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
-	COMMONWARE_MIN_REQUIRED_CONTAINERS=$(MIN_REQUIRED_CONTAINERS) \
-	COMMONWARE_MAX_REQUIRED_CONTAINERS=$(MAX_REQUIRED_CONTAINERS) \
+	TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
+	MIN_REQUIRED_CONTAINERS=$(MIN_REQUIRED_CONTAINERS) \
+	MAX_REQUIRED_CONTAINERS=$(MAX_REQUIRED_CONTAINERS) \
 	cargo +nightly fuzz run $(TRACE_TARGET)
 
 tv_live_watch: clean_traces
-	COMMONWARE_TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
+	TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
 	./scripts/watch_new_traces.sh "$(TEST_DIR)" "$(FUZZ_TRACES_ROOT)"
 
 ITF_DIR ?= itf_traces

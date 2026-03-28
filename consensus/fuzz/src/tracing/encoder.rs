@@ -4,9 +4,12 @@
 //! a complete `.qnt` test module that can be verified with the quint
 //! model checker against `replica.qnt`.
 
-use super::sniffer::{TraceEntry, TracedCert, TracedVote};
+use super::{
+    data::{ReporterReplicaStateData, TraceData, TraceProposalData},
+    sniffer::{TraceEntry, TracedCert, TracedVote},
+};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Write,
 };
 
@@ -57,7 +60,7 @@ enum VoteKind {
 /// a combined `Set(...)`, reducing the number of quint evaluation steps.
 #[derive(Clone)]
 enum ActionItem {
-    /// Non-reorderable action: on_notarize, inject_vote, on_certificate.
+    /// Non-reorderable action: on_notarize, send_*_vote, on_certificate.
     /// Acts as a barrier for vote grouping.
     Barrier(String),
     /// Vote delivery that can be merged with others sharing the same
@@ -89,8 +92,6 @@ pub struct EncoderConfig {
 /// Proposal information reconstructed from trace data.
 struct ViewProposal {
     view_parent: u64,
-    /// Correct nodes that sent notarize votes for this view.
-    correct_notarizers: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -191,7 +192,8 @@ fn filter_invalid_byzantine_votes(
 }
 
 /// Encodes trace entries into a quint test module.
-pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
+pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
+    let entries = &trace_data.entries;
     let honest_votes = collect_honest_votes(entries, cfg);
 
     // Filter out entries where the receiver is Byzantine (no state in quint model)
@@ -208,7 +210,7 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
         .collect();
     let correct_entries = filter_invalid_byzantine_votes(&correct_entries, cfg, &honest_votes);
 
-    let block_map = build_block_map(&correct_entries);
+    let block_map = build_block_map(trace_data);
     let leader_map = build_leader_map_to(cfg, cfg.max_view);
     let leader_lookup: HashMap<u64, String> = leader_map.iter().cloned().collect();
 
@@ -219,8 +221,7 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     let vote_blocks = build_correct_vote_blocks(&correct_entries, &block_map, cfg);
 
     // Build view proposals from notarize votes and authentic certificates
-    let proposals =
-        build_view_proposals(&correct_entries, &block_map, &vote_blocks, cfg);
+    let proposals = build_view_proposals(&correct_entries, &block_map, &vote_blocks, cfg);
 
     let mut out = String::new();
 
@@ -310,7 +311,6 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
     let action_items = build_actions(
         &correct_entries,
         &block_map,
-        &proposals,
         cfg,
         &leader_lookup,
         &vote_blocks,
@@ -362,14 +362,20 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
         writeln!(out).unwrap();
     }
 
-    // Final run references the last part
+    // Final run references the last trace chunk or snapshot action.
     let last_part = if chunks.is_empty() {
         leader_init
     } else {
         format!("trace_part_{:02}", chunks.len() - 1)
     };
+    let last_action = write_snapshot_expectations(
+        &mut out,
+        &last_part,
+        &trace_data.reporter_states,
+        &block_map,
+    );
     writeln!(out, "    run traceTest =").unwrap();
-    writeln!(out, "        {}", last_part).unwrap();
+    writeln!(out, "        {}", last_action).unwrap();
     writeln!(out, "            .expect(safe_invariants)").unwrap();
     // Assert that all correct nodes finalized the expected number of containers
     if cfg.required_containers > 0 {
@@ -386,21 +392,10 @@ pub fn encode(entries: &[TraceEntry], cfg: &EncoderConfig) -> String {
 
     // Helper actions
     write_helpers(&mut out);
+    write_reporter_helpers(&mut out);
 
     writeln!(out, "}}").unwrap();
     out
-}
-
-fn is_correct_notarizer_for_view(
-    proposals: &HashMap<ProposalKey, ViewProposal>,
-    view: u64,
-    sig: &str,
-) -> bool {
-    proposals
-        .iter()
-        .any(|(key, proposal)| {
-            key.view == view && proposal.correct_notarizers.iter().any(|s| s == sig)
-        })
 }
 
 /// Pre-scans the trace to build a map of blocks that correct nodes actually
@@ -504,7 +499,8 @@ fn is_authentic_cert(
 /// `on_notarize(receiver, vote)`. The encoder synthesizes a single
 /// self-delivery for a correct leader so the leader's own sent/local vote
 /// is represented even when the trace only shows network deliveries to
-/// other replicas. Byzantine votes are injected via `inject_vote`.
+/// other replicas. Every observed vote also emits a matching `send_*_vote`
+/// action once so the global sent-vote history matches the replay.
 /// Finalize/nullify deliveries continue to use grouped `on_*` calls.
 ///
 /// Returns structured `ActionItem`s: barriers (non-reorderable) and vote
@@ -514,7 +510,6 @@ fn is_authentic_cert(
 fn build_actions(
     entries: &[TraceEntry],
     block_map: &[(String, String)],
-    proposals: &HashMap<ProposalKey, ViewProposal>,
     cfg: &EncoderConfig,
     leader_lookup: &HashMap<u64, String>,
     vote_blocks: &HashMap<(String, u64, String), HashSet<String>>,
@@ -522,7 +517,7 @@ fn build_actions(
     let mut actions: Vec<ActionItem> = Vec::new();
     // Keys include block name for notarize/finalize to handle byzantine equivocation
     // (same signer, same view, different blocks).
-    let mut injected_votes: HashSet<(String, u64, String, String)> = HashSet::new();
+    let mut sent_votes_emitted: HashSet<(String, u64, String, String)> = HashSet::new();
     let mut self_delivered: HashSet<(String, u64, String)> = HashSet::new();
     let mut leader_self_processed: HashSet<ProposalKey> = HashSet::new();
     // Dedup cert deliveries per receiver. In the Rust execution, each node
@@ -548,6 +543,19 @@ fn build_actions(
                     let is_leader =
                         leader_lookup.get(view).map(|l| l.as_str()) == Some(sig.as_str());
 
+                    if sent_votes_emitted.insert((
+                        sig.clone(),
+                        *view,
+                        "notarize".into(),
+                        bn.clone(),
+                    )) {
+                        actions.push(ActionItem::Barrier(format!(
+                            "send_notarize_vote({{ proposal: {}, sig: \"{}\" }})",
+                            proposal_ref(*view, &bn),
+                            sig
+                        )));
+                    }
+
                     // The trace typically does not contain a self-delivery for the
                     // correct leader's own proposal vote, so synthesize one once.
                     if is_leader
@@ -558,22 +566,6 @@ fn build_actions(
                             "on_notarize(\"{}\", {{ proposal: {}, sig: \"{}\" }})",
                             sig,
                             proposal_var_name(&proposal),
-                            sig
-                        )));
-                    }
-
-                    // Byzantine notarize: inject into sent_vote
-                    if is_byzantine_node(&sig, cfg.faults)
-                        && injected_votes.insert((
-                            sig.clone(),
-                            *view,
-                            "notarize".into(),
-                            bn.clone(),
-                        ))
-                    {
-                        actions.push(ActionItem::Barrier(format!(
-                            "inject_vote(notarize({}, \"{}\"))",
-                            proposal_ref(*view, &bn),
                             sig
                         )));
                     }
@@ -589,6 +581,19 @@ fn build_actions(
                 TracedVote::Finalize { view, sig, block } => {
                     let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
                     let bn = map_block(block, block_map);
+
+                    if sent_votes_emitted.insert((
+                        sig.clone(),
+                        *view,
+                        "finalize".into(),
+                        bn.clone(),
+                    )) {
+                        actions.push(ActionItem::Barrier(format!(
+                            "send_finalize_vote({{ proposal: {}, sig: \"{}\" }})",
+                            proposal_ref(*view, &bn),
+                            sig
+                        )));
+                    }
 
                     // Correct finalize: self-delivery (node counts its own finalize)
                     if !is_byzantine_node(&sig, cfg.faults)
@@ -607,22 +612,6 @@ fn build_actions(
                         });
                     }
 
-                    // Byzantine finalize: inject into sent_vote
-                    if is_byzantine_node(&sig, cfg.faults)
-                        && injected_votes.insert((
-                            sig.clone(),
-                            *view,
-                            "finalize".into(),
-                            bn.clone(),
-                        ))
-                    {
-                        actions.push(ActionItem::Barrier(format!(
-                            "inject_vote(finalize({}, \"{}\"))",
-                            proposal_ref(*view, &bn),
-                            sig
-                        )));
-                    }
-
                     // Deliver vote to receiver
                     actions.push(ActionItem::VoteDelivery {
                         kind: VoteKind::Finalize,
@@ -638,23 +627,20 @@ fn build_actions(
                 }
                 TracedVote::Nullify { view, sig } => {
                     let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
+                    if sent_votes_emitted.insert((
+                        sig.clone(),
+                        *view,
+                        "nullify".into(),
+                        String::new(),
+                    )) {
+                        actions.push(ActionItem::Barrier(format!(
+                            "send_nullify_vote({{ view: {}, sig: \"{}\" }})",
+                            view, sig
+                        )));
+                    }
                     // Correct nullify: inject if it was not already produced by
                     // leader proposal processing for that signer/view.
                     if !is_byzantine_node(&sig, cfg.faults) {
-                        let needs_inject = !is_correct_notarizer_for_view(proposals, *view, &sig);
-                        if needs_inject
-                            && injected_votes.insert((
-                                sig.clone(),
-                                *view,
-                                "nullify".into(),
-                                String::new(),
-                            ))
-                        {
-                            actions.push(ActionItem::Barrier(format!(
-                                "inject_vote(nullify({}, \"{}\"))",
-                                view, sig
-                            )));
-                        }
                         // Self-delivery
                         if self_delivered.insert((sig.clone(), *view, "nullify".into())) {
                             actions.push(ActionItem::VoteDelivery {
@@ -665,21 +651,6 @@ fn build_actions(
                                 vote: format!("{{ view: {}, sig: \"{}\" }}", view, sig),
                             });
                         }
-                    }
-
-                    // Byzantine nullify: inject into sent_vote
-                    if is_byzantine_node(&sig, cfg.faults)
-                        && injected_votes.insert((
-                            sig.clone(),
-                            *view,
-                            "nullify".into(),
-                            String::new(),
-                        ))
-                    {
-                        actions.push(ActionItem::Barrier(format!(
-                            "inject_vote(nullify({}, \"{}\"))",
-                            view, sig
-                        )));
                     }
 
                     // Deliver vote to receiver
@@ -748,37 +719,6 @@ fn build_actions(
                 if !cert_delivered.insert(cert_dedup_key) {
                     continue;
                 }
-
-                // Ensure correct nullify signers are injected (for nullification certs)
-                if let TracedCert::Nullification { view, signers, .. } = cert {
-                    for sig in signers {
-                        if !is_byzantine_node(sig, cfg.faults) {
-                            let needs_inject = !is_correct_notarizer_for_view(proposals, *view, sig);
-                            if needs_inject
-                                && injected_votes.insert((
-                                    sig.clone(),
-                                    *view,
-                                    "nullify".into(),
-                                    String::new(),
-                                ))
-                            {
-                                actions.push(ActionItem::Barrier(format!(
-                                    "inject_vote(nullify({}, \"{}\"))",
-                                    view, sig
-                                )));
-                            }
-                        }
-                    }
-                }
-
-                // Inject byzantine signers' votes for the certificate
-                inject_byzantine_cert_votes(
-                    cert,
-                    &mut injected_votes,
-                    &mut actions,
-                    block_map,
-                    cfg,
-                );
 
                 // Deliver certificate (barrier: cannot be reordered with votes)
                 let cert_str = encode_cert(cert, block_map);
@@ -860,20 +800,28 @@ fn flush_vote_group(pending: &mut Vec<ActionItem>, result: &mut Vec<String>) {
         let vote_set = votes.join(", ");
         let s = match kind {
             VoteKind::Finalize => format!("on_finalize(\"{}\", Set({}))", receiver, vote_set),
-            VoteKind::Nullify => format!(
-                "on_nullify(\"{}\", {}, Set({}))",
-                receiver, view, vote_set
-            ),
+            VoteKind::Nullify => {
+                format!("on_nullify(\"{}\", {}, Set({}))", receiver, view, vote_set)
+            }
         };
         result.push(s);
     }
 }
 
 /// Maps block hashes to val_b0, val_b1, ... in order of first appearance.
-fn build_block_map(entries: &[TraceEntry]) -> Vec<(String, String)> {
+fn build_block_map(trace_data: &TraceData) -> Vec<(String, String)> {
     let mut map = Vec::new();
     let mut seen = HashMap::new();
-    for entry in entries {
+    let mut record_hash = |hash: String| {
+        if hash == "GENESIS_PAYLOAD" || seen.contains_key(&hash) {
+            return;
+        }
+        let name = format!("val_b{}", map.len());
+        seen.insert(hash.clone(), name.clone());
+        map.push((hash, name));
+    };
+
+    for entry in &trace_data.entries {
         let hash = match entry {
             TraceEntry::Vote {
                 vote: TracedVote::Notarize { block, .. },
@@ -893,14 +841,20 @@ fn build_block_map(entries: &[TraceEntry]) -> Vec<(String, String)> {
             } => Some(block.clone()),
             _ => None,
         };
-        if let Some(h) = hash {
-            if !seen.contains_key(&h) {
-                let name = format!("val_b{}", map.len());
-                seen.insert(h.clone(), name.clone());
-                map.push((h, name));
-            }
+        if let Some(hash) = hash {
+            record_hash(hash);
         }
     }
+
+    for state in trace_data.reporter_states.values() {
+        for proposal in state.notarizations.values() {
+            record_hash(proposal.payload.clone());
+        }
+        for proposal in state.finalizations.values() {
+            record_hash(proposal.payload.clone());
+        }
+    }
+
     map
 }
 
@@ -1022,12 +976,8 @@ fn build_view_proposals(
                     .or_insert_with(|| (Vec::new(), idx));
                 block_entry.1 = idx;
             }
-            TraceEntry::Certificate { cert, .. } if is_authentic_cert(
-                cert,
-                vote_blocks,
-                block_map,
-                cfg.faults,
-            ) =>
+            TraceEntry::Certificate { cert, .. }
+                if is_authentic_cert(cert, vote_blocks, block_map, cfg.faults) =>
             {
                 match cert {
                     TracedCert::Notarization { view, block, .. }
@@ -1070,14 +1020,16 @@ fn build_view_proposals(
                 )
             })
             .collect();
-        view_blocks.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.block_name.cmp(&b.0.block_name)));
+        view_blocks.sort_by(|a, b| {
+            a.2.cmp(&b.2)
+                .then_with(|| a.0.block_name.cmp(&b.0.block_name))
+        });
 
-        for (key, correct_notarizers, _) in &view_blocks {
+        for (key, _correct_notarizers, _) in &view_blocks {
             proposals.insert(
                 key.clone(),
                 ViewProposal {
                     view_parent: last_parent_view,
-                    correct_notarizers: correct_notarizers.clone(),
                 },
             );
         }
@@ -1108,73 +1060,448 @@ fn build_view_proposals(
     proposals
 }
 
-/// Injects byzantine signers' votes from a certificate into sent_vote.
-fn inject_byzantine_cert_votes(
-    cert: &TracedCert,
-    injected: &mut HashSet<(String, u64, String, String)>,
-    actions: &mut Vec<ActionItem>,
-    block_map: &[(String, String)],
-    cfg: &EncoderConfig,
-) {
-    match cert {
-        TracedCert::Notarization {
-            view,
-            block,
-            signers,
-            ..
-        } => {
-            let bn = map_block(block, block_map);
-            for sig in signers {
-                if !is_byzantine_node(sig, cfg.faults) {
-                    continue;
-                }
-                if injected.insert((sig.clone(), *view, "notarize".into(), bn.clone())) {
-                    actions.push(ActionItem::Barrier(format!(
-                        "inject_vote(notarize({}, \"{}\"))",
-                        proposal_ref(*view, &bn),
-                        sig
-                    )));
-                }
-            }
-        }
-        TracedCert::Nullification { view, signers, .. } => {
-            for sig in signers {
-                if !is_byzantine_node(sig, cfg.faults) {
-                    continue;
-                }
-                if injected.insert((sig.clone(), *view, "nullify".into(), String::new())) {
-                    actions.push(ActionItem::Barrier(format!(
-                        "inject_vote(nullify({}, \"{}\"))",
-                        view, sig
-                    )));
-                }
-            }
-        }
-        TracedCert::Finalization {
-            view,
-            block,
-            signers,
-            ..
-        } => {
-            let bn = map_block(block, block_map);
-            for sig in signers {
-                if !is_byzantine_node(sig, cfg.faults) {
-                    continue;
-                }
-                if injected.insert((sig.clone(), *view, "finalize".into(), bn.clone())) {
-                    actions.push(ActionItem::Barrier(format!(
-                        "inject_vote(finalize({}, \"{}\"))",
-                        proposal_ref(*view, &bn),
-                        sig
-                    )));
-                }
-            }
-        }
+fn encode_reporter_payload_expr(payload: &str, block_map: &[(String, String)]) -> String {
+    if payload == "GENESIS_PAYLOAD" {
+        "GENESIS_PAYLOAD".to_string()
+    } else {
+        format!("\"{}\"", map_block(payload, block_map))
     }
 }
 
+fn encode_reporter_view_expr(view: u64) -> String {
+    if view == 0 {
+        "GENESIS_VIEW".to_string()
+    } else {
+        view.to_string()
+    }
+}
+
+fn encode_reporter_option_payload_expr(
+    proposal: Option<&TraceProposalData>,
+    block_map: &[(String, String)],
+) -> String {
+    match proposal {
+        Some(proposal) => format!(
+            "Some({})",
+            encode_reporter_payload_expr(&proposal.payload, block_map)
+        ),
+        None => "None".to_string(),
+    }
+}
+
+fn encode_option_usize_expr(value: Option<usize>) -> String {
+    match value {
+        Some(value) => format!("Some({value})"),
+        None => "None".to_string(),
+    }
+}
+
+fn encode_signer_set_expr(signers: Option<&BTreeSet<String>>) -> String {
+    match signers {
+        Some(signers) if !signers.is_empty() => {
+            let values: Vec<String> = signers
+                .iter()
+                .map(|signer| format!("\"{signer}\""))
+                .collect();
+            format!("Set({})", values.join(", "))
+        }
+        _ => "Set()".to_string(),
+    }
+}
+
+fn write_snapshot_expectations(
+    out: &mut String,
+    base_action: &str,
+    reporter_states: &BTreeMap<String, ReporterReplicaStateData>,
+    block_map: &[(String, String)],
+) -> String {
+    let mut previous = base_action.to_string();
+
+    for (replica_id, state) in reporter_states {
+        let mut views = BTreeSet::new();
+        views.extend(state.notarizations.keys().copied());
+        views.extend(state.nullifications.iter().copied());
+        views.extend(state.finalizations.keys().copied());
+
+        for view in views {
+            let view_expr = encode_reporter_view_expr(view);
+            let has_notarization = state.notarizations.contains_key(&view);
+            let has_nullification = state.nullifications.contains(&view);
+            let has_finalization = state.finalizations.contains_key(&view);
+            let action_name = format!("trace_snapshot_id_{}_view_{}", replica_id, view);
+
+            writeln!(out, "    action {} =", action_name).unwrap();
+            writeln!(out, "        {}", previous).unwrap();
+            writeln!(out, "            .then(all {{").unwrap();
+            if has_notarization {
+                let notarization_expr =
+                    encode_reporter_option_payload_expr(state.notarizations.get(&view), block_map);
+                let notarization_count_expr = encode_option_usize_expr(
+                    state
+                        .notarization_signature_counts
+                        .get(&view)
+                        .copied()
+                        .flatten(),
+                );
+                writeln!(
+                    out,
+                    "                assert(replica_has_notarization(\"{}\", {}) == true),",
+                    replica_id, view_expr
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "                assert(replica_notarization_payload(\"{}\", {}) == {}),",
+                    replica_id, view_expr, notarization_expr
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "                assert(replica_notarization_signature_count(\"{}\", {}) == {}),",
+                    replica_id, view_expr, notarization_count_expr
+                )
+                .unwrap();
+            }
+            if has_nullification {
+                let nullification_count_expr = encode_option_usize_expr(
+                    state
+                        .nullification_signature_counts
+                        .get(&view)
+                        .copied()
+                        .flatten(),
+                );
+                let nullify_signers_expr = encode_signer_set_expr(state.nullify_signers.get(&view));
+                writeln!(
+                    out,
+                    "                assert(replica_has_nullification(\"{}\", {}) == true),",
+                    replica_id, view_expr
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "                assert(replica_nullification_signature_count(\"{}\", {}) == {}),",
+                    replica_id, view_expr, nullification_count_expr
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "                assert(replica_observed_nullify_signers(\"{}\", {}) == {}),",
+                    replica_id, view_expr, nullify_signers_expr
+                )
+                .unwrap();
+            }
+            if has_finalization {
+                let finalization_expr =
+                    encode_reporter_option_payload_expr(state.finalizations.get(&view), block_map);
+                let finalization_count_expr = encode_option_usize_expr(
+                    state
+                        .finalization_signature_counts
+                        .get(&view)
+                        .copied()
+                        .flatten(),
+                );
+                writeln!(
+                    out,
+                    "                assert(replica_has_finalization(\"{}\", {}) == true),",
+                    replica_id, view_expr
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "                assert(replica_finalization_payload(\"{}\", {}) == {}),",
+                    replica_id, view_expr, finalization_expr
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "                assert(replica_finalization_signature_count(\"{}\", {}) == {}),",
+                    replica_id, view_expr, finalization_count_expr
+                )
+                .unwrap();
+            }
+            writeln!(out, "                unchanged_all,").unwrap();
+            writeln!(out, "            }})").unwrap();
+            writeln!(out).unwrap();
+
+            previous = action_name;
+        }
+
+        let action_name = format!("trace_snapshot_id_{}_max_finalized_view", replica_id);
+        writeln!(out, "    action {} =", action_name).unwrap();
+        writeln!(out, "        {}", previous).unwrap();
+        writeln!(out, "            .then(all {{").unwrap();
+        writeln!(
+            out,
+            "                assert(replica_max_finalized_view(\"{}\") >= {}),",
+            replica_id,
+            encode_reporter_view_expr(state.max_finalized_view)
+        )
+        .unwrap();
+        writeln!(out, "                unchanged_all,").unwrap();
+        writeln!(out, "            }})").unwrap();
+        writeln!(out).unwrap();
+        previous = action_name;
+    }
+
+    previous
+}
+
+fn write_reporter_helpers(out: &mut String) {
+    writeln!(
+        out,
+        "    def replica_has_notarization(id: ReplicaId, view: ViewNumber): bool = {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        is_some(replica_state.get(id).notarization.get(view))"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "    def replica_notarization_payload(id: ReplicaId, view: ViewNumber): Option[Payload] = {{").unwrap();
+    writeln!(
+        out,
+        "        match (replica_state.get(id).notarization.get(view)) {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            | Some(cert) => Some(cert.proposal.payload)"
+    )
+    .unwrap();
+    writeln!(out, "            | None => None").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "    def replica_notarization_signature_count(id: ReplicaId, view: ViewNumber): Option[int] = {{").unwrap();
+    writeln!(
+        out,
+        "        match (replica_state.get(id).notarization.get(view)) {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            | Some(cert) => Some(cert.signatures.size())"
+    )
+    .unwrap();
+    writeln!(out, "            | None => None").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    def replica_has_nullification(id: ReplicaId, view: ViewNumber): bool = {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        is_some(replica_state.get(id).nullification.get(view))"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "    def replica_nullification_signature_count(id: ReplicaId, view: ViewNumber): Option[int] = {{").unwrap();
+    writeln!(
+        out,
+        "        match (replica_state.get(id).nullification.get(view)) {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            | Some(cert) => Some(cert.signatures.size())"
+    )
+    .unwrap();
+    writeln!(out, "            | None => None").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    def replica_has_finalization(id: ReplicaId, view: ViewNumber): bool = {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        is_some(replica_state.get(id).finalization.get(view))"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "    def replica_finalization_payload(id: ReplicaId, view: ViewNumber): Option[Payload] = {{").unwrap();
+    writeln!(
+        out,
+        "        match (replica_state.get(id).finalization.get(view)) {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            | Some(cert) => Some(cert.proposal.payload)"
+    )
+    .unwrap();
+    writeln!(out, "            | None => None").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "    def replica_finalization_signature_count(id: ReplicaId, view: ViewNumber): Option[int] = {{").unwrap();
+    writeln!(
+        out,
+        "        match (replica_state.get(id).finalization.get(view)) {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "            | Some(cert) => Some(cert.signatures.size())"
+    )
+    .unwrap();
+    writeln!(out, "            | None => None").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "    def replica_observed_nullify_signers(id: ReplicaId, view: ViewNumber): Set[Signature] = {{").unwrap();
+    writeln!(out, "        val stored = store_nullify_votes.get(id).filter(v => v.view == view).map(v => v.sig)").unwrap();
+    writeln!(out, "        val local = sent_nullify_votes.filter(v => and {{ v.sig == sig_of(id), v.view == view }}).map(v => v.sig)").unwrap();
+    writeln!(out, "        stored.union(local)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    def replica_max_finalized_view(id: ReplicaId): ViewNumber = {{"
+    )
+    .unwrap();
+    writeln!(out, "        VIEWS.fold(GENESIS_VIEW, (acc, view) => {{").unwrap();
+    writeln!(out, "            if (and {{ is_some(replica_state.get(id).finalization.get(view)), view > acc }}) view else acc").unwrap();
+    writeln!(out, "        }})").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+}
 /// Writes the standard helper actions used by test modules.
 fn write_helpers(out: &mut String) {
+    writeln!(out, "    action unchanged_all = all {{").unwrap();
+    writeln!(out, "        sent_proposal' = sent_proposal,").unwrap();
+    writeln!(out, "        sent_notarize_votes' = sent_notarize_votes,").unwrap();
+    writeln!(out, "        sent_nullify_votes' = sent_nullify_votes,").unwrap();
+    writeln!(out, "        sent_finalize_votes' = sent_finalize_votes,").unwrap();
+    writeln!(out, "        sent_certificates' = sent_certificates,").unwrap();
+    writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
+    writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
+    writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
+    writeln!(out, "        store_certificates' = store_certificates,").unwrap();
+    writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
+    writeln!(
+        out,
+        "        ghost_committed_blocks' = ghost_committed_blocks,"
+    )
+    .unwrap();
+    writeln!(out, "        leader' = leader,").unwrap();
+    writeln!(out, "        replica_state' = replica_state,").unwrap();
+    writeln!(out, "        certify_policy' = certify_policy,").unwrap();
+    writeln!(out, "        lastAction' = lastAction,").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    action send_notarize_vote(vote: NotarizeVote): bool = all {{"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        sent_notarize_votes' = sent_notarize_votes.union(Set(vote)),"
+    )
+    .unwrap();
+    writeln!(out, "        sent_nullify_votes' = sent_nullify_votes,").unwrap();
+    writeln!(out, "        sent_finalize_votes' = sent_finalize_votes,").unwrap();
+    writeln!(out, "        sent_proposal' = sent_proposal,").unwrap();
+    writeln!(out, "        sent_certificates' = sent_certificates,").unwrap();
+    writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
+    writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
+    writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
+    writeln!(out, "        store_certificates' = store_certificates,").unwrap();
+    writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
+    writeln!(
+        out,
+        "        ghost_committed_blocks' = ghost_committed_blocks,"
+    )
+    .unwrap();
+    writeln!(out, "        leader' = leader,").unwrap();
+    writeln!(out, "        replica_state' = replica_state,").unwrap();
+    writeln!(out, "        certify_policy' = certify_policy,").unwrap();
+    writeln!(out, "        lastAction' = \"send_notarize_vote\",").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    action send_nullify_vote(vote: NullifyVote): bool = all {{"
+    )
+    .unwrap();
+    writeln!(out, "        sent_notarize_votes' = sent_notarize_votes,").unwrap();
+    writeln!(
+        out,
+        "        sent_nullify_votes' = sent_nullify_votes.union(Set(vote)),"
+    )
+    .unwrap();
+    writeln!(out, "        sent_finalize_votes' = sent_finalize_votes,").unwrap();
+    writeln!(out, "        sent_proposal' = sent_proposal,").unwrap();
+    writeln!(out, "        sent_certificates' = sent_certificates,").unwrap();
+    writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
+    writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
+    writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
+    writeln!(out, "        store_certificates' = store_certificates,").unwrap();
+    writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
+    writeln!(
+        out,
+        "        ghost_committed_blocks' = ghost_committed_blocks,"
+    )
+    .unwrap();
+    writeln!(out, "        leader' = leader,").unwrap();
+    writeln!(out, "        replica_state' = replica_state,").unwrap();
+    writeln!(out, "        certify_policy' = certify_policy,").unwrap();
+    writeln!(out, "        lastAction' = \"send_nullify_vote\",").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    action send_finalize_vote(vote: FinalizeVote): bool = all {{"
+    )
+    .unwrap();
+    writeln!(out, "        sent_notarize_votes' = sent_notarize_votes,").unwrap();
+    writeln!(out, "        sent_nullify_votes' = sent_nullify_votes,").unwrap();
+    writeln!(
+        out,
+        "        sent_finalize_votes' = sent_finalize_votes.union(Set(vote)),"
+    )
+    .unwrap();
+    writeln!(out, "        sent_proposal' = sent_proposal,").unwrap();
+    writeln!(out, "        sent_certificates' = sent_certificates,").unwrap();
+    writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
+    writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
+    writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
+    writeln!(out, "        store_certificates' = store_certificates,").unwrap();
+    writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
+    writeln!(
+        out,
+        "        ghost_committed_blocks' = ghost_committed_blocks,"
+    )
+    .unwrap();
+    writeln!(out, "        leader' = leader,").unwrap();
+    writeln!(out, "        replica_state' = replica_state,").unwrap();
+    writeln!(out, "        certify_policy' = certify_policy,").unwrap();
+    writeln!(out, "        lastAction' = \"send_finalize_vote\",").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
     writeln!(out, "    action inject_vote(vote: Vote): bool = all {{").unwrap();
     writeln!(out, "        match (vote) {{").unwrap();
     writeln!(out, "            | Notarize(v) => all {{").unwrap();
@@ -1183,21 +1510,45 @@ fn write_helpers(out: &mut String) {
         "                sent_notarize_votes' = sent_notarize_votes.union(Set(v)),"
     )
     .unwrap();
-    writeln!(out, "                sent_nullify_votes' = sent_nullify_votes,").unwrap();
-    writeln!(out, "                sent_finalize_votes' = sent_finalize_votes,").unwrap();
+    writeln!(
+        out,
+        "                sent_nullify_votes' = sent_nullify_votes,"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                sent_finalize_votes' = sent_finalize_votes,"
+    )
+    .unwrap();
     writeln!(out, "            }}").unwrap();
     writeln!(out, "            | Nullify(v) => all {{").unwrap();
-    writeln!(out, "                sent_notarize_votes' = sent_notarize_votes,").unwrap();
+    writeln!(
+        out,
+        "                sent_notarize_votes' = sent_notarize_votes,"
+    )
+    .unwrap();
     writeln!(
         out,
         "                sent_nullify_votes' = sent_nullify_votes.union(Set(v)),"
     )
     .unwrap();
-    writeln!(out, "                sent_finalize_votes' = sent_finalize_votes,").unwrap();
+    writeln!(
+        out,
+        "                sent_finalize_votes' = sent_finalize_votes,"
+    )
+    .unwrap();
     writeln!(out, "            }}").unwrap();
     writeln!(out, "            | Finalize(v) => all {{").unwrap();
-    writeln!(out, "                sent_notarize_votes' = sent_notarize_votes,").unwrap();
-    writeln!(out, "                sent_nullify_votes' = sent_nullify_votes,").unwrap();
+    writeln!(
+        out,
+        "                sent_notarize_votes' = sent_notarize_votes,"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "                sent_nullify_votes' = sent_nullify_votes,"
+    )
+    .unwrap();
     writeln!(
         out,
         "                sent_finalize_votes' = sent_finalize_votes.union(Set(v)),"

@@ -1,10 +1,11 @@
 use super::{
-    data::TraceData,
+    data::{ReporterReplicaStateData, TraceData, TraceProposalData},
     sniffer::{ChannelKind, SniffingReceiver, TraceEntry, TraceLog, TracedCert, TracedVote},
 };
 use crate::{
-    disrupter::Disrupter, invariants, simplex, strategy::SmallScopeForTracing, utils::Partition,
-    FuzzInput, SimplexEd25519, EPOCH, N4F1C3, PAGE_CACHE_SIZE, PAGE_SIZE,
+    disrupter::Disrupter, invariants, simplex, strategy::SmallScopeForTracing,
+    types::ReplayedReplicaState, utils::Partition, FuzzInput, SimplexEd25519, EPOCH, N4F1C3,
+    PAGE_CACHE_SIZE, PAGE_SIZE,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
@@ -27,7 +28,9 @@ use commonware_p2p::{
     Recipients,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, IoBuf, Metrics, Runner, Spawner};
+use commonware_runtime::{
+    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Metrics, Runner, Spawner,
+};
 use commonware_utils::{channel::mpsc::Receiver, sync::Mutex, FuzzRng, NZUsize};
 use futures::future::join_all;
 use kdtree::{distance::squared_euclidean, KdTree};
@@ -41,7 +44,7 @@ use std::{
     time::Duration,
 };
 
-const TRACE_SELECTION_STRATEGY_ENV: &str = "COMMONWARE_TRACE_SELECTION_STRATEGY";
+const TRACE_SELECTION_STRATEGY_ENV: &str = "TRACE_SELECTION_STRATEGY";
 const TRACE_SELECTION_LOG_FILE: &str = "fuzz.log";
 const LOF_NEIGHBORS: usize = 5;
 const LOF_OUTLIER_THRESHOLD: f64 = 1.5;
@@ -428,7 +431,9 @@ fn compute_lof_score(
     candidate: &TraceSessionSignature,
 ) -> Option<f64> {
     let signatures: Vec<_> = seen_signatures.iter().cloned().collect();
-    let candidate_idx = signatures.iter().position(|signature| signature == candidate)?;
+    let candidate_idx = signatures
+        .iter()
+        .position(|signature| signature == candidate)?;
     let points = flatten_signatures_for_lof(&signatures);
     let total_points = points.len();
     let k = LOF_NEIGHBORS.min(total_points.saturating_sub(1));
@@ -448,7 +453,12 @@ fn compute_lof_score(
         .collect::<Option<_>>()?;
     let k_distances: Vec<f64> = neighbors
         .iter()
-        .map(|point_neighbors| point_neighbors.last().map(|(distance, _)| *distance).unwrap_or(0.0))
+        .map(|point_neighbors| {
+            point_neighbors
+                .last()
+                .map(|(distance, _)| *distance)
+                .unwrap_or(0.0)
+        })
         .collect();
     let lrds: Vec<f64> = neighbors
         .iter()
@@ -485,7 +495,12 @@ fn flatten_signatures_for_lof(signatures: &[TraceSessionSignature]) -> Vec<Vec<f
         .max(1);
     let max_vector_len = signatures
         .iter()
-        .flat_map(|signature| signature.view_signatures.iter().map(|view_signature| view_signature.vector.len()))
+        .flat_map(|signature| {
+            signature
+                .view_signatures
+                .iter()
+                .map(|view_signature| view_signature.vector.len())
+        })
         .max()
         .unwrap_or(0);
 
@@ -504,7 +519,10 @@ fn flatten_signature(
     for view_signature in &signature.view_signatures {
         point.push(view_signature.view as f64);
         point.extend(view_signature.vector.iter().map(|value| *value as f64));
-        point.extend(std::iter::repeat_n(0.0, max_vector_len.saturating_sub(view_signature.vector.len())));
+        point.extend(std::iter::repeat_n(
+            0.0,
+            max_vector_len.saturating_sub(view_signature.vector.len()),
+        ));
     }
     for _ in signature.view_signatures.len()..max_views {
         point.push(-1.0);
@@ -626,6 +644,117 @@ fn persist_trace_if_selected(base_dir: &str, hash_hex: &str, trace_data: &TraceD
     );
     emit_trace_log(strategy, &artifacts_dir, &line);
     true
+}
+
+fn encode_reporter_states(
+    replayed: Vec<ReplayedReplicaState>,
+    faults: usize,
+) -> BTreeMap<String, ReporterReplicaStateData> {
+    replayed
+        .into_iter()
+        .enumerate()
+        .map(|(idx, state)| {
+            let node_id = format!("n{}", faults + idx);
+            let max_finalized_view = state.finalizations.keys().copied().max().unwrap_or(0);
+            let notarizations = state
+                .notarizations
+                .iter()
+                .map(|(view, cert)| {
+                    (
+                        *view,
+                        TraceProposalData {
+                            view: *view,
+                            parent: 0,
+                            payload: cert.payload.to_string(),
+                        },
+                    )
+                })
+                .collect();
+            let notarization_signature_counts = state
+                .notarizations
+                .iter()
+                .map(|(view, cert)| (*view, cert.signature_count))
+                .collect();
+            let nullifications = state.nullifications.keys().copied().collect();
+            let nullification_signature_counts = state
+                .nullifications
+                .iter()
+                .map(|(view, cert)| (*view, cert.signature_count))
+                .collect();
+            let finalizations = state
+                .finalizations
+                .iter()
+                .map(|(view, cert)| {
+                    (
+                        *view,
+                        TraceProposalData {
+                            view: *view,
+                            parent: 0,
+                            payload: cert.payload.to_string(),
+                        },
+                    )
+                })
+                .collect();
+            let finalization_signature_counts = state
+                .finalizations
+                .iter()
+                .map(|(view, cert)| (*view, cert.signature_count))
+                .collect();
+            let data = ReporterReplicaStateData {
+                notarizations,
+                notarization_signature_counts,
+                nullifications,
+                nullification_signature_counts,
+                finalizations,
+                finalization_signature_counts,
+                notarize_signers: state.notarize_signers.into_iter().collect(),
+                nullify_signers: state.nullify_signers.into_iter().collect(),
+                finalize_signers: state.finalize_signers.into_iter().collect(),
+                max_finalized_view,
+            };
+            (node_id, data)
+        })
+        .collect()
+}
+
+macro_rules! stabilize_reporter_states {
+    ($context:expr, $trace:expr, $reporters:expr, $faults:expr, $max_participants:expr) => {{
+        const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+        const REQUIRED_STABLE_POLLS: usize = 4;
+        const MAX_SNAPSHOT_DRAIN: Duration = Duration::from_millis(400);
+
+        let start = $context.current();
+        let mut stable_polls = 0usize;
+        let mut last_trace_len = None;
+        let mut last_reporter_states: Option<BTreeMap<String, ReporterReplicaStateData>> = None;
+
+        loop {
+            let reporter_states = encode_reporter_states(
+                invariants::extract_replayed($reporters, $max_participants),
+                $faults,
+            );
+            let trace_len = $trace.lock().structured.len();
+            let is_stable = last_trace_len == Some(trace_len)
+                && last_reporter_states.as_ref() == Some(&reporter_states);
+
+            if is_stable {
+                stable_polls += 1;
+            } else {
+                stable_polls = 0;
+            }
+
+            if stable_polls >= REQUIRED_STABLE_POLLS
+                || $context.current().duration_since(start).unwrap_or_default()
+                    >= MAX_SNAPSHOT_DRAIN
+            {
+                break reporter_states;
+            }
+
+            last_trace_len = Some(trace_len);
+            last_reporter_states = Some(reporter_states);
+            $context.sleep(SNAPSHOT_POLL_INTERVAL).await;
+        }
+    }};
 }
 
 /// Run consensus with a Byzantine twin and quint tracing, capturing messages as JSON.
@@ -1007,6 +1136,13 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             }));
         }
         join_all(finalizers).await;
+        let reporter_states = stabilize_reporter_states!(
+            &mut context,
+            &trace,
+            &reporters,
+            config.faults as usize,
+            config.n as usize
+        );
 
         let states = invariants::extract(&reporters, config.n as usize);
         invariants::check::<SimplexEd25519>(config.n, &states);
@@ -1021,6 +1157,7 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             max_view,
             entries: trace.structured.clone(),
             required_containers: tracing_input.required_containers,
+            reporter_states,
         };
 
         persist_trace_if_selected("simplex_ed25519_quint", &hash_hex, &trace_data);
@@ -1357,6 +1494,13 @@ pub fn run_quint_twins_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) 
             }));
         }
         join_all(finalizers).await;
+        let reporter_states = stabilize_reporter_states!(
+            &mut context,
+            &trace,
+            &reporters,
+            config.faults as usize,
+            config.n as usize
+        );
 
         let states = invariants::extract(&reporters, config.n as usize);
         invariants::check::<SimplexEd25519>(config.n, &states);
@@ -1371,9 +1515,14 @@ pub fn run_quint_twins_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) 
             max_view,
             entries: trace.structured.clone(),
             required_containers: tracing_input.required_containers,
+            reporter_states,
         };
 
-        persist_trace_if_selected("simplex_ed25519_quint_twins_disrupter", &hash_hex, &trace_data);
+        persist_trace_if_selected(
+            "simplex_ed25519_quint_twins_disrupter",
+            &hash_hex,
+            &trace_data,
+        );
     });
 }
 
@@ -1536,6 +1685,13 @@ pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             }));
         }
         join_all(finalizers).await;
+        let reporter_states = stabilize_reporter_states!(
+            &mut context,
+            &trace,
+            &reporters,
+            config.faults as usize,
+            config.n as usize
+        );
 
         let states = invariants::extract(&reporters, config.n as usize);
         invariants::check::<SimplexEd25519>(config.n, &states);
@@ -1550,6 +1706,7 @@ pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             max_view,
             entries: trace.structured.clone(),
             required_containers: tracing_input.required_containers,
+            reporter_states,
         };
 
         persist_trace_if_selected("simplex_ed25519_quint_disrupter", &hash_hex, &trace_data);

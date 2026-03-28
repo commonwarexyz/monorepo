@@ -7,8 +7,7 @@ use super::{
     sniffer::{TraceEntry, TracedCert, TracedVote},
 };
 use crate::replayer::compare::{ExpectedNodeState, ExpectedState};
-use serde_json::json;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Errors encountered while decoding an ITF trace.
@@ -325,7 +324,11 @@ fn collect_typed_vote_store(
     for (k, v) in parse_map(get_var(state, var_name)) {
         if let Some(node) = k.as_str() {
             let votes = result.entry(node.to_string()).or_default();
-            votes.extend(parse_set(v).into_iter().map(|vote| wrap_tagged_value(tag, vote)));
+            votes.extend(
+                parse_set(v)
+                    .into_iter()
+                    .map(|vote| wrap_tagged_value(tag, vote)),
+            );
         }
     }
 }
@@ -793,6 +796,7 @@ pub fn decode_itf(
         max_view,
         entries,
         required_containers: 0,
+        reporter_states: Default::default(),
     };
 
     Ok((trace_data, expected))

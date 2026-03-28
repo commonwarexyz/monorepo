@@ -38,6 +38,17 @@ module types {
     pure val LeaderTimeoutKind = "LEADER_TIMEOUT_KIND"
     pure val AdvanceTimeoutKind = "ADVANCE_TIMEOUT_KIND"
 
+    type TimeoutReason = str
+
+    pure val InactivityReason = "Inactivity"
+    pure val LeaderNullifyReason = "LeaderNullify"
+    pure val LeaderTimeoutReason = "LeaderTimeout"
+    pure val CertificationTimeoutReason = "CertificationTimeout"
+    pure val MissingProposalReason = "MissingProposal"
+    pure val IgnoredProposalReason = "IgnoredProposal"
+    pure val InvalidProposalReason = "InvalidProposal"
+    pure val FailedCertificationReason = "FailedCertification"
+
     // Leader-proposal message
     type Proposal = {
         // proposed payload
@@ -183,6 +194,10 @@ module types {
         last_finalized: ViewNumber,
         // not in the original spec, whether this replica has sent a proposal
         propose_sent: bool,
+        // round proposal currently remembered for each view
+        proposal: ViewNumber -> Option[Proposal],
+        // first timeout reason observed for each view
+        timeout_reason: ViewNumber -> Option[TimeoutReason],
         // payload this replica has notarized per view
         notarized: ViewNumber -> Option[Payload],
         // notarization certificates constructed by this replica per view
@@ -195,6 +210,9 @@ module types {
         leader_proposal: ViewNumber -> Option[Proposal],
         // once a conflicting leader proposal is observed for a view, keep that fact forever
         leader_proposal_conflicted: ViewNumber -> bool,
+        // local certification result for a view:
+        // Some(true) = certified, Some(false) = certification failed, None = no result yet
+        certify: ViewNumber -> Option[bool],
         // payload this replica has certified per view
         certified: ViewNumber -> Option[Payload]
     }

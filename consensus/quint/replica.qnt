@@ -221,9 +221,73 @@ module replica {
         }
     }
 
+    pure def record_local_proposal(self: ReplicaState, proposal: Proposal): ReplicaState = {
+        if (self.proposal.get(proposal.view) == None)
+            {
+                ...self,
+                proposal: self.proposal.set(proposal.view, Some(proposal))
+            }
+        else
+            self
+    }
+
+    pure def observe_round_proposal(
+        self: ReplicaState,
+        proposal: Proposal,
+        recovered: bool
+    ): ReplicaState = {
+        if (self.leader_proposal_conflicted.get(proposal.view))
+            self
+        else
+            match (self.proposal.get(proposal.view)) {
+                | None => {
+                    ...self,
+                    proposal: self.proposal.set(proposal.view, Some(proposal))
+                }
+                | Some(existing) =>
+                    if (existing == proposal)
+                        self
+                    else if (recovered)
+                        {
+                            ...self,
+                            proposal: self.proposal.set(proposal.view, Some(proposal))
+                        }
+                    else
+                        self
+            }
+    }
+
     pure def has_leader_proposal_conflict(self: ReplicaState, proposal: Proposal): bool = {
         self.leader_proposal_conflicted.get(proposal.view)
             or option_has(self.leader_proposal.get(proposal.view), known => known != proposal)
+    }
+
+    pure def remember_timeout_reason(
+        self: ReplicaState,
+        view: ViewNumber,
+        reason: TimeoutReason
+    ): ReplicaState = {
+        if (self.timeout_reason.get(view) == None)
+            {
+                ...self,
+                timeout_reason: self.timeout_reason.set(view, Some(reason))
+            }
+        else
+            self
+    }
+
+    pure def remember_certify_result(
+        self: ReplicaState,
+        view: ViewNumber,
+        result: bool
+    ): ReplicaState = {
+        if (self.certify.get(view) == None)
+            {
+                ...self,
+                certify: self.certify.set(view, Some(result))
+            }
+        else
+            self
     }
 
     pure def mark_vote_broadcast(self: ReplicaState, view: ViewNumber, kind: Kind): ReplicaState = {
@@ -264,16 +328,31 @@ module replica {
     pure def remember_certificate(self: ReplicaState, cert: Certificate): ReplicaState = {
         match (cert) {
             | Notarization(n) => {
-                ...self,
-                notarization: self.notarization.set(n.proposal.view, Some(n))
+                if (is_some(self.notarization.get(n.proposal.view)))
+                    self
+                else
+                    {
+                        ...self,
+                        notarization: self.notarization.set(n.proposal.view, Some(n))
+                    }
             }
             | Nullification(n) => {
-                ...self,
-                nullification: self.nullification.set(n.view, Some(n))
+                if (is_some(self.nullification.get(n.view)))
+                    self
+                else
+                    {
+                        ...self,
+                        nullification: self.nullification.set(n.view, Some(n))
+                    }
             }
             | Finalization(f) => {
-                ...self,
-                finalization: self.finalization.set(f.proposal.view, Some(f))
+                if (is_some(self.finalization.get(f.proposal.view)))
+                    self
+                else
+                    {
+                        ...self,
+                        finalization: self.finalization.set(f.proposal.view, Some(f))
+                    }
             }
         }
     }
@@ -414,14 +493,25 @@ module replica {
             next_sent_nullify: sent_nullify,
             next_stored_nullify: stored_nullify
         } else {
-            next_self: {
-                ...mark_vote_broadcast(self, view, NullifyKind),
-                leader_timeout: if (leader_expired) self.leader_timeout.set(view, Some(true)) else self.leader_timeout,
-                advance_timeout: if (advance_expired) self.advance_timeout.set(view, Some(true)) else self.advance_timeout,
-                ghost_sent_votes: self.ghost_sent_votes.setBy(view, old => old.append(NullifyKind))
-            },
-            next_sent_nullify: sent_nullify.union(Set(local_nullify)),
-            next_stored_nullify: stored_nullify.union(Set(local_nullify))
+            val timeout_reason =
+                if (leader_expired)
+                    LeaderTimeoutReason
+                else
+                    CertificationTimeoutReason
+            {
+                next_self: {
+                    ...mark_vote_broadcast(
+                        remember_timeout_reason(self, view, timeout_reason),
+                        view,
+                        NullifyKind
+                    ),
+                    leader_timeout: if (leader_expired) self.leader_timeout.set(view, Some(true)) else self.leader_timeout,
+                    advance_timeout: if (advance_expired) self.advance_timeout.set(view, Some(true)) else self.advance_timeout,
+                    ghost_sent_votes: self.ghost_sent_votes.setBy(view, old => old.append(NullifyKind))
+                },
+                next_sent_nullify: sent_nullify.union(Set(local_nullify)),
+                next_stored_nullify: stored_nullify.union(Set(local_nullify))
+            }
         }
     }
 
@@ -429,6 +519,7 @@ module replica {
         self: ReplicaState,
         id: ReplicaId,
         view: ViewNumber,
+        reason: TimeoutReason,
         sent_nullify: Set[NullifyVote],
         stored_nullify: Set[NullifyVote]
     ): TimerExpired = {
@@ -444,18 +535,22 @@ module replica {
             }
         else if (self.broadcast_finalize.get(view))
             {
-                next_self: {
+                next_self: remember_timeout_reason({
                     ...self,
                     leader_timeout: self.leader_timeout.set(view, None),
                     advance_timeout: self.advance_timeout.set(view, None)
-                },
+                }, view, reason),
                 next_sent_nullify: sent_nullify,
                 next_stored_nullify: stored_nullify
             }
         else
             {
                 next_self: {
-                    ...mark_vote_broadcast(self, view, NullifyKind),
+                    ...mark_vote_broadcast(
+                        remember_timeout_reason(self, view, reason),
+                        view,
+                        NullifyKind
+                    ),
                     leader_timeout: self.leader_timeout.set(view, None),
                     advance_timeout: self.advance_timeout.set(view, None),
                     ghost_sent_votes: self.ghost_sent_votes.setBy(view, old => old.append(NullifyKind))
@@ -484,19 +579,38 @@ module replica {
             }
         else if (self.broadcast_finalize.get(view))
             {
-                next_self: fire_all_timers(self, view),
+                next_self: remember_timeout_reason(
+                    fire_all_timers(self, view),
+                    view,
+                    LeaderNullifyReason
+                ),
                 next_sent_nullify: sent_nullify,
                 next_stored_nullify: stored_nullify
             }
         else
             {
                 next_self: {
-                    ...mark_vote_broadcast(fire_all_timers(self, view), view, NullifyKind),
+                    ...mark_vote_broadcast(
+                        remember_timeout_reason(
+                            fire_all_timers(self, view),
+                            view,
+                            LeaderNullifyReason
+                        ),
+                        view,
+                        NullifyKind
+                    ),
                     ghost_sent_votes: self.ghost_sent_votes.setBy(view, old => old.append(NullifyKind))
                 },
                 next_sent_nullify: sent_nullify.union(Set(local_nullify)),
                 next_stored_nullify: stored_nullify.union(Set(local_nullify))
             }
+    }
+
+    pure def quorum_signers(signers: Set[Signature]): Set[Signature] = {
+        signers
+            .powerset()
+            .filter(s => s.size() == Q)
+            .fold(signers, (acc, s) => if (acc.size() == Q) acc else s)
     }
 
     def create_nullification(id: ReplicaId, view: ViewNumber, votes: Set[NullifyVote]): Option[Certificate] = {
@@ -506,7 +620,7 @@ module replica {
         if (signers.size() < Q)
             None
         else
-            Some(nullification(view, signers, sig_of(id)))
+            Some(nullification(view, quorum_signers(signers), sig_of(id)))
     }
 
     def create_notarization(id: ReplicaId, proposal: Proposal, votes: Set[NotarizeVote]): Option[Certificate] = {
@@ -516,7 +630,7 @@ module replica {
         if (signers.size() < Q)
             None
         else
-            Some(notarization(proposal, signers, sig_of(id)))
+            Some(notarization(proposal, quorum_signers(signers), sig_of(id)))
     }
 
     def create_finalization(id: ReplicaId, proposal: Proposal, votes: Set[FinalizeVote]): Option[Certificate] = {
@@ -526,7 +640,7 @@ module replica {
         if (signers.size() < Q)
             None
         else
-            Some(finalization(proposal, signers, sig_of(id)))
+            Some(finalization(proposal, quorum_signers(signers), sig_of(id)))
     }
 
     action init = {
@@ -556,12 +670,15 @@ module replica {
                 broadcast_notarization: VIEWS.mapBy(_ => false),
                 broadcast_nullification: VIEWS.mapBy(_ => false),
                 broadcast_finalization: VIEWS.mapBy(_ => false),
+                proposal: VIEWS.union(Set(GENESIS_VIEW)).mapBy(_ => None),
+                timeout_reason: VIEWS.mapBy(_ => None),
                 notarized: VIEWS.mapBy(_ => None),
                 notarization: VIEWS.mapBy(_ => None),
                 nullification: VIEWS.mapBy(_ => None),
                 finalization: VIEWS.mapBy(_ => None),
-                leader_proposal: VIEWS.mapBy(_ => None),
-                leader_proposal_conflicted: VIEWS.mapBy(_ => false),
+                leader_proposal: VIEWS.union(Set(GENESIS_VIEW)).mapBy(_ => None),
+                leader_proposal_conflicted: VIEWS.union(Set(GENESIS_VIEW)).mapBy(_ => false),
+                certify: VIEWS.mapBy(_ => None),
                 certified: VIEWS.mapBy(_ => None),
                 propose_sent: false,
                 leader_timeout: VIEWS.mapBy(_ => Some(false)),
@@ -700,7 +817,14 @@ module replica {
                     store_nullify_votes' = store_nullify_votes,
                     store_finalize_votes' = store_finalize_votes,
                     replica_state' = replica_state.set(id, {
-                        ...mark_vote_broadcast(observe_leader_proposal(self, proposal), self.view, NotarizeKind),
+                        ...mark_vote_broadcast(
+                            observe_leader_proposal(
+                                record_local_proposal(self, proposal),
+                                proposal
+                            ),
+                            self.view,
+                            NotarizeKind
+                        ),
                         propose_sent: true,
                         leader_timeout: self.leader_timeout.set(self.view, None),
                         notarized: self.notarized.put(self.view, Some(new_payload)),
@@ -718,7 +842,14 @@ module replica {
             } else {
                 // Proposal failure path: immediate timeout expiry
                 // Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
-                val timer = forced_timeout_expired(self, id, self.view, sent_nullify_votes, store_nullify)
+                val timer = forced_timeout_expired(
+                    self,
+                    id,
+                    self.view,
+                    InvalidProposalReason,
+                    sent_nullify_votes,
+                    store_nullify
+                )
                 all {
                     sent_notarize_votes' = sent_notarize_votes,
                     sent_nullify_votes' = timer.next_sent_nullify,
@@ -758,7 +889,14 @@ module replica {
         val payload_ok = VALID_PAYLOADS.contains(payload)
         val is_leader_vote = (vote.sig == sig_of(leader.get(view)))
         val proposal_conflicted = has_leader_proposal_conflict(self, proposal)
-        val timer = forced_timeout_expired(self, id, view, sent_nullify_votes, store_nullify)
+        val timer = forced_timeout_expired(
+            self,
+            id,
+            view,
+            InvalidProposalReason,
+            sent_nullify_votes,
+            store_nullify
+        )
         val can_process_as_proposal = and {
             is_leader_vote,
             view == self.view,
@@ -810,7 +948,14 @@ module replica {
                         store_nullify_votes' = store_nullify_votes,
                         store_finalize_votes' = store_finalize_votes,
                         replica_state' = replica_state.set(id, {
-                            ...mark_vote_broadcast(observe_leader_proposal(self, proposal), self.view, NotarizeKind),
+                            ...mark_vote_broadcast(
+                                observe_leader_proposal(
+                                    observe_round_proposal(self, proposal, false),
+                                    proposal
+                                ),
+                                self.view,
+                                NotarizeKind
+                            ),
                             leader_timeout: self.leader_timeout.set(self.view, None),
                             notarized: self.notarized.put(self.view, Some(payload)),
                             ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
@@ -829,7 +974,10 @@ module replica {
                         store_finalize_votes' = store_finalize_votes,
                         replica_state' = replica_state.set(
                             id,
-                            observe_leader_proposal(timer.next_self, proposal)
+                            observe_leader_proposal(
+                                observe_round_proposal(timer.next_self, proposal, false),
+                                proposal
+                            )
                         ),
                     }
                 },
@@ -1052,10 +1200,26 @@ module replica {
     action on_certificate(id: ReplicaId, cert: Certificate): bool = all {
         val certs = store_certificates.get(id)
         all {
-            not(cert.in(certs)),
             cert_signatures(cert).size() >= Q,
+            val duplicate_by_kind_and_view = certs.exists(existing => and {
+                cert_view(existing) == cert_view(cert),
+                cert_kind(existing) == cert_kind(cert),
+            })
 
-            if (is_notarization_cert(cert)) {
+            if (duplicate_by_kind_and_view) {
+                all {
+                    sent_notarize_votes' = sent_notarize_votes,
+                    sent_nullify_votes' = sent_nullify_votes,
+                    sent_finalize_votes' = sent_finalize_votes,
+                    sent_certificates' = sent_certificates,
+                    store_notarize_votes' = store_notarize_votes,
+                    store_nullify_votes' = store_nullify_votes,
+                    store_finalize_votes' = store_finalize_votes,
+                    store_certificates' = store_certificates,
+                    replica_state' = replica_state,
+                    ghost_committed_blocks' = ghost_committed_blocks,
+                }
+            } else if (is_notarization_cert(cert)) {
                 all {
                     store_notarize_votes' = store_notarize_votes,
                     _process_notarization_certificate(id, cert, true)
@@ -1112,6 +1276,7 @@ module replica {
                         self,
                         id,
                         cert_view_num,
+                        FailedCertificationReason,
                         sent_nullify_votes,
                         store_nullify_votes.get(id)
                     )
@@ -1165,7 +1330,10 @@ module replica {
                                 ...enter_view({
                                     ...mark_vote_broadcast(
                                         observe_certificate(
-                                            observe_leader_proposal(self, cert_prop),
+                                            observe_leader_proposal(
+                                                observe_round_proposal(self, cert_prop, true),
+                                                cert_prop
+                                            ),
                                             cert,
                                             is_new_cert
                                         ),
@@ -1174,6 +1342,7 @@ module replica {
                                     ),
                                     advance_timeout: if (self.view == cert_view_num) self.advance_timeout.set(cert_view_num, None) else self.advance_timeout,
                                     ghost_last_seen_notarization: seen_notarization,
+                                    certify: self.certify.set(cert_view_num, Some(true)),
                                     certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
                                     ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(FinalizeKind))
                                 }, cert_view_num + 1)
@@ -1189,10 +1358,14 @@ module replica {
                             store_finalize_votes' = store_finalize_votes,
                             replica_state' = replica_state.set(id, {
                                 ...observe_certificate(
-                                    observe_leader_proposal(timer.next_self, cert_prop),
+                                    observe_leader_proposal(
+                                        observe_round_proposal(timer.next_self, cert_prop, true),
+                                        cert_prop
+                                    ),
                                     cert,
                                     is_new_cert
                                 ),
+                                certify: timer.next_self.certify.set(cert_view_num, Some(false)),
                                 ghost_last_seen_notarization: seen_notarization
                             }),
                             ghost_committed_blocks' = ghost_committed_blocks,
@@ -1206,7 +1379,10 @@ module replica {
                             store_finalize_votes' = store_finalize_votes,
                             replica_state' = replica_state.set(id, {
                                 ...observe_certificate(
-                                    observe_leader_proposal(self, cert_prop),
+                                    observe_leader_proposal(
+                                        observe_round_proposal(self, cert_prop, true),
+                                        cert_prop
+                                    ),
                                     cert,
                                     is_new_cert
                                 ),
@@ -1305,7 +1481,10 @@ module replica {
                         replica_state' = replica_state.set(id,
                             enter_view({
                                 ...observe_certificate(
-                                    observe_leader_proposal(self, cert_prop),
+                                    observe_leader_proposal(
+                                        observe_round_proposal(self, cert_prop, true),
+                                        cert_prop
+                                    ),
                                     cert,
                                     is_new_cert
                                 ),

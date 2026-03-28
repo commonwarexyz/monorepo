@@ -41,7 +41,7 @@ while true; do
 
         if cargo run -p commonware-consensus-fuzz --bin trace_to_quint -- "$staging_dir" "$TEST_DIR"; then
             qnt_file="${TEST_DIR}/trace_${hash}.qnt"
-            COMMONWARE_TRACE_SELECTION_STRATEGY="${COMMONWARE_TRACE_SELECTION_STRATEGY:-current}" \
+            TRACE_SELECTION_STRATEGY="${TRACE_SELECTION_STRATEGY:-current}" \
                 ./scripts/test_traces.sh "$qnt_file" "$TRACES_ROOT"
             : > "$seen_marker"
         fi

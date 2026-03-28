@@ -69,7 +69,7 @@ fn main() {
             required_containers: trace_data.required_containers,
         };
 
-        let qnt = encoder::encode(&trace_data.entries, &cfg);
+        let qnt = encoder::encode(&trace_data, &cfg);
         let output_path = output_dir.join(format!("trace_{}.qnt", stem));
         fs::write(&output_path, &qnt).expect("failed to write quint test");
         println!("{} -> {}", path.display(), output_path.display());

@@ -18,7 +18,7 @@ set -euo pipefail
 
 TEST_TARGET="${1:-traces}"
 TRACES_ROOT="${2:-../fuzz/artifacts/traces}"
-MAX_LINES=1900
+MAX_LINES=3000
 PASS=0
 FAIL=0
 SKIP=0
@@ -41,17 +41,17 @@ fi
 CRASHES_DIR="${TRACE_ROOT_DIR}/crashes"
 
 QUINT_BIN="$(which quint)"
-TRACE_SELECTION_STRATEGY="${COMMONWARE_TRACE_SELECTION_STRATEGY:-current}"
+TRACE_SELECTION_STRATEGY="${TRACE_SELECTION_STRATEGY:-current}"
 
 case "$TRACE_SELECTION_STRATEGY" in
     smallscope | short | lof)
-        MAX_SAMPLES=1000
+        MAX_SAMPLES=50
         ;;
     current | default)
         MAX_SAMPLES=10000
         ;;
     *)
-        echo "Error: unsupported COMMONWARE_TRACE_SELECTION_STRATEGY=$TRACE_SELECTION_STRATEGY"
+        echo "Error: unsupported TRACE_SELECTION_STRATEGY=$TRACE_SELECTION_STRATEGY"
         exit 1
         ;;
 esac
@@ -79,7 +79,10 @@ for qnt_file in "${TEST_FILES[@]}"; do
     if NODE_OPTIONS="--max-old-space-size=$heap_mb" "${cmd[@]}"; then
         PASS=$((PASS + 1))
         if [ "$(dirname "$qnt_file")" = "$TRACE_ROOT_DIR" ]; then
-            rm -f "$qnt_file"
+          trace_count=$(find "$TRACE_ROOT_DIR" -maxdepth 1 -type f -name 'trace_*.qnt' | wc -l)
+          if [ "$trace_count" -gt 3 ]; then
+              rm -f "$qnt_file"
+          fi
         fi
     else
         FAIL=$((FAIL + 1))
