@@ -65,6 +65,14 @@ where
         databases: A::Databases,
         last_processed: Anchor<<A::Block as Digestible>::Digest>,
     },
+
+    /// Requests the attached database set.
+    ///
+    /// The actor replies once the database set is attached, or immediately if
+    /// it is already available.
+    SubscribeDatabases {
+        response: oneshot::Sender<A::Databases>,
+    },
 }
 
 /// Channel-based proxy to the [`Stateful`](super::Stateful) actor.
@@ -121,6 +129,18 @@ where
             })
             .await
             .expect("stateful actor dropped during sync_complete");
+    }
+
+    /// Wait for the attached database set.
+    ///
+    /// This resolves when startup bootstrap finishes and the actor has
+    /// attached the database set. Late callers receive the current database
+    /// set immediately.
+    pub async fn subscribe_databases(&self) -> A::Databases {
+        self.sender
+            .request(|response| Message::SubscribeDatabases { response })
+            .await
+            .expect("stateful actor dropped during subscribe_databases")
     }
 }
 

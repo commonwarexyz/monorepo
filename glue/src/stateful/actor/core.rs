@@ -55,6 +55,41 @@ struct HeldFinalization<B> {
     acknowledgement: Exact,
 }
 
+/// Tracks the attached database set and pending subscribers.
+struct DatabaseAttachment<D: Clone> {
+    databases: Option<D>,
+    subscribers: Vec<oneshot::Sender<D>>,
+}
+
+impl<D: Clone> DatabaseAttachment<D> {
+    const fn new() -> Self {
+        Self {
+            databases: None,
+            subscribers: Vec::new(),
+        }
+    }
+
+    fn prune_closed_subscribers(&mut self) {
+        self.subscribers
+            .retain(|subscriber| !subscriber.is_closed());
+    }
+
+    fn subscribe(&mut self, response: oneshot::Sender<D>) {
+        let Some(databases) = self.databases.clone() else {
+            self.subscribers.push(response);
+            return;
+        };
+        response.send_lossy(databases);
+    }
+
+    fn attach(&mut self, databases: D) {
+        self.databases = Some(databases.clone());
+        for subscriber in self.subscribers.drain(..) {
+            subscriber.send_lossy(databases.clone());
+        }
+    }
+}
+
 const STATE_SYNC_METADATA_SUFFIX: &str = "_state_sync_metadata";
 
 /// Startup mode for the [`Stateful`] application.
@@ -177,6 +212,9 @@ where
 
     /// Marshal mailbox used for startup anchoring and lazy recovery.
     marshal: P,
+
+    /// Attached database set and pending subscribers.
+    database_attachment: DatabaseAttachment<A::Databases>,
 }
 
 /// Stateful application that manages the pending-tip DAG of merkleized
@@ -280,6 +318,7 @@ where
                 context: self.context,
                 input_provider: self.input_provider,
                 marshal: self.marshal,
+                database_attachment: DatabaseAttachment::new(),
             },
             mode: Mode::Syncing(SyncingState::new(self.inner, tip_sender, self.resolvers)),
         };
@@ -325,6 +364,9 @@ where
     {
         select_loop! {
             self.shared.context,
+            on_start => {
+                self.shared.database_attachment.prune_closed_subscribers();
+            },
             on_stopped => {
                 debug!("context shutdown, stopping stateful application");
             },
@@ -340,6 +382,9 @@ where
                             Mode::Processing(processor) => processor.genesis().await,
                         };
                         response.send_lossy(genesis);
+                    }
+                    (_, Message::SubscribeDatabases { response }) => {
+                        self.shared.database_attachment.subscribe(response);
                     }
 
                     // Syncing Mode
@@ -387,6 +432,7 @@ where
                             last_processed,
                         },
                     ) => {
+                        let attached_databases = databases.clone();
                         let processor = handle_sync_complete(
                             self.shared.context.as_present(),
                             self.shared.marshal.clone(),
@@ -395,6 +441,7 @@ where
                             last_processed,
                         )
                         .await;
+                        self.shared.database_attachment.attach(attached_databases);
                         self.mode = Mode::Processing(processor);
                     }
 
@@ -554,4 +601,55 @@ where
 
     info!("sync complete, database attached to processor");
     processor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DatabaseAttachment;
+    use commonware_utils::channel::oneshot;
+
+    #[test]
+    fn database_attachment_notifies_pending_subscribers() {
+        let mut attachment = DatabaseAttachment::new();
+        let (tx1, rx1) = oneshot::channel();
+        let (tx2, rx2) = oneshot::channel();
+
+        attachment.subscribe(tx1);
+        attachment.subscribe(tx2);
+        attachment.attach(7u64);
+
+        assert_eq!(rx1.blocking_recv(), Ok(7));
+        assert_eq!(rx2.blocking_recv(), Ok(7));
+    }
+
+    #[test]
+    fn database_attachment_replays_to_late_subscribers() {
+        let mut attachment = DatabaseAttachment::new();
+        attachment.attach(11u64);
+
+        let (tx, rx) = oneshot::channel();
+        attachment.subscribe(tx);
+
+        assert_eq!(rx.blocking_recv(), Ok(11));
+    }
+
+    #[test]
+    fn database_attachment_prunes_closed_subscribers() {
+        let mut attachment = DatabaseAttachment::new();
+        let (closed_tx, closed_rx) = oneshot::channel::<u64>();
+        let (open_tx, open_rx) = oneshot::channel();
+
+        drop(closed_rx);
+        attachment.subscribe(closed_tx);
+        attachment.subscribe(open_tx);
+
+        assert_eq!(attachment.subscribers.len(), 2);
+
+        attachment.prune_closed_subscribers();
+
+        assert_eq!(attachment.subscribers.len(), 1);
+
+        attachment.attach(13u64);
+        assert_eq!(open_rx.blocking_recv(), Ok(13));
+    }
 }
