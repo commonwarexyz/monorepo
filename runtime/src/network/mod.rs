@@ -18,11 +18,9 @@ stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring-
 mod tests {
     use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
     use futures::join;
-    use std::{
-        net::SocketAddr,
-        sync::{Arc, Mutex},
-    };
-    use tokio::sync::{mpsc, oneshot};
+    use commonware_utils::channel::{mpsc, oneshot};
+    use std::{net::SocketAddr, sync::Arc};
+    use tokio::sync::Barrier;
 
     const CLIENT_SEND_DATA: &[u8] = b"client_send_data";
     const SERVER_SEND_DATA: &[u8] = b"server_send_data";
@@ -385,48 +383,30 @@ mod tests {
         const NUM_CLIENTS: usize = 96;
         const NUM_MESSAGES: usize = 16_384;
         const MESSAGE_SIZE: usize = 4096;
-        const CLIENT_ID_LEN: usize = core::mem::size_of::<u32>();
 
         let mut listener = network
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
-        let done_receivers = Arc::new(Mutex::new(
-            (0..NUM_CLIENTS)
-                .map(|_| None)
-                .collect::<Vec<Option<oneshot::Receiver<()>>>>(),
-        ));
+
+        // Keep all sockets alive until every participant finishes (otherwise,
+        // socket close may cause an error on receive).
+        let barrier = Arc::new(Barrier::new(NUM_CLIENTS * 2));
 
         // Spawn a server task that echoes messages from many clients.
-        let server_done_receivers = done_receivers.clone();
+        let server_barrier = barrier.clone();
         let server = tokio::spawn(async move {
             let mut connections = Vec::with_capacity(NUM_CLIENTS);
             for _ in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-                let done_receivers = server_done_receivers.clone();
+                let barrier = server_barrier.clone();
                 connections.push(tokio::spawn(async move {
-                    let mut read_done_rx = None;
                     for _ in 0..NUM_MESSAGES {
                         let received = stream.recv(MESSAGE_SIZE).await.unwrap();
-                        if read_done_rx.is_none() {
-                            let client_id = u32::from_be_bytes(
-                                received.clone().coalesce().as_ref()[..CLIENT_ID_LEN]
-                                    .try_into()
-                                    .expect("missing client id"),
-                            ) as usize;
-                            read_done_rx = Some(
-                                done_receivers.lock().unwrap()[client_id]
-                                    .take()
-                                    .expect("missing client completion receiver"),
-                            );
-                        }
                         sink.send(received).await.unwrap();
                     }
-                    read_done_rx
-                        .expect("client completion receiver missing")
-                        .await
-                        .expect("client completion signal missing");
+                    barrier.wait().await;
                 }));
             }
             for connection in connections {
@@ -436,21 +416,18 @@ mod tests {
 
         // Spawn all clients.
         let mut clients = Vec::new();
-        for client_id in 0..NUM_CLIENTS {
+        for _ in 0..NUM_CLIENTS {
             let network = network.clone();
-            let done_receivers = done_receivers.clone();
+            let barrier = barrier.clone();
             clients.push(tokio::spawn(async move {
-                let (read_done_tx, read_done_rx) = oneshot::channel();
-                done_receivers.lock().unwrap()[client_id] = Some(read_done_rx);
                 let (mut sink, mut stream) = network.dial(addr).await.unwrap();
-                let mut payload = vec![42u8; MESSAGE_SIZE];
-                payload[..CLIENT_ID_LEN].copy_from_slice(&(client_id as u32).to_be_bytes());
+                let payload = vec![42u8; MESSAGE_SIZE];
                 for _ in 0..NUM_MESSAGES {
                     sink.send(payload.clone()).await.unwrap();
                     let received = stream.recv(MESSAGE_SIZE).await.unwrap();
                     assert_eq!(received.coalesce(), &payload[..]);
                 }
-                read_done_tx.send(()).unwrap();
+                barrier.wait().await;
             }));
         }
 
