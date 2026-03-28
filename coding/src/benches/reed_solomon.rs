@@ -7,7 +7,9 @@ use rand::{RngCore, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 use reed_solomon_simd::{
     engine::DefaultEngine,
-    rate::{HighRateDecoder, HighRateEncoder, LowRateDecoder, LowRateEncoder, RateDecoder, RateEncoder},
+    rate::{
+        HighRateDecoder, HighRateEncoder, LowRateDecoder, LowRateEncoder, RateDecoder, RateEncoder,
+    },
     ReedSolomonDecoder, ReedSolomonEncoder,
 };
 use std::hint::black_box;

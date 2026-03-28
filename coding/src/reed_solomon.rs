@@ -858,8 +858,7 @@ mod tests {
         let min = 4u16;
 
         // Encode data correctly to get valid chunks
-        let (_correct_root, chunks) =
-            encode::<Sha256, _>(total, min, data, &STRATEGY).unwrap();
+        let (_correct_root, chunks) = encode::<Sha256, _>(total, min, data, &STRATEGY).unwrap();
 
         // Create a malicious/fake root (simulating a malicious encoder)
         let mut hasher = Sha256::new();
