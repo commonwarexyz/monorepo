@@ -45,10 +45,13 @@ mod tests {
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("Failed to bind");
+
+        // Get the local address of the listener
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         // Wait to drop any open sockets until both sides have completed.
         join!(
+            // Server accepts a client, verifies the payload, and sends a reply.
             async move {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
                 let received = stream
@@ -61,11 +64,14 @@ mod tests {
                     .expect("Failed to send");
                 (sink, stream)
             },
+            // Client connects to the server, sends a payload, and reads the reply.
             async move {
+                // Connect to the server
                 let (mut sink, mut stream) = network
                     .dial(listener_addr)
                     .await
                     .expect("Failed to dial server");
+
                 sink.send(IoBuf::from(CLIENT_SEND_DATA))
                     .await
                     .expect("Failed to send data");
@@ -86,6 +92,8 @@ mod tests {
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .expect("Failed to bind");
+
+        // Get the local address of the listener
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         // Build one logical message from multiple chunks so this test exercises
@@ -100,6 +108,7 @@ mod tests {
         // Spawn a server and read exactly the logical message size. The receive
         // side should observe the same byte stream regardless of send chunking.
         join!(
+            // Server receives the vectored payload as one logical byte stream.
             async move {
                 let (_, sink, mut stream) = listener.accept().await.expect("Failed to accept");
                 let received = stream
@@ -109,11 +118,14 @@ mod tests {
                 assert_eq!(received.coalesce(), expected.as_ref());
                 (sink, stream)
             },
+            // Client connects and sends the pre-built vectored message.
             async move {
+                // Connect to the server
                 let (mut sink, stream) = network
                     .dial(listener_addr)
                     .await
                     .expect("Failed to dial server");
+
                 // Send the pre-built vectored message.
                 sink.send(message).await.expect("Failed to send data");
                 (sink, stream)
@@ -135,8 +147,12 @@ mod tests {
         // Keep all sockets alive until every participant finishes.
         let barrier = Arc::new(Barrier::new(NUM_CLIENTS * 2));
         let server_barrier = barrier.clone();
+
+        // Server task
         let server = tokio::spawn(async move {
             let mut set = JoinSet::new();
+
+            // Handle multiple clients
             for _ in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
                 let barrier = server_barrier.clone();
@@ -149,6 +165,8 @@ mod tests {
                     sink.send(IoBuf::from(SERVER_SEND_DATA))
                         .await
                         .expect("Failed to send");
+
+                    // Hold the connection open until every peer has finished.
                     barrier.wait().await;
                 });
             }
@@ -157,23 +175,33 @@ mod tests {
             }
         });
 
+        // Start multiple clients
         let mut set = JoinSet::new();
         for _ in 0..NUM_CLIENTS {
             let network = network.clone();
             let barrier = barrier.clone();
             set.spawn(async move {
+                // Connect to the server
                 let (mut sink, mut stream) = network
                     .dial(listener_addr)
                     .await
                     .expect("Failed to dial server");
+
+                // Send a message to the server
                 sink.send(IoBuf::from(CLIENT_SEND_DATA))
                     .await
                     .expect("Failed to send data");
+
+                // Receive a message from the server
                 let received = stream
                     .recv(SERVER_SEND_DATA.len())
                     .await
                     .expect("Failed to receive data");
+
+                // Verify the received data
                 assert_eq!(received.coalesce(), SERVER_SEND_DATA);
+
+                // Hold the connection open until every peer has finished.
                 barrier.wait().await;
             });
         }
@@ -211,11 +239,14 @@ mod tests {
                 }
                 (sink, stream)
             },
+            // Client task
             async move {
+                // Connect to the server
                 let (mut sink, mut stream) = network
                     .dial(listener_addr)
                     .await
                     .expect("Failed to dial server");
+
                 // Create a pattern of data
                 let pattern = (0..CHUNK_SIZE).map(|i| (i % 256) as u8).collect::<Vec<_>>();
 
@@ -265,11 +296,13 @@ mod tests {
         let listener_addr = listener.local_addr().expect("Failed to get local address");
 
         join!(
+            // Server sends data
             async move {
                 let (_, mut sink, stream) = listener.accept().await.expect("Failed to accept");
                 sink.send(IoBuf::from(DATA)).await.expect("Failed to send");
                 (sink, stream)
             },
+            // Client receives and tests peek
             async move {
                 let (sink, mut stream) = network
                     .dial(listener_addr)
@@ -330,15 +363,18 @@ mod tests {
             .unwrap();
         let addr = listener.local_addr().unwrap();
 
-        // Spawn all servers.
+        // Keep every connection alive until both the client and server halves finish.
         let barrier = Arc::new(Barrier::new(NUM_CLIENTS * 2));
         let server_barrier = barrier.clone();
+
+        // Spawn a server task that echoes messages from many clients.
         let server = tokio::spawn(async move {
             let mut set = JoinSet::new();
             for _ in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.unwrap();
                 let barrier = server_barrier.clone();
                 set.spawn(async move {
+                    // Echo every message back to the connected client.
                     for _ in 0..NUM_MESSAGES {
                         let received = stream.recv(MESSAGE_SIZE).await.unwrap();
                         sink.send(received).await.unwrap();
@@ -357,6 +393,7 @@ mod tests {
             let network = network.clone();
             let barrier = barrier.clone();
             set.spawn(async move {
+                // Dial the server and repeatedly verify the echoed payload.
                 let (mut sink, mut stream) = network.dial(addr).await.unwrap();
                 let payload = vec![42u8; MESSAGE_SIZE];
                 for _ in 0..NUM_MESSAGES {
