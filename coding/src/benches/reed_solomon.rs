@@ -132,7 +132,7 @@ fn bench_decode_breakdown(c: &mut Criterion) {
 
         c.bench_function(
             &format!(
-                "reed_solomon::decode_substeps/reconstruction msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS} shard_selection={label}"
+                "reed_solomon::decode_substeps/type=reconstruction msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS} shard_selection={label}"
             ),
             |b| {
                 b.iter(|| {
@@ -154,7 +154,7 @@ fn bench_decode_breakdown(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "reed_solomon::decode_substeps/reencode msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+            "reed_solomon::decode_substeps/type=reencode msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
         ),
         |b| {
             b.iter(|| {
@@ -172,7 +172,7 @@ fn bench_decode_breakdown(c: &mut Criterion) {
     let (worst_originals, worst_recoveries) = selected_shards(&prepared, ShardSelection::Worst);
     c.bench_function(
         &format!(
-            "reed_solomon::decode_substeps/high_rate_reconstruction msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+            "reed_solomon::decode_substeps/type=high_rate_reconstruction msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
         ),
         |b| {
             b.iter_batched(
@@ -197,7 +197,7 @@ fn bench_decode_breakdown(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "reed_solomon::decode_substeps/low_rate_reconstruction msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+            "reed_solomon::decode_substeps/type=low_rate_reconstruction msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
         ),
         |b| {
             b.iter_batched(
@@ -222,7 +222,7 @@ fn bench_decode_breakdown(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "reed_solomon::decode_substeps/bmt_root_check msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+            "reed_solomon::decode_substeps/type=bmt_root_check msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
         ),
         |b| {
             b.iter_batched(
@@ -242,7 +242,7 @@ fn bench_decode_breakdown(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "reed_solomon::decode_substeps/payload_extraction msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+            "reed_solomon::decode_substeps/type=payload_extraction msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
         ),
         |b| {
             b.iter(|| {
@@ -277,7 +277,7 @@ fn bench_encode_breakdown(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "reed_solomon::encode_substeps/recovery_copy msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+            "reed_solomon::encode_substeps/type=recovery_copy msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
         ),
         |b| {
             b.iter(|| {
@@ -292,7 +292,7 @@ fn bench_encode_breakdown(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "reed_solomon::encode_substeps/shard_hashing msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+            "reed_solomon::encode_substeps/type=shard_hashing msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
         ),
         |b| {
             b.iter(|| {
@@ -304,7 +304,7 @@ fn bench_encode_breakdown(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "reed_solomon::encode_substeps/bmt_build msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+            "reed_solomon::encode_substeps/type=bmt_build msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
         ),
         |b| {
             b.iter_batched(
@@ -324,7 +324,7 @@ fn bench_encode_breakdown(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "reed_solomon::encode_substeps/proof_generation msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+            "reed_solomon::encode_substeps/type=proof_generation msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
         ),
         |b| {
             b.iter(|| {
@@ -338,7 +338,7 @@ fn bench_encode_breakdown(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "reed_solomon::encode_substeps/high_rate msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+            "reed_solomon::encode_substeps/type=high_rate msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
         ),
         |b| {
             b.iter_batched(
@@ -360,7 +360,7 @@ fn bench_encode_breakdown(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "reed_solomon::encode_substeps/low_rate msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
+            "reed_solomon::encode_substeps/type=low_rate msg_len={TARGET_MSG_LEN} chunks={TARGET_CHUNKS}"
         ),
         |b| {
             b.iter_batched(
