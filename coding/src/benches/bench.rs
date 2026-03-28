@@ -7,6 +7,8 @@ use rand_chacha::ChaCha8Rng;
 use shard_selection::SELECTIONS;
 
 mod reed_solomon;
+#[cfg(feature = "isa-l")]
+mod reed_solomon_compare;
 mod shard_selection;
 mod zoda;
 
@@ -128,4 +130,12 @@ pub(crate) fn bench_decode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     }
 }
 
+#[cfg(feature = "isa-l")]
+criterion_main!(
+    reed_solomon::benches,
+    reed_solomon_compare::benches,
+    zoda::benches
+);
+
+#[cfg(not(feature = "isa-l"))]
 criterion_main!(reed_solomon::benches, zoda::benches);

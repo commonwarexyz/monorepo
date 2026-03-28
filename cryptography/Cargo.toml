@@ -138,6 +138,11 @@ harness = false
 path = "src/blake3/benches/bench.rs"
 
 [[bench]]
+name = "crc32"
+harness = false
+path = "src/crc32/benches/bench.rs"
+
+[[bench]]
 name = "lthash"
 harness = false
 path = "src/lthash/benches/bench.rs"
