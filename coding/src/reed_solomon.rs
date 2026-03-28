@@ -196,38 +196,6 @@ fn prepare_data(data: &[u8], k: usize) -> (Vec<u8>, usize) {
     (padded, shard_len)
 }
 
-/// Compute the BMT root directly from raw shard digests.
-///
-/// This mirrors `bmt::Builder` + `Tree::build`, but avoids materializing the
-/// full tree when decode only needs the finalized root.
-fn merkle_root_from_digests<H: Hasher>(digests: &[H::Digest]) -> H::Digest {
-    debug_assert!(!digests.is_empty(), "merkle roots require at least one digest");
-
-    let mut hasher = H::new();
-    let leaf_count: u32 = digests.len().try_into().expect("too many leaves");
-    let mut current = Vec::with_capacity(digests.len());
-    for (index, digest) in digests.iter().enumerate() {
-        let position: u32 = index.try_into().expect("too many leaves");
-        hasher.update(&position.to_be_bytes());
-        hasher.update(digest);
-        current.push(hasher.finalize());
-    }
-
-    while current.len() > 1 {
-        let mut next = Vec::with_capacity(current.len().div_ceil(2));
-        for pair in current.chunks(2) {
-            hasher.update(&pair[0]);
-            hasher.update(if pair.len() == 2 { &pair[1] } else { &pair[0] });
-            next.push(hasher.finalize());
-        }
-        current = next;
-    }
-
-    hasher.update(&leaf_count.to_be_bytes());
-    hasher.update(&current[0]);
-    hasher.finalize()
-}
-
 /// Extract data from encoded shards.
 ///
 /// The first `k` shards, when concatenated, form `[length_prefix | data | padding]`.
@@ -533,13 +501,17 @@ fn decode<'a, H: Hasher, S: Strategy>(
         shard_digests[i] = Some(digest);
     }
 
-    let shard_digests: Vec<_> = shard_digests
+    let mut builder = Builder::<H>::new(n);
+    shard_digests
         .into_iter()
         .map(|digest| digest.expect("digest must be present for every shard"))
-        .collect();
+        .for_each(|digest| {
+            builder.add(&digest);
+        });
+    let tree = builder.build();
 
     // Confirm root is consistent
-    if merkle_root_from_digests::<H>(&shard_digests) != *root {
+    if tree.root() != *root {
         return Err(Error::Inconsistent);
     }
 
@@ -860,19 +832,6 @@ mod tests {
             .collect::<Vec<_>>();
         let decoded = decode::<Sha256, _>(total, min, &root, minimal.iter(), &STRATEGY).unwrap();
         assert_eq!(decoded, data);
-    }
-
-    #[test]
-    fn test_merkle_root_from_digests_matches_bmt() {
-        let digests: Vec<_> = (0u8..8).map(|i| Sha256::hash(&[i])).collect();
-
-        let mut builder = Builder::<Sha256>::new(digests.len());
-        for digest in &digests {
-            builder.add(digest);
-        }
-        let tree = builder.build();
-
-        assert_eq!(merkle_root_from_digests::<Sha256>(&digests), tree.root());
     }
 
     #[test]
