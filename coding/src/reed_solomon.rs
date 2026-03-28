@@ -196,71 +196,112 @@ fn prepare_data(data: &[u8], k: usize) -> (Vec<u8>, usize) {
     (padded, shard_len)
 }
 
+/// Compute the BMT root directly from raw shard digests.
+///
+/// This mirrors `bmt::Builder` + `Tree::build`, but avoids materializing the
+/// full tree when decode only needs the finalized root.
+fn merkle_root_from_digests<H: Hasher>(digests: &[H::Digest]) -> H::Digest {
+    debug_assert!(!digests.is_empty(), "merkle roots require at least one digest");
+
+    let mut hasher = H::new();
+    let leaf_count: u32 = digests.len().try_into().expect("too many leaves");
+    let mut current = Vec::with_capacity(digests.len());
+    for (index, digest) in digests.iter().enumerate() {
+        let position: u32 = index.try_into().expect("too many leaves");
+        hasher.update(&position.to_be_bytes());
+        hasher.update(digest);
+        current.push(hasher.finalize());
+    }
+
+    while current.len() > 1 {
+        let mut next = Vec::with_capacity(current.len().div_ceil(2));
+        for pair in current.chunks(2) {
+            hasher.update(&pair[0]);
+            hasher.update(if pair.len() == 2 { &pair[1] } else { &pair[0] });
+            next.push(hasher.finalize());
+        }
+        current = next;
+    }
+
+    hasher.update(&leaf_count.to_be_bytes());
+    hasher.update(&current[0]);
+    hasher.finalize()
+}
+
 /// Extract data from encoded shards.
 ///
 /// The first `k` shards, when concatenated, form `[length_prefix | data | padding]`.
-/// This function bulk-copies shard slices while skipping the 4-byte prefix.
+/// This copies only the actual payload bytes and validates padding in place.
 fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
     let shards = shards.get(..k).ok_or(Error::NotEnoughChunks)?;
-    let (data_len, payload_len) = read_prefix_and_payload_len(shards)?;
-    let mut payload = copy_payload_after_prefix(shards, payload_len);
-    validate_zero_padding(&payload, data_len)?;
-    payload.truncate(data_len);
-    Ok(payload)
+    let (data_len, _) = read_prefix_and_payload_len(shards)?;
+    let mut data = Vec::with_capacity(data_len);
+    let mut prefix_bytes_left = u32::SIZE;
+    let mut data_bytes_left = data_len;
+
+    for shard in shards {
+        let skip = prefix_bytes_left.min(shard.len());
+        prefix_bytes_left -= skip;
+        if skip == shard.len() {
+            continue;
+        }
+
+        let payload = &shard[skip..];
+        let take = data_bytes_left.min(payload.len());
+        data.extend_from_slice(&payload[..take]);
+        data_bytes_left -= take;
+
+        if take < payload.len() && payload[take..].iter().any(|byte| *byte != 0) {
+            return Err(Error::Inconsistent);
+        }
+    }
+
+    if prefix_bytes_left != 0 || data_bytes_left != 0 {
+        return Err(Error::Inconsistent);
+    }
+    Ok(data)
 }
 
 /// Read the 4-byte big-endian length prefix from `shards` and validate that
 /// the decoded length fits in the post-prefix payload region.
 fn read_prefix_and_payload_len(shards: &[&[u8]]) -> Result<(usize, usize), Error> {
-    let total_len: usize = shards.iter().map(|s| s.len()).sum();
+    let Some(first) = shards.first() else {
+        return Err(Error::NotEnoughChunks);
+    };
+    let shard_len = first.len();
+    if shards.iter().any(|shard| shard.len() != shard_len) {
+        return Err(Error::Inconsistent);
+    }
+
+    let total_len = shard_len
+        .checked_mul(shards.len())
+        .ok_or(Error::Inconsistent)?;
     if total_len < u32::SIZE {
         return Err(Error::Inconsistent);
     }
 
-    // Read the length prefix, which may span multiple shards.
-    let mut prefix = [0u8; u32::SIZE];
-    let mut prefix_len = 0usize;
-    for shard in shards {
-        if prefix_len == u32::SIZE {
-            break;
+    let data_len = if let Some(prefix) = first.get(..u32::SIZE) {
+        u32::from_be_bytes(prefix.try_into().expect("prefix length must match")) as usize
+    } else {
+        // Read the length prefix, which may span multiple shards.
+        let mut prefix = [0u8; u32::SIZE];
+        let mut prefix_len = 0usize;
+        for shard in shards {
+            if prefix_len == u32::SIZE {
+                break;
+            }
+            let read = (u32::SIZE - prefix_len).min(shard.len());
+            prefix[prefix_len..prefix_len + read].copy_from_slice(&shard[..read]);
+            prefix_len += read;
         }
-        let read = (u32::SIZE - prefix_len).min(shard.len());
-        prefix[prefix_len..prefix_len + read].copy_from_slice(&shard[..read]);
-        prefix_len += read;
+        u32::from_be_bytes(prefix) as usize
     }
-
-    let data_len = u32::from_be_bytes(prefix) as usize;
+    ;
     let payload_len = total_len - u32::SIZE;
     if data_len > payload_len {
         return Err(Error::Inconsistent);
     }
     Ok((data_len, payload_len))
-}
-
-/// Bulk-copy bytes after the 4-byte prefix from `shards` into a contiguous
-/// payload buffer.
-fn copy_payload_after_prefix(shards: &[&[u8]], payload_len: usize) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(payload_len);
-    let mut prefix_bytes_left = u32::SIZE;
-    for shard in shards {
-        if prefix_bytes_left >= shard.len() {
-            prefix_bytes_left -= shard.len();
-            continue;
-        }
-        payload.extend_from_slice(&shard[prefix_bytes_left..]);
-        prefix_bytes_left = 0;
-    }
-    payload
-}
-
-/// Validate canonical encoding by requiring trailing bytes after `data_len`
-/// to be zero.
-fn validate_zero_padding(payload: &[u8], data_len: usize) -> Result<(), Error> {
-    // Canonical encoding requires all trailing bytes to be zero.
-    if !payload[data_len..].iter().all(|byte| *byte == 0) {
-        return Err(Error::Inconsistent);
-    }
-    Ok(())
 }
 
 /// Type alias for the internal encoding result.
@@ -282,9 +323,11 @@ type Encoding<D> = (D, Vec<Chunk<D>>);
 fn encode<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
-    data: Vec<u8>,
+    data: impl AsRef<[u8]>,
     strategy: &S,
 ) -> Result<Encoding<H::Digest>, Error> {
+    let data = data.as_ref();
+
     // Validate parameters
     assert!(total > min);
     assert!(min > 0);
@@ -296,7 +339,7 @@ fn encode<H: Hasher, S: Strategy>(
     }
 
     // Prepare data as a contiguous buffer of k shards
-    let (padded, shard_len) = prepare_data(&data, k);
+    let (padded, shard_len) = prepare_data(data, k);
 
     // Create or reuse encoder
     let recovery_buf = {
@@ -416,80 +459,92 @@ fn decode<'a, H: Hasher, S: Strategy>(
         return Err(Error::NotEnoughChunks);
     }
 
-    // Decode original data
-    let mut decoder = Cached::take(
-        &CACHED_DECODER,
-        || ReedSolomonDecoder::new(k, m, shard_len),
-        |dec| dec.reset(k, m, shard_len),
-    )
-    .map_err(Error::ReedSolomon)?;
-    for (idx, ref shard) in &provided_originals {
-        decoder
-            .add_original_shard(*idx, shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    for (idx, ref shard) in &provided_recoveries {
-        decoder
-            .add_recovery_shard(*idx, shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
-
-    // Reconstruct all original shards
-    let mut shards = vec![Default::default(); k];
-    for (idx, shard) in provided_originals
-        .into_iter()
-        .chain(decoding.restored_original_iter())
-    {
-        shards[idx] = shard;
+    let mut originals = vec![&[][..]; k];
+    for &(idx, shard) in &provided_originals {
+        originals[idx] = shard;
     }
 
-    // Re-encode recovered data to get recovery shards
+    let all_originals_provided = provided_originals.len() == k;
+    let mut decoder = if all_originals_provided {
+        None
+    } else {
+        Some(
+            Cached::take(
+                &CACHED_DECODER,
+                || ReedSolomonDecoder::new(k, m, shard_len),
+                |dec| dec.reset(k, m, shard_len),
+            )
+            .map_err(Error::ReedSolomon)?,
+        )
+    };
+    let decoding = if let Some(decoder) = decoder.as_mut() {
+        for (idx, shard) in &provided_originals {
+            decoder
+                .add_original_shard(*idx, shard)
+                .map_err(Error::ReedSolomon)?;
+        }
+        for (idx, shard) in &provided_recoveries {
+            decoder
+                .add_recovery_shard(*idx, shard)
+                .map_err(Error::ReedSolomon)?;
+        }
+        Some(decoder.decode().map_err(Error::ReedSolomon)?)
+    } else {
+        None
+    };
+
+    let mut missing_digest_shards = Vec::with_capacity(n - provided);
+    if let Some(decoding) = decoding.as_ref() {
+        for (idx, shard) in decoding.restored_original_iter() {
+            originals[idx] = shard;
+            missing_digest_shards.push((idx, shard));
+        }
+    }
+
+    // Re-encode recovered data to get any missing recovery shard digests.
     let mut encoder = Cached::take(
         &CACHED_ENCODER,
         || ReedSolomonEncoder::new(k, m, shard_len),
         |enc| enc.reset(k, m, shard_len),
     )
     .map_err(Error::ReedSolomon)?;
-    for shard in shards.iter().take(k) {
+    for shard in &originals {
         encoder
             .add_original_shard(shard)
             .map_err(Error::ReedSolomon)?;
     }
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    shards.extend(encoding.recovery_iter());
+    for (idx, shard) in encoding.recovery_iter().enumerate() {
+        let shard_idx = k + idx;
+        if shard_digests[shard_idx].is_none() {
+            missing_digest_shards.push((shard_idx, shard));
+        }
+    }
 
-    // Build Merkle tree
+    // Hash only the shards whose digests were not already checked.
     for (i, digest) in strategy.map_init_collect_vec(
-        shard_digests
-            .iter()
-            .enumerate()
-            .filter_map(|(i, digest)| digest.is_none().then_some(i)),
+        &missing_digest_shards,
         H::new,
-        |hasher, i| {
-            hasher.update(shards[i]);
-            (i, hasher.finalize())
+        |hasher, (i, shard)| {
+            hasher.update(shard);
+            (*i, hasher.finalize())
         },
     ) {
         shard_digests[i] = Some(digest);
     }
 
-    let mut builder = Builder::<H>::new(n);
-    shard_digests
+    let shard_digests: Vec<_> = shard_digests
         .into_iter()
         .map(|digest| digest.expect("digest must be present for every shard"))
-        .for_each(|digest| {
-            builder.add(&digest);
-        });
-    let tree = builder.build();
+        .collect();
 
     // Confirm root is consistent
-    if tree.root() != *root {
+    if merkle_root_from_digests::<H>(&shard_digests) != *root {
         return Err(Error::Inconsistent);
     }
 
     // Extract original data
-    extract_data(&shards, k)
+    extract_data(&originals, k)
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [`bmt`].
@@ -596,13 +651,25 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         mut data: impl Buf,
         strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
-        let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
-        encode::<H, _>(
-            total_shards(config)?,
-            config.minimum_shards.get(),
-            data,
-            strategy,
-        )
+        let remaining = data.remaining();
+        let chunk = data.chunk();
+        if chunk.len() == remaining {
+            encode::<H, _>(
+                total_shards(config)?,
+                config.minimum_shards.get(),
+                chunk,
+                strategy,
+            )
+        } else {
+            let mut contiguous = vec![0u8; remaining];
+            data.copy_to_slice(&mut contiguous);
+            encode::<H, _>(
+                total_shards(config)?,
+                config.minimum_shards.get(),
+                &contiguous,
+                strategy,
+            )
+        }
     }
 
     fn check(
@@ -793,6 +860,36 @@ mod tests {
             .collect::<Vec<_>>();
         let decoded = decode::<Sha256, _>(total, min, &root, minimal.iter(), &STRATEGY).unwrap();
         assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_merkle_root_from_digests_matches_bmt() {
+        let digests: Vec<_> = (0u8..8).map(|i| Sha256::hash(&[i])).collect();
+
+        let mut builder = Builder::<Sha256>::new(digests.len());
+        for digest in &digests {
+            builder.add(digest);
+        }
+        let tree = builder.build();
+
+        assert_eq!(merkle_root_from_digests::<Sha256>(&digests), tree.root());
+    }
+
+    #[test]
+    fn test_scheme_encode_accepts_non_contiguous_buf() {
+        let config = Config {
+            minimum_shards: NZU16!(3),
+            extra_shards: NZU16!(2),
+        };
+        let payload = b"hello world";
+        let (expected_root, expected_chunks) = RS::encode(&config, payload.as_slice(), &STRATEGY).unwrap();
+
+        let left = Bytes::from_static(b"hello ");
+        let right = Bytes::from_static(b"world");
+        let (actual_root, actual_chunks) = RS::encode(&config, left.chain(right), &STRATEGY).unwrap();
+
+        assert_eq!(actual_root, expected_root);
+        assert_eq!(actual_chunks, expected_chunks);
     }
 
     #[test]
