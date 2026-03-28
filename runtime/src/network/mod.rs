@@ -150,9 +150,8 @@ mod tests {
         // Server task
         let server_barrier = barrier.clone();
         let server = tokio::spawn(async move {
-            let mut set = JoinSet::new();
-
             // Handle multiple clients
+            let mut set = JoinSet::new();
             for _ in 0..NUM_CLIENTS {
                 let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
                 let barrier = server_barrier.clone();
@@ -365,9 +364,9 @@ mod tests {
 
         // Keep every connection alive until both the client and server halves finish.
         let barrier = Arc::new(Barrier::new(NUM_CLIENTS * 2));
-        let server_barrier = barrier.clone();
 
         // Spawn a server task that echoes messages from many clients.
+        let server_barrier = barrier.clone();
         let server = tokio::spawn(async move {
             let mut set = JoinSet::new();
             for _ in 0..NUM_CLIENTS {
