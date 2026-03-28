@@ -17,10 +17,12 @@ stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring-
 #[cfg(test)]
 mod tests {
     use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
-    use commonware_utils::channel::{mpsc, oneshot};
+    use commonware_utils::{
+        channel::{mpsc, oneshot},
+        sync::Barrier,
+    };
     use futures::join;
     use std::{net::SocketAddr, sync::Arc};
-    use tokio::sync::Barrier;
 
     const CLIENT_SEND_DATA: &[u8] = b"client_send_data";
     const SERVER_SEND_DATA: &[u8] = b"server_send_data";
