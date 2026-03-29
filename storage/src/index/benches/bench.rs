@@ -1,3 +1,4 @@
+use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::Metrics;
 use criterion::criterion_main;
 use prometheus_client::registry::Metric;
@@ -9,8 +10,10 @@ mod insert;
 mod lookup;
 mod lookup_miss;
 
+pub(crate) type Digest = <Sha256 as Hasher>::Digest;
+
 #[derive(Clone)]
-pub struct DummyMetrics;
+pub(crate) struct DummyMetrics;
 
 impl Metrics for DummyMetrics {
     fn label(&self) -> String {

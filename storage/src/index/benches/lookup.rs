@@ -1,4 +1,4 @@
-use super::DummyMetrics;
+use super::{Digest, DummyMetrics};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
     index::{unordered, Unordered},
@@ -15,16 +15,6 @@ use std::{
 const N_ITEMS: [usize; 2] = [10_000, 50_000];
 #[cfg(full_bench)]
 const N_ITEMS: [usize; 5] = [10_000, 50_000, 100_000, 500_000, 1_000_000];
-
-type Digest = <Sha256 as Hasher>::Digest;
-
-// Match the full digest via stored positions so collisions pay the same scan cost
-// without changing the index value layout.
-fn contains_full_key<I: Unordered<Value = u64>>(index: &I, key: &Digest, keys: &[Digest]) -> bool {
-    index
-        .get(key)
-        .any(|candidate| &keys[*candidate as usize] == key)
-}
 
 fn run_lookup<T: Translator>(
     c: &mut Criterion,
@@ -51,7 +41,7 @@ fn run_lookup<T: Translator>(
             for _ in 0..iters {
                 let start = Instant::now();
                 for key in &lookup_keys {
-                    black_box(contains_full_key(&index, key, keys));
+                    black_box(index.get(key).next().is_some());
                 }
                 total += start.elapsed();
             }
