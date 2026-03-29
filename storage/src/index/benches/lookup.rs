@@ -66,6 +66,6 @@ fn bench_lookup(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().sample_size(50).warm_up_time(std::time::Duration::from_secs(5)).measurement_time(std::time::Duration::from_secs(10));
+    config = Criterion::default().sample_size(10);
     targets = bench_lookup,
 }
