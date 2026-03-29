@@ -440,10 +440,8 @@ fn decode<'a, H: Hasher, S: Strategy>(
     let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
 
     // Reconstruct all original shards
-    let mut missing_digest_shards = Vec::with_capacity(n - provided);
     for (idx, shard) in decoding.restored_original_iter() {
         originals[idx] = shard;
-        missing_digest_shards.push((idx, shard));
     }
 
     // Re-encode recovered data to get recovery shards
@@ -459,20 +457,20 @@ fn decode<'a, H: Hasher, S: Strategy>(
             .map_err(Error::ReedSolomon)?;
     }
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    for (idx, shard) in encoding.recovery_iter().enumerate() {
-        let shard_idx = k + idx;
-        if shard_digests[shard_idx].is_none() {
-            missing_digest_shards.push((shard_idx, shard));
-        }
-    }
-
     // Build Merkle tree
-    for (i, digest) in
-        strategy.map_init_collect_vec(&missing_digest_shards, H::new, |hasher, (i, shard)| {
+    for (i, digest) in strategy.map_init_collect_vec(
+        originals
+            .iter()
+            .copied()
+            .enumerate()
+            .chain(encoding.recovery_iter().enumerate().map(|(idx, shard)| (k + idx, shard)))
+            .filter(|(i, _)| shard_digests[*i].is_none()),
+        H::new,
+        |hasher, (i, shard)| {
             hasher.update(shard);
-            (*i, hasher.finalize())
-        })
-    {
+            (i, hasher.finalize())
+        },
+    ) {
         shard_digests[i] = Some(digest);
     }
 
