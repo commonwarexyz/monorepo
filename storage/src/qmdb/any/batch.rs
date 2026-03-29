@@ -1572,6 +1572,9 @@ mod tests {
             db.apply_batch(initial).await.unwrap();
             db.commit().await.unwrap();
 
+            // Update only key_a so the colliding sibling key_b remains outside
+            // parent.diff and must still be resolved through the committed
+            // snapshot in the child.
             let parent = db
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xCC, 1)))
@@ -1651,6 +1654,9 @@ mod tests {
             db.apply_batch(initial).await.unwrap();
             db.commit().await.unwrap();
 
+            // Update only key_a so the colliding sibling key_b remains outside
+            // parent.diff and must still be resolved through the committed
+            // snapshot in the child.
             let parent = db
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xCC, 1)))
