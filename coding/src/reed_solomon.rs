@@ -215,13 +215,13 @@ fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
             continue;
         }
 
-        // Copy only the live payload bytes; any remaining bytes in this shard
-        // must be canonical zero padding.
+        // Copy only the live payload bytes from this shard.
         let payload = &shard[prefix_bytes_left..];
         let copy_len = data_bytes_left.min(payload.len());
         data.extend_from_slice(&payload[..copy_len]);
         data_bytes_left -= copy_len;
 
+        // Any remaining bytes in this shard must be canonical zero padding.
         if !payload[copy_len..].iter().all(|byte| *byte == 0) {
             return Err(Error::Inconsistent);
         }
