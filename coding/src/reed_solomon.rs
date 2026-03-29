@@ -190,13 +190,7 @@ fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
     // Prepare data
     let mut padded = vec![0u8; k * shard_len];
     padded[..u32::SIZE].copy_from_slice(&(data_len as u32).to_be_bytes());
-    let mut offset = u32::SIZE;
-    while data.has_remaining() {
-        let chunk = data.chunk();
-        padded[offset..offset + chunk.len()].copy_from_slice(chunk);
-        offset += chunk.len();
-        data.advance(chunk.len());
-    }
+    data.copy_to_slice(&mut padded[u32::SIZE..u32::SIZE + data_len]);
 
     (padded, shard_len)
 }
