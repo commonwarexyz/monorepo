@@ -1795,9 +1795,10 @@ pub mod tests {
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
-            // Counterexample shape: parent updates only key_a, while colliding
-            // sibling key_b remains outside the parent diff and is still
-            // resolved through the committed snapshot in the child.
+            // Seed four colliding committed keys, then update only key_a.
+            // The specific 4 / 1 / 0 shape is a concrete counterexample:
+            // key_b remains outside the parent diff and is still resolved
+            // through the committed snapshot in the child.
             let mut initial = db.new_batch();
             for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
@@ -1814,6 +1815,9 @@ pub mod tests {
                 .await
                 .unwrap();
 
+            // Build the child while the parent is still pending, then rebuild
+            // the same logical child after committing the parent and compare
+            // both canonical and ops roots.
             let pending_child = parent
                 .new_batch::<Sha256>()
                 .write(key_a, Some(colliding_digest(0xDD, 1)))
@@ -1836,6 +1840,8 @@ pub mod tests {
             assert_eq!(pending_child.root(), committed_child.root());
             assert_eq!(pending_child.ops_root(), committed_child.ops_root());
 
+            // Rebase the pending child onto the committed parent and ensure the
+            // applied wrapper roots still match the committed-path child roots.
             let current_db_size = *db.bounds().await.end;
             db.apply_batch(pending_child.finalize_from(current_db_size))
                 .await
@@ -1859,7 +1865,8 @@ pub mod tests {
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
-            // Match the unordered counterexample shape on the ordered path.
+            // Match the unordered counterexample shape on the ordered path so
+            // both wrappers exercise the same collision pattern.
             let mut initial = db.new_batch();
             for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
@@ -1876,6 +1883,8 @@ pub mod tests {
                 .await
                 .unwrap();
 
+            // Build the child while the parent is still pending, then rebuild
+            // the same logical child after committing the parent.
             let pending_child = parent
                 .new_batch::<Sha256>()
                 .write(key_a, Some(colliding_digest(0xDD, 1)))
@@ -1898,6 +1907,8 @@ pub mod tests {
             assert_eq!(pending_child.root(), committed_child.root());
             assert_eq!(pending_child.ops_root(), committed_child.ops_root());
 
+            // Rebase the pending child onto the committed parent and compare
+            // the applied wrapper roots with the committed-path child roots.
             let current_db_size = *db.bounds().await.end;
             db.apply_batch(pending_child.finalize_from(current_db_size))
                 .await

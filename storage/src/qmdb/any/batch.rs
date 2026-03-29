@@ -1560,9 +1560,10 @@ mod tests {
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
-            // Counterexample shape: parent updates only key_a, while colliding
-            // sibling key_b remains outside parent.diff and is still resolved
-            // through the committed snapshot in the child.
+            // Seed four colliding committed keys, then update only key_a.
+            // The specific 4 / 1 / 0 shape is a concrete counterexample:
+            // key_b remains outside parent.diff and is still resolved through
+            // the committed snapshot in the child.
             let mut initial = db.new_batch();
             for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
@@ -1582,9 +1583,11 @@ mod tests {
                 "regression requires a sibling collision to remain only in the committed snapshot"
             );
 
-            // Without the base_diff-location guard, the stale snapshot entry
-            // for key_a can consume key_a's child mutation before the actual
-            // base_diff location.
+            // Build the child while the parent is still pending. The child
+            // mutates the parent-updated key plus the colliding sibling that
+            // still resolves through the committed snapshot. Without the
+            // base_diff-location guard, the stale snapshot entry for key_a can
+            // consume key_a's mutation before the actual base_diff location.
             let pending_child = parent
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xDD, 1)))
@@ -1593,6 +1596,8 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Commit the parent, then rebuild the same logical child from the
+            // committed DB state and compare speculative roots.
             let finalized_parent = parent.finalize();
             db.apply_batch(finalized_parent).await.unwrap();
             db.commit().await.unwrap();
@@ -1607,6 +1612,8 @@ mod tests {
 
             assert_eq!(pending_child.root(), committed_child.root());
 
+            // Rebase the pending child onto the committed parent and ensure the
+            // applied root still matches the committed-path child root.
             let current_db_size = *db.bounds().await.end;
             db.apply_batch(pending_child.finalize_from(current_db_size))
                 .await
@@ -1634,7 +1641,8 @@ mod tests {
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
-            // Match the unordered counterexample shape on the ordered path.
+            // Match the unordered counterexample shape on the ordered path so
+            // both variants exercise the same collision pattern.
             let mut initial = db.new_batch();
             for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
@@ -1654,6 +1662,8 @@ mod tests {
                 "ordered regression requires a sibling collision to remain only in the committed snapshot"
             );
 
+            // Build the child while the parent is still pending, then rebuild
+            // the same logical child after committing the parent.
             let pending_child = parent
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xDD, 1)))
@@ -1676,6 +1686,8 @@ mod tests {
 
             assert_eq!(pending_child.root(), committed_child.root());
 
+            // Rebase the pending child onto the committed parent and compare
+            // the applied root with the committed-path child root.
             let current_db_size = *db.bounds().await.end;
             db.apply_batch(pending_child.finalize_from(current_db_size))
                 .await
