@@ -432,41 +432,28 @@ fn decode<'a, H: Hasher, S: Strategy>(
         originals[idx] = shard;
     }
 
-    let all_originals_provided = provided_originals.len() == k;
-    let mut decoder = if all_originals_provided {
-        None
-    } else {
-        Some(
-            Cached::take(
-                &CACHED_DECODER,
-                || ReedSolomonDecoder::new(k, m, shard_len),
-                |dec| dec.reset(k, m, shard_len),
-            )
-            .map_err(Error::ReedSolomon)?,
-        )
-    };
-    let decoding = if let Some(decoder) = decoder.as_mut() {
-        for (idx, shard) in &provided_originals {
-            decoder
-                .add_original_shard(*idx, shard)
-                .map_err(Error::ReedSolomon)?;
-        }
-        for (idx, shard) in &provided_recoveries {
-            decoder
-                .add_recovery_shard(*idx, shard)
-                .map_err(Error::ReedSolomon)?;
-        }
-        Some(decoder.decode().map_err(Error::ReedSolomon)?)
-    } else {
-        None
-    };
+    let mut decoder = Cached::take(
+        &CACHED_DECODER,
+        || ReedSolomonDecoder::new(k, m, shard_len),
+        |dec| dec.reset(k, m, shard_len),
+    )
+    .map_err(Error::ReedSolomon)?;
+    for (idx, shard) in &provided_originals {
+        decoder
+            .add_original_shard(*idx, shard)
+            .map_err(Error::ReedSolomon)?;
+    }
+    for (idx, shard) in &provided_recoveries {
+        decoder
+            .add_recovery_shard(*idx, shard)
+            .map_err(Error::ReedSolomon)?;
+    }
+    let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
 
     let mut missing_digest_shards = Vec::with_capacity(n - provided);
-    if let Some(decoding) = decoding.as_ref() {
-        for (idx, shard) in decoding.restored_original_iter() {
-            originals[idx] = shard;
-            missing_digest_shards.push((idx, shard));
-        }
+    for (idx, shard) in decoding.restored_original_iter() {
+        originals[idx] = shard;
+        missing_digest_shards.push((idx, shard));
     }
 
     // Re-encode recovered data to get any missing recovery shard digests.
