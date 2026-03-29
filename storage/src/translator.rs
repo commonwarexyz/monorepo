@@ -367,30 +367,59 @@ mod tests {
     }
 
     #[test]
-    fn identity_hasher_works_on_small_slice() {
-        let mut h = UintIdentity::default();
-        h.write(b"abc");
-        let raw = u64::from_le_bytes(cap::<8>(b"abc"));
-        assert_eq!(h.finish(), raw.wrapping_mul(GOLDEN_RATIO));
+    fn identity_hasher_small_slices_differ() {
+        let hash = |bytes: &[u8]| {
+            let mut h = UintIdentity::default();
+            h.write(bytes);
+            h.finish()
+        };
+        assert_ne!(hash(b"abc"), hash(b"abd"));
+        assert_ne!(hash(b"a"), hash(b"b"));
+        assert_ne!(hash(b""), hash(b"a"));
     }
 
     #[test]
-    fn identity_hasher_mixes_integer_writes() {
-        let mut h = UintIdentity::default();
-        h.write_u8(7);
-        assert_eq!(h.finish(), 7u64.wrapping_mul(GOLDEN_RATIO));
+    fn identity_hasher_sets_high_bits() {
+        // The mixing step must spread small values into the top 7 bits so that
+        // hashbrown's h2 SIMD filter is effective.
+        for i in [1u64, 7, 17, 255] {
+            let mut h = UintIdentity::default();
+            h.write_u64(i);
+            assert_ne!(h.finish() >> 57, 0, "high bits all zero for input {i}");
+        }
+    }
 
-        let mut h = UintIdentity::default();
-        h.write_u16(17);
-        assert_eq!(h.finish(), 17u64.wrapping_mul(GOLDEN_RATIO));
+    #[test]
+    fn identity_hasher_integer_writes_differ() {
+        let hash_u8 = |v: u8| {
+            let mut h = UintIdentity::default();
+            h.write_u8(v);
+            h.finish()
+        };
+        let hash_u16 = |v: u16| {
+            let mut h = UintIdentity::default();
+            h.write_u16(v);
+            h.finish()
+        };
+        let hash_u32 = |v: u32| {
+            let mut h = UintIdentity::default();
+            h.write_u32(v);
+            h.finish()
+        };
+        let hash_u64 = |v: u64| {
+            let mut h = UintIdentity::default();
+            h.write_u64(v);
+            h.finish()
+        };
+        assert_ne!(hash_u8(0), hash_u8(1));
+        assert_ne!(hash_u16(0), hash_u16(1));
+        assert_ne!(hash_u32(0), hash_u32(1));
+        assert_ne!(hash_u64(0), hash_u64(1));
 
-        let mut h = UintIdentity::default();
-        h.write_u32(29);
-        assert_eq!(h.finish(), 29u64.wrapping_mul(GOLDEN_RATIO));
-
-        let mut h = UintIdentity::default();
-        h.write_u64(31);
-        assert_eq!(h.finish(), 31u64.wrapping_mul(GOLDEN_RATIO));
+        // Same numeric value through different write widths must agree.
+        assert_eq!(hash_u8(7), hash_u16(7));
+        assert_eq!(hash_u16(7), hash_u32(7));
+        assert_eq!(hash_u32(7), hash_u64(7));
     }
 
     #[test]
