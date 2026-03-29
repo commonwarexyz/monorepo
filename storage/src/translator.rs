@@ -1,6 +1,6 @@
 //! Primitive implementations of [Translator].
 
-use commonware_utils::GOLDEN_RATIO_U64;
+use commonware_utils::GOLDEN_RATIO;
 use core::hash::{BuildHasher, Hash, Hasher};
 
 /// Translate keys into a new representation (often a smaller one).
@@ -22,15 +22,15 @@ pub trait Translator: Clone + BuildHasher + Send + Sync + 'static {
     fn transform(&self, key: &[u8]) -> Self::Key;
 }
 
-/// A “do-nothing” hasher for `uint`.
+/// A lightweight hasher for translated `uint` keys.
 ///
 /// Most users typically store keys that are **already hashed** (shortened by the [Translator]).
 /// Re-hashing them with SipHash (by [std::collections::HashMap]) would waste CPU, so we give
-/// [std::collections::HashMap] this identity hasher instead:
+/// [std::collections::HashMap] this custom hasher instead:
 ///
 /// * [Hasher::write_u8], [Hasher::write_u16], [Hasher::write_u32], [Hasher::write_u64] copies the
 ///   input into an internal field;
-/// * [Hasher::finish] returns that value unchanged.
+/// * [Hasher::finish] returns that value multiplied by a mixing constant.
 ///
 /// # Warning
 ///
@@ -75,7 +75,7 @@ impl Hasher for UintIdentity {
         // Multiply by the mixing constant to spread low-order bits across all 64 bits.
         // Without this, hashbrown's h2 control bytes (top 7 bits) are all zero for small
         // keys, defeating its SIMD fast-reject filter.
-        self.value.wrapping_mul(GOLDEN_RATIO_U64)
+        self.value.wrapping_mul(GOLDEN_RATIO)
     }
 }
 
@@ -128,7 +128,7 @@ define_cap_translator!(TwoCap, 2, u16);
 define_cap_translator!(FourCap, 4, u32);
 define_cap_translator!(EightCap, 8, u64);
 
-/// Define a special array type for which we'll implement our own identity hasher. This avoids the
+/// Define a special array type for which we'll implement our own lightweight hasher. This avoids the
 /// overhead of the default Array hasher which unnecessarily (for our use case) includes a length
 /// prefix.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -371,7 +371,26 @@ mod tests {
         let mut h = UintIdentity::default();
         h.write(b"abc");
         let raw = u64::from_le_bytes(cap::<8>(b"abc"));
-        assert_eq!(h.finish(), raw.wrapping_mul(GOLDEN_RATIO_U64));
+        assert_eq!(h.finish(), raw.wrapping_mul(GOLDEN_RATIO));
+    }
+
+    #[test]
+    fn identity_hasher_mixes_integer_writes() {
+        let mut h = UintIdentity::default();
+        h.write_u8(7);
+        assert_eq!(h.finish(), 7u64.wrapping_mul(GOLDEN_RATIO));
+
+        let mut h = UintIdentity::default();
+        h.write_u16(17);
+        assert_eq!(h.finish(), 17u64.wrapping_mul(GOLDEN_RATIO));
+
+        let mut h = UintIdentity::default();
+        h.write_u32(29);
+        assert_eq!(h.finish(), 29u64.wrapping_mul(GOLDEN_RATIO));
+
+        let mut h = UintIdentity::default();
+        h.write_u64(31);
+        assert_eq!(h.finish(), 31u64.wrapping_mul(GOLDEN_RATIO));
     }
 
     #[test]

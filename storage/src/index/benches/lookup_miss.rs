@@ -54,7 +54,7 @@ fn translated_key_misses<T: Translator>(
     inserted_keys: &[Digest],
     count: usize,
 ) -> Vec<Digest> {
-    let occupied: HashSet<_> = inserted_keys
+    let mut seen: HashSet<_> = inserted_keys
         .iter()
         .map(|key| translator.transform(key))
         .collect();
@@ -63,7 +63,9 @@ fn translated_key_misses<T: Translator>(
     let mut i = inserted_keys.len() as u64;
     while misses.len() < count {
         let key = Sha256::hash(&i.to_be_bytes());
-        if !occupied.contains(&translator.transform(&key)) {
+        // Keep translated misses distinct so we do not benchmark repeated probes into the
+        // same empty bucket.
+        if seen.insert(translator.transform(&key)) {
             misses.push(key);
         }
         i += 1;

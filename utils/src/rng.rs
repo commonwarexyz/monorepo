@@ -1,6 +1,6 @@
 //! Utilities for random number generation.
 
-use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
+use rand::{CryptoRng, RngCore, SeedableRng, rngs::StdRng};
 use std::mem::size_of;
 
 /// Returns a seeded RNG for deterministic testing.
@@ -107,7 +107,7 @@ impl FuzzRng {
     ///
     /// Conceptually:
     /// 1. Build `word` from a wrapping `BLOCK_BYTES` window anchored at `ctr`.
-    /// 2. Compute `mixed = mix64(word ^ ctr ^ GOLDEN_RATIO_U64)`.
+    /// 2. Compute `mixed = mix64(word ^ ctr ^ GOLDEN_RATIO)`.
     /// 3. Increment `ctr`.
     ///
     /// This keeps the output deterministic while preserving local mutation
@@ -129,7 +129,7 @@ impl FuzzRng {
         // hashing the entire seed into an avalanche-style global state.
         let ctr = self.ctr;
         self.ctr = self.ctr.wrapping_add(1);
-        mix64(word ^ ctr ^ crate::GOLDEN_RATIO_U64)
+        mix64(word ^ ctr ^ crate::GOLDEN_RATIO)
     }
 }
 
@@ -362,8 +362,8 @@ mod tests {
         };
 
         #[allow(clippy::identity_op)]
-        let expected0 = mix(word ^ 0 ^ crate::GOLDEN_RATIO_U64);
-        let expected1 = mix(word ^ 1 ^ crate::GOLDEN_RATIO_U64);
+        let expected0 = mix(word ^ 0 ^ crate::GOLDEN_RATIO);
+        let expected1 = mix(word ^ 1 ^ crate::GOLDEN_RATIO);
 
         assert_eq!(rng.next_u64(), expected0);
         assert_eq!(rng.next_u64(), expected1);

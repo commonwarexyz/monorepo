@@ -41,7 +41,7 @@ commonware_macros::stability_scope!(BETA {
     ///
     /// Equal to `floor(2^64 / phi)`. Because it is odd, multiplication by it
     /// is a bijection modulo `2^64`.
-    pub const GOLDEN_RATIO_U64: u64 = 0x9e37_79b9_7f4a_7c15;
+    pub const GOLDEN_RATIO: u64 = 0x9e37_79b9_7f4a_7c15;
 
     /// Represents a participant/validator index within a consensus committee.
     ///

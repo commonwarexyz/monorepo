@@ -1,6 +1,7 @@
 #![no_main]
 
 use commonware_storage::translator::{EightCap, FourCap, OneCap, Translator, TwoCap};
+use commonware_utils::GOLDEN_RATIO;
 use libfuzzer_sys::{
     arbitrary::{Arbitrary, Unstructured},
     fuzz_target,
@@ -41,7 +42,7 @@ struct FuzzInput {
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, arbitrary::Error> {
-        let translator_type = match u8::arbitrary(u)? % 3 {
+        let translator_type = match u8::arbitrary(u)? % 4 {
             0 => TranslatorType::One,
             1 => TranslatorType::Two,
             2 => TranslatorType::Four,
@@ -82,6 +83,10 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
+fn mixed_finish(value: u64) -> u64 {
+    value.wrapping_mul(GOLDEN_RATIO)
+}
+
 fn test_cap<T: Translator>(translator: T, cap: usize, operations: &[Operation]) {
     for op in operations {
         match op {
@@ -98,19 +103,19 @@ fn test_cap<T: Translator>(translator: T, cap: usize, operations: &[Operation]) 
                 match value_type {
                     ValueType::U8(v) => {
                         hasher.write_u8(*v);
-                        assert_eq!(hasher.finish(), *v as u64);
+                        assert_eq!(hasher.finish(), mixed_finish(*v as u64));
                     }
                     ValueType::U16(v) => {
                         hasher.write_u16(*v);
-                        assert_eq!(hasher.finish(), *v as u64);
+                        assert_eq!(hasher.finish(), mixed_finish(*v as u64));
                     }
                     ValueType::U32(v) => {
                         hasher.write_u32(*v);
-                        assert_eq!(hasher.finish(), *v as u64);
+                        assert_eq!(hasher.finish(), mixed_finish(*v as u64));
                     }
                     ValueType::U64(v) => {
                         hasher.write_u64(*v);
-                        assert_eq!(hasher.finish(), *v);
+                        assert_eq!(hasher.finish(), mixed_finish(*v));
                     }
                 }
             }
