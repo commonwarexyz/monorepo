@@ -352,6 +352,9 @@ where
     block_subscriptions:
         BTreeMap<BlockSubscriptionKey<B::Digest>, Vec<oneshot::Sender<Arc<CodedBlock<B, C, H>>>>>,
 
+    /// Open subscriptions waiting only for block availability by digest.
+    available_by_digest_subscriptions: BTreeMap<B::Digest, Vec<oneshot::Sender<()>>>,
+
     /// Metrics for the shard engine.
     metrics: ShardMetrics,
 }
@@ -392,6 +395,7 @@ where
                 reconstructed_blocks: BTreeMap::new(),
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
                 block_subscriptions: BTreeMap::new(),
+                available_by_digest_subscriptions: BTreeMap::new(),
                 metrics,
             },
             Mailbox::new(sender),
@@ -450,6 +454,11 @@ where
                         subscribers.retain(|tx| !tx.is_closed());
                         !subscribers.is_empty()
                     });
+                self.available_by_digest_subscriptions
+                    .retain(|_, subscribers| {
+                        subscribers.retain(|tx| !tx.is_closed());
+                        !subscribers.is_empty()
+                    });
             },
             on_stopped => {
                 debug!("received shutdown signal, stopping shard engine");
@@ -492,6 +501,13 @@ where
                         .cloned();
                     response.send_lossy(block);
                 }
+                Message::HasByDigest { digest, response } => {
+                    let available = self
+                        .reconstructed_blocks
+                        .values()
+                        .any(|block| block.digest() == digest);
+                    response.send_lossy(available);
+                }
                 Message::SubscribeAssignedShardVerified {
                     commitment,
                     response,
@@ -509,6 +525,9 @@ where
                 }
                 Message::SubscribeByDigest { digest, response } => {
                     self.handle_block_subscription(BlockSubscriptionKey::Digest(digest), response);
+                }
+                Message::SubscribeAvailableByDigest { digest, response } => {
+                    self.handle_available_by_digest_subscription(digest, response);
                 }
                 Message::Prune { through } => {
                     self.prune(through);
@@ -961,6 +980,27 @@ where
             .push(response);
     }
 
+    /// Handles the registry of a block-availability subscription by digest.
+    fn handle_available_by_digest_subscription(
+        &mut self,
+        digest: B::Digest,
+        response: oneshot::Sender<()>,
+    ) {
+        if self
+            .reconstructed_blocks
+            .values()
+            .any(|block| block.digest() == digest)
+        {
+            response.send_lossy(());
+            return;
+        }
+
+        self.available_by_digest_subscriptions
+            .entry(digest)
+            .or_default()
+            .push(response);
+    }
+
     /// Notifies and cleans up any subscriptions waiting for assigned shard
     /// verification.
     fn notify_assigned_shard_verified_subscribers(&mut self, commitment: Commitment) {
@@ -974,10 +1014,21 @@ where
         }
     }
 
+    /// Notifies and cleans up any subscriptions waiting for block availability by digest.
+    fn notify_available_by_digest_subscribers(&mut self, digest: B::Digest) {
+        if let Some(mut subscribers) = self.available_by_digest_subscriptions.remove(&digest) {
+            for subscriber in subscribers.drain(..) {
+                subscriber.send_lossy(());
+            }
+        }
+    }
+
     /// Notifies and cleans up any subscriptions for a reconstructed block.
     fn notify_block_subscribers(&mut self, block: Arc<CodedBlock<B, C, H>>) {
         let commitment = block.commitment();
         let digest = block.digest();
+
+        self.notify_available_by_digest_subscribers(digest);
 
         // Notify by-commitment subscribers.
         if let Some(mut subscribers) = self
@@ -1009,10 +1060,10 @@ where
             .remove(&commitment);
         self.block_subscriptions
             .remove(&BlockSubscriptionKey::Commitment(commitment));
+        let digest = commitment.block::<B::Digest>();
         self.block_subscriptions
-            .remove(&BlockSubscriptionKey::Digest(
-                commitment.block::<B::Digest>(),
-            ));
+            .remove(&BlockSubscriptionKey::Digest(digest));
+        self.available_by_digest_subscriptions.remove(&digest);
     }
 
     /// Prunes all blocks in the reconstructed block cache that are older than the block

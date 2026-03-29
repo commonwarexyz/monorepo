@@ -430,6 +430,30 @@ where
         None
     }
 
+    /// Check whether a verified or notarized block is cached by digest.
+    pub(crate) async fn has_block(&self, digest: <V::Block as Digestible>::Digest) -> bool {
+        for cache in self.caches.values().rev() {
+            if cache
+                .verified_blocks
+                .has(Identifier::Key(&digest))
+                .await
+                .expect("failed to check verified block")
+            {
+                return true;
+            }
+
+            if cache
+                .notarized_blocks
+                .has(Identifier::Key(&digest))
+                .await
+                .expect("failed to check notarized block")
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Prune the caches below the given round.
     pub(crate) async fn prune(&mut self, round: Round) {
         // Remove and close prunable archives from older epochs

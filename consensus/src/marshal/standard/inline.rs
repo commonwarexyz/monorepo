@@ -483,14 +483,26 @@ where
             return rx;
         }
 
-        // Otherwise, subscribe to marshal for block availability.
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
+        // Otherwise, wait for marshal to observe the digest before
+        // materializing the block for the certified slow path.
+        let availability_rx = self
+            .marshal
+            .subscribe_available_by_digest(Some(round), digest)
+            .await;
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("inline_certify")
             .with_attribute("round", round)
             .spawn(move |_| async move {
+                if await_block_subscription(&mut tx, availability_rx, &digest, "certification")
+                    .await
+                    .is_none()
+                {
+                    return;
+                }
+
+                let block_rx = marshal.subscribe_by_digest(Some(round), digest).await;
                 let Some(block) =
                     await_block_subscription(&mut tx, block_rx, &digest, "certification").await
                 else {

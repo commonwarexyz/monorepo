@@ -77,6 +77,13 @@ where
         self.get_by_digest(digest).await
     }
 
+    async fn has_by_digest(
+        &self,
+        digest: <CodedBlock<B, C, H> as Digestible>::Digest,
+    ) -> bool {
+        self.has_by_digest(digest).await
+    }
+
     async fn find_by_commitment(&self, commitment: Commitment) -> Option<Self::CachedBlock> {
         self.get(commitment).await
     }
@@ -86,6 +93,13 @@ where
         digest: <CodedBlock<B, C, H> as Digestible>::Digest,
     ) -> oneshot::Receiver<Self::CachedBlock> {
         self.subscribe_by_digest(digest).await
+    }
+
+    async fn subscribe_available_by_digest(
+        &self,
+        digest: <CodedBlock<B, C, H> as Digestible>::Digest,
+    ) -> oneshot::Receiver<()> {
+        self.subscribe_available_by_digest(digest).await
     }
 
     async fn subscribe_by_commitment(

@@ -173,6 +173,14 @@ struct BlockSubscription<V: Variant> {
     _aborter: Aborter,
 }
 
+/// A struct that holds multiple subscriptions waiting only for block availability.
+struct AvailabilitySubscription {
+    // The subscribers that are waiting for the digest to become available.
+    subscribers: Vec<oneshot::Sender<()>>,
+    // Aborter that aborts the waiter future when dropped.
+    _aborter: Aborter,
+}
+
 /// The key used to track block subscriptions.
 ///
 /// Digest-scoped and commitment-scoped subscriptions are intentionally distinct
@@ -185,6 +193,10 @@ enum BlockSubscriptionKey<C, D> {
 
 type BlockSubscriptionKeyFor<V> =
     BlockSubscriptionKey<<V as Variant>::Commitment, <<V as Variant>::Block as Digestible>::Digest>;
+
+type AvailabilityDigestFor<V> = <<V as Variant>::Block as Digestible>::Digest;
+type AvailabilityWaiterResultFor<V> = Result<AvailabilityDigestFor<V>, AvailabilityDigestFor<V>>;
+type AvailabilityWaitersFor<V> = AbortablePool<AvailabilityWaiterResultFor<V>>;
 
 /// The [Actor] is responsible for receiving uncertified blocks from the broadcast mechanism,
 /// receiving notarizations and finalizations from consensus, and reconstructing a total order
@@ -245,6 +257,8 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: BTreeMap<BlockSubscriptionKeyFor<V>, BlockSubscription<V>>,
+    // Outstanding subscriptions waiting only for digest availability
+    availability_subscriptions: BTreeMap<<V::Block as Digestible>::Digest, AvailabilitySubscription>,
 
     // ---------- Storage ----------
     // Prunable cache
@@ -348,6 +362,7 @@ where
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 tip: Height::zero(),
                 block_subscriptions: BTreeMap::new(),
+                availability_subscriptions: BTreeMap::new(),
                 cache,
                 application_metadata,
                 finalizations_by_height,
@@ -392,6 +407,7 @@ where
     {
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<Result<V::Block, BlockSubscriptionKeyFor<V>>>::default();
+        let mut availability_waiters = AvailabilityWaitersFor::<V>::default();
 
         // Get tip and send to application
         let tip = self.get_latest().await;
@@ -424,6 +440,10 @@ where
                     bs.subscribers.retain(|tx| !tx.is_closed());
                     !bs.subscribers.is_empty()
                 });
+                self.availability_subscriptions.retain(|_, subscription| {
+                    subscription.subscribers.retain(|tx| !tx.is_closed());
+                    !subscription.subscribers.is_empty()
+                });
             },
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
@@ -447,6 +467,16 @@ where
                         }
                     }
                     self.block_subscriptions.remove(&key);
+                }
+            },
+            Ok(completion) = availability_waiters.next_completed() else continue => match completion {
+                Ok(digest) => self.notify_available_subscribers(digest),
+                Err(digest) => {
+                    debug!(
+                        ?digest,
+                        "buffer availability subscription closed, canceling local subscribers"
+                    );
+                    self.availability_subscriptions.remove(&digest);
                 }
             },
             // Handle application acknowledgements (drain all ready acks, sync once)
@@ -674,6 +704,21 @@ where
                             response,
                             &mut resolver,
                             &mut waiters,
+                            &mut buffer,
+                        )
+                        .await;
+                    }
+                    Message::SubscribeAvailableByDigest {
+                        round,
+                        digest,
+                        response,
+                    } => {
+                        self.handle_subscribe_available(
+                            round,
+                            digest,
+                            response,
+                            &mut resolver,
+                            &mut availability_waiters,
                             &mut buffer,
                         )
                         .await;
@@ -927,6 +972,50 @@ where
                         .map_or_else(|_| Err(waiter_key), |block| Ok(block.into_block()))
                 });
                 entry.insert(BlockSubscription {
+                    subscribers: vec![response],
+                    _aborter: aborter,
+                });
+            }
+        }
+    }
+
+    /// Handle a local subscription request for block availability by digest.
+    async fn handle_subscribe_available<Buf: Buffer<V>>(
+        &mut self,
+        round: Option<Round>,
+        digest: <V::Block as Digestible>::Digest,
+        response: oneshot::Sender<()>,
+        resolver: &mut impl Resolver<Key = Request<V::Commitment>>,
+        waiters: &mut AvailabilityWaitersFor<V>,
+        buffer: &mut Buf,
+    ) {
+        if self.is_block_available(buffer, digest).await {
+            response.send_lossy(());
+            return;
+        }
+
+        if let Some(round) = round {
+            if round < self.last_processed_round {
+                return;
+            }
+
+            debug!(?round, ?digest, "requested block availability missing");
+            resolver
+                .fetch(Request::<V::Commitment>::Notarized { round })
+                .await;
+        }
+
+        debug!(?round, ?digest, "registering availability subscriber");
+        match self.availability_subscriptions.entry(digest) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().subscribers.push(response);
+            }
+            Entry::Vacant(entry) => {
+                let rx = buffer.subscribe_available_by_digest(digest).await;
+                let aborter = waiters.push(async move {
+                    rx.await.map_or_else(|_| Err(digest), |_| Ok(digest))
+                });
+                entry.insert(AvailabilitySubscription {
                     subscribers: vec![response],
                     _aborter: aborter,
                 });
@@ -1201,8 +1290,18 @@ where
 
     // -------------------- Waiters --------------------
 
+    /// Notify any subscribers waiting only for digest availability.
+    fn notify_available_subscribers(&mut self, digest: <V::Block as Digestible>::Digest) {
+        if let Some(mut subscription) = self.availability_subscriptions.remove(&digest) {
+            for subscriber in subscription.subscribers.drain(..) {
+                subscriber.send_lossy(());
+            }
+        }
+    }
+
     /// Notify any subscribers for the given digest with the provided block.
     fn notify_subscribers(&mut self, block: &V::Block) {
+        self.notify_available_subscribers(block.digest());
         if let Some(mut bs) = self
             .block_subscriptions
             .remove(&BlockSubscriptionKey::Digest(block.digest()))
@@ -1503,6 +1602,18 @@ where
 
     // -------------------- Mixed Storage --------------------
 
+    /// Checks whether a block is available in cache or finalized storage.
+    async fn has_block_in_storage(&self, digest: <V::Block as Digestible>::Digest) -> bool {
+        if self.cache.has_block(digest).await {
+            return true;
+        }
+
+        match self.finalized_blocks.has(ArchiveID::Key(&digest)).await {
+            Ok(found) => found,
+            Err(e) => panic!("failed to check block: {e}"),
+        }
+    }
+
     /// Looks for a block in cache and finalized storage by digest.
     async fn find_block_in_storage(
         &self,
@@ -1517,6 +1628,15 @@ where
             Ok(stored) => stored.map(|stored| stored.into()),
             Err(e) => panic!("failed to get block: {e}"),
         }
+    }
+
+    /// Checks whether a block is available anywhere locally using only the digest.
+    async fn is_block_available<Buf: Buffer<V>>(
+        &self,
+        buffer: &Buf,
+        digest: <V::Block as Digestible>::Digest,
+    ) -> bool {
+        buffer.has_by_digest(digest).await || self.has_block_in_storage(digest).await
     }
 
     /// Looks for a block anywhere in local storage using only the digest.
