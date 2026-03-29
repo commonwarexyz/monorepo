@@ -309,57 +309,6 @@ where
         locations
     }
 
-    /// Gather exact existing-key locations for unordered mutation resolution.
-    ///
-    /// This differs from [`gather_existing_locations`](Self::gather_existing_locations),
-    /// which returns every snapshot location sharing the same translated key.
-    /// Unordered merkleization only needs the exact location for each mutated
-    /// key, so this helper filters snapshot collisions by reading candidate
-    /// operations and comparing full keys.
-    async fn gather_matching_locations<E, C, I>(
-        &self,
-        mutations: &BTreeMap<U::Key, Option<U::Value>>,
-        db: &Db<E, C, I, H, U>,
-    ) -> Result<Vec<Location>, Error>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<U>>,
-        I: UnorderedIndex<Value = Location>,
-    {
-        let mut locations = Vec::new();
-        let mut snapshot_candidates = BTreeSet::new();
-        let mut snapshot_keys = BTreeSet::new();
-
-        for key in mutations.keys() {
-            if let Some(entry) = self.base_diff.get(key) {
-                if let Some(loc) = entry.loc() {
-                    locations.push(loc);
-                }
-                continue;
-            }
-
-            snapshot_candidates.extend(db.snapshot.get(key).copied());
-            snapshot_keys.insert(key);
-        }
-
-        let futures = snapshot_candidates
-            .iter()
-            .map(|&loc| self.read_op(loc, &[], db));
-        let results = try_join_all(futures).await?;
-
-        for (op, &loc) in results.iter().zip(snapshot_candidates.iter()) {
-            let Some(key) = op.key() else {
-                continue;
-            };
-            if snapshot_keys.contains(key) {
-                locations.push(loc);
-            }
-        }
-
-        locations.sort();
-        Ok(locations)
-    }
-
     /// Check if the operation at `loc` for `key` is still active.
     fn is_active_at<E, C, I>(
         &self,
@@ -635,7 +584,7 @@ where
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O, parallelized).
-        let locations = m.gather_matching_locations(&mutations, db).await?;
+        let locations = m.gather_existing_locations(&mutations, db);
         let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
         let results = try_join_all(futures).await?;
 
@@ -649,10 +598,21 @@ where
         // This includes keys from both the base snapshot and the base diff.
         for (op, &old_loc) in results.iter().zip(&locations) {
             let key = op.key().expect("updates should have a key");
+
+            // A key resolved via base_diff must only match at its base_diff
+            // location. Without this guard, a stale snapshot collision (the
+            // pre-parent DB snapshot still containing the key's old location)
+            // can consume the mutation at the wrong sort position, changing
+            // the operation order relative to the committed-state path.
+            if let Some(entry) = m.base_diff.get(key) {
+                if entry.loc() != Some(old_loc) {
+                    continue;
+                }
+            }
+
             let Some(mutation) = mutations.remove(key) else {
                 // Snapshot index collision: this operation's key does not match
-                // the mutation key (the snapshot uses a compressed translated key
-                // that can collide). The mutation will be handled as a create below.
+                // any mutation key. The mutation will be handled as a create below.
                 continue;
             };
 
@@ -1590,61 +1550,6 @@ mod tests {
         // Mutation unchanged.
         assert_eq!(mutations.len(), 1);
         assert!(mutations.contains_key(&1));
-    }
-
-    #[test]
-    fn gather_matching_locations_filters_snapshot_collisions() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            type TestDb = UnorderedFixedDb<
-                deterministic::Context,
-                sha256::Digest,
-                sha256::Digest,
-                Sha256,
-                OneCap,
-            >;
-
-            let config = fixed_db_config::<OneCap>("gather-existing-collisions", &context);
-            let mut db = TestDb::init(context, config).await.unwrap();
-
-            let key_a = colliding_digest(0xAA, 1);
-            let key_b = colliding_digest(0xAA, 2);
-
-            let initial = db
-                .new_batch()
-                .write(key_a, Some(colliding_digest(0xBB, 1)))
-                .write(key_b, Some(colliding_digest(0xBB, 2)))
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(initial).await.unwrap();
-            db.commit().await.unwrap();
-
-            let candidates: Vec<_> = db.snapshot.get(&key_b).copied().collect();
-            assert_eq!(candidates.len(), 2);
-
-            let expected = {
-                let reader = db.log.reader().await;
-                let mut expected = None;
-                for loc in candidates {
-                    let op = reader.read(*loc).await.unwrap();
-                    if op.key() == Some(&key_b) {
-                        expected = Some(loc);
-                        break;
-                    }
-                }
-                expected.unwrap()
-            };
-
-            let (_, m) = db.new_batch().into_parts();
-            let mutations = BTreeMap::from([(key_b, Some(colliding_digest(0xCC, 2)))]);
-            let gathered = m.gather_matching_locations(&mutations, &db).await.unwrap();
-
-            assert_eq!(gathered, vec![expected]);
-
-            db.destroy().await.unwrap();
-        });
     }
 
     #[test]
