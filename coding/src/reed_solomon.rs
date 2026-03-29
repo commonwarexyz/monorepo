@@ -203,7 +203,7 @@ fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
 /// padding directly from the shard slices.
 fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
     let shards = shards.get(..k).ok_or(Error::NotEnoughChunks)?;
-    let data_len = read_prefix_and_payload_len(shards)?;
+    let data_len = read_data_len(shards)?;
     let mut data = Vec::with_capacity(data_len);
     let mut prefix_bytes_left = u32::SIZE;
     let mut data_bytes_left = data_len;
@@ -240,7 +240,7 @@ fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
 
 /// Read the 4-byte big-endian length prefix from `shards` and validate that
 /// the decoded length fits in the post-prefix payload region.
-fn read_prefix_and_payload_len(shards: &[&[u8]]) -> Result<usize, Error> {
+fn read_data_len(shards: &[&[u8]]) -> Result<usize, Error> {
     let total_len: usize = shards.iter().map(|s| s.len()).sum();
     if total_len < u32::SIZE {
         return Err(Error::Inconsistent);
