@@ -278,6 +278,70 @@ module tests {
             .expect(test_invariants)
     }
 
+    run conflictingNotarizationCertificateIsNotDuplicateTest = {
+        val proposal_1 = {
+            payload: "val_b0",
+            view: 1,
+            parent: GENESIS_VIEW,
+        }
+        val proposal_a = {
+            payload: "val_b1",
+            view: 2,
+            parent: 1,
+        }
+        val proposal_b = {
+            payload: "val_b2",
+            view: 2,
+            parent: 1,
+        }
+        val conflicting_cert = notarization(proposal_b, Set("n0", "n2", "n3"), "n3")
+
+        initWithLeaderAndCertify(
+            Map(0 -> "n1", 1 -> "n1", 2 -> "n3", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
+            CERTIFY_ALL_TRUE
+        )
+            .then(send_proposal("n1", proposal_1))
+            .then(propose("n1", proposal_1.payload, proposal_1.parent))
+            .then(replica_receives_notarize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 1, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 1, GENESIS_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", 1, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", 1, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", 1, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n2"))
+            .then(send_proposal("n3", proposal_a))
+            .then(send_notarize_vote({ proposal: proposal_a, sig: "n3" }))
+            .then(replica_receives_notarize_vote("n1", "val_b1", 2, 1, "n3"))
+            .then(replica_receives_notarize_vote("n0", "val_b1", 2, 1, "n3"))
+            .then(replica_receives_notarize_vote("n0", "val_b1", 2, 1, "n1"))
+            .then(on_certificate("n0", conflicting_cert))
+            .then(all {
+                assert(replica_state.get("n0").leader_proposal_conflicted.get(2) == true),
+                assert(replica_state.get("n0").leader_proposal.get(2) == Some(proposal_a)),
+                assert(store_certificates.get("n0").filter(c =>
+                    is_notarization_cert(c) and cert_view(c) == 2
+                ).size() == 1),
+                assert(store_certificates.get("n0").exists(c =>
+                    is_notarization_cert(c) and cert_proposal(c) == Some(proposal_a)
+                )),
+                assert(not(store_certificates.get("n0").exists(c =>
+                    is_notarization_cert(c) and cert_proposal(c) == Some(proposal_b)
+                ))),
+                unchanged_all,
+            })
+            .expect(test_invariants)
+    }
+
     run mixedParentFinalizeVotesDoNotFormCertificateTest = {
         val proposal_1 = {
             payload: "val_b0",

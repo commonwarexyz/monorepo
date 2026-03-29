@@ -4,8 +4,8 @@ TEST_DIR ?= traces
 TRACE_TARGET ?= simplex_ed25519_quint_twins_disrupter
 FUZZ_RUNS ?= -1
 TRACE_SELECTION_STRATEGY ?= smallscope
-MIN_REQUIRED_CONTAINERS ?= 5
-MAX_REQUIRED_CONTAINERS ?= 20
+MIN_REQUIRED_CONTAINERS ?= 3
+MAX_REQUIRED_CONTAINERS ?= 10
 
 .PHONY: test typecheck repl check clean get_fuzz_traces build_quint_tests_from_fuzz_traces test_traces clean_fuzz_traces tv tv_live tv_live_fuzz tv_live_watch generate_itf convert_itf replay_itf clean_mbt_traces conformance_roundtrip ist
 

@@ -276,20 +276,6 @@ module replica {
             self
     }
 
-    pure def remember_certify_result(
-        self: ReplicaState,
-        view: ViewNumber,
-        result: bool
-    ): ReplicaState = {
-        if (self.certify.get(view) == None)
-            {
-                ...self,
-                certify: self.certify.set(view, Some(result))
-            }
-        else
-            self
-    }
-
     pure def mark_vote_broadcast(self: ReplicaState, view: ViewNumber, kind: Kind): ReplicaState = {
         if (kind == NotarizeKind)
             {
@@ -363,6 +349,33 @@ module replica {
             mark_certificate_broadcast(remembered, cert)
         else
             remembered
+    }
+
+    pure def same_certificate_subject(existing: Certificate, cert: Certificate): bool = {
+        match (existing) {
+            | Notarization(n1) =>
+                match (cert) {
+                    | Notarization(n2) => n1.proposal == n2.proposal
+                    | _ => false
+                }
+            | Nullification(n1) =>
+                match (cert) {
+                    | Nullification(n2) => n1.view == n2.view
+                    | _ => false
+                }
+            | Finalization(f1) =>
+                match (cert) {
+                    | Finalization(f2) => f1.proposal == f2.proposal
+                    | _ => false
+                }
+        }
+    }
+
+    pure def same_certificate_kind_and_view(existing: Certificate, cert: Certificate): bool = {
+        and {
+            cert_kind(existing) == cert_kind(cert),
+            cert_view(existing) == cert_view(cert),
+        }
     }
 
     pure def list_contains_payload(chain: List[Payload], payload: Payload): bool = {
@@ -1213,12 +1226,10 @@ module replica {
         val certs = store_certificates.get(id)
         all {
             cert_signatures(cert).size() >= Q,
-            val duplicate_by_kind_and_view = certs.exists(existing => and {
-                cert_view(existing) == cert_view(cert),
-                cert_kind(existing) == cert_kind(cert),
-            })
+            val duplicate = certs.exists(existing => same_certificate_subject(existing, cert))
+            val seen_kind_and_view = certs.exists(existing => same_certificate_kind_and_view(existing, cert))
 
-            if (duplicate_by_kind_and_view) {
+            if (duplicate) {
                 all {
                     sent_notarize_votes' = sent_notarize_votes,
                     sent_nullify_votes' = sent_nullify_votes,
@@ -1235,19 +1246,19 @@ module replica {
                 match (cert) {
                     | Notarization(n) => all {
                         store_notarize_votes' = store_notarize_votes,
-                        _process_notarization(id, n, true)
+                        _process_notarization(id, n, not(seen_kind_and_view))
                     }
                     | Nullification(n) => all {
                         store_notarize_votes' = store_notarize_votes,
                         store_nullify_votes' = store_nullify_votes,
                         store_finalize_votes' = store_finalize_votes,
-                        _process_nullification(id, n, true)
+                        _process_nullification(id, n, not(seen_kind_and_view))
                     }
                     | Finalization(f) => all {
                         store_notarize_votes' = store_notarize_votes,
                         store_nullify_votes' = store_nullify_votes,
                         store_finalize_votes' = store_finalize_votes,
-                        _process_finalization(id, f, true)
+                        _process_finalization(id, f, not(seen_kind_and_view))
                     }
                 }
             },
@@ -1261,7 +1272,7 @@ module replica {
         }
     }
 
-    action _process_notarization_certificate(id: ReplicaId, cert: NotarizationCert, is_new_cert: bool): bool = all {
+    action _process_notarization(id: ReplicaId, cert: NotarizationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
         val cert_msg: Certificate = Notarization(cert)
         all {
@@ -1402,7 +1413,7 @@ module replica {
         }
     }
 
-    action _process_nullification_certificate(id: ReplicaId, cert: NullificationCert, is_new_cert: bool): bool = all {
+    action _process_nullification(id: ReplicaId, cert: NullificationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
         val cert_msg: Certificate = Nullification(cert)
         val cert_view_num = cert.view
