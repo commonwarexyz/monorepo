@@ -1797,6 +1797,8 @@ pub mod tests {
                     .await
                     .unwrap();
 
+            // Seed the committed DB with colliding keys before building the
+            // parent/child chain through the current wrapper.
             let mut initial = db.new_batch();
             for i in 0..8 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
@@ -1806,6 +1808,8 @@ pub mod tests {
                 .unwrap();
             db.commit().await.unwrap();
 
+            // Parent extends the colliding keyset so the child observes both
+            // committed and uncommitted colliding locations.
             let mut parent = db.new_batch();
             for i in 0..8 {
                 parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
@@ -1815,6 +1819,8 @@ pub mod tests {
             }
             let parent = parent.merkleize(None, &db).await.unwrap();
 
+            // Build the child against the pending parent, then rebuild the same
+            // logical child after committing the parent and compare both roots.
             let mut pending_child = parent.new_batch::<Sha256>();
             for i in 4..12 {
                 pending_child =
@@ -1849,6 +1855,8 @@ pub mod tests {
                     .await
                     .unwrap();
 
+            // Seed the committed DB with colliding keys before building the
+            // parent/child chain through the ordered current wrapper.
             let mut initial = db.new_batch();
             for i in 0..8 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
@@ -1858,6 +1866,8 @@ pub mod tests {
                 .unwrap();
             db.commit().await.unwrap();
 
+            // Parent extends the colliding keyset so the child observes both
+            // committed and uncommitted colliding locations.
             let mut parent = db.new_batch();
             for i in 0..8 {
                 parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
@@ -1867,6 +1877,8 @@ pub mod tests {
             }
             let parent = parent.merkleize(None, &db).await.unwrap();
 
+            // Build the child against the pending parent, then rebuild the same
+            // logical child after committing the parent and compare both roots.
             let mut pending_child = parent.new_batch::<Sha256>();
             for i in 4..12 {
                 pending_child =

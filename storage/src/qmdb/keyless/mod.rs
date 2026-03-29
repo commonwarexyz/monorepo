@@ -1919,9 +1919,12 @@ mod test {
         executor.start(|context| async move {
             let mut db = open_db(context.with_label("db")).await;
 
+            // Build the child while the parent is still pending.
             let parent = db.new_batch().append(vec![1]).merkleize(None);
             let pending_child = parent.new_batch::<Sha256>().append(vec![2]).merkleize(None);
 
+            // Commit the parent, then rebuild the same logical child from the
+            // committed DB state and compare roots.
             db.apply_batch(parent.finalize()).await.unwrap();
             db.commit().await.unwrap();
 

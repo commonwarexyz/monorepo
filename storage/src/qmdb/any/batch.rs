@@ -1567,6 +1567,8 @@ mod tests {
             let config = fixed_db_config::<OneCap>("batch-collision-regression", &context);
             let mut db = TestDb::init(context, config).await.unwrap();
 
+            // Seed the committed DB with colliding keys so the parent update path
+            // must distinguish exact full-key matches from translated-key collisions.
             let mut initial = db.new_batch();
             for i in 0..8 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
@@ -1575,6 +1577,8 @@ mod tests {
             db.apply_batch(initial).await.unwrap();
             db.commit().await.unwrap();
 
+            // Parent batch both updates existing colliding keys and creates new
+            // colliding keys that are only visible through base_diff.
             let mut parent = db.new_batch();
             for i in 0..8 {
                 parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
@@ -1584,6 +1588,8 @@ mod tests {
             }
             let parent = parent.merkleize(None, &db).await.unwrap();
 
+            // Build the child while the parent is still pending so resolution
+            // sees the parent through base_diff plus the stale committed snapshot.
             let mut pending_child = parent.new_batch();
             for i in 4..12 {
                 pending_child =
@@ -1591,6 +1597,8 @@ mod tests {
             }
             let pending_child = pending_child.merkleize(None, &db).await.unwrap();
 
+            // Commit the parent, then rebuild the same logical child from the
+            // committed DB state and compare roots.
             let finalized_parent = parent.finalize();
             db.apply_batch(finalized_parent).await.unwrap();
             db.commit().await.unwrap();
@@ -1622,6 +1630,8 @@ mod tests {
             let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", &context);
             let mut db = TestDb::init(context, config).await.unwrap();
 
+            // Seed the committed DB with colliding keys so the ordered path is
+            // exercised under the same translator pressure as unordered.
             let mut initial = db.new_batch();
             for i in 0..8 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
@@ -1630,6 +1640,8 @@ mod tests {
             db.apply_batch(initial).await.unwrap();
             db.commit().await.unwrap();
 
+            // Parent batch both updates existing colliding keys and creates new
+            // colliding keys that become visible to the child via base_diff.
             let mut parent = db.new_batch();
             for i in 0..8 {
                 parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
@@ -1639,6 +1651,8 @@ mod tests {
             }
             let parent = parent.merkleize(None, &db).await.unwrap();
 
+            // Build the child while the parent is still pending, then compare it
+            // with the equivalent child built after the parent is committed.
             let mut pending_child = parent.new_batch();
             for i in 4..12 {
                 pending_child =

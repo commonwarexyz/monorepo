@@ -1729,12 +1729,15 @@ pub(super) mod test {
             let key1 = Sha256::hash(&[1]);
             let key2 = Sha256::hash(&[2]);
 
+            // Build the child while the parent is still pending.
             let parent = db.new_batch().set(key1, vec![1]).merkleize(None);
             let pending_child = parent
                 .new_batch::<Sha256>()
                 .set(key2, vec![2])
                 .merkleize(None);
 
+            // Commit the parent, then rebuild the same logical child from the
+            // committed DB state and compare roots.
             db.apply_batch(parent.finalize()).await.unwrap();
             db.commit().await.unwrap();
 
