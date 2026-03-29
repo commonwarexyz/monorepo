@@ -613,34 +613,46 @@ module replica {
             .fold(signers, (acc, s) => if (acc.size() == Q) acc else s)
     }
 
-    def create_nullification(id: ReplicaId, view: ViewNumber, votes: Set[NullifyVote]): Option[Certificate] = {
+    def create_nullification(id: ReplicaId, view: ViewNumber, votes: Set[NullifyVote]): Option[NullificationCert] = {
         val similar_votes = votes.filter(v => v.view == view)
         val signers = similar_votes.map(v => v.sig)
 
         if (signers.size() < Q)
             None
         else
-            Some(nullification(view, quorum_signers(signers), sig_of(id)))
+            Some({
+                view: view,
+                signatures: quorum_signers(signers),
+                ghost_sender: sig_of(id)
+            })
     }
 
-    def create_notarization(id: ReplicaId, proposal: Proposal, votes: Set[NotarizeVote]): Option[Certificate] = {
+    def create_notarization(id: ReplicaId, proposal: Proposal, votes: Set[NotarizeVote]): Option[NotarizationCert] = {
         val similar_votes: Set[NotarizeVote] = votes.filter(v => v.proposal == proposal)
         val signers = similar_votes.map(v => v.sig)
 
         if (signers.size() < Q)
             None
         else
-            Some(notarization(proposal, quorum_signers(signers), sig_of(id)))
+            Some({
+                proposal: proposal,
+                signatures: quorum_signers(signers),
+                ghost_sender: sig_of(id)
+            })
     }
 
-    def create_finalization(id: ReplicaId, proposal: Proposal, votes: Set[FinalizeVote]): Option[Certificate] = {
+    def create_finalization(id: ReplicaId, proposal: Proposal, votes: Set[FinalizeVote]): Option[FinalizationCert] = {
         val similar_votes: Set[FinalizeVote] = votes.filter(v => v.proposal == proposal)
         val signers = similar_votes.map(v => v.sig)
 
         if (signers.size() < Q)
             None
         else
-            Some(finalization(proposal, quorum_signers(signers), sig_of(id)))
+            Some({
+                proposal: proposal,
+                signatures: quorum_signers(signers),
+                ghost_sender: sig_of(id)
+            })
     }
 
     action init = {
@@ -1008,7 +1020,7 @@ module replica {
                 match create_notarization(id, proposal, new_store_notarize) {
                     | Some(cert) => all {
                         now_notarized,
-                        _process_notarization_certificate(id, cert, not(had_notarization))
+                        _process_notarization(id, cert, not(had_notarization))
                     }
                     | None => all {
                         store_certificates' = store_certificates,
@@ -1075,7 +1087,7 @@ module replica {
                     match create_finalization(id, proposal, store_finalize.union(votes)) {
                         | Some(cert) => all {
                             is_proposal_finalized_votes(proposal, store_finalize.union(votes)),
-                            _process_finalization_certificate(id, cert, not(store_certificates.get(id).exists(c => and {
+                            _process_finalization(id, cert, not(store_certificates.get(id).exists(c => and {
                                 is_finalization_cert(c),
                                 cert_proposal(c) == Some(proposal),
                             })))
@@ -1143,14 +1155,14 @@ module replica {
                         now_nullified,
                         if (not(had_nullification))
                             all {
-                                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
+                                store_certificates' = store_certificates.setBy(id, old => old.union(Set(Nullification(cert)))),
                             }
                         else
                             all {
                                 store_certificates' = store_certificates,
                             },
                         if (should_broadcast_nullification)
-                            sent_certificates' = sent_certificates.union(Set(cert))
+                            sent_certificates' = sent_certificates.union(Set(Nullification(cert)))
                         else
                             sent_certificates' = sent_certificates,
                         ghost_committed_blocks' = ghost_committed_blocks,
@@ -1165,7 +1177,7 @@ module replica {
                             enter_view(
                                 observe_certificate(
                                     cancel_all_timers(timer.next_self, view),
-                                    cert,
+                                    Nullification(cert),
                                     should_broadcast_nullification
                                 ),
                                 view + 1
@@ -1219,24 +1231,24 @@ module replica {
                     replica_state' = replica_state,
                     ghost_committed_blocks' = ghost_committed_blocks,
                 }
-            } else if (is_notarization_cert(cert)) {
-                all {
-                    store_notarize_votes' = store_notarize_votes,
-                    _process_notarization_certificate(id, cert, true)
-                }
-            } else if (is_nullification_cert(cert)) {
-                all {
-                    store_notarize_votes' = store_notarize_votes,
-                    store_nullify_votes' = store_nullify_votes,
-                    store_finalize_votes' = store_finalize_votes,
-                    _process_nullification_certificate(id, cert, true)
-                }
             } else {
-                all {
-                    store_notarize_votes' = store_notarize_votes,
-                    store_nullify_votes' = store_nullify_votes,
-                    store_finalize_votes' = store_finalize_votes,
-                    _process_finalization_certificate(id, cert, true)
+                match (cert) {
+                    | Notarization(n) => all {
+                        store_notarize_votes' = store_notarize_votes,
+                        _process_notarization(id, n, true)
+                    }
+                    | Nullification(n) => all {
+                        store_notarize_votes' = store_notarize_votes,
+                        store_nullify_votes' = store_nullify_votes,
+                        store_finalize_votes' = store_finalize_votes,
+                        _process_nullification(id, n, true)
+                    }
+                    | Finalization(f) => all {
+                        store_notarize_votes' = store_notarize_votes,
+                        store_nullify_votes' = store_nullify_votes,
+                        store_finalize_votes' = store_finalize_votes,
+                        _process_finalization(id, f, true)
+                    }
                 }
             },
 
@@ -1249,178 +1261,162 @@ module replica {
         }
     }
 
-    action _process_notarization_certificate(id: ReplicaId, cert: Certificate, is_new_cert: bool): bool = all {
+    action _process_notarization_certificate(id: ReplicaId, cert: NotarizationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
+        val cert_msg: Certificate = Notarization(cert)
         all {
-            is_notarization_cert(cert),
-            cert_signatures(cert).size() >= Q,
+            cert.signatures.size() >= Q,
 
             if (is_new_cert) all {
-                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
-                sent_certificates' = sent_certificates.union(Set(cert)),
+                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert_msg))),
+                sent_certificates' = sent_certificates.union(Set(cert_msg)),
             } else all {
                 store_certificates' = store_certificates,
                 sent_certificates' = sent_certificates,
             },
 
-            val cert_view_num = cert_view(cert)
-            match (cert_payload(cert)) {
-                | Some(cert_payload_val) => all {
-                    val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
-                    val cert_prop = match cert {
-                        | Notarization(n) => n.proposal
-                        | _ => { payload: cert_payload_val, view: cert_view_num, parent: GENESIS_VIEW }
-                    }
-                    val proposal_conflicted = has_leader_proposal_conflict(self, cert_prop)
-                    val timer = forced_timeout_expired(
-                        self,
-                        id,
-                        cert_view_num,
-                        FailedCertificationReason,
-                        sent_nullify_votes,
-                        store_nullify_votes.get(id)
-                    )
-                    val locally_valid = and {
-                        VALID_PAYLOADS.contains(cert_prop.payload),
-                        is_some(parent_payload(self, cert_prop.view, cert_prop.parent, store_certificates.get(id))),
-                    }
-                    val can_send_finalize = and {
-                        can_certify(id, cert_payload_val),
-                        locally_valid,
-                        not(proposal_conflicted),
-                        self.certified.get(cert_view_num) == None,
-                        not(has_sent_finalize(id, cert_view_num)),
-                        // NOTE: The protocol informal description (consensus/src/simplex/mod.rs) does not explicitly
-                        // state the reverse guard "no finalize after nullify in the same view".
-                        // The Rust voter implementation enforces that exclusion, so this model does that too.
-                        not(has_sent_nullify(id, cert_view_num)),
-                    }
-                    val can_send_nullify = and {
-                        // Do not immediately nullify on parent conflict.
-                        // Equivocation blocks finalization (see can_send_finalize),
-                        // and the certification timeout handles nullification.
-                        not(can_certify(id, cert_payload_val)),
-                        self.view == cert_view_num,
-                        // NOTE: Model simplification: suppress nullify retries (single-shot nullify per view).
-                        // Real implementation may rebroadcast nullify for liveness.
-                        not(has_sent_nullify(id, cert_view_num)),
-                        // NOTE: The protocol informal description (consensus/src/simplex/mod.rs) does not explicitly
-                        // state the reverse guard "no nullify after finalize in the same view".
-                        // The Rust voter implementation enforces that exclusion, so this model does that too.
-                        not(has_sent_finalize(id, cert_view_num))
-                    }
+            val cert_view_num = cert.proposal.view
+            val cert_payload_val = cert.proposal.payload
+            val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
+            val cert_prop = cert.proposal
+            val proposal_conflicted = has_leader_proposal_conflict(self, cert_prop)
+            val timer = forced_timeout_expired(
+                self,
+                id,
+                cert_view_num,
+                FailedCertificationReason,
+                sent_nullify_votes,
+                store_nullify_votes.get(id)
+            )
+            val locally_valid = and {
+                VALID_PAYLOADS.contains(cert_prop.payload),
+                is_some(parent_payload(self, cert_prop.view, cert_prop.parent, store_certificates.get(id))),
+            }
+            val can_send_finalize = and {
+                can_certify(id, cert_payload_val),
+                locally_valid,
+                not(proposal_conflicted),
+                self.certified.get(cert_view_num) == None,
+                not(has_sent_finalize(id, cert_view_num)),
+                // NOTE: The protocol informal description (consensus/src/simplex/mod.rs) does not explicitly
+                // state the reverse guard "no finalize after nullify in the same view".
+                // The Rust voter implementation enforces that exclusion, so this model does that too.
+                not(has_sent_nullify(id, cert_view_num)),
+            }
+            val can_send_nullify = and {
+                // Do not immediately nullify on parent conflict.
+                // Equivocation blocks finalization (see can_send_finalize),
+                // and the certification timeout handles nullification.
+                not(can_certify(id, cert_payload_val)),
+                self.view == cert_view_num,
+                // NOTE: Model simplification: suppress nullify retries (single-shot nullify per view).
+                // Real implementation may rebroadcast nullify for liveness.
+                not(has_sent_nullify(id, cert_view_num)),
+                // NOTE: The protocol informal description (consensus/src/simplex/mod.rs) does not explicitly
+                // state the reverse guard "no nullify after finalize in the same view".
+                // The Rust voter implementation enforces that exclusion, so this model does that too.
+                not(has_sent_finalize(id, cert_view_num))
+            }
 
-                    if (can_send_finalize)
-                        all {
-                            sent_notarize_votes' = sent_notarize_votes,
-                            sent_nullify_votes' = sent_nullify_votes,
-                            sent_finalize_votes' = sent_finalize_votes.union(Set({
-                                proposal: cert_prop,
-                                sig: sig_of(id),
-                            })),
-                            store_nullify_votes' = store_nullify_votes,
-                            store_finalize_votes' = store_finalize_votes.set(
-                                id,
-                                store_finalize_votes.get(id).union(Set({
-                                    proposal: cert_prop,
-                                    sig: sig_of(id),
-                                }))
-                            ),
-                            replica_state' = replica_state.set(id, {
-                                ...enter_view({
-                                    ...mark_vote_broadcast(
-                                        observe_certificate(
-                                            observe_leader_proposal(
-                                                observe_round_proposal(self, cert_prop, true),
-                                                cert_prop
-                                            ),
-                                            cert,
-                                            is_new_cert
-                                        ),
-                                        cert_view_num,
-                                        FinalizeKind
-                                    ),
-                                    advance_timeout: if (self.view == cert_view_num) self.advance_timeout.set(cert_view_num, None) else self.advance_timeout,
-                                    ghost_last_seen_notarization: seen_notarization,
-                                    certify: self.certify.set(cert_view_num, Some(true)),
-                                    certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
-                                    ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(FinalizeKind))
-                                }, cert_view_num + 1)
-                            }),
-                            ghost_committed_blocks' = ghost_committed_blocks,
-                        }
-                    else if (can_send_nullify)
-                        all {
-                            sent_notarize_votes' = sent_notarize_votes,
-                            sent_nullify_votes' = timer.next_sent_nullify,
-                            sent_finalize_votes' = sent_finalize_votes,
-                            store_nullify_votes' = store_nullify_votes.set(id, timer.next_stored_nullify),
-                            store_finalize_votes' = store_finalize_votes,
-                            replica_state' = replica_state.set(id, {
-                                ...observe_certificate(
-                                    observe_leader_proposal(
-                                        observe_round_proposal(timer.next_self, cert_prop, true),
-                                        cert_prop
-                                    ),
-                                    cert,
-                                    is_new_cert
-                                ),
-                                certify: timer.next_self.certify.set(cert_view_num, Some(false)),
-                                ghost_last_seen_notarization: seen_notarization
-                            }),
-                            ghost_committed_blocks' = ghost_committed_blocks,
-                        }
-                    else
-                        all {
-                            sent_notarize_votes' = sent_notarize_votes,
-                            sent_nullify_votes' = sent_nullify_votes,
-                            sent_finalize_votes' = sent_finalize_votes,
-                            store_nullify_votes' = store_nullify_votes,
-                            store_finalize_votes' = store_finalize_votes,
-                            replica_state' = replica_state.set(id, {
-                                ...observe_certificate(
+            if (can_send_finalize)
+                all {
+                    sent_notarize_votes' = sent_notarize_votes,
+                    sent_nullify_votes' = sent_nullify_votes,
+                    sent_finalize_votes' = sent_finalize_votes.union(Set({
+                        proposal: cert_prop,
+                        sig: sig_of(id),
+                    })),
+                    store_nullify_votes' = store_nullify_votes,
+                    store_finalize_votes' = store_finalize_votes.set(
+                        id,
+                        store_finalize_votes.get(id).union(Set({
+                            proposal: cert_prop,
+                            sig: sig_of(id),
+                        }))
+                    ),
+                    replica_state' = replica_state.set(id, {
+                        ...enter_view({
+                            ...mark_vote_broadcast(
+                                observe_certificate(
                                     observe_leader_proposal(
                                         observe_round_proposal(self, cert_prop, true),
                                         cert_prop
                                     ),
-                                    cert,
+                                    cert_msg,
                                     is_new_cert
                                 ),
-                                advance_timeout: if (self.view == cert_view_num) self.advance_timeout.set(cert_view_num, None) else self.advance_timeout,
-                                ghost_last_seen_notarization: seen_notarization
-                            }),
-                            ghost_committed_blocks' = ghost_committed_blocks,
-                        }
+                                cert_view_num,
+                                FinalizeKind
+                            ),
+                            advance_timeout: if (self.view == cert_view_num) self.advance_timeout.set(cert_view_num, None) else self.advance_timeout,
+                            ghost_last_seen_notarization: seen_notarization,
+                            certify: self.certify.set(cert_view_num, Some(true)),
+                            certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
+                            ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(FinalizeKind))
+                        }, cert_view_num + 1)
+                    }),
+                    ghost_committed_blocks' = ghost_committed_blocks,
                 }
-                | None => all {
-                    false,
+            else if (can_send_nullify)
+                all {
+                    sent_notarize_votes' = sent_notarize_votes,
+                    sent_nullify_votes' = timer.next_sent_nullify,
+                    sent_finalize_votes' = sent_finalize_votes,
+                    store_nullify_votes' = store_nullify_votes.set(id, timer.next_stored_nullify),
+                    store_finalize_votes' = store_finalize_votes,
+                    replica_state' = replica_state.set(id, {
+                        ...observe_certificate(
+                            observe_leader_proposal(
+                                observe_round_proposal(timer.next_self, cert_prop, true),
+                                cert_prop
+                            ),
+                            cert_msg,
+                            is_new_cert
+                        ),
+                        certify: timer.next_self.certify.set(cert_view_num, Some(false)),
+                        ghost_last_seen_notarization: seen_notarization
+                    }),
+                    ghost_committed_blocks' = ghost_committed_blocks,
+                }
+            else
+                all {
                     sent_notarize_votes' = sent_notarize_votes,
                     sent_nullify_votes' = sent_nullify_votes,
                     sent_finalize_votes' = sent_finalize_votes,
                     store_nullify_votes' = store_nullify_votes,
                     store_finalize_votes' = store_finalize_votes,
-                    replica_state' = replica_state,
+                    replica_state' = replica_state.set(id, {
+                        ...observe_certificate(
+                            observe_leader_proposal(
+                                observe_round_proposal(self, cert_prop, true),
+                                cert_prop
+                            ),
+                            cert_msg,
+                            is_new_cert
+                        ),
+                        advance_timeout: if (self.view == cert_view_num) self.advance_timeout.set(cert_view_num, None) else self.advance_timeout,
+                        ghost_last_seen_notarization: seen_notarization
+                    }),
                     ghost_committed_blocks' = ghost_committed_blocks,
                 }
-            }
         }
     }
 
-    action _process_nullification_certificate(id: ReplicaId, cert: Certificate, is_new_cert: bool): bool = all {
+    action _process_nullification_certificate(id: ReplicaId, cert: NullificationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
-        val cert_view_num = cert_view(cert)
+        val cert_msg: Certificate = Nullification(cert)
+        val cert_view_num = cert.view
         val should_broadcast_nullification = not(self.broadcast_nullification.get(cert_view_num))
         all {
-            is_nullification_cert(cert),
-            cert_signatures(cert).size() >= Q,
+            cert.signatures.size() >= Q,
 
             if (is_new_cert) all {
-                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
+                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert_msg))),
             } else all {
                 store_certificates' = store_certificates,
             },
             if (should_broadcast_nullification)
-                sent_certificates' = sent_certificates.union(Set(cert))
+                sent_certificates' = sent_certificates.union(Set(cert_msg))
             else
                 sent_certificates' = sent_certificates,
 
@@ -1432,7 +1428,7 @@ module replica {
                 enter_view(
                     observe_certificate(
                         cancel_all_timers(self, cert_view_num),
-                        cert,
+                        cert_msg,
                         should_broadcast_nullification
                     ),
                     cert_view_num + 1
@@ -1442,66 +1438,52 @@ module replica {
         }
     }
 
-    action _process_finalization_certificate(id: ReplicaId, cert: Certificate, is_new_cert: bool): bool = all {
+    action _process_finalization(id: ReplicaId, cert: FinalizationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
+        val cert_msg: Certificate = Finalization(cert)
         all {
-            is_finalization_cert(cert),
-            cert_signatures(cert).size() >= Q,
+            cert.signatures.size() >= Q,
 
             if (is_new_cert) all {
-                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
-                sent_certificates' = sent_certificates.union(Set(cert)),
+                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert_msg))),
+                sent_certificates' = sent_certificates.union(Set(cert_msg)),
             } else all {
                 store_certificates' = store_certificates,
                 sent_certificates' = sent_certificates,
             },
 
-            val cert_view_num = cert_view(cert)
-            match (cert_payload(cert)) {
-                | Some(cert_payload_val) => all {
-                    val cert_prop = match cert {
-                        | Finalization(f) => f.proposal
-                        | _ => { payload: cert_payload_val, view: cert_view_num, parent: GENESIS_VIEW }
-                    }
-                    val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
-                    val newer = cert_view_num > self.last_finalized
+            val cert_view_num = cert.proposal.view
+            val cert_payload_val = cert.proposal.payload
+            val cert_prop = cert.proposal
+            val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
+            val newer = cert_view_num > self.last_finalized
 
-                    all {
-                        // Watermark-only finalization: append just the finalized payload.
-                        // No recursive ancestor walk -- matches the Rust implementation
-                        // which updates last_finalized as a simple watermark.
-                        if (is_new_cert and newer)
-                            ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.append(cert_payload_val))
-                        else
-                            ghost_committed_blocks' = ghost_committed_blocks,
-
-                        sent_notarize_votes' = sent_notarize_votes,
-                        sent_nullify_votes' = sent_nullify_votes,
-                        sent_finalize_votes' = sent_finalize_votes,
-                        replica_state' = replica_state.set(id,
-                            enter_view({
-                                ...observe_certificate(
-                                    observe_leader_proposal(
-                                        observe_round_proposal(self, cert_prop, true),
-                                        cert_prop
-                                    ),
-                                    cert,
-                                    is_new_cert
-                                ),
-                                last_finalized: if (newer) cert_view_num else self.last_finalized,
-                                ghost_last_seen_notarization: seen_notarization
-                            }, cert_view_num + 1)
-                        )
-                    }
-                }
-                | None => all {
-                    false,
-                    sent_notarize_votes' = sent_notarize_votes,
-                    sent_nullify_votes' = sent_nullify_votes,
-                    sent_finalize_votes' = sent_finalize_votes,
-                    replica_state' = replica_state,
+            all {
+                // Watermark-only finalization: append just the finalized payload.
+                // No recursive ancestor walk -- matches the Rust implementation
+                // which updates last_finalized as a simple watermark.
+                if (is_new_cert and newer)
+                    ghost_committed_blocks' = ghost_committed_blocks.setBy(id, old => old.append(cert_payload_val))
+                else
                     ghost_committed_blocks' = ghost_committed_blocks,
-                }
+
+                sent_notarize_votes' = sent_notarize_votes,
+                sent_nullify_votes' = sent_nullify_votes,
+                sent_finalize_votes' = sent_finalize_votes,
+                replica_state' = replica_state.set(id,
+                    enter_view({
+                        ...observe_certificate(
+                            observe_leader_proposal(
+                                observe_round_proposal(self, cert_prop, true),
+                                cert_prop
+                            ),
+                            cert_msg,
+                            is_new_cert
+                        ),
+                        last_finalized: if (newer) cert_view_num else self.last_finalized,
+                        ghost_last_seen_notarization: seen_notarization
+                    }, cert_view_num + 1)
+                )
             }
         }
     }
