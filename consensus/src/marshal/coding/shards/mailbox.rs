@@ -50,6 +50,13 @@ where
         /// The response channel.
         response: oneshot::Sender<Option<Arc<CodedBlock<B, C, H>>>>,
     },
+    /// A request to check whether a reconstructed block is already available by digest.
+    HasByDigest {
+        /// The digest of the block to check.
+        digest: B::Digest,
+        /// The response channel.
+        response: oneshot::Sender<bool>,
+    },
     /// A request to open a subscription for assigned shard verification.
     ///
     /// For participants, this resolves once the leader-delivered shard for
@@ -81,6 +88,13 @@ where
         digest: B::Digest,
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
+    },
+    /// A request to open a subscription for block availability by digest.
+    SubscribeAvailableByDigest {
+        /// The block's digest.
+        digest: B::Digest,
+        /// The response channel.
+        response: oneshot::Sender<()>,
     },
     /// A request to prune all caches at and below the given commitment.
     Prune {
@@ -153,6 +167,17 @@ where
             .flatten()
     }
 
+    /// Check whether a reconstructed block is already available by digest.
+    pub async fn has_by_digest(&self, digest: B::Digest) -> bool {
+        self.sender
+            .request(|tx| Message::HasByDigest {
+                digest,
+                response: tx,
+            })
+            .await
+            .unwrap_or(false)
+    }
+
     /// Subscribe to assigned shard verification for a commitment.
     ///
     /// For participants, this resolves once the leader-delivered shard for
@@ -197,6 +222,20 @@ where
     ) -> oneshot::Receiver<Arc<CodedBlock<B, C, H>>> {
         let (responder, receiver) = oneshot::channel();
         let msg = Message::SubscribeByDigest {
+            digest,
+            response: responder,
+        };
+        self.sender.send_lossy(msg).await;
+        receiver
+    }
+
+    /// Subscribe to block availability by digest.
+    pub async fn subscribe_available_by_digest(
+        &self,
+        digest: B::Digest,
+    ) -> oneshot::Receiver<()> {
+        let (responder, receiver) = oneshot::channel();
+        let msg = Message::SubscribeAvailableByDigest {
             digest,
             response: responder,
         };

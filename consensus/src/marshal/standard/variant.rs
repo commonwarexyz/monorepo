@@ -60,6 +60,10 @@ where
         self.get(digest).await
     }
 
+    async fn has_by_digest(&self, digest: B::Digest) -> bool {
+        self.has(digest).await
+    }
+
     async fn find_by_commitment(&self, commitment: B::Digest) -> Option<Self::CachedBlock> {
         self.find_by_digest(commitment).await
     }
@@ -68,6 +72,10 @@ where
         let (tx, rx) = oneshot::channel();
         self.subscribe_prepared(digest, tx).await;
         rx
+    }
+
+    async fn subscribe_available_by_digest(&self, digest: B::Digest) -> oneshot::Receiver<()> {
+        self.subscribe_available(digest).await
     }
 
     async fn subscribe_by_commitment(
