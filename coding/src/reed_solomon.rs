@@ -291,8 +291,9 @@ fn encode<H: Hasher, S: Strategy>(
     let n = total as usize;
     let k = min as usize;
     let m = n - k;
-    if data.remaining() > u32::MAX as usize {
-        return Err(Error::InvalidDataLength(data.remaining()));
+    let data_len = data.remaining();
+    if data_len > u32::MAX as usize {
+        return Err(Error::InvalidDataLength(data_len));
     }
 
     // Prepare data as a contiguous buffer of k shards
@@ -421,7 +422,6 @@ fn decode<'a, H: Hasher, S: Strategy>(
     for &(idx, shard) in &provided_originals {
         originals[idx] = shard;
     }
-
     let mut decoder = Cached::take(
         &CACHED_DECODER,
         || ReedSolomonDecoder::new(k, m, shard_len),
