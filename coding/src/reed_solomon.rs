@@ -418,10 +418,6 @@ fn decode<'a, H: Hasher, S: Strategy>(
     }
 
     // Decode original data
-    let mut originals = vec![&[][..]; k];
-    for &(idx, shard) in &provided_originals {
-        originals[idx] = shard;
-    }
     let mut decoder = Cached::take(
         &CACHED_DECODER,
         || ReedSolomonDecoder::new(k, m, shard_len),
@@ -441,8 +437,12 @@ fn decode<'a, H: Hasher, S: Strategy>(
     let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
 
     // Reconstruct all original shards
-    for (idx, shard) in decoding.restored_original_iter() {
-        originals[idx] = shard;
+    let mut shards = vec![Default::default(); k];
+    for (idx, shard) in provided_originals
+        .into_iter()
+        .chain(decoding.restored_original_iter())
+    {
+        shards[idx] = shard;
     }
 
     // Re-encode recovered data to get recovery shards
@@ -452,23 +452,23 @@ fn decode<'a, H: Hasher, S: Strategy>(
         |enc| enc.reset(k, m, shard_len),
     )
     .map_err(Error::ReedSolomon)?;
-    for shard in &originals {
+    for shard in shards.iter().take(k) {
         encoder
             .add_original_shard(shard)
             .map_err(Error::ReedSolomon)?;
     }
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+    shards.extend(encoding.recovery_iter());
+
     // Build Merkle tree
     for (i, digest) in strategy.map_init_collect_vec(
-        originals
+        shard_digests
             .iter()
-            .copied()
             .enumerate()
-            .chain(encoding.recovery_iter().enumerate().map(|(idx, shard)| (k + idx, shard)))
-            .filter(|(i, _)| shard_digests[*i].is_none()),
+            .filter_map(|(i, digest)| digest.is_none().then_some(i)),
         H::new,
-        |hasher, (i, shard)| {
-            hasher.update(shard);
+        |hasher, i| {
+            hasher.update(shards[i]);
             (i, hasher.finalize())
         },
     ) {
@@ -490,7 +490,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     }
 
     // Extract original data
-    extract_data(&originals, k)
+    extract_data(&shards, k)
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [`bmt`].
