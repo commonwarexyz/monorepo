@@ -31,10 +31,6 @@ pub const fn mix64(mut word: u64) -> u64 {
     word ^ (word >> 31)
 }
 
-/// Domain-separation constant for the mixing step. This ensures the mixed stream
-/// is not derived from `word ^ ctr` alone and helps avoid accidental fixed points
-/// when fuzz input has low structure (for example empty or repeated bytes).
-const FUZZ_RNG_MIX_DOMAIN: u64 = 0x9e3779b97f4a7c15;
 /// Width of each source window in bytes.
 const BLOCK_BYTES: usize = size_of::<u64>();
 
@@ -111,7 +107,7 @@ impl FuzzRng {
     ///
     /// Conceptually:
     /// 1. Build `word` from a wrapping `BLOCK_BYTES` window anchored at `ctr`.
-    /// 2. Compute `mixed = mix64(word ^ ctr ^ FUZZ_RNG_MIX_DOMAIN)`.
+    /// 2. Compute `mixed = mix64(word ^ ctr ^ GOLDEN_RATIO)`.
     /// 3. Increment `ctr`.
     ///
     /// This keeps the output deterministic while preserving local mutation
@@ -133,7 +129,7 @@ impl FuzzRng {
         // hashing the entire seed into an avalanche-style global state.
         let ctr = self.ctr;
         self.ctr = self.ctr.wrapping_add(1);
-        mix64(word ^ ctr ^ FUZZ_RNG_MIX_DOMAIN)
+        mix64(word ^ ctr ^ crate::GOLDEN_RATIO)
     }
 }
 
@@ -366,8 +362,8 @@ mod tests {
         };
 
         #[allow(clippy::identity_op)]
-        let expected0 = mix(word ^ 0 ^ FUZZ_RNG_MIX_DOMAIN);
-        let expected1 = mix(word ^ 1 ^ FUZZ_RNG_MIX_DOMAIN);
+        let expected0 = mix(word ^ 0 ^ crate::GOLDEN_RATIO);
+        let expected1 = mix(word ^ 1 ^ crate::GOLDEN_RATIO);
 
         assert_eq!(rng.next_u64(), expected0);
         assert_eq!(rng.next_u64(), expected1);

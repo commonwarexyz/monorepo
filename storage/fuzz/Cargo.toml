@@ -153,13 +153,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "translator_operations"
-path = "fuzz_targets/translator_operations.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "mmr_journaled"
 path = "fuzz_targets/mmr_journaled.rs"
 test = false
