@@ -603,13 +603,17 @@ where
             // location. Without this guard, a stale snapshot collision (the
             // pre-parent DB snapshot still containing the key's old location)
             // can consume the mutation at the wrong sort position, changing
-            // the operation order relative to the committed-state path.
-            let base_diff_entry = m.base_diff.get(key);
-            if let Some(entry) = base_diff_entry {
+            // the operation order relative to the committed-state path. When
+            // the base diff entry does match, use it to trace `base_old_loc`
+            // back to the key's location in the base DB snapshot.
+            let base_old_loc = if let Some(entry) = m.base_diff.get(key) {
                 if entry.loc() != Some(old_loc) {
                     continue;
                 }
-            }
+                entry.base_old_loc()
+            } else {
+                Some(old_loc)
+            };
 
             let Some(mutation) = mutations.remove(key) else {
                 // Snapshot index collision: this operation's key does not match
@@ -617,11 +621,9 @@ where
                 continue;
             };
 
-            // Determine base_old_loc: trace through base diff to find
-            // the key's location in the base DB snapshot.
+            // Write the user mutation at the next batch location while
+            // preserving the committed-base provenance computed above.
             let new_loc = Location::new(m.base_size + ops.len() as u64);
-            let base_old_loc = base_diff_entry.map_or(Some(old_loc), DiffEntry::base_old_loc);
-
             match mutation {
                 Some(value) => {
                     ops.push(Operation::Update(update::Unordered(
