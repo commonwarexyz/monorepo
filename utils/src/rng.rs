@@ -1,6 +1,6 @@
 //! Utilities for random number generation.
 
-use rand::{CryptoRng, RngCore, SeedableRng, rngs::StdRng};
+use rand::{rngs::StdRng, CryptoRng, RngCore, SeedableRng};
 use std::mem::size_of;
 
 /// Returns a seeded RNG for deterministic testing.
