@@ -598,13 +598,13 @@ where
         // This includes keys from both the base snapshot and the base diff.
         for (op, &old_loc) in results.iter().zip(&locations) {
             let key = op.key().expect("updates should have a key");
-            let base_diff_entry = m.base_diff.get(key);
 
             // A key resolved via base_diff must only match at its base_diff
             // location. Without this guard, a stale snapshot collision (the
             // pre-parent DB snapshot still containing the key's old location)
             // can consume the mutation at the wrong sort position, changing
             // the operation order relative to the committed-state path.
+            let base_diff_entry = m.base_diff.get(key);
             if let Some(entry) = base_diff_entry {
                 if entry.loc() != Some(old_loc) {
                     continue;
@@ -617,10 +617,9 @@ where
                 continue;
             };
 
-            let new_loc = Location::new(m.base_size + ops.len() as u64);
-
             // Determine base_old_loc: trace through base diff to find
             // the key's location in the base DB snapshot.
+            let new_loc = Location::new(m.base_size + ops.len() as u64);
             let base_old_loc = base_diff_entry.map_or(Some(old_loc), DiffEntry::base_old_loc);
 
             match mutation {
