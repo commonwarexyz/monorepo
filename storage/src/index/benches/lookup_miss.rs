@@ -19,9 +19,12 @@ const N_LOOKUPS: usize = 10_000;
 
 type Digest = <Sha256 as Hasher>::Digest;
 
-// Match the full digest so misses scan the entire collision chain when needed.
-fn contains_full_key<I: Unordered<Value = Digest>>(index: &I, key: &Digest) -> bool {
-    index.get(key).any(|candidate| candidate == key)
+// Match the full digest via stored positions so misses scan the entire collision
+// chain without changing the index value layout.
+fn contains_full_key<I: Unordered<Value = u64>>(index: &I, key: &Digest, keys: &[Digest]) -> bool {
+    index
+        .get(key)
+        .any(|candidate| &keys[*candidate as usize] == key)
 }
 
 fn run_lookup_miss<T: Translator>(
@@ -34,8 +37,8 @@ fn run_lookup_miss<T: Translator>(
 ) {
     // Populate the index
     let mut index = unordered::Index::new(DummyMetrics, translator);
-    for key in inserted_keys.iter().take(items) {
-        index.insert(key, key.clone());
+    for (i, key) in inserted_keys.iter().enumerate().take(items) {
+        index.insert(key, i as u64);
     }
 
     let label = format!("{}/translator={name} items={items}", module_path!());
@@ -45,7 +48,7 @@ fn run_lookup_miss<T: Translator>(
             for _ in 0..iters {
                 let start = Instant::now();
                 for key in missing_keys.iter().take(N_LOOKUPS) {
-                    black_box(contains_full_key(&index, key));
+                    black_box(contains_full_key(&index, key, inserted_keys));
                 }
                 total += start.elapsed();
             }

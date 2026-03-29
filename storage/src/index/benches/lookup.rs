@@ -18,9 +18,12 @@ const N_ITEMS: [usize; 5] = [10_000, 50_000, 100_000, 500_000, 1_000_000];
 
 type Digest = <Sha256 as Hasher>::Digest;
 
-// Match the full digest so collisions pay the same chain scan cost as real callers.
-fn contains_full_key<I: Unordered<Value = Digest>>(index: &I, key: &Digest) -> bool {
-    index.get(key).any(|candidate| candidate == key)
+// Match the full digest via stored positions so collisions pay the same scan cost
+// without changing the index value layout.
+fn contains_full_key<I: Unordered<Value = u64>>(index: &I, key: &Digest, keys: &[Digest]) -> bool {
+    index
+        .get(key)
+        .any(|candidate| &keys[*candidate as usize] == key)
 }
 
 fn run_lookup<T: Translator>(
@@ -32,8 +35,8 @@ fn run_lookup<T: Translator>(
 ) {
     // Populate the index
     let mut index = unordered::Index::new(DummyMetrics, translator);
-    for key in keys.iter().take(items) {
-        index.insert(key, key.clone());
+    for (i, key) in keys.iter().enumerate().take(items) {
+        index.insert(key, i as u64);
     }
 
     // Shuffle lookup order
@@ -48,7 +51,7 @@ fn run_lookup<T: Translator>(
             for _ in 0..iters {
                 let start = Instant::now();
                 for key in &lookup_keys {
-                    black_box(contains_full_key(&index, key));
+                    black_box(contains_full_key(&index, key, keys));
                 }
                 total += start.elapsed();
             }
