@@ -1,11 +1,7 @@
 //! Primitive implementations of [Translator].
 
+use commonware_utils::GOLDEN_RATIO_U64;
 use core::hash::{BuildHasher, Hash, Hasher};
-
-// 64-bit golden-ratio-derived multiplicative hash constant:
-// floor(2^64 / phi) == 0x9e3779b97f4a7c15.
-// Since it is odd, multiplication by it is a bijection modulo 2^64.
-const MIXING_CONSTANT: u64 = 0x9e3779b97f4a7c15;
 
 /// Translate keys into a new representation (often a smaller one).
 ///
@@ -79,7 +75,7 @@ impl Hasher for UintIdentity {
         // Multiply by the mixing constant to spread low-order bits across all 64 bits.
         // Without this, hashbrown's h2 control bytes (top 7 bits) are all zero for small
         // keys, defeating its SIMD fast-reject filter.
-        self.value.wrapping_mul(MIXING_CONSTANT)
+        self.value.wrapping_mul(GOLDEN_RATIO_U64)
     }
 }
 
@@ -375,7 +371,7 @@ mod tests {
         let mut h = UintIdentity::default();
         h.write(b"abc");
         let raw = u64::from_le_bytes(cap::<8>(b"abc"));
-        assert_eq!(h.finish(), raw.wrapping_mul(MIXING_CONSTANT));
+        assert_eq!(h.finish(), raw.wrapping_mul(GOLDEN_RATIO_U64));
     }
 
     #[test]
