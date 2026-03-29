@@ -400,7 +400,10 @@ pub mod tests {
     use super::{ordered, unordered, FConfig, FixedConfig, MmrConfig, VConfig, VariableConfig};
     use crate::{
         qmdb::{
-            any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+            any::{
+                test::colliding_digest,
+                traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+            },
             store::tests::{TestKey, TestValue},
             Error, Location,
         },
@@ -1221,13 +1224,6 @@ pub mod tests {
 
     fn val(i: u64) -> Digest {
         Sha256::hash(&(i + 10000).to_be_bytes())
-    }
-
-    fn colliding_digest(prefix: u8, suffix: u64) -> Digest {
-        let mut bytes = [0u8; 32];
-        bytes[0] = prefix;
-        bytes[24..].copy_from_slice(&suffix.to_be_bytes());
-        Digest::from(bytes)
     }
 
     async fn commit_writes_with_metadata(

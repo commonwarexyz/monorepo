@@ -1455,20 +1455,14 @@ mod tests {
     use super::*;
     use crate::{
         qmdb::any::{
-            ordered::fixed::Db as OrderedFixedDb, test::fixed_db_config,
+            ordered::fixed::Db as OrderedFixedDb,
+            test::{colliding_digest, fixed_db_config},
             unordered::fixed::Db as UnorderedFixedDb,
         },
         translator::OneCap,
     };
     use commonware_cryptography::{sha256, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
-
-    fn colliding_digest(prefix: u8, suffix: u64) -> sha256::Digest {
-        let mut bytes = [0u8; 32];
-        bytes[0] = prefix;
-        bytes[24..].copy_from_slice(&suffix.to_be_bytes());
-        sha256::Digest::from(bytes)
-    }
 
     /// Test helper: same logic as `Merkleizer::extract_parent_deleted_creates`
     /// but without requiring a full Merkleizer instance.
