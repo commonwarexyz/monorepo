@@ -199,19 +199,48 @@ fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
 /// Extract data from encoded shards.
 ///
 /// The first `k` shards, when concatenated, form `[length_prefix | data | padding]`.
-/// This function bulk-copies shard slices while skipping the 4-byte prefix.
+/// This function copies only the data bytes while validating trailing zero
+/// padding directly from the shard slices.
 fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
     let shards = shards.get(..k).ok_or(Error::NotEnoughChunks)?;
-    let (data_len, payload_len) = read_prefix_and_payload_len(shards)?;
-    let mut payload = copy_payload_after_prefix(shards, payload_len);
-    validate_zero_padding(&payload, data_len)?;
-    payload.truncate(data_len);
-    Ok(payload)
+    let data_len = read_prefix_and_payload_len(shards)?;
+    let mut data = Vec::with_capacity(data_len);
+    let mut prefix_bytes_left = u32::SIZE;
+    let mut data_bytes_left = data_len;
+    for shard in shards {
+        // The length prefix may straddle shard boundaries, so ignore bytes until
+        // we reach the first payload byte.
+        if prefix_bytes_left >= shard.len() {
+            prefix_bytes_left -= shard.len();
+            continue;
+        }
+
+        let payload = &shard[prefix_bytes_left..];
+        let copy_len = data_bytes_left.min(payload.len());
+
+        // Copy only the live payload bytes; any remaining bytes in this shard
+        // must be canonical zero padding.
+        data.extend_from_slice(&payload[..copy_len]);
+        data_bytes_left -= copy_len;
+
+        if !payload[copy_len..].iter().all(|byte| *byte == 0) {
+            return Err(Error::Inconsistent);
+        }
+        prefix_bytes_left = 0;
+    }
+
+    // The prefix advertised more payload bytes than were present in the first
+    // `k` shards.
+    if data_bytes_left != 0 {
+        return Err(Error::Inconsistent);
+    }
+
+    Ok(data)
 }
 
 /// Read the 4-byte big-endian length prefix from `shards` and validate that
 /// the decoded length fits in the post-prefix payload region.
-fn read_prefix_and_payload_len(shards: &[&[u8]]) -> Result<(usize, usize), Error> {
+fn read_prefix_and_payload_len(shards: &[&[u8]]) -> Result<usize, Error> {
     let total_len: usize = shards.iter().map(|s| s.len()).sum();
     if total_len < u32::SIZE {
         return Err(Error::Inconsistent);
@@ -234,33 +263,7 @@ fn read_prefix_and_payload_len(shards: &[&[u8]]) -> Result<(usize, usize), Error
     if data_len > payload_len {
         return Err(Error::Inconsistent);
     }
-    Ok((data_len, payload_len))
-}
-
-/// Bulk-copy bytes after the 4-byte prefix from `shards` into a contiguous
-/// payload buffer.
-fn copy_payload_after_prefix(shards: &[&[u8]], payload_len: usize) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(payload_len);
-    let mut prefix_bytes_left = u32::SIZE;
-    for shard in shards {
-        if prefix_bytes_left >= shard.len() {
-            prefix_bytes_left -= shard.len();
-            continue;
-        }
-        payload.extend_from_slice(&shard[prefix_bytes_left..]);
-        prefix_bytes_left = 0;
-    }
-    payload
-}
-
-/// Validate canonical encoding by requiring trailing bytes after `data_len`
-/// to be zero.
-fn validate_zero_padding(payload: &[u8], data_len: usize) -> Result<(), Error> {
-    // Canonical encoding requires all trailing bytes to be zero.
-    if !payload[data_len..].iter().all(|byte| *byte == 0) {
-        return Err(Error::Inconsistent);
-    }
-    Ok(())
+    Ok(data_len)
 }
 
 /// Type alias for the internal encoding result.
