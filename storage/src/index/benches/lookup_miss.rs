@@ -17,18 +17,25 @@ const N_ITEMS: [usize; 5] = [10_000, 50_000, 100_000, 500_000, 1_000_000];
 
 const N_LOOKUPS: usize = 10_000;
 
+type Digest = <Sha256 as Hasher>::Digest;
+
+// Match the full digest so misses scan the entire collision chain when needed.
+fn contains_full_key<I: Unordered<Value = Digest>>(index: &I, key: &Digest) -> bool {
+    index.get(key).any(|candidate| candidate == key)
+}
+
 fn run_lookup_miss<T: Translator>(
     c: &mut Criterion,
     translator: T,
     name: &str,
     items: usize,
-    inserted_keys: &[<Sha256 as Hasher>::Digest],
-    missing_keys: &[<Sha256 as Hasher>::Digest],
+    inserted_keys: &[Digest],
+    missing_keys: &[Digest],
 ) {
     // Populate the index
     let mut index = unordered::Index::new(DummyMetrics, translator);
-    for (i, key) in inserted_keys.iter().enumerate().take(items) {
-        index.insert(key, i as u64);
+    for key in inserted_keys.iter().take(items) {
+        index.insert(key, key.clone());
     }
 
     let label = format!("{}/translator={name} items={items}", module_path!());
@@ -38,7 +45,7 @@ fn run_lookup_miss<T: Translator>(
             for _ in 0..iters {
                 let start = Instant::now();
                 for key in missing_keys.iter().take(N_LOOKUPS) {
-                    black_box(index.get(key).next());
+                    black_box(contains_full_key(&index, key));
                 }
                 total += start.elapsed();
             }
