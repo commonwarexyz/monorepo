@@ -604,7 +604,8 @@ where
             // pre-parent DB snapshot still containing the key's old location)
             // can consume the mutation at the wrong sort position, changing
             // the operation order relative to the committed-state path.
-            if let Some(entry) = m.base_diff.get(key) {
+            let base_diff_entry = m.base_diff.get(key);
+            if let Some(entry) = base_diff_entry {
                 if entry.loc() != Some(old_loc) {
                     continue;
                 }
@@ -616,14 +617,10 @@ where
                 continue;
             };
 
-            let new_loc = Location::new(m.base_size + ops.len() as u64);
-
             // Determine base_old_loc: trace through base diff to find
             // the key's location in the base DB snapshot.
-            let base_old_loc = m
-                .base_diff
-                .get(key)
-                .map_or(Some(old_loc), DiffEntry::base_old_loc);
+            let new_loc = Location::new(m.base_size + ops.len() as u64);
+            let base_old_loc = base_diff_entry.map_or(Some(old_loc), DiffEntry::base_old_loc);
 
             match mutation {
                 Some(value) => {
@@ -1560,51 +1557,72 @@ mod tests {
 
             let config = fixed_db_config::<OneCap>("batch-collision-regression", &context);
             let mut db = TestDb::init(context, config).await.unwrap();
+            let key_a = colliding_digest(0xAA, 1);
+            let key_b = colliding_digest(0xAA, 0);
 
-            // Seed the committed DB with colliding keys so the parent update path
-            // must distinguish exact full-key matches from translated-key collisions.
+            // Seed four colliding committed keys, then update only key_a.
+            // The specific 4 / 1 / 0 shape is a concrete counterexample:
+            // key_b remains outside parent.diff and is still resolved through
+            // the committed snapshot in the child.
             let mut initial = db.new_batch();
-            for i in 0..8 {
+            for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
             }
             let initial = initial.merkleize(None, &db).await.unwrap().finalize();
             db.apply_batch(initial).await.unwrap();
             db.commit().await.unwrap();
 
-            // Parent batch both updates existing colliding keys and creates new
-            // colliding keys that are only visible through base_diff.
-            let mut parent = db.new_batch();
-            for i in 0..8 {
-                parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
-            }
-            for i in 8..16 {
-                parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
-            }
-            let parent = parent.merkleize(None, &db).await.unwrap();
+            // Update only key_a so the colliding sibling key_b remains outside
+            // parent.diff and must still be resolved through the committed
+            // snapshot in the child.
+            let parent = db
+                .new_batch()
+                .write(key_a, Some(colliding_digest(0xCC, 1)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+            assert!(
+                !parent.diff.contains_key(&key_b),
+                "regression requires a sibling collision to remain only in the committed snapshot"
+            );
 
-            // Build the child while the parent is still pending so resolution
-            // sees the parent through base_diff plus the stale committed snapshot.
-            let mut pending_child = parent.new_batch();
-            for i in 4..12 {
-                pending_child =
-                    pending_child.write(colliding_digest(0xAA, i), Some(colliding_digest(0xDD, i)));
-            }
-            let pending_child = pending_child.merkleize(None, &db).await.unwrap();
+            // Build the child while the parent is still pending. The child
+            // mutates the parent-updated key plus the colliding sibling that
+            // still resolves through the committed snapshot. Without the
+            // base_diff-location guard, the stale snapshot entry for key_a can
+            // consume key_a's mutation before the actual base_diff location.
+            let pending_child = parent
+                .new_batch()
+                .write(key_a, Some(colliding_digest(0xDD, 1)))
+                .write(key_b, Some(colliding_digest(0xDD, 0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
 
             // Commit the parent, then rebuild the same logical child from the
-            // committed DB state and compare roots.
+            // committed DB state and compare speculative roots.
             let finalized_parent = parent.finalize();
             db.apply_batch(finalized_parent).await.unwrap();
             db.commit().await.unwrap();
 
-            let mut committed_child = db.new_batch();
-            for i in 4..12 {
-                committed_child = committed_child
-                    .write(colliding_digest(0xAA, i), Some(colliding_digest(0xDD, i)));
-            }
-            let committed_child = committed_child.merkleize(None, &db).await.unwrap();
+            let committed_child = db
+                .new_batch()
+                .write(key_a, Some(colliding_digest(0xDD, 1)))
+                .write(key_b, Some(colliding_digest(0xDD, 0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
 
             assert_eq!(pending_child.root(), committed_child.root());
+
+            // Rebase the pending child onto the committed parent and ensure the
+            // applied root still matches the committed-path child root.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(pending_child.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            assert_eq!(db.root(), committed_child.root());
+
             db.destroy().await.unwrap();
         });
     }
@@ -1623,49 +1641,65 @@ mod tests {
 
             let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", &context);
             let mut db = TestDb::init(context, config).await.unwrap();
+            let key_a = colliding_digest(0xAA, 1);
+            let key_b = colliding_digest(0xAA, 0);
 
-            // Seed the committed DB with colliding keys so the ordered path is
-            // exercised under the same translator pressure as unordered.
+            // Match the unordered counterexample shape on the ordered path so
+            // both variants exercise the same collision pattern.
             let mut initial = db.new_batch();
-            for i in 0..8 {
+            for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
             }
             let initial = initial.merkleize(None, &db).await.unwrap().finalize();
             db.apply_batch(initial).await.unwrap();
             db.commit().await.unwrap();
 
-            // Parent batch both updates existing colliding keys and creates new
-            // colliding keys that become visible to the child via base_diff.
-            let mut parent = db.new_batch();
-            for i in 0..8 {
-                parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
-            }
-            for i in 8..16 {
-                parent = parent.write(colliding_digest(0xAA, i), Some(colliding_digest(0xCC, i)));
-            }
-            let parent = parent.merkleize(None, &db).await.unwrap();
+            // Update only key_a so the colliding sibling key_b remains outside
+            // parent.diff and must still be resolved through the committed
+            // snapshot in the child.
+            let parent = db
+                .new_batch()
+                .write(key_a, Some(colliding_digest(0xCC, 1)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+            assert!(
+                !parent.diff.contains_key(&key_b),
+                "ordered regression requires a sibling collision to remain only in the committed snapshot"
+            );
 
-            // Build the child while the parent is still pending, then compare it
-            // with the equivalent child built after the parent is committed.
-            let mut pending_child = parent.new_batch();
-            for i in 4..12 {
-                pending_child =
-                    pending_child.write(colliding_digest(0xAA, i), Some(colliding_digest(0xDD, i)));
-            }
-            let pending_child = pending_child.merkleize(None, &db).await.unwrap();
+            // Build the child while the parent is still pending, then rebuild
+            // the same logical child after committing the parent.
+            let pending_child = parent
+                .new_batch()
+                .write(key_a, Some(colliding_digest(0xDD, 1)))
+                .write(key_b, Some(colliding_digest(0xDD, 0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
 
             let finalized_parent = parent.finalize();
             db.apply_batch(finalized_parent).await.unwrap();
             db.commit().await.unwrap();
 
-            let mut committed_child = db.new_batch();
-            for i in 4..12 {
-                committed_child = committed_child
-                    .write(colliding_digest(0xAA, i), Some(colliding_digest(0xDD, i)));
-            }
-            let committed_child = committed_child.merkleize(None, &db).await.unwrap();
+            let committed_child = db
+                .new_batch()
+                .write(key_a, Some(colliding_digest(0xDD, 1)))
+                .write(key_b, Some(colliding_digest(0xDD, 0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
 
             assert_eq!(pending_child.root(), committed_child.root());
+
+            // Rebase the pending child onto the committed parent and compare
+            // the applied root with the committed-path child root.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(pending_child.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            assert_eq!(db.root(), committed_child.root());
+
             db.destroy().await.unwrap();
         });
     }
