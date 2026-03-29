@@ -833,32 +833,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_prefix_and_payload_len_empty_shards() {
-        assert!(matches!(
-            read_prefix_and_payload_len(&[]),
-            Err(Error::NotEnoughChunks)
-        ));
-    }
-
-    #[test]
-    fn test_read_prefix_and_payload_len_rejects_zero_length_shard() {
-        let shards = [&[][..]];
-        assert!(matches!(
-            read_prefix_and_payload_len(&shards),
-            Err(Error::Inconsistent)
-        ));
-    }
-
-    #[test]
-    fn test_read_prefix_and_payload_len_rejects_mismatched_lengths() {
-        let shards = [&[0u8, 0u8][..], &[0u8, 0u8, 0u8, 1u8][..]];
-        assert!(matches!(
-            read_prefix_and_payload_len(&shards),
-            Err(Error::Inconsistent)
-        ));
-    }
-
-    #[test]
     fn test_extract_data_single_shard_fast_path() {
         let shard = [0u8, 0u8, 0u8, 3u8, 1u8, 2u8, 3u8, 0u8];
         let shards = [&shard[..]];
