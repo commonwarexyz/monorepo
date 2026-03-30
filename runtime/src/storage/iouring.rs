@@ -396,8 +396,8 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        storage::tests::run_storage_tests, utils::thread, Blob as _, BufferPool, BufferPoolConfig, IoBufMut,
-        Storage as _,
+        storage::tests::run_storage_tests, utils::thread, Blob as _, BufferPool, BufferPoolConfig,
+        IoBufMut, Storage as _,
     };
     use std::{
         env,
@@ -747,6 +747,7 @@ mod tests {
             Config {
                 storage_directory: storage_root.clone(),
                 iouring_config: Default::default(),
+                thread_stack_size: utils::thread::system_thread_stack_size(),
             },
             &mut Registry::default(),
             pool,
@@ -779,6 +780,7 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
+                thread_stack_size: utils::thread::system_thread_stack_size(),
             },
             &mut Registry::default(),
             pool,

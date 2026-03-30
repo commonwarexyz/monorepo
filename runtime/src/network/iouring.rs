@@ -505,9 +505,8 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
-        thread, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _, Network as _,
-        Sink as _,
-        Stream as _,
+        thread, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _,
+        Network as _, Sink as _, Stream as _,
     };
     use commonware_macros::{select, test_group};
     use prometheus_client::registry::Registry;
@@ -901,7 +900,7 @@ mod tests {
         let network = Network::start(
             Config {
                 tcp_nodelay: Some(true),
-                so_linger: Some(Duration::ZERO),
+                zero_linger: true,
                 ..Default::default()
             },
             &mut Registry::default(),
