@@ -527,6 +527,7 @@ mod tests {
     fn test_reserve_sets_next_dial() {
         deterministic::Runner::default().start(|mut context| async move {
             let mut record = Record::known(test_address());
+            record.increment_primary();
             let now = context.current();
             assert_eq!(record.dialable(now, true, true), DialStatus::Now);
 
@@ -585,7 +586,8 @@ mod tests {
 
         // Public ingress, public egress - dialable
         let public_socket = SocketAddr::from(([8, 8, 8, 8], 8080));
-        let record_public = Record::known(types::Address::Symmetric(public_socket));
+        let mut record_public = Record::known(types::Address::Symmetric(public_socket));
+        record_public.increment_primary();
         assert_eq!(record_public.dialable(now, false, true), DialStatus::Now);
 
         // Private ingress (Socket), public egress - NOT dialable when allow_private_ips=false
@@ -596,7 +598,8 @@ mod tests {
             ingress: Ingress::Socket(private_ingress),
             egress: public_egress,
         };
-        let record_private_ingress = Record::known(asymmetric_private_ingress);
+        let mut record_private_ingress = Record::known(asymmetric_private_ingress);
+        record_private_ingress.increment_primary();
         assert_eq!(
             record_private_ingress.dialable(now, false, true),
             DialStatus::Unavailable
@@ -614,7 +617,8 @@ mod tests {
             ingress: Ingress::Socket(public_ingress),
             egress: private_egress,
         };
-        let record_private_egress = Record::known(asymmetric_private_egress);
+        let mut record_private_egress = Record::known(asymmetric_private_egress);
+        record_private_egress.increment_primary();
         assert_eq!(
             record_private_egress.dialable(now, false, true),
             DialStatus::Now
@@ -628,7 +632,8 @@ mod tests {
             },
             egress: public_egress,
         };
-        let record_dns = Record::known(dns_ingress);
+        let mut record_dns = Record::known(dns_ingress);
+        record_dns.increment_primary();
         assert_eq!(record_dns.dialable(now, false, true), DialStatus::Now);
         assert_eq!(
             record_dns.dialable(now, false, false),

@@ -147,26 +147,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 };
                 let (deleted_secondary, changed_secondary) =
                     self.directory.set_secondaries(secondary);
-                let deleted: HashSet<_> = deleted_primary
+
+                // Kill connections for peers no longer in any tracked peer set
+                // or whose addresses changed.
+                for peer in deleted_primary
                     .into_iter()
                     .chain(deleted_secondary)
-                    .collect();
-                let changed: HashSet<_> = changed_primary
-                    .into_iter()
+                    .chain(changed_primary)
                     .chain(changed_secondary)
-                    .collect();
-
-                // Kill connections for peers no longer in any tracked peer set.
-                for peer in deleted {
-                    if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
-                        mailbox.kill().await;
-                    }
-                }
-
-                // Kill connections for peers whose addresses changed. These connections
-                // were established with the old address and should be replaced with a connection
-                // to the new address.
-                for peer in changed {
+                {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
                     }
@@ -694,6 +683,43 @@ mod tests {
             assert!(!dialable.peers.iter().any(|peer| peer == &secondary_pk));
             assert!(mailbox.dial(secondary_pk.clone()).await.is_none());
             assert!(mailbox.acceptable(secondary_pk, secondary_addr.ip()).await);
+        });
+    }
+
+    #[test]
+    fn test_overlapping_primary_secondary_no_duplicate_in_subscription() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let mut subscription = oracle.subscribe().await;
+
+            let (_signer, pk) = new_signer_and_pk(1);
+            let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9001);
+            crate::AddressableManager::track(
+                &mut oracle,
+                0,
+                AddressableTrackedPeers::new(
+                    [(pk.clone(), addr.into())].try_into().unwrap(),
+                    [(pk.clone(), addr.into())].try_into().unwrap(),
+                ),
+            )
+            .await;
+
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 0);
+            assert_eq!(new.len(), 1);
+            assert!(new.position(&pk).is_some());
+            assert_eq!(all, new);
+
+            let dialable = mailbox.dialable().await;
+            assert!(dialable.peers.iter().any(|peer| peer == &pk));
+            assert!(mailbox.acceptable(pk, addr.ip()).await);
         });
     }
 

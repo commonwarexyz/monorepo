@@ -404,7 +404,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let (mut sender, receiver) = ring::channel(NZUsize!(1));
 
                 // Send current peer list immediately
-                let peer_list: Vec<P> = self.all_connectable_peers().into_iter().collect();
+                let peer_list = self.all_connectable_peers();
                 let _ = sender.send(peer_list).await;
 
                 // Store sender for future broadcasts
@@ -524,7 +524,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
     async fn broadcast_peer_list(&mut self) {
-        let peer_list = self.all_connectable_peers().into_iter().collect::<Vec<_>>();
+        let peer_list = self.all_connectable_peers();
         let mut live_subscribers = Vec::with_capacity(self.peer_subscribers.len());
         for mut subscriber in self.peer_subscribers.drain(..) {
             if subscriber.send(peer_list.clone()).await.is_ok() {
@@ -556,12 +556,17 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 
     /// Get all peers that are currently allowed to send to and receive from the network.
-    fn all_connectable_peers(&self) -> Set<P> {
-        self.all_primary_peers()
-            .into_iter()
-            .chain(self.secondary_peers.iter().cloned())
-            .try_collect()
-            .expect("peer keys are unique")
+    fn all_connectable_peers(&self) -> Vec<P> {
+        if self.peer_sets.is_empty() && self.tracked_peer_sets.is_none() {
+            return self.peers.keys().cloned().collect();
+        }
+        let mut out: Vec<P> = self.peer_refs.keys().cloned().collect();
+        for peer in self.secondary_peers.iter() {
+            if !self.peer_refs.contains_key(peer) {
+                out.push(peer.clone());
+            }
+        }
+        out
     }
 
     /// Returns whether the peer is currently allowed to use the network.
@@ -629,7 +634,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 if self.peer_sets.is_empty() {
                     self.peers.keys().cloned().collect()
                 } else {
-                    self.all_connectable_peers().into_iter().collect()
+                    self.all_connectable_peers()
                 }
             }
             Recipients::Some(keys) => keys,
@@ -1322,7 +1327,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Provider, Receiver as _, Recipients, Sender as _};
+    use crate::{Provider, Receiver as _, Recipients, Sender as _, TrackedPeers};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic, Quota, Runner as _};
     use futures::FutureExt;
@@ -1928,6 +1933,91 @@ mod tests {
             drop(oracle);
             drop(sender);
             network_handle.abort();
+        });
+    }
+
+    #[test]
+    fn test_overlapping_primary_secondary_no_duplicate_recipients() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: Some(3),
+            };
+            let network_context = context.with_label("network");
+            let (network, oracle) = Network::new(network_context.clone(), cfg);
+            network_context.spawn(|_| network.run());
+
+            let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
+            let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
+            let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
+
+            // pk2 appears in both primary and secondary
+            let mut manager = oracle.manager();
+            crate::Manager::track(
+                &mut manager,
+                0,
+                TrackedPeers::new(
+                    [pk1.clone(), pk2.clone()].try_into().unwrap(),
+                    [pk2.clone(), pk3.clone()].try_into().unwrap(),
+                ),
+            )
+            .await;
+
+            let link = ingress::Link {
+                latency: Duration::from_millis(1),
+                jitter: Duration::ZERO,
+                success_rate: 1.0,
+            };
+            for (a, b) in [(&pk1, &pk2), (&pk1, &pk3), (&pk2, &pk3)] {
+                oracle
+                    .add_link(a.clone(), b.clone(), link.clone())
+                    .await
+                    .unwrap();
+            }
+
+            let (mut sender1, _) = oracle
+                .control(pk1.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_, mut recv2) = oracle
+                .control(pk2.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (_, mut recv3) = oracle
+                .control(pk3.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let msg = vec![42u8; 10];
+            let sent_to = sender1
+                .send(Recipients::All, msg.clone(), true)
+                .await
+                .unwrap();
+
+            // pk2 should only appear once in the sent-to list
+            let pk2_count = sent_to.iter().filter(|pk| *pk == &pk2).count();
+            assert_eq!(pk2_count, 1, "pk2 received duplicate sends");
+
+            // pk3 (secondary-only) should also be sent to
+            assert!(sent_to.iter().any(|pk| pk == &pk3));
+
+            // Both should receive the message
+            context.sleep(Duration::from_millis(10)).await;
+            let (from2, data2) = recv2.recv().await.unwrap();
+            assert_eq!(from2, pk1);
+            assert_eq!(data2, msg.as_slice());
+            let (from3, data3) = recv3.recv().await.unwrap();
+            assert_eq!(from3, pk1);
+            assert_eq!(data3, msg.as_slice());
+
+            // pk2 should NOT have a second copy
+            let extra = recv2.recv().now_or_never();
+            assert!(extra.is_none(), "pk2 received duplicate message");
         });
     }
 }

@@ -926,6 +926,39 @@ mod tests {
     }
 
     #[test]
+    fn test_overlapping_primary_secondary_no_duplicate_in_subscription() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let mut subscription = oracle.subscribe().await;
+
+            let (_signer, pk) = new_signer_and_pk(1);
+            crate::Manager::track(
+                &mut oracle,
+                0,
+                TrackedPeers::new(
+                    [pk.clone()].try_into().unwrap(),
+                    [pk.clone()].try_into().unwrap(),
+                ),
+            )
+            .await;
+
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 0);
+            assert_eq!(new.len(), 1);
+            assert!(new.position(&pk).is_some());
+            assert_eq!(all, new);
+            assert!(mailbox.acceptable(pk).await);
+        });
+    }
+
+    #[test]
     fn test_dial_message() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
