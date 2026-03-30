@@ -212,6 +212,16 @@ where
 /// Reference: <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites>
 pub type DST = &'static [u8];
 
+/// Configuration for [`Scalar`]'s [`Read`] implementation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScalarReadCfg {
+    /// Accept any in-range scalar, including zero.
+    #[default]
+    AllowZero,
+    /// Reject the zero scalar (use for private keys per IETF BLS spec).
+    RejectZero,
+}
+
 /// Wrapper around [blst_fr] that represents an element of the BLS12‑381
 /// scalar field `F_r`.
 ///
@@ -496,7 +506,7 @@ impl Read for Private {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let scalar = Scalar::read_cfg(buf, &true)?;
+        let scalar = Scalar::read_cfg(buf, &ScalarReadCfg::RejectZero)?;
         Ok(Self::new(scalar))
     }
 }
@@ -624,18 +634,16 @@ impl Write for Scalar {
 }
 
 impl Read for Scalar {
-    /// When `true`, reject zero scalars (use for private keys per IETF BLS spec).
-    /// When `false`, allow zero scalars (only validate in-range).
-    type Cfg = bool;
+    type Cfg = ScalarReadCfg;
 
-    fn read_cfg(buf: &mut impl Buf, reject_zero: &bool) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &ScalarReadCfg) -> Result<Self, Error> {
         let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
         // SAFETY: bytes is a valid 32-byte array.
         //
-        // When reject_zero is true, blst_sk_check validates non-zero and in-range
-        // per IETF BLS12-381 spec (Draft 4+).
-        // When reject_zero is false, blst_scalar_fr_check validates in-range only.
+        // RejectZero: blst_sk_check validates non-zero and in-range per IETF
+        // BLS12-381 spec (Draft 4+).
+        // AllowZero: blst_scalar_fr_check validates in-range only.
         //
         // References:
         // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
@@ -643,10 +651,9 @@ impl Read for Scalar {
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            let valid = if *reject_zero {
-                blst_sk_check(&scalar)
-            } else {
-                blst_scalar_fr_check(&scalar)
+            let valid = match cfg {
+                ScalarReadCfg::RejectZero => blst_sk_check(&scalar),
+                ScalarReadCfg::AllowZero => blst_scalar_fr_check(&scalar),
             };
             if !valid {
                 return Err(Invalid("Scalar", "Invalid"));
@@ -1843,7 +1850,7 @@ mod tests {
         let original = Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
-        let decoded = Scalar::decode_cfg(&mut encoded, &true).unwrap();
+        let decoded = Scalar::decode_cfg(&mut encoded, &ScalarReadCfg::RejectZero).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -1853,11 +1860,11 @@ mod tests {
         let encoded = zero.encode();
 
         // Allow zero: should succeed
-        let decoded = Scalar::decode_cfg(encoded.clone(), &false).unwrap();
+        let decoded = Scalar::decode_cfg(encoded.clone(), &ScalarReadCfg::AllowZero).unwrap();
         assert_eq!(zero, decoded);
 
         // Reject zero: should fail
-        assert!(Scalar::decode_cfg(encoded, &true).is_err());
+        assert!(Scalar::decode_cfg(encoded, &ScalarReadCfg::RejectZero).is_err());
     }
 
     #[test]
