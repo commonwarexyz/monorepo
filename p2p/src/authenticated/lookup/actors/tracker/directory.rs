@@ -115,6 +115,29 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Setters ----------
 
+    /// Track a new primary peer set and replace the current secondaries.
+    ///
+    /// Returns `(deleted_peers, changed_peers)` across both updates.
+    pub fn track(
+        &mut self,
+        index: u64,
+        primary: Map<C, Address>,
+        secondary: Map<C, Address>,
+    ) -> Option<(Vec<C>, Vec<C>)> {
+        let (deleted_primary, changed_primary) = self.add_set(index, primary)?;
+        let (deleted_secondary, changed_secondary) = self.set_secondaries(secondary);
+        Some((
+            deleted_primary
+                .into_iter()
+                .chain(deleted_secondary)
+                .collect(),
+            changed_primary
+                .into_iter()
+                .chain(changed_secondary)
+                .collect(),
+        ))
+    }
+
     /// Releases a peer.
     pub fn release(&mut self, metadata: Metadata<C>) {
         let peer = metadata.public_key();

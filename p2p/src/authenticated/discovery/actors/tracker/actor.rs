@@ -159,11 +159,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let max = self.max_peer_set_size;
                 assert!(len as u64 <= max, "peer set too large: {len} > {max}");
 
-                // Attempt to add the peer set
-                if !self.directory.add_set(index, primary.clone()) {
+                // Attempt to update tracked peers.
+                if !self
+                    .directory
+                    .track(index, primary.clone(), secondary)
+                {
                     return;
                 }
-                self.directory.set_secondaries(secondary);
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {

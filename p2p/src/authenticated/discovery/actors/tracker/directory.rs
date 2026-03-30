@@ -131,6 +131,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Setters ----------
 
+    /// Track a new primary peer set and replace the current secondaries.
+    pub fn track(&mut self, index: u64, primary: OrderedSet<C>, secondary: OrderedSet<C>) -> bool {
+        if !self.add_set(index, primary) {
+            return false;
+        }
+        self.set_secondaries(secondary);
+        true
+    }
+
     /// Releases a peer.
     pub fn release(&mut self, metadata: Metadata<C>) {
         let peer = metadata.public_key();

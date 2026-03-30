@@ -140,22 +140,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Identify peers that were added or had their addresses changed.
                 let peer_keys: Set<C::PublicKey> = primary.keys().clone();
-                let Some((deleted_primary, changed_primary)) =
-                    self.directory.add_set(index, primary)
+                let Some((deleted_peers, changed_peers)) =
+                    self.directory.track(index, primary, secondary)
                 else {
                     return;
                 };
-                let (deleted_secondary, changed_secondary) =
-                    self.directory.set_secondaries(secondary);
 
                 // Kill connections for peers no longer in any tracked peer set
                 // or whose addresses changed.
-                for peer in deleted_primary
-                    .into_iter()
-                    .chain(deleted_secondary)
-                    .chain(changed_primary)
-                    .chain(changed_secondary)
-                {
+                for peer in deleted_peers.into_iter().chain(changed_peers) {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
                     }
