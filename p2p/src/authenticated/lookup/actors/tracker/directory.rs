@@ -122,6 +122,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Track new primary and secondary peer sets for the given index.
     ///
     /// Returns `(deleted_peers, changed_peers)` across both updates.
+    ///
+    /// Returns `None` if the index is invalid or if a peer appears in both
+    /// the primary and secondary sets with conflicting addresses.
     pub fn track(
         &mut self,
         index: u64,
@@ -178,6 +181,20 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 warn!(?index, ?last, "index must monotonically increase");
                 return None;
             }
+        }
+
+        // Reject registrations that try to track the same peer in both sets
+        // with different addresses. Accepting these would let the secondary
+        // overwrite the primary's active dial/listen endpoint.
+        for (peer, primary_addr) in &primaries {
+            let Some(secondary_addr) = secondaries.get_value(peer) else {
+                continue;
+            };
+            if primary_addr == secondary_addr {
+                continue;
+            }
+            warn!(?index, ?peer, "peer has conflicting primary and secondary addresses");
+            return None;
         }
 
         // Create and store new primary peer set (all peers are tracked regardless of address
@@ -764,6 +781,99 @@ mod tests {
                 Map::default(),
             );
             assert!(result.is_none());
+        });
+    }
+
+    #[test]
+    fn test_track_rejects_conflicting_primary_secondary_overlap() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let primary_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let secondary_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 2235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            let result = directory.track(
+                0,
+                [(pk_1.clone(), addr(primary_addr))].try_into().unwrap(),
+                [(pk_1.clone(), addr(secondary_addr))].try_into().unwrap(),
+            );
+
+            assert!(result.is_none());
+            assert!(directory.get_set(&0).is_none());
+            assert_eq!(directory.latest_set_index(), None);
+            assert!(!directory.peers.contains_key(&pk_1));
+            assert!(!directory.eligible(&pk_1));
+            assert!(directory.primary().is_empty());
+            assert!(directory.dialable().peers.is_empty());
+            assert!(!directory.listenable().contains(&primary_addr.ip()));
+            assert!(!directory.listenable().contains(&secondary_addr.ip()));
+        });
+    }
+
+    #[test]
+    fn test_track_rejects_conflicting_overlap_without_mutating_existing_address() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 3,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let old_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1235);
+        let new_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 2235);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            let initial = directory
+                .track(
+                    0,
+                    [(pk_1.clone(), addr(old_addr))].try_into().unwrap(),
+                    Map::default(),
+                )
+                .unwrap();
+            assert!(initial.0.is_empty());
+            assert!(initial.1.is_empty());
+
+            let result = directory.track(
+                1,
+                [(pk_1.clone(), addr(new_addr))].try_into().unwrap(),
+                [(pk_1.clone(), addr(old_addr))].try_into().unwrap(),
+            );
+
+            assert!(result.is_none());
+            assert_eq!(directory.latest_set_index(), Some(0));
+            assert!(directory.get_set(&1).is_none());
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(old_addr))
+            );
+            assert_eq!(directory.primary(), [pk_1.clone()].try_into().unwrap());
+            assert_eq!(directory.dialable().peers, vec![pk_1.clone()]);
+            assert_eq!(directory.dial(&pk_1).unwrap().1, Ingress::Socket(old_addr));
+            assert!(directory.listenable().contains(&old_addr.ip()));
+            assert!(!directory.listenable().contains(&new_addr.ip()));
         });
     }
 
