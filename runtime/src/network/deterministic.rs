@@ -13,22 +13,46 @@ const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 /// Implementation of [crate::Sink] for a deterministic [Network].
 pub struct Sink {
     sender: mocks::Sink,
+    poisoned: bool,
 }
 
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.sender.send(bufs).await.map_err(|_| Error::SendFailed)
+        if self.poisoned {
+            return Err(Error::Closed);
+        }
+
+        let result = self.sender.send(bufs).await.map_err(|_| Error::SendFailed);
+
+        // A failed send leaves the write half unusable.
+        if result.is_err() {
+            self.poisoned = true;
+        }
+
+        result
     }
 }
 
 /// Implementation of [crate::Stream] for a deterministic [Network].
 pub struct Stream {
     receiver: mocks::Stream,
+    poisoned: bool,
 }
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
-        self.receiver.recv(len).await.map_err(|_| Error::RecvFailed)
+        if self.poisoned {
+            return Err(Error::Closed);
+        }
+
+        let result = self.receiver.recv(len).await.map_err(|_| Error::RecvFailed);
+
+        // A failed recv leaves the read half unusable.
+        if result.is_err() {
+            self.poisoned = true;
+        }
+
+        result
     }
 
     fn peek(&self, max_len: usize) -> &[u8] {
@@ -48,7 +72,17 @@ impl crate::Listener for Listener {
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         let (socket, sender, receiver) = self.listener.recv().await.ok_or(Error::ReadFailed)?;
-        Ok((socket, Sink { sender }, Stream { receiver }))
+        Ok((
+            socket,
+            Sink {
+                sender,
+                poisoned: false,
+            },
+            Stream {
+                receiver,
+                poisoned: false,
+            },
+        ))
     }
 
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
@@ -137,9 +171,11 @@ impl crate::Network for Network {
         Ok((
             Sink {
                 sender: listener_sender,
+                poisoned: false,
             },
             Stream {
                 receiver: dialer_receiver,
+                poisoned: false,
             },
         ))
     }
