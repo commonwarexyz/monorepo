@@ -308,10 +308,7 @@ where
                     epoch.get(),
                     TrackedPeers::new(
                         Set::from_iter_dedup(
-                            dealers
-                                .iter()
-                                .cloned()
-                                .chain(players.iter().cloned()),
+                            dealers.iter().cloned().chain(players.iter().cloned()),
                         ),
                         next_players.clone(),
                     ),

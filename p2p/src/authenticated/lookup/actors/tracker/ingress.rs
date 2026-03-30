@@ -7,8 +7,7 @@ use crate::{
         Mailbox,
     },
     types::Address,
-    AddressableTrackedPeers,
-    Ingress, PeerSetSubscription,
+    AddressableTrackedPeers, Ingress, PeerSetSubscription,
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::{

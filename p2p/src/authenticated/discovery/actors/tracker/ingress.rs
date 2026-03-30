@@ -22,10 +22,7 @@ use commonware_utils::{
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
-    Register {
-        index: u64,
-        peers: TrackedPeers<C>,
-    },
+    Register { index: u64, peers: TrackedPeers<C> },
 
     // ---------- Used by peer set provider ----------
     /// Fetch the peer set at a given index.

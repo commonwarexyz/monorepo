@@ -140,7 +140,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Identify peers that were added or had their addresses changed.
                 let peer_keys: Set<C::PublicKey> = primary.keys().clone();
-                let Some((deleted_primary, changed_primary)) = self.directory.add_set(index, primary)
+                let Some((deleted_primary, changed_primary)) =
+                    self.directory.add_set(index, primary)
                 else {
                     return;
                 };
@@ -671,7 +672,9 @@ mod tests {
                 &mut oracle,
                 0,
                 AddressableTrackedPeers::new(
-                    [(primary_pk.clone(), primary_addr.into())].try_into().unwrap(),
+                    [(primary_pk.clone(), primary_addr.into())]
+                        .try_into()
+                        .unwrap(),
                     [(secondary_pk.clone(), secondary_addr.into())]
                         .try_into()
                         .unwrap(),
