@@ -160,10 +160,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 assert!(len as u64 <= max, "peer set too large: {len} > {max}");
 
                 // Attempt to update tracked peers.
-                if !self
-                    .directory
-                    .track(index, primary.clone(), secondary)
-                {
+                if !self.directory.track(index, primary.clone(), secondary) {
                     return;
                 }
 
