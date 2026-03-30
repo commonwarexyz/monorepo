@@ -208,7 +208,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
     }
 
-    /// Stores a new peer set.
+    /// Stores a new primary peer set.
     pub fn add_set(&mut self, index: u64, peers: OrderedSet<C>) -> bool {
         // Check if peer set already exists
         if self.sets.contains_key(&index) {
@@ -231,7 +231,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 self.metrics.tracked.inc();
                 Record::unknown()
             });
-            record.increment();
+            record.increment_primary();
             set.update(peer, !record.want(self.dial_fail_limit));
         }
         self.sets.insert(index, set);
@@ -241,12 +241,38 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             let (index, set) = self.sets.pop_first().unwrap();
             debug!(index, "removed oldest peer set");
             set.into_iter().for_each(|peer| {
-                self.peers.get_mut(peer).unwrap().decrement();
+                self.peers.get_mut(peer).unwrap().decrement_primary();
                 self.delete_if_needed(peer);
             });
         }
 
         true
+    }
+
+    /// Replace the current set of secondary peers.
+    pub fn set_secondaries(&mut self, peers: OrderedSet<C>) {
+        let removed_secondaries: Vec<_> = self
+            .peers
+            .iter()
+            .filter(|(_, record)| record.is_secondary())
+            .filter(|(peer, _)| peers.position(peer).is_none())
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        for peer in removed_secondaries {
+            let Some(record) = self.peers.get_mut(&peer) else {
+                continue;
+            };
+            record.set_secondary(false);
+            self.delete_if_needed(&peer);
+        }
+
+        for peer in peers {
+            let record = self.peers.entry(peer).or_insert_with(|| {
+                self.metrics.tracked.inc();
+                Record::unknown()
+            });
+            record.set_secondary(true);
+        }
     }
 
     /// Gets a peer set by index.
@@ -318,11 +344,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Getters ----------
 
-    /// Returns all peers that are part of at least one peer set.
-    pub fn tracked(&self) -> OrderedSet<C> {
+    /// Returns all peers that are part of at least one primary peer set.
+    pub fn primary(&self) -> OrderedSet<C> {
         self.peers
             .iter()
-            .filter(|(_, r)| r.sets() > 0)
+            .filter(|(_, record)| record.primary_sets() > 0)
             .map(|(k, _)| k.clone())
             .try_collect()
             .expect("HashMap keys are unique")

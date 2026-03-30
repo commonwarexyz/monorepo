@@ -150,20 +150,24 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
+                let primary = peers.primary;
+                let secondary = peers.secondary;
+
                 // Ensure that peer set is not too large.
                 // Panic since there is no way to recover from this.
-                let len = peers.len();
+                let len = primary.len();
                 let max = self.max_peer_set_size;
                 assert!(len as u64 <= max, "peer set too large: {len} > {max}");
 
                 // Attempt to add the peer set
-                if !self.directory.add_set(index, peers.clone()) {
+                if !self.directory.add_set(index, primary.clone()) {
                     return;
                 }
+                self.directory.set_secondaries(secondary);
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
-                    subscriber.send_lossy((index, peers.clone(), self.directory.tracked()))
+                    subscriber.send_lossy((index, primary.clone(), self.directory.primary()))
                 });
             }
             Message::PeerSet { index, responder } => {
@@ -177,7 +181,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
                     let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
-                    sender.send_lossy((latest_set_id, latest_set, self.directory.tracked()));
+                    sender.send_lossy((latest_set_id, latest_set, self.directory.primary()));
                 }
                 self.subscribers.push(sender);
 
@@ -286,7 +290,7 @@ mod tests {
             },
             Mailbox,
         },
-        Ingress, Manager,
+        Ingress, Provider, TrackedPeers,
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{
@@ -868,6 +872,56 @@ mod tests {
             let dialable_peers = mailbox.dialable().await;
             assert_eq!(dialable_peers.peers.len(), 1);
             assert_eq!(dialable_peers.peers[0], boot_pk);
+        });
+    }
+
+    #[test]
+    fn test_secondary_peers_are_connectable_but_not_primary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ip_namespace,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let mut subscription = oracle.subscribe().await;
+
+            let (_primary_signer, primary_pk) = new_signer_and_pk(1);
+            let (mut secondary_signer, secondary_pk) = new_signer_and_pk(2);
+            crate::Manager::track(
+                &mut oracle,
+                0,
+                TrackedPeers::new(
+                    [primary_pk.clone()].try_into().unwrap(),
+                    [secondary_pk.clone()].try_into().unwrap(),
+                ),
+            )
+            .await;
+
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 0);
+            assert_eq!(new.len(), 1);
+            assert!(new.position(&primary_pk).is_some());
+            assert!(new.position(&secondary_pk).is_none());
+            assert_eq!(all, new);
+            assert!(mailbox.acceptable(secondary_pk.clone()).await);
+
+            let secondary_info = new_peer_info(
+                &mut secondary_signer,
+                &ip_namespace,
+                SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9002),
+                context.current().epoch_millis(),
+                Some(secondary_pk.clone()),
+                false,
+            );
+            mailbox.peers(vec![secondary_info]);
+            context.sleep(Duration::from_millis(10)).await;
+
+            let dialable = mailbox.dialable().await;
+            assert!(dialable.peers.iter().any(|peer| peer == &secondary_pk));
         });
     }
 

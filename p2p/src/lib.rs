@@ -220,6 +220,52 @@ stability_scope!(BETA {
     /// Alias for the subscription type returned by [`Provider::subscribe`].
     pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)>;
 
+    /// Primary and secondary peers registered together for [`Manager::track`].
+    #[derive(Clone, Debug)]
+    pub struct TrackedPeers<P: PublicKey> {
+        pub primary: Set<P>,
+        pub secondary: Set<P>,
+    }
+
+    impl<P: PublicKey> TrackedPeers<P> {
+        pub const fn new(primary: Set<P>, secondary: Set<P>) -> Self {
+            Self { primary, secondary }
+        }
+
+        pub fn primary(primary: Set<P>) -> Self {
+            Self::new(primary, Set::default())
+        }
+    }
+
+    impl<P: PublicKey> From<Set<P>> for TrackedPeers<P> {
+        fn from(primary: Set<P>) -> Self {
+            Self::primary(primary)
+        }
+    }
+
+    /// Primary and secondary peers registered together for [`AddressableManager::track`].
+    #[derive(Clone, Debug)]
+    pub struct AddressableTrackedPeers<P: PublicKey> {
+        pub primary: Map<P, Address>,
+        pub secondary: Map<P, Address>,
+    }
+
+    impl<P: PublicKey> AddressableTrackedPeers<P> {
+        pub const fn new(primary: Map<P, Address>, secondary: Map<P, Address>) -> Self {
+            Self { primary, secondary }
+        }
+
+        pub fn primary(primary: Map<P, Address>) -> Self {
+            Self::new(primary, Map::default())
+        }
+    }
+
+    impl<P: PublicKey> From<Map<P, Address>> for AddressableTrackedPeers<P> {
+        fn from(primary: Map<P, Address>) -> Self {
+            Self::primary(primary)
+        }
+    }
+
     /// Interface for reading peer set information.
     pub trait Provider: Debug + Clone + Send + 'static {
         /// Public key type used to identify peers.
@@ -235,8 +281,8 @@ stability_scope!(BETA {
         ///
         /// Returns a receiver that will receive tuples of:
         /// - The peer set ID
-        /// - The peers in the new set
-        /// - All currently tracked peers (union of recent peer sets)
+        /// - The peers in the new primary set
+        /// - All currently primary peers (union of recent peer sets)
         #[allow(clippy::type_complexity)]
         fn subscribe(
             &mut self,
@@ -245,36 +291,49 @@ stability_scope!(BETA {
 
     /// Interface for managing peer set membership (where peer addresses are not known).
     pub trait Manager: Provider {
-        /// Track a peer set with the given ID and peers.
+        /// Track a primary peer set and secondary peers with the given ID.
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
         /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
         ///
         /// For good connectivity, all peers must track the same peer sets at the same ID.
-        fn track(
+        ///
+        ///
+        /// Callers may pass either a bare [`Set`] (registering only primary peers)
+        /// or a [`TrackedPeers`] value containing both primary and secondary peers.
+        fn track<R>(
             &mut self,
             id: u64,
-            peers: Set<Self::PublicKey>,
-        ) -> impl Future<Output = ()> + Send;
+            peers: R,
+        ) -> impl Future<Output = ()> + Send
+        where
+            R: Into<TrackedPeers<Self::PublicKey>> + Send;
     }
 
     /// Interface for managing peer set membership (where peer addresses are known).
     pub trait AddressableManager: Provider {
-        /// Track a peer set with the given ID and peer<PublicKey, Address> pairs.
+        /// Track a primary peer set and secondary peers with the given ID.
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
         /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
         ///
         /// For good connectivity, all peers must track the same peer sets at the same ID.
-        fn track(
+        ///
+        ///
+        /// Callers may pass either a bare [`Map`] (registering only primary peers)
+        /// or an [`AddressableTrackedPeers`] value containing both primary and
+        /// secondary peers.
+        fn track<R>(
             &mut self,
             id: u64,
-            peers: Map<Self::PublicKey, Address>,
-        ) -> impl Future<Output = ()> + Send;
+            peers: R,
+        ) -> impl Future<Output = ()> + Send
+        where
+            R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send;
 
         /// Update addresses for multiple peers without creating a new peer set.
         ///
-        /// For each peer that is tracked and has a changed address:
+        /// For each primary or secondary peer with a changed address:
         /// - Any existing connection to the peer is severed (it was on the old IP)
         /// - The listener's allowed IPs are updated to reflect the new egress IP
         /// - Future connections will use the new address

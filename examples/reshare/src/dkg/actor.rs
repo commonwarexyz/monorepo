@@ -25,7 +25,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_math::algebra::Random;
-use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender};
+use commonware_p2p::{utils::mux::Muxer, Manager, Receiver, Recipients, Sender, TrackedPeers};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     spawn_cell, telemetry::metrics::status::GaugeExt, Buf, BufMut, BufferPooler, Clock,
@@ -302,18 +302,18 @@ where
                 )
             };
 
-            // Any given peer set includes:
-            // - Dealers and players for the active epoch
-            // - Players for the next epoch
+            // Primary peers are the dealers and players for the active epoch.
             self.manager
                 .track(
                     epoch.get(),
-                    Set::from_iter_dedup(
-                        dealers
-                            .iter()
-                            .cloned()
-                            .chain(players.iter().cloned())
-                            .chain(next_players),
+                    TrackedPeers::new(
+                        Set::from_iter_dedup(
+                            dealers
+                                .iter()
+                                .cloned()
+                                .chain(players.iter().cloned()),
+                        ),
+                        next_players.clone(),
                     ),
                 )
                 .await;

@@ -20,6 +20,9 @@
 //! list of authorized `PublicKey`s (`(u64, Vec<PublicKey>)`). Based on this shared knowledge, each
 //! peer can construct a sorted bit vector message (`BitVec`) representing its knowledge of the
 //! dialable addresses [std::net::SocketAddr] for the peers in that set.
+//! Registration happens via [`Manager::track`](crate::Manager::track), which accepts either a bare
+//! primary-peer set or a [`TrackedPeers`](crate::TrackedPeers) value containing both primary and
+//! secondary peers.
 //! The `BitVec` message contains:
 //! - `index`: The `u64` index the bit vector applies to.
 //! - `bits`: The bit vector itself, where a '1' signifies knowledge of the corresponding
@@ -42,6 +45,8 @@
 //! tracking multiple peer sets concurrently (up to `tracked_peer_sets`), each identified by its
 //! `index`. This is useful, for instance, during transitions like distributed key generation
 //! (DKG) where connections to both old and new peer sets are needed simultaneously.
+//! Secondary peers are connectable, but they are excluded from peer-set subscriptions and the
+//! gossip bit-vector namespace used for primary peer sets.
 //!
 //! Upon receiving a `BitVec` message, a peer compares it against its own knowledge for the same
 //! index. If the receiving peer knows addresses that the sender marked as '0' (unknown), it
@@ -258,7 +263,7 @@ mod tests {
             discovery::actors::router::{Actor as RouterActor, Config as RouterConfig},
             relay::Relay,
         },
-        Ingress, Manager, Provider, Receiver, Recipients, Sender,
+        Ingress, Provider, Receiver, Recipients, Sender,
     };
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, select_loop, test_group, test_traced};

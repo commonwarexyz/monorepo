@@ -136,11 +136,15 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
 
-    // Peer sets indexed by their ID
+    // Primary peer sets indexed by their ID
     peer_sets: BTreeMap<u64, Set<P>>,
 
-    // Reference count for each peer (number of peer sets they belong to)
+    // Reference count for each peer (number of primary peer sets they belong to)
     peer_refs: BTreeMap<P, usize>,
+
+    // Secondary peers that can connect and receive `Recipients::All` traffic,
+    // but are excluded from provider peer sets.
+    secondary_peers: Set<P>,
 
     // Maximum number of peer sets to track
     tracked_peer_sets: Option<usize>,
@@ -151,11 +155,11 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // State of the transmitter
     transmitter: transmitter::State<P>,
 
-    // Subscribers to peer set updates (used by Manager::subscribe())
+    // Subscribers to primary peer set updates (used by Manager::subscribe())
     #[allow(clippy::type_complexity)]
     subscribers: Vec<mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>>,
 
-    // Subscribers to tracked peer list updates (used by PeerSource for LimitedSender)
+    // Subscribers to the connectable peer list (used by PeerSource for LimitedSender)
     peer_subscribers: Vec<ring::Sender<Vec<P>>>,
 
     // Metrics for received and sent messages
@@ -198,6 +202,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 peers: BTreeMap::new(),
                 peer_sets: BTreeMap::new(),
                 peer_refs: BTreeMap::new(),
+                secondary_peers: Set::default(),
                 blocks: BTreeSet::new(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
@@ -254,6 +259,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
         match message {
             ingress::Message::Track { id, peers } => {
+                let primary = peers.primary;
+                let secondary = peers.secondary;
+
                 let Some(tracked_peer_sets) = self.tracked_peer_sets else {
                     warn!("attempted to register peer set when tracking is disabled");
                     return;
@@ -278,14 +286,14 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
 
                 // Create and store new peer set
-                for public_key in peers.iter() {
+                for public_key in primary.iter() {
                     // Create peer if it doesn't exist
                     self.ensure_peer_exists(public_key).await;
 
                     // Increment reference count
                     *self.peer_refs.entry(public_key.clone()).or_insert(0) += 1;
                 }
-                self.peer_sets.insert(id, peers.clone());
+                self.peer_sets.insert(id, primary.clone());
 
                 // Remove oldest peer set if we exceed the limit
                 while self.peer_sets.len() > tracked_peer_sets {
@@ -306,9 +314,14 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     }
                 }
 
+                for peer in secondary.iter() {
+                    self.ensure_peer_exists(peer).await;
+                }
+                self.secondary_peers = secondary;
+
                 // Notify all subscribers about the new peer set
-                let all = self.all_tracked_peers();
-                let notification = (id, peers, all);
+                let all = self.all_primary_peers();
+                let notification = (id, primary, all);
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(notification.clone()));
 
@@ -377,7 +390,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Send the latest peer set upon subscription
                 if let Some((index, peers)) = self.peer_sets.last_key_value() {
-                    let all = self.all_tracked_peers();
+                    let all = self.all_primary_peers();
                     let notification = (*index, peers.clone(), all);
                     sender.send_lossy(notification);
                 }
@@ -391,7 +404,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let (mut sender, receiver) = ring::channel(NZUsize!(1));
 
                 // Send current peer list immediately
-                let peer_list: Vec<P> = self.all_tracked_peers().into_iter().collect();
+                let peer_list: Vec<P> = self.all_connectable_peers().into_iter().collect();
                 let _ = sender.send(peer_list).await;
 
                 // Store sender for future broadcasts
@@ -511,7 +524,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
     async fn broadcast_peer_list(&mut self) {
-        let peer_list = self.all_tracked_peers().into_iter().collect::<Vec<_>>();
+        let peer_list = self.all_connectable_peers().into_iter().collect::<Vec<_>>();
         let mut live_subscribers = Vec::with_capacity(self.peer_subscribers.len());
         for mut subscriber in self.peer_subscribers.drain(..) {
             if subscriber.send(peer_list.clone()).await.is_ok() {
@@ -521,12 +534,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         self.peer_subscribers = live_subscribers;
     }
 
-    /// Get all tracked peers as an ordered set.
+    /// Get all primary peers as an ordered set.
     ///
     /// When peer sets are registered, returns only the peers from those sets.
     /// Otherwise, returns all registered peers (for compatibility with tests
     /// that don't use peer sets).
-    fn all_tracked_peers(&self) -> Set<P> {
+    fn all_primary_peers(&self) -> Set<P> {
         if self.peer_sets.is_empty() && self.tracked_peer_sets.is_none() {
             self.peers
                 .keys()
@@ -540,6 +553,20 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .try_collect()
                 .expect("BTreeMap keys are unique")
         }
+    }
+
+    /// Get all peers that are currently allowed to send to and receive from the network.
+    fn all_connectable_peers(&self) -> Set<P> {
+        self.all_primary_peers()
+            .into_iter()
+            .chain(self.secondary_peers.iter().cloned())
+            .try_collect()
+            .expect("peer keys are unique")
+    }
+
+    /// Returns whether the peer is currently allowed to use the network.
+    fn is_connectable(&self, peer: &P) -> bool {
+        self.peer_refs.contains_key(peer) || self.secondary_peers.position(peer).is_some()
     }
 }
 
@@ -581,10 +608,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     fn handle_task(&mut self, task: Task<P>) {
         // If peer sets are enabled and we are not in one, ignore the message (we are disconnected from all)
         let (channel, origin, recipients, message, reply) = task;
-        if self.tracked_peer_sets.is_some() && !self.peer_refs.contains_key(&origin) {
+        if self.tracked_peer_sets.is_some() && !self.is_connectable(&origin) {
             warn!(
                 ?origin,
-                reason = "not in tracked peer set",
+                reason = "not primary or secondary",
                 "dropping message"
             );
             if let Err(err) = reply.send(Vec::new()) {
@@ -596,13 +623,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         // Collect recipients
         let recipients = match recipients {
             Recipients::All => {
-                // If peer sets have been registered, send only to tracked peers
+                // If peer sets have been registered, send only to primary and secondary peers
                 // Otherwise, send to all registered peers (compatibility
                 // with tests that do not register peer sets.)
                 if self.peer_sets.is_empty() {
                     self.peers.keys().cloned().collect()
                 } else {
-                    self.peer_refs.keys().cloned().collect()
+                    self.all_connectable_peers().into_iter().collect()
                 }
             }
             Recipients::Some(keys) => keys,
@@ -619,12 +646,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 continue;
             }
 
-            // If tracking peer sets, ensure recipient and sender are in a tracked peer set
-            if self.tracked_peer_sets.is_some() && !self.peer_refs.contains_key(&recipient) {
+            // If tracking peer sets, ensure recipient is primary or secondary
+            if self.tracked_peer_sets.is_some() && !self.is_connectable(&recipient) {
                 trace!(
                     ?origin,
                     ?recipient,
-                    reason = "not in tracked peer set",
+                    reason = "not primary or secondary",
                     "dropping message"
                 );
                 continue;
@@ -1295,7 +1322,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Manager, Provider, Receiver as _, Recipients, Sender as _};
+    use crate::{Provider, Receiver as _, Recipients, Sender as _};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic, Quota, Runner as _};
     use futures::FutureExt;

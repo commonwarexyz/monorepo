@@ -135,11 +135,25 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
     async fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
         match msg {
             Message::Register { index, peers } => {
+                let primary = peers.primary;
+                let secondary = peers.secondary;
+
                 // Identify peers that were added or had their addresses changed.
-                let peer_keys: Set<C::PublicKey> = peers.keys().clone();
-                let Some((deleted, changed)) = self.directory.add_set(index, peers) else {
+                let peer_keys: Set<C::PublicKey> = primary.keys().clone();
+                let Some((deleted_primary, changed_primary)) = self.directory.add_set(index, primary)
+                else {
                     return;
                 };
+                let (deleted_secondary, changed_secondary) =
+                    self.directory.set_secondaries(secondary);
+                let deleted: HashSet<_> = deleted_primary
+                    .into_iter()
+                    .chain(deleted_secondary)
+                    .collect();
+                let changed: HashSet<_> = changed_primary
+                    .into_iter()
+                    .chain(changed_secondary)
+                    .collect();
 
                 // Kill connections for peers no longer in any tracked peer set.
                 for peer in deleted {
@@ -165,7 +179,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Notify all subscribers about the new peer set
                 self.subscribers.retain(|subscriber| {
-                    subscriber.send_lossy((index, peer_keys.clone(), self.directory.tracked()))
+                    subscriber.send_lossy((index, peer_keys.clone(), self.directory.primary()))
                 });
             }
             Message::Overwrite { peers } => {
@@ -202,7 +216,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
                     let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
-                    sender.send_lossy((latest_set_id, latest_set, self.directory.tracked()));
+                    sender.send_lossy((latest_set_id, latest_set, self.directory.primary()));
                 }
                 self.subscribers.push(sender);
 
@@ -274,7 +288,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{authenticated::lookup::actors::peer, AddressableManager, Ingress};
+    use crate::{
+        authenticated::lookup::actors::peer, AddressableManager, AddressableTrackedPeers, Ingress,
+        Provider,
+    };
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
         Signer,
@@ -629,6 +646,50 @@ mod tests {
             let (_unknown_signer, unknown_pk) = new_signer_and_pk(100);
             let no_reservation = mailbox.dial(unknown_pk).await;
             assert!(no_reservation.is_none());
+        });
+    }
+
+    #[test]
+    fn test_secondary_peers_are_connectable_but_not_primary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
+            let TestHarness {
+                mut mailbox,
+                mut oracle,
+                ..
+            } = setup_actor(context.clone(), cfg);
+
+            let mut subscription = oracle.subscribe().await;
+
+            let (_primary_signer, primary_pk) = new_signer_and_pk(1);
+            let primary_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9001);
+            let (_secondary_signer, secondary_pk) = new_signer_and_pk(2);
+            let secondary_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9002);
+
+            crate::AddressableManager::track(
+                &mut oracle,
+                0,
+                AddressableTrackedPeers::new(
+                    [(primary_pk.clone(), primary_addr.into())].try_into().unwrap(),
+                    [(secondary_pk.clone(), secondary_addr.into())]
+                        .try_into()
+                        .unwrap(),
+                ),
+            )
+            .await;
+
+            let (id, new, all) = subscription.recv().await.unwrap();
+            assert_eq!(id, 0);
+            assert_eq!(new.len(), 1);
+            assert!(new.position(&primary_pk).is_some());
+            assert!(new.position(&secondary_pk).is_none());
+            assert_eq!(all, new);
+
+            let dialable = mailbox.dialable().await;
+            assert!(dialable.peers.iter().any(|peer| peer == &primary_pk));
+            assert!(dialable.peers.iter().any(|peer| peer == &secondary_pk));
+            assert!(mailbox.acceptable(secondary_pk, secondary_addr.ip()).await);
         });
     }
 

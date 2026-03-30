@@ -143,7 +143,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .try_set(self.context.current().epoch_millis());
     }
 
-    /// Stores a new peer set.
+    /// Stores a new primary peer set.
     ///
     /// Returns `Some((deleted_peers, changed_peers))` on success, where:
     /// - `deleted_peers`: peers removed due to max_sets eviction
@@ -184,7 +184,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                     entry.insert(Record::known(addr.clone()))
                 }
             };
-            record.increment();
+            record.increment_primary();
         }
         self.sets.insert(index, peers.into_keys());
 
@@ -194,7 +194,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             let (index, set) = self.sets.pop_first().unwrap();
             debug!(index, "removed oldest peer set");
             set.into_iter().for_each(|peer| {
-                self.peers.get_mut(&peer).unwrap().decrement();
+                self.peers.get_mut(&peer).unwrap().decrement_primary();
                 let deleted = self.delete_if_needed(&peer);
                 if deleted {
                     deleted_peers.push(peer);
@@ -203,6 +203,49 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
 
         Some((deleted_peers, changed_peers))
+    }
+
+    /// Replace the current set of secondary peers.
+    ///
+    /// Returns `(deleted_peers, changed_peers)`, where:
+    /// - `deleted_peers` are peers that are no longer primary or secondary
+    /// - `changed_peers` are peers whose address changed while remaining registered
+    pub fn set_secondaries(&mut self, peers: Map<C, Address>) -> (Vec<C>, Vec<C>) {
+        let mut deleted_peers = Vec::new();
+        let mut changed_peers = Vec::new();
+
+        let removed_secondaries: Vec<_> = self
+            .peers
+            .iter()
+            .filter(|(_, record)| record.is_secondary())
+            .filter(|(peer, _)| peers.keys().position(peer).is_none())
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        for peer in removed_secondaries {
+            let Some(record) = self.peers.get_mut(&peer) else {
+                continue;
+            };
+            record.set_secondary(false);
+            if self.delete_if_needed(&peer) {
+                deleted_peers.push(peer);
+            }
+        }
+
+        for (peer, addr) in peers {
+            let record = match self.peers.entry(peer.clone()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    self.metrics.tracked.inc();
+                    entry.insert(Record::known(addr.clone()))
+                }
+            };
+            if record.update(addr) {
+                changed_peers.push(peer.clone());
+            }
+            record.set_secondary(true);
+        }
+
+        (deleted_peers, changed_peers)
     }
 
     /// Update a tracked peer's address.
@@ -281,11 +324,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Getters ----------
 
-    /// Returns all peers that are part of at least one peer set.
-    pub fn tracked(&self) -> Set<C> {
+    /// Returns all peers that are part of at least one primary peer set.
+    pub fn primary(&self) -> Set<C> {
         self.peers
             .iter()
-            .filter(|(_, r)| r.sets() > 0)
+            .filter(|(_, record)| record.primary_sets() > 0)
             .map(|(k, _)| k.clone())
             .try_collect()
             .expect("HashMap keys are unique")

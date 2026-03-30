@@ -199,8 +199,8 @@ impl<
                 debug!("peer set subscription closed");
                 return;
             } => {
-                // Instead of directing our requests to exclusively the latest set (which may still be syncing, we
-                // reconcile with all tracked peers).
+                // Instead of directing our requests to exclusively the latest set (which may still
+                // be syncing), we reconcile with all primary peers.
                 if self.last_peer_set_id < Some(id) {
                     self.last_peer_set_id = Some(id);
                     self.fetcher.reconcile(all.as_ref());

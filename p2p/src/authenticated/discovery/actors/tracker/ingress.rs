@@ -9,7 +9,7 @@ use crate::{
         mailbox::UnboundedMailbox,
         Mailbox,
     },
-    PeerSetSubscription,
+    PeerSetSubscription, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
@@ -22,7 +22,10 @@ use commonware_utils::{
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
-    Register { index: u64, peers: Set<C> },
+    Register {
+        index: u64,
+        peers: TrackedPeers<C>,
+    },
 
     // ---------- Used by peer set provider ----------
     /// Fetch the peer set at a given index.
@@ -252,6 +255,11 @@ impl<C: PublicKey> Oracle<C> {
     pub(super) const fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
+
+    /// Register only primary peers at the given index.
+    pub async fn track(&mut self, index: u64, primary: Set<C>) {
+        crate::Manager::track(self, index, primary).await;
+    }
 }
 
 impl<C: PublicKey> crate::Provider for Oracle<C> {
@@ -281,8 +289,14 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 }
 
 impl<C: PublicKey> crate::Manager for Oracle<C> {
-    async fn track(&mut self, index: u64, peers: Set<Self::PublicKey>) {
-        self.sender.0.send_lossy(Message::Register { index, peers });
+    async fn track<R>(&mut self, index: u64, peers: R)
+    where
+        R: Into<TrackedPeers<Self::PublicKey>> + Send,
+    {
+        self.sender.0.send_lossy(Message::Register {
+            index,
+            peers: peers.into(),
+        });
     }
 }
 

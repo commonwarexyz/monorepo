@@ -23,13 +23,19 @@
 //!
 //! - [`AddressableManager::track`](crate::AddressableManager::track): Register a new peer set at a
 //!   monotonically increasing index. Use this when the peer set composition changes (peers added/removed).
+//!   This accepts either a bare primary-peer map or an
+//!   [`AddressableTrackedPeers`](crate::AddressableTrackedPeers) value containing both primary and
+//!   secondary peers.
 //! - [`AddressableManager::overwrite`](crate::AddressableManager::overwrite): Update multiple
 //!   peers' addresses in-place without creating a new peer set. Use this when only peer IPs change but
 //!   the peer set composition stays the same. Untracked or unchanged peers are silently skipped (so the application doesn't
 //!   need to track what their last submitted peer set was).
 //!
+//! Secondary peers are eligible to connect and receive `Recipients::All` traffic, but they are
+//! excluded from peer-set subscriptions and generic resolver request targeting.
+//!
 //! Any inbound connection attempts from an IP address that is not in the union of all registered
-//! peer sets will be rejected.
+//! primary or secondary peers will be rejected.
 //!
 //! ## Messages
 //!
@@ -207,7 +213,7 @@ pub use network::Network;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Address, AddressableManager, Ingress, Provider, Receiver, Recipients, Sender};
+    use crate::{Address, Ingress, Provider, Receiver, Recipients, Sender};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_macros::{select, test_group, test_traced};
     use commonware_runtime::{
