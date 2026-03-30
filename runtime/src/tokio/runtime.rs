@@ -109,6 +109,11 @@ impl TaskTracker {
     const LIVE_INCREMENT: usize = 2;
 
     #[inline]
+    const fn closed(state: usize) -> bool {
+        state & Self::CLOSED != 0
+    }
+
+    #[inline]
     const fn live(state: usize) -> usize {
         state >> 1
     }
@@ -123,7 +128,7 @@ impl TaskTracker {
         // closed registration".
         self.state
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |state| {
-                if state & Self::CLOSED != 0 {
+                if Self::closed(state) {
                     None
                 } else {
                     Some(
@@ -158,9 +163,8 @@ impl TaskTracker {
 
         let mut gate = self.gate.lock();
         let state = self.state.load(Ordering::Relaxed);
-        assert_ne!(
-            state & Self::CLOSED,
-            0,
+        assert!(
+            Self::closed(state),
             "task registration must be closed before waiting for idle",
         );
         if Self::live(state) == 0 {
