@@ -170,6 +170,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `None` if the peer set index is invalid (already exists or not monotonically
     /// increasing).
+    #[cfg(test)]
     pub fn add_set(
         &mut self,
         index: u64,

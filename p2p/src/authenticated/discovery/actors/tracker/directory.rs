@@ -218,6 +218,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Stores a new primary peer set.
+    #[cfg(test)]
     pub fn add_set(&mut self, index: u64, primaries: OrderedSet<C>) -> bool {
         self.add_tracked_sets(index, primaries, OrderedSet::default())
     }

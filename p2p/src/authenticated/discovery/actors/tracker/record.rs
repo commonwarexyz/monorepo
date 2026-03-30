@@ -241,6 +241,7 @@ impl<C: PublicKey> Record<C> {
     }
 
     /// Returns whether this peer is currently registered in at least one secondary peer set.
+    #[cfg(test)]
     pub const fn is_secondary(&self) -> bool {
         self.secondary_sets > 0
     }
