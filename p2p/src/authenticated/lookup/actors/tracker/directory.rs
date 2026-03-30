@@ -675,7 +675,7 @@ mod tests {
                     Map::default(),
                 )
                 .is_some());
-            assert!(directory.peers.get(&secondary_0).is_none());
+            assert!(!directory.peers.contains_key(&secondary_0));
             assert!(directory.eligible(&secondary_1));
         });
     }

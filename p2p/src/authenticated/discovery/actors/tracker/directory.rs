@@ -648,7 +648,7 @@ mod tests {
             assert!(directory.eligible(&secondary_1));
 
             assert!(directory.track(2, [primary_2].try_into().unwrap(), OrderedSet::default()));
-            assert!(directory.peers.get(&secondary_0).is_none());
+            assert!(!directory.peers.contains_key(&secondary_0));
             assert!(directory.eligible(&secondary_1));
         });
     }
