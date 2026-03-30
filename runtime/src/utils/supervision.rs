@@ -135,7 +135,8 @@ impl Tree {
         let mut pending = vec![Arc::clone(self)];
         while let Some(node) = pending.pop() {
             let result = {
-                node.parent.lock().take();
+                // Keep the parent link until `Drop` so stale-child accounting
+                // stays centralized in one place.
                 let mut inner = node.inner.lock();
                 inner.abort()
             };
@@ -159,17 +160,6 @@ impl Drop for Tree {
             parent_inner.note_stale_child();
         }
 
-        let children = self.inner.get_mut().children.drain(..).collect::<Vec<_>>();
-        if !children.is_empty() {
-            if let Some(parent) = self.parent.get_mut().as_ref() {
-                let mut parent_inner = parent.inner.lock();
-                let released = children
-                    .into_iter()
-                    .filter(|child| child.strong_count() == 0)
-                    .count();
-                parent_inner.stale_children = parent_inner.stale_children.saturating_add(released);
-            }
-        }
         if let Some(parent) = self.parent.get_mut().take() {
             // If dropping this node makes its ancestors uniquely owned as well,
             // release that lineage iteratively instead of recursing through
@@ -322,6 +312,41 @@ mod tests {
         {
             let inner = root.inner.lock();
             assert_eq!(inner.children.len(), 1, "stale children were not reaped");
+            assert_eq!(inner.stale_children, 0, "stale child count was not reset");
+        }
+
+        drop(child);
+        drop(root);
+    }
+
+    #[test]
+    fn aborted_children_still_count_toward_batched_reaping() {
+        let root = Tree::root();
+        let mut aborted = Vec::with_capacity(CHILD_REAP_THRESHOLD);
+
+        for _ in 0..CHILD_REAP_THRESHOLD {
+            let (child, was_aborted) = Tree::child(&root);
+            assert!(!was_aborted, "child node unexpectedly aborted");
+            aborted.push(child);
+        }
+
+        for child in aborted {
+            child.abort();
+            drop(child);
+        }
+
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.len(), CHILD_REAP_THRESHOLD);
+            assert_eq!(inner.stale_children, CHILD_REAP_THRESHOLD);
+        }
+
+        let (child, was_aborted) = Tree::child(&root);
+        assert!(!was_aborted, "child node unexpectedly aborted");
+
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.len(), 1, "aborted children were not reaped");
             assert_eq!(inner.stale_children, 0, "stale child count was not reset");
         }
 
