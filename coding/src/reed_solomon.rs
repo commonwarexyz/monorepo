@@ -176,9 +176,9 @@ where
 /// Returns a contiguous buffer of `k` padded shards and the shard length.
 /// The buffer layout is `[length_prefix | data | zero_padding]` split into
 /// `k` equal-sized shards of `shard_len` bytes each.
-fn prepare_data(data: &[u8], k: usize) -> (Vec<u8>, usize) {
+fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
     // Compute shard length
-    let data_len = data.len();
+    let data_len = data.remaining();
     let prefixed_len = u32::SIZE + data_len;
     let mut shard_len = prefixed_len.div_ceil(k);
 
@@ -191,7 +191,7 @@ fn prepare_data(data: &[u8], k: usize) -> (Vec<u8>, usize) {
     let length_bytes = (data_len as u32).to_be_bytes();
     let mut padded = vec![0u8; k * shard_len];
     padded[..u32::SIZE].copy_from_slice(&length_bytes);
-    padded[u32::SIZE..u32::SIZE + data_len].copy_from_slice(data);
+    data.copy_to_slice(&mut padded[u32::SIZE..u32::SIZE + data_len]);
 
     (padded, shard_len)
 }
@@ -199,19 +199,47 @@ fn prepare_data(data: &[u8], k: usize) -> (Vec<u8>, usize) {
 /// Extract data from encoded shards.
 ///
 /// The first `k` shards, when concatenated, form `[length_prefix | data | padding]`.
-/// This function bulk-copies shard slices while skipping the 4-byte prefix.
+/// This function copies only the data bytes while validating trailing zero
+/// padding directly from the shard slices.
 fn extract_data(shards: &[&[u8]], k: usize) -> Result<Vec<u8>, Error> {
     let shards = shards.get(..k).ok_or(Error::NotEnoughChunks)?;
-    let (data_len, payload_len) = read_prefix_and_payload_len(shards)?;
-    let mut payload = copy_payload_after_prefix(shards, payload_len);
-    validate_zero_padding(&payload, data_len)?;
-    payload.truncate(data_len);
-    Ok(payload)
+    let data_len = read_data_len(shards)?;
+    let mut data = Vec::with_capacity(data_len);
+    let mut prefix_bytes_left = u32::SIZE;
+    let mut data_bytes_left = data_len;
+    for shard in shards {
+        // The length prefix may straddle shard boundaries, so ignore bytes until
+        // we reach the first payload byte.
+        if prefix_bytes_left >= shard.len() {
+            prefix_bytes_left -= shard.len();
+            continue;
+        }
+
+        // Copy only the live payload bytes from this shard.
+        let payload = &shard[prefix_bytes_left..];
+        let copy_len = data_bytes_left.min(payload.len());
+        data.extend_from_slice(&payload[..copy_len]);
+        data_bytes_left -= copy_len;
+
+        // Any remaining bytes in this shard must be canonical zero padding.
+        if !payload[copy_len..].iter().all(|byte| *byte == 0) {
+            return Err(Error::Inconsistent);
+        }
+        prefix_bytes_left = 0;
+    }
+
+    // The prefix advertised more payload bytes than were present in the first
+    // `k` shards.
+    if data_bytes_left != 0 {
+        return Err(Error::Inconsistent);
+    }
+
+    Ok(data)
 }
 
 /// Read the 4-byte big-endian length prefix from `shards` and validate that
 /// the decoded length fits in the post-prefix payload region.
-fn read_prefix_and_payload_len(shards: &[&[u8]]) -> Result<(usize, usize), Error> {
+fn read_data_len(shards: &[&[u8]]) -> Result<usize, Error> {
     let total_len: usize = shards.iter().map(|s| s.len()).sum();
     if total_len < u32::SIZE {
         return Err(Error::Inconsistent);
@@ -234,33 +262,7 @@ fn read_prefix_and_payload_len(shards: &[&[u8]]) -> Result<(usize, usize), Error
     if data_len > payload_len {
         return Err(Error::Inconsistent);
     }
-    Ok((data_len, payload_len))
-}
-
-/// Bulk-copy bytes after the 4-byte prefix from `shards` into a contiguous
-/// payload buffer.
-fn copy_payload_after_prefix(shards: &[&[u8]], payload_len: usize) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(payload_len);
-    let mut prefix_bytes_left = u32::SIZE;
-    for shard in shards {
-        if prefix_bytes_left >= shard.len() {
-            prefix_bytes_left -= shard.len();
-            continue;
-        }
-        payload.extend_from_slice(&shard[prefix_bytes_left..]);
-        prefix_bytes_left = 0;
-    }
-    payload
-}
-
-/// Validate canonical encoding by requiring trailing bytes after `data_len`
-/// to be zero.
-fn validate_zero_padding(payload: &[u8], data_len: usize) -> Result<(), Error> {
-    // Canonical encoding requires all trailing bytes to be zero.
-    if !payload[data_len..].iter().all(|byte| *byte == 0) {
-        return Err(Error::Inconsistent);
-    }
-    Ok(())
+    Ok(data_len)
 }
 
 /// Type alias for the internal encoding result.
@@ -282,7 +284,7 @@ type Encoding<D> = (D, Vec<Chunk<D>>);
 fn encode<H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
-    data: Vec<u8>,
+    data: impl Buf,
     strategy: &S,
 ) -> Result<Encoding<H::Digest>, Error> {
     // Validate parameters
@@ -291,12 +293,13 @@ fn encode<H: Hasher, S: Strategy>(
     let n = total as usize;
     let k = min as usize;
     let m = n - k;
-    if data.len() > u32::MAX as usize {
-        return Err(Error::InvalidDataLength(data.len()));
+    let data_len = data.remaining();
+    if data_len > u32::MAX as usize {
+        return Err(Error::InvalidDataLength(data_len));
     }
 
     // Prepare data as a contiguous buffer of k shards
-    let (padded, shard_len) = prepare_data(&data, k);
+    let (padded, shard_len) = prepare_data(data, k);
 
     // Create or reuse encoder
     let recovery_buf = {
@@ -423,12 +426,12 @@ fn decode<'a, H: Hasher, S: Strategy>(
         |dec| dec.reset(k, m, shard_len),
     )
     .map_err(Error::ReedSolomon)?;
-    for (idx, ref shard) in &provided_originals {
+    for (idx, shard) in &provided_originals {
         decoder
             .add_original_shard(*idx, shard)
             .map_err(Error::ReedSolomon)?;
     }
-    for (idx, ref shard) in &provided_recoveries {
+    for (idx, shard) in &provided_recoveries {
         decoder
             .add_recovery_shard(*idx, shard)
             .map_err(Error::ReedSolomon)?;
@@ -593,10 +596,9 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 
     fn encode(
         config: &Config,
-        mut data: impl Buf,
+        data: impl Buf,
         strategy: &impl Strategy,
     ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
-        let data: Vec<u8> = data.copy_to_bytes(data.remaining()).to_vec();
         encode::<H, _>(
             total_shards(config)?,
             config.minimum_shards.get(),
@@ -668,7 +670,7 @@ mod tests {
         let min = 3u16;
 
         // Encode the data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
 
         // Use a mix of original and recovery pieces
         let pieces: Vec<_> = vec![
@@ -689,7 +691,7 @@ mod tests {
         let min = 4u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
 
         // Try with fewer than min
         let pieces: Vec<_> = chunks
@@ -710,7 +712,7 @@ mod tests {
         let min = 3u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
 
         // Include duplicate index by cloning the first chunk
         let pieces = [
@@ -731,7 +733,7 @@ mod tests {
         let min = 3u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
 
         // Verify all proofs at invalid index
         for i in 0..total {
@@ -745,7 +747,7 @@ mod tests {
         let data = b"Test parameter validation";
 
         // total <= min should panic
-        encode::<Sha256, _>(3, 3, data.to_vec(), &STRATEGY).unwrap();
+        encode::<Sha256, _>(3, 3, data.as_slice(), &STRATEGY).unwrap();
     }
 
     #[test]
@@ -754,7 +756,7 @@ mod tests {
         let data = b"Test parameter validation";
 
         // min = 0 should panic
-        encode::<Sha256, _>(5, 0, data.to_vec(), &STRATEGY).unwrap();
+        encode::<Sha256, _>(5, 0, data.as_slice(), &STRATEGY).unwrap();
     }
 
     #[test]
@@ -764,7 +766,7 @@ mod tests {
         let min = 30u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
 
         // Try to decode with min
         let minimal = chunks
@@ -783,7 +785,7 @@ mod tests {
         let min = 4u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.clone(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
 
         // Try to decode with min
         let minimal = chunks
@@ -803,7 +805,7 @@ mod tests {
 
         // Encode data correctly to get valid chunks
         let (_correct_root, chunks) =
-            encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+            encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
 
         // Create a malicious/fake root (simulating a malicious encoder)
         let mut hasher = Sha256::new();
@@ -859,7 +861,7 @@ mod tests {
         let min = 3u16;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
         let mut pieces: Vec<_> = chunks.into_iter().map(|c| checked(root, c)).collect();
 
         // Tamper with one of the checked chunks by modifying the shard data.
@@ -883,7 +885,7 @@ mod tests {
         let m = total - min;
 
         // Compute original data encoding
-        let (padded, shard_size) = prepare_data(data, min as usize);
+        let (padded, shard_size) = prepare_data(data.as_slice(), min as usize);
 
         // Re-encode the data
         let mut encoder = ReedSolomonEncoder::new(min as usize, m as usize, shard_size).unwrap();
@@ -946,7 +948,7 @@ mod tests {
         let k = min as usize;
         let m = total as usize - k;
 
-        let (mut padded, shard_len) = prepare_data(data, k);
+        let (mut padded, shard_len) = prepare_data(data.as_slice(), k);
         let payload_end = u32::SIZE + data.len();
         let total_original_len = k * shard_len;
         assert!(payload_end < total_original_len, "test requires padding");
@@ -993,7 +995,7 @@ mod tests {
         let min = 3u16;
 
         // Encode the data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.to_vec(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
 
         // Use a mix of original and recovery pieces
         let mut invalid = checked(root, chunks[1].clone());
@@ -1016,7 +1018,7 @@ mod tests {
         let min = u16::MAX / 2;
 
         // Encode data
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.clone(), &STRATEGY).unwrap();
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
 
         // Try to decode with min
         let minimal = chunks
@@ -1035,7 +1037,7 @@ mod tests {
         let min = u16::MAX / 2 - 1;
 
         // Encode data
-        let result = encode::<Sha256, _>(total, min, data, &STRATEGY);
+        let result = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY);
         assert!(matches!(
             result,
             Err(Error::ReedSolomon(

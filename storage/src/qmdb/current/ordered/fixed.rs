@@ -18,22 +18,16 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
 pub type Db<E, K, V, H, T, const N: usize> =
     super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, Index<T, Location>, H, N>;
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > Db<E, K, V, H, T, N>
+impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, const N: usize>
+    Db<E, K, V, H, T, N>
 {
     /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
     /// the bitmap MMR if a thread pool is provided.
@@ -56,9 +50,9 @@ pub mod partitioned {
             Error,
         },
         translator::Translator,
+        Context,
     };
     use commonware_cryptography::Hasher;
-    use commonware_runtime::{Clock, Metrics, Storage as RStorage};
     use commonware_utils::Array;
 
     /// A partitioned variant of [super::Db].
@@ -79,7 +73,7 @@ pub mod partitioned {
         >;
 
     impl<
-            E: RStorage + Clock + Metrics,
+            E: Context,
             K: Array,
             V: FixedValue,
             H: Hasher,
@@ -101,14 +95,14 @@ pub mod test {
     use super::*;
     use crate::{
         qmdb::{
-            current::{ordered::tests as shared, tests::fixed_config},
+            current::{batch::BitmapRead, ordered::tests as shared, tests::fixed_config},
             Error,
         },
         translator::OneCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, Metrics, Runner as _};
     use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
 
     /// A type alias for the concrete [Db] type used in these unit tests.
@@ -150,12 +144,16 @@ pub mod test {
                 let finalized = db
                     .new_batch()
                     .write(key, Some(value))
-                    .merkleize(None)
+                    .merkleize(None, &db)
                     .await
                     .unwrap()
                     .finalize();
                 db.apply_batch(finalized).await.unwrap();
             }
+
+            // Prune the database
+            let floor = db.any.inactivity_floor_loc;
+            db.prune(floor).await.unwrap();
 
             assert!(
                 db.status.pruned_chunks() > 0,

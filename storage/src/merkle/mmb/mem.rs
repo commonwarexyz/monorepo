@@ -139,7 +139,9 @@ mod tests {
 
         let mmb_copy = Mmb::init(
             Config {
-                nodes: mmb.nodes.iter().copied().collect(),
+                nodes: (*Position::try_from(prune_loc).unwrap()..*mmb.size())
+                    .map(|i| mmb.get_node(Position::new(i)).unwrap())
+                    .collect(),
                 pruning_boundary: prune_loc,
                 pinned_nodes: mmb.node_digests_to_pin(prune_loc),
             },

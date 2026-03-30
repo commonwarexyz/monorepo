@@ -13,15 +13,15 @@ use crate::{
         Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::Array;
 use std::ops::Range;
 
 impl<E, K, V, H, T> sync::Database for immutable::Immutable<E, K, V, H, T>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: VariableValue,
     H: Hasher,
@@ -85,18 +85,13 @@ where
         let last_commit_loc = {
             // Get the start of the log.
             let reader = journal.journal.reader().await;
-            let start_loc = Location::new(reader.bounds().start);
+            let bounds = reader.bounds();
+            let start_loc = Location::new(bounds.start);
 
             // Build snapshot from the log
             build_snapshot_from_log(start_loc, &reader, &mut snapshot, |_, _| {}).await?;
 
-            Location::new(
-                reader
-                    .bounds()
-                    .end
-                    .checked_sub(1)
-                    .expect("commit should exist"),
-            )
+            Location::new(bounds.end.checked_sub(1).expect("commit should exist"))
         };
 
         let db = Self {

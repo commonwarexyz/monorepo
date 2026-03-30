@@ -7,4 +7,13 @@
 #
 # The justfile creates level-specific symlinks to this script (wrapper_BETA, etc.)
 # so Cargo sees different wrapper paths and correctly invalidates caches per level.
-exec "$@" --cfg "commonware_stability_${COMMONWARE_STABILITY_LEVEL}"
+#
+# The justfile saves RUSTC_WRAPPER into COMMONWARE_RUSTC_WRAPPER and clears it
+# to avoid Cargo nesting ($RUSTC_WRAPPER $RUSTC_WORKSPACE_WRAPPER $RUSTC), which
+# breaks tools like sccache that can't identify the wrapper as a compiler. Instead,
+# this script invokes the original RUSTC_WRAPPER internally, reversing the order.
+if [ -n "$COMMONWARE_RUSTC_WRAPPER" ]; then
+    exec "$COMMONWARE_RUSTC_WRAPPER" "$@" --cfg "commonware_stability_${COMMONWARE_STABILITY_LEVEL}"
+else
+    exec "$@" --cfg "commonware_stability_${COMMONWARE_STABILITY_LEVEL}"
+fi

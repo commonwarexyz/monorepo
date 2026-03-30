@@ -55,17 +55,14 @@ use crate::{
         authenticated,
         contiguous::{
             variable::{Config as JournalConfig, Journal as ContiguousJournal},
-            Contiguous, Reader,
+            Contiguous, Mutable, Reader,
         },
     },
-    mmr::{
-        journaled::{Config as MmrConfig, Mmr},
-        Location, Proof,
-    },
+    mmr::{journaled::Config as MmrConfig, Location, Proof},
     qmdb::{any::VariableValue, operation::Committable, Error},
+    Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use std::num::NonZeroU64;
 use tracing::{debug, warn};
 
@@ -87,7 +84,7 @@ pub struct Config<C> {
 type Journal<E, V, H> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H>;
 
 /// A keyless authenticated database for variable-length data.
-pub struct Keyless<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
+pub struct Keyless<E: Context, V: VariableValue, H: Hasher> {
     /// Authenticated journal of operations.
     journal: Journal<E, V, H>,
 
@@ -95,7 +92,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
     last_commit_loc: Location,
 }
 
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H> {
+impl<E: Context, V: VariableValue, H: Hasher> Keyless<E, V, H> {
     /// Get the value at location `loc` in the database.
     ///
     /// # Errors
@@ -217,6 +214,58 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
         Ok(())
     }
 
+    /// Rewind the database to `size` operations, where `size` is the location of the next append.
+    ///
+    /// This rewinds both the operations journal and its MMR to the historical state at `size`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when:
+    /// - `size` is not a valid rewind target
+    /// - the target's required logical range is not fully retained (for keyless, this means the
+    ///   oldest retained location is already beyond the rewind boundary)
+    /// - `size - 1` is not a commit operation
+    ///
+    /// Any error from this method is fatal for this handle. Rewind may mutate journal state
+    /// before this method finishes updating in-memory rewind state. Callers must drop this
+    /// database handle after any `Err` from `rewind` and reopen from storage.
+    ///
+    /// A successful rewind is not restart-stable until a subsequent [`Self::commit`] or
+    /// [`Self::sync`].
+    pub async fn rewind(&mut self, size: Location) -> Result<(), Error> {
+        let rewind_size = *size;
+        let current_size = *self.last_commit_loc + 1;
+        if rewind_size == current_size {
+            return Ok(());
+        }
+        if rewind_size == 0 || rewind_size > current_size {
+            return Err(Error::Journal(crate::journal::Error::InvalidRewind(
+                rewind_size,
+            )));
+        }
+
+        let rewind_last_loc = Location::new(rewind_size - 1);
+        {
+            let reader = self.journal.reader().await;
+            let bounds = reader.bounds();
+            if rewind_size <= bounds.start {
+                return Err(Error::Journal(crate::journal::Error::ItemPruned(
+                    *rewind_last_loc,
+                )));
+            }
+            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            if !matches!(rewind_last_op, Operation::Commit(_)) {
+                return Err(Error::UnexpectedData(rewind_last_loc));
+            }
+        }
+
+        // Journal rewind happens before in-memory commit-location updates. If a later step fails,
+        // this handle may be internally diverged and must be dropped by the caller.
+        self.journal.rewind(rewind_size).await?;
+        self.last_commit_loc = rewind_last_loc;
+        Ok(())
+    }
+
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
@@ -236,17 +285,9 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H>
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
-    #[allow(clippy::type_complexity)]
-    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<'_, E, V, H, Mmr<E, H::Digest>> {
+    pub fn new_batch(&self) -> batch::UnmerkleizedBatch<H, V> {
         let journal_size = *self.last_commit_loc + 1;
-        batch::UnmerkleizedBatch {
-            keyless: self,
-            journal_batch: self.journal.new_batch(),
-            appends: Vec::new(),
-            base_operations: Vec::new(),
-            base_size: journal_size,
-            db_size: journal_size,
-        }
+        batch::UnmerkleizedBatch::new(self, journal_size)
     }
 
     /// Apply a changeset to the database.
@@ -335,6 +376,21 @@ mod test {
     async fn open_db(context: deterministic::Context) -> Db {
         let cfg = db_config("partition", &context);
         Db::init(context, cfg).await.unwrap()
+    }
+
+    async fn commit_appends(
+        db: &mut Db,
+        values: impl IntoIterator<Item = Vec<u8>>,
+        metadata: Option<Vec<u8>>,
+    ) -> core::ops::Range<Location> {
+        let mut batch = db.new_batch();
+        for value in values {
+            batch = batch.append(value);
+        }
+        let finalized = batch.merkleize(metadata).finalize();
+        let range = db.apply_batch(finalized).await.unwrap();
+        db.commit().await.unwrap();
+        range
     }
 
     #[test_traced("INFO")]
@@ -1122,6 +1178,135 @@ mod test {
         });
     }
 
+    #[test_traced("INFO")]
+    fn test_keyless_db_rewind_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+            let initial_root = db.root();
+            let initial_size = db.bounds().await.end;
+
+            let value_a = vec![1u8; 12];
+            let value_b = vec![2u8; 16];
+            let metadata_a = vec![3u8; 20];
+            let first_range = commit_appends(
+                &mut db,
+                [value_a.clone(), value_b.clone()],
+                Some(metadata_a.clone()),
+            )
+            .await;
+
+            let root_before = db.root();
+            let size_before = db.bounds().await.end;
+            let commit_before = db.last_commit_loc();
+            assert_eq!(size_before, first_range.end);
+
+            let value_c = vec![4u8; 24];
+            let metadata_b = vec![5u8; 8];
+            let second_range =
+                commit_appends(&mut db, [value_c.clone()], Some(metadata_b.clone())).await;
+            assert_eq!(second_range.start, size_before);
+            assert_ne!(db.root(), root_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_b));
+
+            db.rewind(size_before).await.unwrap();
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.bounds().await.end, size_before);
+            assert_eq!(db.last_commit_loc(), commit_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a.clone()));
+            assert_eq!(db.get(Location::new(1)).await.unwrap(), Some(value_a));
+            assert_eq!(db.get(Location::new(2)).await.unwrap(), Some(value_b));
+            assert!(
+                matches!(
+                    db.get(Location::new(4)).await,
+                    Err(Error::LocationOutOfBounds(_, size)) if size == size_before
+                ),
+                "rewound append should be out of bounds",
+            );
+
+            db.commit().await.unwrap();
+            drop(db);
+            let mut db = open_db(context.with_label("reopen")).await;
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.bounds().await.end, size_before);
+            assert_eq!(db.last_commit_loc(), commit_before);
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
+            assert_eq!(db.get(Location::new(1)).await.unwrap(), Some(vec![1u8; 12]));
+            assert_eq!(db.get(Location::new(2)).await.unwrap(), Some(vec![2u8; 16]));
+            assert!(matches!(
+                db.get(Location::new(4)).await,
+                Err(Error::LocationOutOfBounds(_, size)) if size == size_before
+            ));
+
+            db.rewind(initial_size).await.unwrap();
+            assert_eq!(db.root(), initial_root);
+            assert_eq!(db.bounds().await.end, initial_size);
+            assert_eq!(db.get_metadata().await.unwrap(), None);
+            assert!(matches!(
+                db.get(Location::new(1)).await,
+                Err(Error::LocationOutOfBounds(_, size)) if size == initial_size
+            ));
+
+            db.commit().await.unwrap();
+            drop(db);
+            let db = open_db(context.with_label("reopen_initial_boundary")).await;
+            assert_eq!(db.root(), initial_root);
+            assert_eq!(db.bounds().await.end, initial_size);
+            assert_eq!(db.get_metadata().await.unwrap(), None);
+            assert!(matches!(
+                db.get(Location::new(1)).await,
+                Err(Error::LocationOutOfBounds(_, size)) if size == initial_size
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_db_rewind_pruned_target_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            let first_range =
+                commit_appends(&mut db, (0..16).map(|i| vec![i as u8; 8]), None).await;
+
+            let mut round = 0u64;
+            loop {
+                round += 1;
+                assert!(
+                    round <= 64,
+                    "failed to prune enough history for rewind test"
+                );
+
+                commit_appends(&mut db, (0..16).map(|i| vec![(round + i) as u8; 8]), None).await;
+                db.prune(db.last_commit_loc()).await.unwrap();
+
+                if db.bounds().await.start > first_range.start {
+                    break;
+                }
+            }
+
+            let oldest_retained = db.bounds().await.start;
+            let boundary_err = db.rewind(oldest_retained).await.unwrap_err();
+            assert!(
+                matches!(
+                    boundary_err,
+                    Error::Journal(crate::journal::Error::ItemPruned(_))
+                ),
+                "unexpected rewind error at retained boundary: {boundary_err:?}"
+            );
+
+            let err = db.rewind(first_range.start).await.unwrap_err();
+            assert!(
+                matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
+                "unexpected rewind error: {err:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
@@ -1130,6 +1315,7 @@ mod test {
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.sync());
         is_send(db.get(loc));
+        is_send(db.rewind(loc));
     }
 
     /// batch.get() reads pending appends and falls through to base DB.
@@ -1157,7 +1343,7 @@ mod test {
             let batch = db.new_batch();
             for (i, loc) in base_locs.iter().enumerate() {
                 assert_eq!(
-                    batch.get(*loc).await.unwrap(),
+                    batch.get(*loc, &db).await.unwrap(),
                     Some(base_vals[i].clone()),
                     "base DB value at loc {loc} mismatch"
                 );
@@ -1167,11 +1353,11 @@ mod test {
             let new_val = vec![99u8; 16];
             let new_loc = batch.size();
             let batch = batch.append(new_val.clone());
-            assert_eq!(batch.get(new_loc).await.unwrap(), Some(new_val));
+            assert_eq!(batch.get(new_loc, &db).await.unwrap(), Some(new_val));
 
             // Location past the end returns None.
             let beyond = Location::new(*new_loc + 1);
-            assert_eq!(batch.get(beyond).await.unwrap(), None);
+            assert_eq!(batch.get(beyond, &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1194,17 +1380,17 @@ mod test {
             let parent_m = parent.merkleize(None);
 
             // Child reads v1 from parent chain.
-            let child = parent_m.new_batch();
-            assert_eq!(child.get(loc1).await.unwrap(), Some(v1));
+            let child = parent_m.new_batch::<Sha256>();
+            assert_eq!(child.get(loc1, &db).await.unwrap(), Some(v1));
 
             // Child appends v2.
             let loc2 = child.size();
             let child = child.append(v2.clone());
-            assert_eq!(child.get(loc2).await.unwrap(), Some(v2));
+            assert_eq!(child.get(loc2, &db).await.unwrap(), Some(v2));
 
             // Nonexistent location.
             let nonexistent = Location::new(9999);
-            assert_eq!(child.get(nonexistent).await.unwrap(), None);
+            assert_eq!(child.get(nonexistent, &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1298,18 +1484,18 @@ mod test {
 
             // Read base DB value through merkleized batch.
             assert_eq!(
-                merkleized.get(Location::new(1)).await.unwrap(),
+                merkleized.get(Location::new(1), &db).await.unwrap(),
                 Some(base_val),
             );
 
             // Read this batch's append from the operation chain.
             assert_eq!(
-                merkleized.get(Location::new(3)).await.unwrap(),
+                merkleized.get(Location::new(3), &db).await.unwrap(),
                 Some(new_val),
             );
 
             // Commit op returns None (no metadata).
-            assert_eq!(merkleized.get(Location::new(4)).await.unwrap(), None);
+            assert_eq!(merkleized.get(Location::new(4), &db).await.unwrap(), None);
 
             db.destroy().await.unwrap();
         });
@@ -1338,7 +1524,7 @@ mod test {
             let parent_root = parent_m.root();
 
             // Child batch built on top of parent.
-            let child = parent_m.new_batch();
+            let child = parent_m.new_batch::<Sha256>();
             let loc2 = child.size();
             let child = child.append(v2.clone());
             let loc3 = child.size();
@@ -1515,7 +1701,7 @@ mod test {
 
             // Child batch appends v2.
             let v2 = vec![2u8; 16];
-            let child = parent_m.new_batch();
+            let child = parent_m.new_batch::<Sha256>();
             let loc2 = child.size();
             let child = child.append(v2.clone());
             let child_m = child.merkleize(None);
@@ -1523,19 +1709,19 @@ mod test {
             // Child's MerkleizedBatch can read all three layers:
             // base DB value
             assert_eq!(
-                child_m.get(base_loc).await.unwrap(),
+                child_m.get(base_loc, &db).await.unwrap(),
                 Some(base_val),
                 "should read base DB value"
             );
             // parent chain value
             assert_eq!(
-                child_m.get(loc1).await.unwrap(),
+                child_m.get(loc1, &db).await.unwrap(),
                 Some(v1),
                 "should read parent chain value"
             );
             // child's own value
             assert_eq!(
-                child_m.get(loc2).await.unwrap(),
+                child_m.get(loc2, &db).await.unwrap(),
                 Some(v2),
                 "should read child's own value"
             );
@@ -1635,12 +1821,12 @@ mod test {
 
             // Fork two children from the same parent.
             let child_a = parent
-                .new_batch()
+                .new_batch::<Sha256>()
                 .append(vec![2])
                 .merkleize(None)
                 .finalize();
             let child_b = parent
-                .new_batch()
+                .new_batch::<Sha256>()
                 .append(vec![3])
                 .merkleize(None)
                 .finalize();
@@ -1670,7 +1856,7 @@ mod test {
 
             // Child batch.
             let child_changeset = parent
-                .new_batch()
+                .new_batch::<Sha256>()
                 .append(vec![2])
                 .merkleize(None)
                 .finalize();
@@ -1691,6 +1877,65 @@ mod test {
         });
     }
 
+    /// Apply parent via finalize(), then child via finalize_from(). Both values present.
+    #[test_traced]
+    fn test_keyless_finalize_from() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Parent batch.
+            let parent = db.new_batch();
+            let parent_loc = parent.size();
+            let parent = parent.append(vec![1]);
+            let parent_m = parent.merkleize(None);
+
+            // Child batch built on parent.
+            let child = parent_m.new_batch::<Sha256>();
+            let child_loc = child.size();
+            let child = child.append(vec![2]);
+            let child_m = child.merkleize(None);
+
+            // Apply parent first.
+            db.apply_batch(parent_m.finalize()).await.unwrap();
+            let current_db_size = *db.last_commit_loc() + 1;
+
+            // Apply child via finalize_from (rebased onto committed parent).
+            db.apply_batch(child_m.finalize_from(current_db_size))
+                .await
+                .unwrap();
+
+            // Both values present.
+            assert_eq!(db.get(parent_loc).await.unwrap(), Some(vec![1]));
+            assert_eq!(db.get(child_loc).await.unwrap(), Some(vec![2]));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_keyless_child_root_matches_between_pending_and_committed_paths() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Build the child while the parent is still pending.
+            let parent = db.new_batch().append(vec![1]).merkleize(None);
+            let pending_child = parent.new_batch::<Sha256>().append(vec![2]).merkleize(None);
+
+            // Commit the parent, then rebuild the same logical child from the
+            // committed DB state and compare roots.
+            db.apply_batch(parent.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            let committed_child = db.new_batch().append(vec![2]).merkleize(None);
+
+            assert_eq!(pending_child.root(), committed_child.root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced]
     fn test_stale_changeset_child_applied_before_parent() {
         let executor = deterministic::Runner::default();
@@ -1703,7 +1948,7 @@ mod test {
             // Child batch. Finalize both before applying either so the
             // borrow on `db` through `parent` is released.
             let child_changeset = parent
-                .new_batch()
+                .new_batch::<Sha256>()
                 .append(vec![2])
                 .merkleize(None)
                 .finalize();
@@ -1718,6 +1963,40 @@ mod test {
                 matches!(result, Err(Error::StaleChangeset { .. })),
                 "expected StaleChangeset error, got {result:?}"
             );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// to_batch() creates an owned snapshot whose root matches the committed DB.
+    /// A child batch chained from it can be applied.
+    #[test_traced]
+    fn test_keyless_to_batch() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Populate.
+            let batch = db.new_batch();
+            let loc1 = batch.size();
+            let batch = batch.append(vec![10]);
+            db.apply_batch(batch.merkleize(None).finalize())
+                .await
+                .unwrap();
+
+            // to_batch root matches committed root.
+            let snapshot = db.to_batch();
+            assert_eq!(snapshot.root(), db.root());
+
+            // Chain a child from the snapshot, apply it.
+            let child_batch = snapshot.new_batch::<Sha256>();
+            let loc2 = child_batch.size();
+            let child_batch = child_batch.append(vec![20]);
+            let child = child_batch.merkleize(None);
+            db.apply_batch(child.finalize()).await.unwrap();
+
+            assert_eq!(db.get(loc1).await.unwrap(), Some(vec![10]));
+            assert_eq!(db.get(loc2).await.unwrap(), Some(vec![20]));
 
             db.destroy().await.unwrap();
         });

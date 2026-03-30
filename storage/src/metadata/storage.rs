@@ -1,9 +1,8 @@
 use super::{Config, Error};
+use crate::Context;
 use commonware_codec::{Codec, FixedSize, ReadExt};
 use commonware_cryptography::{crc32, Crc32};
-use commonware_runtime::{
-    telemetry::metrics::status::GaugeExt, Blob, BufMut, Clock, Error as RError, Metrics, Storage,
-};
+use commonware_runtime::{telemetry::metrics::status::GaugeExt, Blob, BufMut, Error as RError};
 use commonware_utils::{sync::AsyncMutex, Span};
 use futures::future::try_join_all;
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
@@ -68,7 +67,7 @@ struct State<B: Blob, K: Span> {
 }
 
 /// Implementation of [Metadata] storage.
-pub struct Metadata<E: Clock + Storage + Metrics, K: Span, V: Codec> {
+pub struct Metadata<E: Context, K: Span, V: Codec> {
     context: E,
 
     map: BTreeMap<K, V>,
@@ -80,7 +79,7 @@ pub struct Metadata<E: Clock + Storage + Metrics, K: Span, V: Codec> {
     keys: Gauge,
 }
 
-impl<E: Clock + Storage + Metrics, K: Span, V: Codec> Metadata<E, K, V> {
+impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
     /// Initialize a new [Metadata] instance.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Open dedicated blobs

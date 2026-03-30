@@ -60,13 +60,12 @@ use crate::{
         sync::{Database, DatabaseConfig as Config},
     },
     translator::Translator,
-    Persistable,
+    Context, Persistable,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
-use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, sync::AsyncMutex, Array};
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -99,7 +98,7 @@ async fn build_db<E, U, I, H, J, const N: usize>(
     thread_pool: Option<commonware_parallel::ThreadPool>,
 ) -> Result<db::Db<E, J, I, H, U, N>, qmdb::Error>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     U: Update + Send + Sync + 'static,
     I: crate::index::Unordered<Value = Location>,
     H: Hasher,
@@ -211,8 +210,8 @@ where
 
     let current_db = db::Db {
         any,
-        status,
-        grafted_mmr,
+        status: crate::qmdb::current::batch::BitmapBatch::Base(Arc::new(status)),
+        grafted_mmr: crate::mmr::batch::MerkleizedBatch::Base(grafted_mmr),
         metadata: AsyncMutex::new(metadata),
         thread_pool,
         root,
@@ -228,7 +227,7 @@ where
 
 impl<E, K, V, H, T, const N: usize> Database for CurrentUnorderedFixedDb<E, K, V, H, T, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher,
@@ -276,7 +275,7 @@ where
 
 impl<E, K, V, H, T, const N: usize> Database for CurrentUnorderedVariableDb<E, K, V, H, T, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher,
@@ -325,7 +324,7 @@ where
 
 impl<E, K, V, H, T, const N: usize> Database for CurrentOrderedFixedDb<E, K, V, H, T, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Array,
     V: FixedValue + 'static,
     H: Hasher,
@@ -373,7 +372,7 @@ where
 
 impl<E, K, V, H, T, const N: usize> Database for CurrentOrderedVariableDb<E, K, V, H, T, N>
 where
-    E: Storage + Clock + Metrics,
+    E: Context,
     K: Key,
     V: VariableValue + 'static,
     H: Hasher,
@@ -430,7 +429,7 @@ macro_rules! impl_current_resolver {
         impl<E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
             for std::sync::Arc<$db<E, K, V, H, T, N>>
         where
-            E: Storage + Clock + Metrics,
+            E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -474,7 +473,7 @@ macro_rules! impl_current_resolver {
                 >,
             >
         where
-            E: Storage + Clock + Metrics,
+            E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
@@ -519,7 +518,7 @@ macro_rules! impl_current_resolver {
                 >,
             >
         where
-            E: Storage + Clock + Metrics,
+            E: Context,
             K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,

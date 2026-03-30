@@ -824,7 +824,7 @@ mod tests {
     use commonware_utils::{
         channel::{mpsc, oneshot},
         sync::Mutex,
-        NZUsize,
+        NZUsize, SystemTimeExt,
     };
     use futures::{
         future::{pending, ready},
@@ -886,6 +886,17 @@ mod tests {
             // Ensure slept duration has elapsed
             let elapsed = now.elapsed().unwrap();
             assert!(elapsed >= Duration::from_millis(100));
+        });
+    }
+
+    fn test_clock_sleep_until_far_future<R: Runner>(runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            let sleep = context.sleep_until(SystemTime::limit());
+            let result = context.timeout(Duration::from_millis(1), sleep).await;
+            assert!(matches!(result, Err(Error::Timeout)));
         });
     }
 
@@ -3351,6 +3362,12 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_clock_sleep_until_far_future() {
+        let executor = deterministic::Runner::default();
+        test_clock_sleep_until_far_future(executor);
+    }
+
+    #[test]
     fn test_deterministic_clock_timeout() {
         let executor = deterministic::Runner::default();
         test_clock_timeout(executor);
@@ -3721,6 +3738,12 @@ mod tests {
     fn test_tokio_clock_sleep_until() {
         let executor = tokio::Runner::default();
         test_clock_sleep_until(executor);
+    }
+
+    #[test]
+    fn test_tokio_clock_sleep_until_far_future() {
+        let executor = tokio::Runner::default();
+        test_clock_sleep_until_far_future(executor);
     }
 
     #[test]

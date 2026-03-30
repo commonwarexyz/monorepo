@@ -160,15 +160,18 @@ check-stability *args='':
     for name in "${LEVEL_NAMES[@]:1}"; do
         ln -sf "$(pwd)/scripts/rustc_stability_wrapper.sh" "target/stability-wrappers/wrapper_${name}"
     done
+    # Save and clear RUSTC_WRAPPER so Cargo doesn't nest it outside the workspace
+    # wrapper (which breaks sccache). The wrapper script invokes it internally.
+    export COMMONWARE_RUSTC_WRAPPER="${RUSTC_WRAPPER:-}"
     if [ -z "$level" ]; then
         for name in "${LEVEL_NAMES[@]:1}"; do
             echo "Checking commonware_stability_${name}..."
-            COMMONWARE_STABILITY_LEVEL="${name}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${name}" cargo check --workspace --lib $excludes $extra_args || exit 1
+            COMMONWARE_STABILITY_LEVEL="${name}" RUSTC_WRAPPER="" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${name}" cargo check --workspace --lib $excludes $extra_args || exit 1
         done
         echo "All stability levels pass!"
         echo "Checking for unmarked public items..."
         ./scripts/find_unstable_public.sh $extra_args
     else
         echo "Checking commonware_stability_${LEVEL_NAMES[$level]}..."
-        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib $excludes $extra_args
+        COMMONWARE_STABILITY_LEVEL="${LEVEL_NAMES[$level]}" RUSTC_WRAPPER="" RUSTC_WORKSPACE_WRAPPER="target/stability-wrappers/wrapper_${LEVEL_NAMES[$level]}" cargo check --workspace --lib $excludes $extra_args
     fi

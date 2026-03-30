@@ -133,7 +133,7 @@ const fn cache_line_size() -> usize {
 
 /// Policy for sizing each thread's cache within a buffer pool size class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BufferPoolThreadCache {
+pub(crate) enum BufferPoolThreadCacheConfig {
     /// Disable thread-local caching and route all reuse through the shared global freelist.
     Disabled,
     /// Use an exact per-thread cache size for every size class.
@@ -164,11 +164,11 @@ pub struct BufferPoolConfig {
     pub alignment: NonZeroUsize,
     /// Policy for sizing the per-thread local cache in each size class.
     ///
-    /// [`BufferPoolThreadCache::Disabled`] bypasses thread-local caches.
-    /// [`BufferPoolThreadCache::Fixed`] uses an exact per-thread cache size.
-    /// [`BufferPoolThreadCache::ForParallelism`] derives a size from the
+    /// [`Self::with_thread_cache_disabled`] bypasses thread-local caches.
+    /// [`Self::with_thread_cache_capacity`] uses an exact per-thread cache size.
+    /// [`Self::with_thread_cache_for_parallelism`] derives a size from the
     /// expected level of parallelism.
-    pub thread_cache_capacity: BufferPoolThreadCache,
+    pub(crate) thread_cache_config: BufferPoolThreadCacheConfig,
 }
 
 impl BufferPoolConfig {
@@ -188,7 +188,7 @@ impl BufferPoolConfig {
             max_per_class: NZUsize!(4096),
             prefill: false,
             alignment: cache_line,
-            thread_cache_capacity: BufferPoolThreadCache::Disabled,
+            thread_cache_config: BufferPoolThreadCacheConfig::Disabled,
         }
     }
 
@@ -205,7 +205,7 @@ impl BufferPoolConfig {
             max_per_class: NZUsize!(64),
             prefill: false,
             alignment: page,
-            thread_cache_capacity: BufferPoolThreadCache::Disabled,
+            thread_cache_config: BufferPoolThreadCacheConfig::Disabled,
         }
     }
 
@@ -235,7 +235,7 @@ impl BufferPoolConfig {
 
     /// Returns a copy of this config with an explicit per-thread cache size.
     pub const fn with_thread_cache_capacity(mut self, thread_cache_capacity: NonZeroUsize) -> Self {
-        self.thread_cache_capacity = BufferPoolThreadCache::Fixed(thread_cache_capacity);
+        self.thread_cache_config = BufferPoolThreadCacheConfig::Fixed(thread_cache_capacity);
         self
     }
 
@@ -245,13 +245,13 @@ impl BufferPoolConfig {
     /// `max_per_class` value. The derived size reserves half the class budget for the shared
     /// freelist and clamps the local cache to `[1, 8]`.
     pub const fn with_thread_cache_for_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
-        self.thread_cache_capacity = BufferPoolThreadCache::ForParallelism(parallelism);
+        self.thread_cache_config = BufferPoolThreadCacheConfig::ForParallelism(parallelism);
         self
     }
 
     /// Returns a copy of this config with thread-local caching disabled.
     pub const fn with_thread_cache_disabled(mut self) -> Self {
-        self.thread_cache_capacity = BufferPoolThreadCache::Disabled;
+        self.thread_cache_config = BufferPoolThreadCacheConfig::Disabled;
         self
     }
 
@@ -328,7 +328,8 @@ impl BufferPoolConfig {
             self.pool_min_size,
             self.min_size
         );
-        if let BufferPoolThreadCache::Fixed(thread_cache_capacity) = self.thread_cache_capacity {
+        if let BufferPoolThreadCacheConfig::Fixed(thread_cache_capacity) = self.thread_cache_config
+        {
             assert!(
                 thread_cache_capacity <= self.max_per_class,
                 "thread_cache_capacity ({}) must be <= max_per_class ({})",
@@ -379,10 +380,12 @@ impl BufferPoolConfig {
     /// cross-thread reuse remains effective, and are clamped to `[1, 8]` to cap
     /// per-thread retention.
     fn resolve_thread_cache_capacity(&self) -> usize {
-        match self.thread_cache_capacity {
-            BufferPoolThreadCache::Disabled => 0,
-            BufferPoolThreadCache::Fixed(thread_cache_capacity) => thread_cache_capacity.get(),
-            BufferPoolThreadCache::ForParallelism(parallelism) => {
+        match self.thread_cache_config {
+            BufferPoolThreadCacheConfig::Disabled => 0,
+            BufferPoolThreadCacheConfig::Fixed(thread_cache_capacity) => {
+                thread_cache_capacity.get()
+            }
+            BufferPoolThreadCacheConfig::ForParallelism(parallelism) => {
                 let max_per_class = self.max_per_class.get();
                 let effective_threads = parallelism.get().min(max_per_class);
                 (max_per_class / (2 * effective_threads)).clamp(1, 8)
@@ -616,7 +619,7 @@ impl Drop for TlsSizeClassCache {
 // any synchronization. The cost is that vectors can accumulate holes over time
 // because ids are not recycled.
 thread_local! {
-    static TLS_CLASS_CACHES: UnsafeCell<Vec<Option<TlsSizeClassCache>>> =
+    static TLS_SIZE_CLASS_CACHES: UnsafeCell<Vec<Option<TlsSizeClassCache>>> =
         const { UnsafeCell::new(Vec::new()) };
 }
 
@@ -629,19 +632,31 @@ thread_local! {
 // cost of leaving holes in `TLS_CLASS_CACHES` over process lifetime.
 static NEXT_SIZE_CLASS_ID: AtomicUsize = AtomicUsize::new(0);
 
-/// Facade over the thread-local cache keyed by `SizeClass::class_id`.
+/// Utilities for managing the calling thread's local [`BufferPool`] caches.
 ///
-/// Each thread owns a sparse `Vec<Option<TlsSizeClassCache>>`, with one
-/// per-size-class cache allocated lazily on first use. Thread exit naturally
-/// flushes cached buffers back to the shared global freelist because
-/// `TlsSizeClassCache` drains itself in `Drop`.
+/// Internally, each thread owns a sparse `Vec<Option<TlsSizeClassCache>>`
+/// keyed by `SizeClass::class_id`, with one per-size-class cache allocated
+/// lazily on first use. Thread exit naturally flushes cached buffers back to
+/// the shared global freelist because `TlsSizeClassCache` drains itself in
+/// `Drop`.
 ///
 /// This type exists to keep the unsafe TLS access localized. All steady-state
 /// cache operations (`pop`, `push`, and `refill`) go through this facade rather
 /// than free functions over the `thread_local!` static.
-pub(super) struct TlsCache;
+pub struct BufferPoolThreadCache;
 
-impl TlsCache {
+impl BufferPoolThreadCache {
+    /// Flushes all local caches for the current thread into the global freelists.
+    pub fn flush() {
+        TLS_SIZE_CLASS_CACHES.with(|bins| {
+            // SAFETY: this TLS value is only ever accessed by the current thread.
+            let bins = unsafe { &mut *bins.get() };
+            for cache in bins.iter_mut() {
+                let _ = cache.take();
+            }
+        });
+    }
+
     /// Pops a cached buffer from the current thread's local cache for the
     /// given size class. Returns `None` if the local cache is empty.
     #[inline]
@@ -691,7 +706,7 @@ impl TlsCache {
         capacity: usize,
         f: impl FnOnce(&mut TlsSizeClassCache) -> R,
     ) -> R {
-        TLS_CLASS_CACHES.with(|bins| {
+        TLS_SIZE_CLASS_CACHES.with(|bins| {
             // SAFETY: this TLS value is only ever accessed by the current thread.
             let bins = unsafe { &mut *bins.get() };
             if class_id >= bins.len() {
@@ -743,7 +758,7 @@ impl BufferPoolInner {
         let class = &self.classes[class_index];
 
         // Fast path: reuse from thread-local cache (no atomics, no metrics).
-        if let Some(entry) = TlsCache::pop(class) {
+        if let Some(entry) = BufferPoolThreadCache::pop(class) {
             return Some(Allocation {
                 buffer: entry.buffer,
                 is_new: false,
@@ -754,7 +769,7 @@ impl BufferPoolInner {
         // Medium path: refill from global freelist.
         let target = (class.thread_cache_capacity / 2).max(1);
         if let Some(buffer) = class.global.pop() {
-            TlsCache::refill(class, target);
+            BufferPoolThreadCache::refill(class, target);
             return Some(Allocation {
                 buffer,
                 is_new: false,
@@ -1061,7 +1076,7 @@ mod tests {
             min_size: NZUsize!(min_size),
             max_size: NZUsize!(max_size),
             max_per_class: NZUsize!(max_per_class),
-            thread_cache_capacity: BufferPoolThreadCache::ForParallelism(NZUsize!(1)),
+            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
             prefill: false,
             alignment: NZUsize!(page_size()),
         }
@@ -1087,7 +1102,7 @@ mod tests {
     /// Helper to get the number of free buffers parked in the current thread's
     /// local cache for a size class.
     fn get_local_len(class: &SizeClass) -> usize {
-        TLS_CLASS_CACHES.with(|bins| {
+        TLS_SIZE_CLASS_CACHES.with(|bins| {
             // SAFETY: this TLS value is only ever accessed by the current thread.
             let bins = unsafe { &*bins.get() };
             bins.get(class.class_id)
@@ -1126,7 +1141,7 @@ mod tests {
             min_size: NZUsize!(3000),
             max_size: NZUsize!(8192),
             max_per_class: NZUsize!(10),
-            thread_cache_capacity: BufferPoolThreadCache::ForParallelism(NZUsize!(1)),
+            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
             prefill: false,
             alignment: NZUsize!(page_size()),
         };
@@ -1250,7 +1265,7 @@ mod tests {
                 min_size: NZUsize!(512),
                 max_size: NZUsize!(1024),
                 max_per_class: NZUsize!(2),
-                thread_cache_capacity: BufferPoolThreadCache::ForParallelism(NZUsize!(1)),
+                thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
                 prefill: false,
                 alignment: NZUsize!(128),
             },
@@ -1299,7 +1314,7 @@ mod tests {
                 min_size: page,
                 max_size: page,
                 max_per_class: NZUsize!(5),
-                thread_cache_capacity: BufferPoolThreadCache::ForParallelism(NZUsize!(1)),
+                thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
                 prefill: true,
                 alignment: page,
             },
@@ -1325,8 +1340,8 @@ mod tests {
         assert_eq!(config.max_size.get(), 64 * 1024);
         assert_eq!(config.max_per_class.get(), 4096);
         assert_eq!(
-            config.thread_cache_capacity,
-            BufferPoolThreadCache::Disabled
+            config.thread_cache_config,
+            BufferPoolThreadCacheConfig::Disabled
         );
         assert!(!config.prefill);
         assert_eq!(config.alignment.get(), cache_line_size());
@@ -1341,8 +1356,8 @@ mod tests {
         assert_eq!(config.max_size.get(), 8 * 1024 * 1024);
         assert_eq!(config.max_per_class.get(), 64);
         assert_eq!(
-            config.thread_cache_capacity,
-            BufferPoolThreadCache::Disabled
+            config.thread_cache_config,
+            BufferPoolThreadCacheConfig::Disabled
         );
         assert!(!config.prefill);
         assert_eq!(config.alignment.get(), page_size());
@@ -1375,8 +1390,8 @@ mod tests {
         assert_eq!(config.max_size.get(), 128 * 1024);
         assert_eq!(config.max_per_class.get(), 64);
         assert_eq!(
-            config.thread_cache_capacity,
-            BufferPoolThreadCache::Fixed(NZUsize!(8))
+            config.thread_cache_config,
+            BufferPoolThreadCacheConfig::Fixed(NZUsize!(8))
         );
         assert!(config.prefill);
         // Storage profile alignment stays page-sized unless explicitly changed.
@@ -1390,8 +1405,8 @@ mod tests {
             .with_min_size(NZUsize!(256));
         aligned.validate();
         assert_eq!(
-            aligned.thread_cache_capacity,
-            BufferPoolThreadCache::ForParallelism(NZUsize!(4))
+            aligned.thread_cache_config,
+            BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(4))
         );
         assert_eq!(aligned.alignment.get(), 256);
         assert_eq!(aligned.min_size.get(), 256);
@@ -1445,6 +1460,49 @@ mod tests {
     }
 
     #[test]
+    fn test_thread_cache_flush_moves_local_entries_to_global() {
+        let page = page_size();
+        let mut registry = test_registry();
+        let pool = BufferPool::new(
+            test_config(page, page * 2, 8).with_thread_cache_capacity(NZUsize!(4)),
+            &mut registry,
+        );
+
+        // Use two distinct size classes so the test exercises the whole TLS
+        // registry, not just a single per-class cache entry.
+        let small_index = pool.inner.config.class_index(page).unwrap();
+        let large_index = pool.inner.config.class_index(page + 1).unwrap();
+        let small_class = &pool.inner.classes[small_index];
+        let large_class = &pool.inner.classes[large_index];
+
+        // Return one buffer from each class to the current thread. With local
+        // caching enabled, both drops should stay in the thread-local bins.
+        let small = pool.try_alloc(page).expect("tracked allocation");
+        let large = pool.try_alloc(page + 1).expect("tracked allocation");
+        drop(small);
+        drop(large);
+
+        // Before flushing, both buffers are only visible via the current
+        // thread's local caches, nothing has been pushed to the global queues.
+        assert_eq!(get_local_len(small_class), 1);
+        assert_eq!(get_local_len(large_class), 1);
+        assert_eq!(small_class.global.len(), 0);
+        assert_eq!(large_class.global.len(), 0);
+
+        // Flushing should walk the entire TLS registry, drop every local cache,
+        // and let each cache's drop implementation return its buffers to the
+        // shared global freelists.
+        BufferPoolThreadCache::flush();
+
+        // After flush, the current thread retains nothing locally and both
+        // buffers are once again visible through their class-global queues.
+        assert_eq!(get_local_len(small_class), 0);
+        assert_eq!(get_local_len(large_class), 0);
+        assert_eq!(small_class.global.len(), 1);
+        assert_eq!(large_class.global.len(), 1);
+    }
+
+    #[test]
     fn test_config_with_budget_bytes() {
         // Classes: 4, 8, 16 (sum = 28). Budget 280 => max_per_class = 10.
         let config = BufferPoolConfig {
@@ -1452,7 +1510,7 @@ mod tests {
             min_size: NZUsize!(4),
             max_size: NZUsize!(16),
             max_per_class: NZUsize!(1),
-            thread_cache_capacity: BufferPoolThreadCache::ForParallelism(NZUsize!(1)),
+            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
             prefill: false,
             alignment: NZUsize!(4),
         }
@@ -1465,7 +1523,7 @@ mod tests {
             min_size: NZUsize!(4),
             max_size: NZUsize!(16),
             max_per_class: NZUsize!(1),
-            thread_cache_capacity: BufferPoolThreadCache::ForParallelism(NZUsize!(1)),
+            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
             prefill: false,
             alignment: NZUsize!(4),
         }
@@ -1494,7 +1552,7 @@ mod tests {
             min_size: NZUsize!(8),
             max_size: NZUsize!(4),
             max_per_class: NZUsize!(1),
-            thread_cache_capacity: BufferPoolThreadCache::ForParallelism(NZUsize!(1)),
+            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
             prefill: false,
             alignment: NZUsize!(4),
         };
@@ -1508,7 +1566,7 @@ mod tests {
             min_size: NZUsize!(8),
             max_size: NZUsize!(12),
             max_per_class: NZUsize!(1),
-            thread_cache_capacity: BufferPoolThreadCache::ForParallelism(NZUsize!(1)),
+            thread_cache_config: BufferPoolThreadCacheConfig::ForParallelism(NZUsize!(1)),
             prefill: false,
             alignment: NZUsize!(4),
         };
@@ -1629,7 +1687,7 @@ mod tests {
 
         // A short global freelist should refill only what exists, then stop.
         class.push_global(AlignedBuffer::new(class.size, class.alignment));
-        TlsCache::refill(&class, MIN_THREAD_CACHE_BATCHING_CAPACITY);
+        BufferPoolThreadCache::refill(&class, MIN_THREAD_CACHE_BATCHING_CAPACITY);
 
         assert_eq!(get_local_len(&class), 1);
         assert_eq!(class.global.len(), 0);
