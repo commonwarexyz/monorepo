@@ -360,15 +360,14 @@ mod tests {
                                         else {
                                             return;
                                         };
-                                        let delay = if sent.len() == recipients.len() {
+                                        if sent.len() == recipients.len() {
                                             // Compare to expected.
                                             sent.sort();
                                             assert_eq!(sent, recipients);
                                             Duration::from_secs(10)
                                         } else {
                                             Duration::from_millis(100)
-                                        };
-                                        delay
+                                        }
                                     }
                                 };
 
