@@ -56,8 +56,8 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
     })
 }
 
-#[derive(Clone, Debug)]
 /// Configuration for a [Storage].
+#[derive(Clone, Debug)]
 pub struct Config {
     /// Where to store blobs.
     pub storage_directory: PathBuf,
@@ -254,6 +254,7 @@ impl Clone for Blob {
 }
 
 impl Blob {
+    /// Construct a blob handle around an already-open file and shared io_uring loop.
     fn new(
         partition: String,
         name: &[u8],

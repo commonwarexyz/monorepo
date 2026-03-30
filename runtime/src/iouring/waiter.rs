@@ -100,7 +100,11 @@ pub enum WaiterState {
         /// requested. `None` means this request has no timeout deadline.
         target_tick: Option<Tick>,
     },
-    /// Cancellation was requested and cancel SQE was submitted.
+    /// Cancellation was requested.
+    ///
+    /// If the request still has an operation SQE in flight, the loop stages an
+    /// async cancel. If the request is only parked in the ready queue, the loop
+    /// completes it locally with timeout when that entry is revisited.
     CancelRequested,
 }
 
@@ -108,7 +112,10 @@ pub enum WaiterState {
 struct Waiter {
     /// Stable identity of this waiter slot instance.
     id: WaiterId,
+    /// Lifecycle state for the logical request stored in this slot.
     state: WaiterState,
+    /// Whether the logical request currently has an operation SQE in flight.
+    in_flight: bool,
     /// The active request state machine.
     request: ActiveRequest,
 }
@@ -167,6 +174,7 @@ impl Waiters {
         let replaced = self.entries[index].replace(Waiter {
             id,
             state: WaiterState::Active { target_tick },
+            in_flight: false,
             request,
         });
         assert!(replaced.is_none(), "free slot should not contain waiter");
@@ -238,6 +246,9 @@ impl Waiters {
             return None;
         }
 
+        // The operation CQE retires the currently in-flight SQE, regardless of
+        // whether the request completes or is requeued for another one.
+        slot.in_flight = false;
         let state = slot.state;
         Some((&mut slot.request, state, waiter_id))
     }
@@ -253,6 +264,30 @@ impl Waiters {
             return None;
         }
         Some((&mut slot.request, slot.state))
+    }
+
+    /// Mark a waiter as having an operation SQE in flight.
+    ///
+    /// Returns `true` when the waiter exists and the generation matches.
+    pub fn mark_in_flight(&mut self, waiter_id: WaiterId) -> bool {
+        let index = waiter_id.index() as usize;
+        let Some(slot) = self.entries.get_mut(index).and_then(Option::as_mut) else {
+            return false;
+        };
+        if slot.id != waiter_id {
+            return false;
+        }
+        slot.in_flight = true;
+        true
+    }
+
+    /// Return whether a waiter currently has an operation SQE in flight.
+    pub fn is_in_flight(&self, waiter_id: WaiterId) -> bool {
+        let index = waiter_id.index() as usize;
+        self.entries
+            .get(index)
+            .and_then(Option::as_ref)
+            .is_some_and(|slot| slot.id == waiter_id && slot.in_flight)
     }
 
     /// Remove a completed request slot by waiter id.
@@ -285,6 +320,8 @@ mod tests {
         sync::Arc,
     };
 
+    /// Build a `Sync` request backed by a socket fd so waiter tests can
+    /// exercise slot lifecycle without touching the filesystem.
     fn make_sync_request() -> (ActiveRequest, oneshot::Receiver<std::io::Result<()>>) {
         let (sock_left, _sock_right) =
             std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
@@ -300,6 +337,8 @@ mod tests {
 
     #[test]
     fn test_waiter_id_encoding_and_generation_wrap() {
+        // Verify waiter ids round-trip through user_data encoding and wrap their generation field
+        // without corrupting the slot index bits.
         let wrapped = WaiterId::new(7, (WaiterId::GENERATION_MASK as u32).wrapping_add(5));
         assert_eq!(wrapped.generation(), 4);
 
@@ -321,11 +360,13 @@ mod tests {
 
     #[test]
     fn test_waiters_lifecycle_and_slot_reuse() {
+        // Verify waiter insertion, completion, removal, and slot reuse all preserve generations.
         let mut waiters = Waiters::new(3);
         assert_eq!(waiters.entries.len(), 3);
         assert_eq!(waiters.len(), 0);
         assert!(waiters.is_empty());
 
+        // Populate two slots so the test can later free and reuse one of them.
         let (req0, _rx0) = make_sync_request();
         let (req1, _rx1) = make_sync_request();
         let id0 = waiters.insert(req0, Some(5));
@@ -353,6 +394,7 @@ mod tests {
             id1.generation().wrapping_add(1) & (WaiterId::GENERATION_MASK as u32)
         );
 
+        // All live waiters should still complete and remove cleanly after slot reuse.
         let _ = waiters.on_cqe(id0.user_data(), 0);
         let _ = waiters.remove(id0);
         let _ = waiters.on_cqe(id2.user_data(), 0);
@@ -362,6 +404,8 @@ mod tests {
 
     #[test]
     fn test_waiters_cancel_paths() {
+        // Verify cancel requests transition waiter state, ignore cancel CQEs for completion, and
+        // discard late cancel CQEs once the original operation has already completed.
         let mut waiters = Waiters::new(3);
 
         let (req, _rx) = make_sync_request();
@@ -396,7 +440,156 @@ mod tests {
     }
 
     #[test]
+    fn test_waiters_track_in_flight_state() {
+        // Verify `mark_in_flight` tracks a staged operation and that the bit is
+        // cleared again when the matching op CQE is processed.
+        let mut waiters = Waiters::new(1);
+        let (req, _rx) = make_sync_request();
+        let waiter_id = waiters.insert(req, Some(4));
+
+        assert!(!waiters.is_in_flight(waiter_id));
+        assert!(waiters.mark_in_flight(waiter_id));
+        assert!(waiters.is_in_flight(waiter_id));
+
+        let _ = waiters
+            .on_cqe(waiter_id.user_data(), 0)
+            .expect("missing op completion");
+        assert!(!waiters.is_in_flight(waiter_id));
+    }
+
+    #[test]
+    fn test_waiters_reject_stale_in_flight_queries() {
+        // Verify stale waiter ids cannot mark or observe in-flight state after
+        // their slot has been recycled to a new generation.
+        let mut waiters = Waiters::new(1);
+        let (req0, _rx0) = make_sync_request();
+        let stale_id = waiters.insert(req0, Some(1));
+        let _ = waiters.remove(stale_id).expect("missing original waiter");
+
+        let (req1, _rx1) = make_sync_request();
+        let active_id = waiters.insert(req1, Some(2));
+        assert_ne!(active_id, stale_id);
+
+        assert!(!waiters.mark_in_flight(stale_id));
+        assert!(!waiters.is_in_flight(stale_id));
+        assert!(waiters.mark_in_flight(active_id));
+        assert!(waiters.is_in_flight(active_id));
+    }
+
+    #[test]
+    fn test_waiters_reject_out_of_range_and_empty_slot_operations() {
+        // Verify cancel and in-flight tracking reject waiter ids that point
+        // outside the table or at currently empty slots.
+        let mut waiters = Waiters::new(1);
+        let out_of_range = WaiterId::new(7, 0);
+        assert!(!waiters.cancel(out_of_range));
+        assert!(!waiters.mark_in_flight(out_of_range));
+
+        let empty_slot = WaiterId::new(0, 0);
+        assert!(!waiters.cancel(empty_slot));
+        assert!(!waiters.mark_in_flight(empty_slot));
+    }
+
+    #[test]
+    fn test_waiters_cancel_stage_only_when_in_flight() {
+        // Verify timeout processing can distinguish between:
+        // - a waiter whose current SQE is still in flight
+        // - a waiter that is only parked in the ready queue
+        let mut waiters = Waiters::new(2);
+
+        // First build a waiter that still has an operation SQE outstanding.
+        let (active_req, _active_rx) = make_sync_request();
+        let active = waiters.insert(active_req, Some(2));
+        assert!(waiters.mark_in_flight(active));
+        assert!(waiters.cancel(active));
+        assert!(waiters.is_in_flight(active));
+        let (_, active_state) = waiters.get_mut(active).expect("active waiter missing");
+        assert!(matches!(active_state, WaiterState::CancelRequested));
+
+        // Then build a waiter that has been canceled before any SQE was staged.
+        let (ready_req, _ready_rx) = make_sync_request();
+        let ready = waiters.insert(ready_req, Some(3));
+        assert!(waiters.cancel(ready));
+        assert!(!waiters.is_in_flight(ready));
+        let (_, ready_state) = waiters.get_mut(ready).expect("ready waiter missing");
+        assert!(matches!(ready_state, WaiterState::CancelRequested));
+    }
+
+    #[test]
+    fn test_waiters_accept_expected_cancel_cqe_results() {
+        // Verify the expected kernel cancel CQE results leave the waiter alive
+        // for the original operation CQE to finish it later.
+        for result in [0, -libc::EALREADY, -libc::ENOENT] {
+            let mut waiters = Waiters::new(1);
+            let (req, _rx) = make_sync_request();
+            let waiter_id = waiters.insert(req, Some(2));
+            assert!(waiters.mark_in_flight(waiter_id));
+            assert!(waiters.cancel(waiter_id));
+
+            assert!(waiters
+                .on_cqe(waiter_id.cancel_user_data(), result)
+                .is_none());
+            let (_, state) = waiters
+                .get_mut(waiter_id)
+                .expect("waiter should remain tracked");
+            assert!(matches!(state, WaiterState::CancelRequested));
+        }
+    }
+
+    #[test]
+    fn test_waiters_tolerate_unexpected_negative_cancel_result() {
+        // Verify unexpected negative cancel CQEs are ignored rather than
+        // corrupting waiter state.
+        let mut waiters = Waiters::new(1);
+        let (req, _rx) = make_sync_request();
+        let waiter_id = waiters.insert(req, Some(2));
+        assert!(waiters.mark_in_flight(waiter_id));
+        assert!(waiters.cancel(waiter_id));
+
+        assert!(waiters
+            .on_cqe(waiter_id.cancel_user_data(), -libc::EPERM)
+            .is_none());
+        let (_, state) = waiters
+            .get_mut(waiter_id)
+            .expect("waiter should remain tracked");
+        assert!(matches!(state, WaiterState::CancelRequested));
+    }
+
+    #[test]
+    fn test_waiters_cancel_cqe_einval_panics() {
+        // Verify `EINVAL` remains a hard invariant failure because the kernel
+        // rejected our async cancel SQE.
+        let mut waiters = Waiters::new(1);
+        let (req, _rx) = make_sync_request();
+        let waiter_id = waiters.insert(req, Some(2));
+        assert!(waiters.mark_in_flight(waiter_id));
+        assert!(waiters.cancel(waiter_id));
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _ = waiters.on_cqe(waiter_id.cancel_user_data(), -libc::EINVAL);
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_waiters_ignore_stale_get_mut_and_remove() {
+        // Verify stale waiter ids cannot observe or remove a reused slot.
+        let mut waiters = Waiters::new(1);
+        let (req0, _rx0) = make_sync_request();
+        let waiter_id = waiters.insert(req0, Some(1));
+        let _ = waiters.remove(waiter_id).expect("missing waiter");
+
+        let (req1, _rx1) = make_sync_request();
+        let reused_id = waiters.insert(req1, Some(2));
+        assert_ne!(reused_id, waiter_id);
+        assert!(waiters.get_mut(waiter_id).is_none());
+        assert!(waiters.remove(waiter_id).is_none());
+    }
+
+    #[test]
     fn test_waiters_insert_and_cancel_invariants() {
+        // Verify waiter capacity is enforced and that cancel remains valid even for waiters that
+        // were inserted without a deadline.
         let mut waiters = Waiters::new(2);
 
         // Inserting beyond configured capacity should panic.

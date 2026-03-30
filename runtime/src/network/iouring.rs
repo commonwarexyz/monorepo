@@ -41,6 +41,7 @@ use tracing::warn;
 /// Default read buffer size (64 KB).
 const DEFAULT_READ_BUFFER_SIZE: usize = 64 * 1024;
 
+/// Configuration for the io_uring network backend.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
@@ -84,8 +85,8 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone)]
 /// [crate::Network] implementation that uses io_uring to do async I/O.
+#[derive(Clone)]
 pub struct Network {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
@@ -306,6 +307,7 @@ pub struct Sink {
 }
 
 impl Sink {
+    /// Construct a sink that submits logical send requests through one io_uring loop.
     const fn new(fd: Arc<OwnedFd>, submitter: iouring::Submitter, timeout: Duration) -> Self {
         Self {
             fd,
@@ -360,6 +362,7 @@ pub struct Stream {
 }
 
 impl Stream {
+    /// Construct a stream with an optional internal read buffer.
     fn new(
         fd: Arc<OwnedFd>,
         submitter: iouring::Submitter,
@@ -383,7 +386,8 @@ impl Stream {
     /// `offset` is the byte offset into `buffer` where received data should
     /// start. `len` is the number of bytes to read starting at that offset.
     ///
-    /// Returns the buffer and either total bytes written (from offset 0) or an error.
+    /// Returns the buffer and either the number of bytes read for this
+    /// invocation or an error.
     async fn submit_recv(
         &self,
         buffer: IoBufMut,
@@ -400,8 +404,8 @@ impl Stream {
                 fd: self.fd.clone(),
                 buf: buffer,
                 // The active request tracks progress with `received` starting
-                // at `offset`, so `len` is the total target (offset + bytes to read).
-                len: offset + len,
+                // at `offset`, so `target_len` is the total target.
+                target_len: offset + len,
                 received: offset,
                 exact,
                 deadline: Some(deadline),
