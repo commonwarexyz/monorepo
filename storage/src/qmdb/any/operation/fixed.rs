@@ -1,5 +1,5 @@
 use crate::{
-    mmr::Location,
+    merkle::{Family, Location},
     qmdb::any::{
         operation::{
             update, Operation, OperationCodec, Update, COMMIT_CONTEXT, DELETE_CONTEXT,
@@ -44,15 +44,16 @@ const fn total_op_size<K: Array, V: FixedSize, S: FixedSize>() -> usize {
     )
 }
 
-impl<V, S> OperationCodec<S> for FixedEncoding<V>
+impl<F, V, S> OperationCodec<F, S> for FixedEncoding<V>
 where
+    F: Family,
     S::Key: Array + Codec,
     V: FixedValue,
     S: Update<Value = V, ValueEncoding = Self> + CodecFixed<Cfg = ()>,
 {
     type ReadCfg = ();
 
-    fn write_operation(op: &Operation<S>, buf: &mut impl BufMut) {
+    fn write_operation(op: &Operation<F, S>, buf: &mut impl BufMut) {
         let total = total_op_size::<S::Key, V, S>();
         match op {
             Operation::Delete(k) => {
@@ -79,7 +80,10 @@ where
         }
     }
 
-    fn read_operation(buf: &mut impl Buf, cfg: &Self::ReadCfg) -> Result<Operation<S>, CodecError> {
+    fn read_operation(
+        buf: &mut impl Buf,
+        cfg: &Self::ReadCfg,
+    ) -> Result<Operation<F, S>, CodecError> {
         let total = total_op_size::<S::Key, V, S>();
         at_least(buf, total)?;
 
@@ -118,8 +122,9 @@ where
 }
 
 // FixedSize for ordered fixed operations.
-impl<K, V> FixedSize for Operation<update::Ordered<K, FixedEncoding<V>>>
+impl<F, K, V> FixedSize for Operation<F, update::Ordered<K, FixedEncoding<V>>>
 where
+    F: Family,
     K: Array,
     V: FixedValue,
     update::Ordered<K, FixedEncoding<V>>: FixedSize,
@@ -128,8 +133,9 @@ where
 }
 
 // FixedSize for unordered fixed operations.
-impl<K, V> FixedSize for Operation<update::Unordered<K, FixedEncoding<V>>>
+impl<F, K, V> FixedSize for Operation<F, update::Unordered<K, FixedEncoding<V>>>
 where
+    F: Family,
     K: Array,
     V: FixedValue,
     update::Unordered<K, FixedEncoding<V>>: FixedSize,

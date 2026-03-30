@@ -58,13 +58,15 @@ use crate::{
             Contiguous, Mutable, Reader,
         },
     },
-    mmr::{journaled::Config as MmrConfig, Location, Proof},
-    qmdb::{any::VariableValue, operation::Committable, Error},
+    merkle::mmr::{self, journaled::Config as MmrConfig, Location, Proof},
+    qmdb::{any::VariableValue, operation::Committable},
     Context,
 };
 use commonware_cryptography::Hasher;
 use std::num::NonZeroU64;
 use tracing::{debug, warn};
+
+type Error = crate::qmdb::Error<mmr::Family>;
 
 pub mod batch;
 mod operation;
@@ -81,7 +83,8 @@ pub struct Config<C> {
 }
 
 /// A keyless QMDB for variable length data.
-type Journal<E, V, H> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H>;
+type Journal<E, V, H> =
+    authenticated::Journal<crate::merkle::mmr::Family, E, ContiguousJournal<E, Operation<V>>, H>;
 
 /// A keyless authenticated database for variable-length data.
 pub struct Keyless<E: Context, V: VariableValue, H: Hasher> {
@@ -773,7 +776,7 @@ mod test {
             assert!(matches!(
                 db.historical_proof(db.bounds().await.end + 1, Location::new(5), NZU64!(10))
                     .await,
-                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Merkle(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
 
             let root = db.root();

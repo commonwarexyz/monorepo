@@ -142,7 +142,7 @@ fn test_config(
 ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
-        mmr_config: MmrConfig {
+        merkle_config: MmrConfig {
             journal_partition: format!("{test_name}-mmr"),
             metadata_partition: format!("{test_name}-meta"),
             items_per_blob: NZU64!(3),
@@ -168,7 +168,7 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let hasher = Standard::<Sha256>::new();
         let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
-        let mut db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
+        let mut db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(context.clone(), cfg)
             .await
             .expect("Failed to init source db");
         let mut restarts = 0usize;
@@ -334,7 +334,7 @@ fn fuzz(input: FuzzInput) {
                     drop(db);
 
                     let cfg = test_config("qmdb-any-variable-fuzz-test", &context);
-                    db = Db::<_, Key, Vec<u8>, Sha256, TwoCap>::init(
+                    db = Db::<Family, _, Key, Vec<u8>, Sha256, TwoCap>::init(
                         context
                             .with_label("db")
                             .with_attribute("instance", restarts),
