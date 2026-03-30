@@ -1,5 +1,5 @@
 use crate::{BufferPool, Error, IoBufs};
-use std::{net::SocketAddr, time::Duration};
+use std::{convert::identity, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
     net::{
@@ -54,10 +54,9 @@ impl crate::Sink for Sink {
         };
 
         // Time out if we take too long to write
-        let result = match timeout(write_timeout, send).await {
-            Ok(result) => result,
-            Err(_) => Err(Error::Timeout),
-        };
+        let result = timeout(write_timeout, send)
+            .await
+            .map_or(Err(Error::Timeout), identity);
 
         // A failed send leaves the write half unusable.
         if result.is_err() {
@@ -85,7 +84,7 @@ impl crate::Stream for Stream {
             return Err(Error::Closed);
         }
 
-        let read_fut = async {
+        let recv = async {
             // SAFETY: `len` bytes are written by read_exact below.
             let mut buf = unsafe { self.pool.alloc_len(len) };
             self.stream
@@ -96,10 +95,9 @@ impl crate::Stream for Stream {
         };
 
         // Time out if we take too long to read
-        let result = match timeout(self.read_timeout, read_fut).await {
-            Ok(result) => result,
-            Err(_) => Err(Error::Timeout),
-        };
+        let result = timeout(self.read_timeout, recv)
+            .await
+            .map_or(Err(Error::Timeout), identity);
 
         // A failed recv leaves the read half unusable.
         if result.is_err() {
