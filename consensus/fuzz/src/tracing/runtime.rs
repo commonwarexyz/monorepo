@@ -1507,15 +1507,15 @@ pub fn run_quint_twins_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) 
         invariants::check::<SimplexEd25519>(config.n, &states);
 
         let trace = trace.lock();
-        let filtered = filter_unprocessed(&trace.structured, &reporter_states);
-        let max_view = filtered.iter().map(|e| e.view()).max().unwrap_or(1);
+        let entries = trace.structured.clone();
+        let max_view = entries.iter().map(|e: &TraceEntry| e.view()).max().unwrap_or(1);
 
         let trace_data = TraceData {
             n: config.n as usize,
             faults: config.faults as usize,
             epoch: EPOCH,
             max_view,
-            entries: filtered,
+            entries,
             required_containers: tracing_input.required_containers,
             reporter_states,
         };
@@ -1755,7 +1755,6 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
             }));
         }
         join_all(finalizers).await;
-        drain_pipeline(&context).await;
 
         let reporter_states = encode_reporter_states(
             invariants::extract_replayed(&reporters, config.n as usize),
@@ -1766,15 +1765,15 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
         invariants::check::<SimplexEd25519>(config.n, &states);
 
         let trace = trace.lock();
-        let filtered = filter_unprocessed(&trace.structured, &reporter_states);
-        let max_view = filtered.iter().map(|e| e.view()).max().unwrap_or(1);
+        let entries = trace.structured.clone();
+        let max_view = entries.iter().map(|e: &TraceEntry| e.view()).max().unwrap_or(1);
 
         let trace_data = TraceData {
             n: config.n as usize,
             faults: config.faults as usize,
             epoch: EPOCH,
             max_view,
-            entries: filtered,
+            entries,
             required_containers: tracing_input.required_containers,
             reporter_states,
         };
