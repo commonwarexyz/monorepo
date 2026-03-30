@@ -460,48 +460,16 @@ impl<D: EngineDefinition> Plan<D> {
                         )
                     })?;
                 if done {
-                    // Check post-run properties
-                    for prop in &self.property {
-                        match prop.check(&tracker, &states).await {
-                            Ok(()) => {
-                                info!(
-                                    target: "simulator",
-                                    property = prop.name(),
-                                    "post-run property passed"
-                                );
-                            }
-                            Err(e) => {
-                                error!(
-                                    target: "simulator",
-                                    property = prop.name(),
-                                    error = %e,
-                                    "post-run property failed"
-                                );
-                                return Err(format!(
-                                    "post-run property violation ({}): {e}",
-                                    prop.name()
-                                ));
-                            }
-                        }
-                    }
-                    let scheduled_actions_applied = scheduled_actions.load(Ordering::Relaxed);
-
-                    info!(
-                        target: "simulator",
-                        required = self.required_finalizations,
-                        exit_condition = self.exit_condition.name(),
-                        crashes,
-                        scheduled_actions = scheduled_actions_applied,
-                        delayed_started,
-                        "all validators reached required progress"
-                    );
-                    result = Ok(PlanResult {
-                        state: ctx.auditor().state(),
-                        tracker,
-                        crashes,
-                        scheduled_actions: scheduled_actions_applied,
-                        delayed_started,
-                    });
+                    result = self
+                        .finish_run(
+                            &ctx,
+                            tracker,
+                            &states,
+                            crashes,
+                            &scheduled_actions,
+                            delayed_started,
+                        )
+                        .await;
                     break;
                 }
 
@@ -548,48 +516,16 @@ impl<D: EngineDefinition> Plan<D> {
                     continue;
                 }
 
-                // Check post-run properties
-                for prop in &self.property {
-                    match prop.check(&tracker, &states).await {
-                        Ok(()) => {
-                            info!(
-                                target: "simulator",
-                                property = prop.name(),
-                                "post-run property passed"
-                            );
-                        }
-                        Err(e) => {
-                            error!(
-                                target: "simulator",
-                                property = prop.name(),
-                                error = %e,
-                                "post-run property failed"
-                            );
-                            return Err(format!(
-                                "post-run property violation ({}): {e}",
-                                prop.name()
-                            ));
-                        }
-                    }
-                }
-                let scheduled_actions_applied = scheduled_actions.load(Ordering::Relaxed);
-
-                info!(
-                    target: "simulator",
-                    required = self.required_finalizations,
-                    exit_condition = self.exit_condition.name(),
-                    crashes,
-                    scheduled_actions = scheduled_actions_applied,
-                    delayed_started,
-                    "all validators reached required progress"
-                );
-                result = Ok(PlanResult {
-                    state: ctx.auditor().state(),
-                    tracker,
-                    crashes,
-                    scheduled_actions: scheduled_actions_applied,
-                    delayed_started,
-                });
+                result = self
+                    .finish_run(
+                        &ctx,
+                        tracker,
+                        &states,
+                        crashes,
+                        &scheduled_actions,
+                        delayed_started,
+                    )
+                    .await;
                 break;
             },
             Some(pk) = restart_rx.recv() else break => {
@@ -664,6 +600,56 @@ impl<D: EngineDefinition> Plan<D> {
         }
 
         result
+    }
+
+    async fn finish_run(
+        &self,
+        ctx: &deterministic::Context,
+        tracker: ProgressTracker<D::PublicKey>,
+        states: &[&D::State],
+        crashes: u64,
+        scheduled_actions: &AtomicU64,
+        delayed_started: bool,
+    ) -> Result<PlanResult<D>, String> {
+        // Check post-run properties
+        for prop in &self.property {
+            match prop.check(&tracker, states).await {
+                Ok(()) => {
+                    info!(
+                        target: "simulator",
+                        property = prop.name(),
+                        "post-run property passed"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        target: "simulator",
+                        property = prop.name(),
+                        error = %e,
+                        "post-run property failed"
+                    );
+                    return Err(format!("post-run property violation ({}): {e}", prop.name()));
+                }
+            }
+        }
+        let scheduled_actions_applied = scheduled_actions.load(Ordering::Relaxed);
+
+        info!(
+            target: "simulator",
+            required = self.required_finalizations,
+            exit_condition = self.exit_condition.name(),
+            crashes,
+            scheduled_actions = scheduled_actions_applied,
+            delayed_started,
+            "all validators reached required progress"
+        );
+        Ok(PlanResult {
+            state: ctx.auditor().state(),
+            tracker,
+            crashes,
+            scheduled_actions: scheduled_actions_applied,
+            delayed_started,
+        })
     }
 
     /// Schedule executor -- sleeps until each scheduled time and
