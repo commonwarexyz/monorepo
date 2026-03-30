@@ -160,12 +160,12 @@ impl Tree {
 
 impl Drop for Tree {
     fn drop(&mut self) {
-        if let Some(parent) = self.parent.get_mut().as_ref() {
-            let mut parent_inner = parent.inner.lock();
-            parent_inner.note_stale_child();
-        }
-
         if let Some(parent) = self.parent.get_mut().take() {
+            {
+                let mut parent_inner = parent.inner.lock();
+                parent_inner.note_stale_child();
+            }
+
             // If dropping this node makes its ancestors uniquely owned as well,
             // release that lineage iteratively instead of recursing through
             // nested `Arc` drops.
