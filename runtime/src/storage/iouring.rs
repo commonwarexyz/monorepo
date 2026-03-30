@@ -802,7 +802,10 @@ mod tests {
 
         // Each operation adds the runtime header size internally, so using the
         // maximum logical offset must fail before any request is submitted.
-        assert!(matches!(blob.read_at(u64::MAX, 1).await, Err(Error::OffsetOverflow)));
+        assert!(matches!(
+            blob.read_at(u64::MAX, 1).await,
+            Err(Error::OffsetOverflow)
+        ));
         assert!(matches!(
             blob.write_at(u64::MAX, b"x".to_vec()).await,
             Err(Error::OffsetOverflow)
@@ -879,7 +882,10 @@ mod tests {
 
         let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
         // Sync should fail through the blob-specific wrapper before any kernel work is attempted.
-        let err = blob.sync().await.expect_err("sync should fail without a loop");
+        let err = blob
+            .sync()
+            .await
+            .expect_err("sync should fail without a loop");
         assert!(matches!(
             err,
             Error::BlobSyncFailed(partition, name, inner)

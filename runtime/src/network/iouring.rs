@@ -857,11 +857,7 @@ mod tests {
         // Construct a sink whose submitter would fail immediately if the wrapper
         // tried to hand work to the loop.
         let (left, _right) = UnixStream::pair().unwrap();
-        let mut sink = Sink::new(
-            Arc::new(left.into()),
-            submitter,
-            Duration::from_secs(1),
-        );
+        let mut sink = Sink::new(Arc::new(left.into()), submitter, Duration::from_secs(1));
 
         sink.send(IoBufs::default()).await.unwrap();
     }
