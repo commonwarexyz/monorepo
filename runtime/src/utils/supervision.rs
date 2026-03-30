@@ -110,7 +110,7 @@ impl Tree {
             return;
         };
 
-        // Abort the task
+        // Abort the task.
         if let Some(aborter) = task {
             aborter.abort();
         }
