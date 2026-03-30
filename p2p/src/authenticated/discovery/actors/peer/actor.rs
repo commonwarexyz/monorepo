@@ -94,7 +94,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
             ),
             Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
         };
-        Ok((metric, payload.encode_with_pool(pool).into()))
+        Ok((metric, payload.encode_with_pool(pool)))
     }
 
     /// Converts pre-encoded data into an outbound metric/payload pair.

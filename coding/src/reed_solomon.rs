@@ -1,6 +1,6 @@
 use crate::{Config, Scheme};
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
@@ -124,6 +124,12 @@ impl<D: Digest> Write for Chunk<D> {
         self.shard.write(writer);
         self.index.write(writer);
         self.proof.write(writer);
+    }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.shard.write_bufs(buf);
+        self.index.write(buf);
+        self.proof.write(buf);
     }
 }
 

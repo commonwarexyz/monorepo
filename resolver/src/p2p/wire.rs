@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{BufsMut, EncodeSize, Error, Read, ReadExt, Write};
 use commonware_utils::Span;
 
 /// Represents a message sent between peers.
@@ -17,6 +17,11 @@ impl<Key: Span> Write for Message<Key> {
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_u64(self.id);
         self.payload.write(buf);
+    }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.id.write(buf);
+        self.payload.write_bufs(buf);
     }
 }
 
@@ -73,6 +78,22 @@ impl<Key: Span> Write for Payload<Key> {
             Self::Response(data) => {
                 buf.put_u8(1);
                 data.write(buf);
+            }
+            Self::Error => {
+                buf.put_u8(2);
+            }
+        }
+    }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        match self {
+            Self::Request(key) => {
+                buf.put_u8(0);
+                key.write(buf);
+            }
+            Self::Response(data) => {
+                buf.put_u8(1);
+                data.write_bufs(buf);
             }
             Self::Error => {
                 buf.put_u8(2);

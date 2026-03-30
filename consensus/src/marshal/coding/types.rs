@@ -4,7 +4,7 @@ use crate::{
     types::{coding::Commitment, Height},
     Block, CertifiableBlock, Heightable,
 };
-use commonware_codec::{EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digestible, Hasher};
 use commonware_parallel::{Sequential, Strategy};
@@ -74,6 +74,12 @@ impl<C: Scheme, H: Hasher> Write for Shard<C, H> {
         self.commitment.write(buf);
         self.index.write(buf);
         self.inner.write(buf);
+    }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.commitment.write(buf);
+        self.index.write(buf);
+        self.inner.write_bufs(buf);
     }
 }
 

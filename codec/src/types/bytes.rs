@@ -3,7 +3,7 @@
 //! For portability and consistency between architectures,
 //! the length of the [Bytes] must fit within a [u32].
 
-use crate::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
+use crate::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 use bytes::{Buf, BufMut, Bytes};
 
 impl Write for Bytes {
@@ -11,6 +11,12 @@ impl Write for Bytes {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
         buf.put_slice(self);
+    }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.len().write(buf);
+        buf.push(self.clone());
     }
 }
 
