@@ -796,13 +796,10 @@ where
                     }
                 }
                 Mode::Work(future) => {
-                    // Get the future (if it still exists).
+                    // Get the future, if spawn has finished installing it.
                     let mut fut_opt = future.lock();
                     let Some(fut) = fut_opt.as_mut() else {
-                        trace!(id, "skipping already complete task");
-
-                        // Remove the future.
-                        self.executor.tasks.remove(id);
+                        trace!(id, "task registration still in flight");
                         continue;
                     };
 
@@ -812,7 +809,6 @@ where
 
                         // Remove the future.
                         self.executor.tasks.remove(id);
-                        *fut_opt = None;
                         continue;
                     }
                 }
@@ -1040,6 +1036,7 @@ impl Tasks {
             mode: Mode::Work(Mutex::new(None)),
         });
         arc_self.running.lock().insert(id, task.clone());
+        drop(closed);
         Some(ReservedTask::new(arc_self.clone(), task))
     }
 
@@ -1053,7 +1050,13 @@ impl Tasks {
         let Mode::Work(slot) = &task.mode else {
             panic!("reserved work task must be in work mode");
         };
-        *slot.lock() = Some(future);
+        let mut slot = slot.lock();
+        assert!(
+            slot.is_none(),
+            "reserved work task must still be waiting for installation",
+        );
+        *slot = Some(future);
+        drop(slot);
         self.queue(task.id);
     }
 
@@ -1936,6 +1939,13 @@ mod tests {
     #[cfg(feature = "external")]
     use futures::StreamExt;
     use futures::{stream::FuturesUnordered, task::noop_waker};
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc as std_mpsc, Arc, Barrier,
+        },
+        thread,
+    };
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
@@ -2178,6 +2188,105 @@ mod tests {
 
         // Reserved tasks that never install a future must not remain in `running`.
         assert!(executor.tasks.running.lock().is_empty());
+    }
+
+    #[test]
+    fn test_shutdown_waits_for_spawn_in_flight() {
+        struct BlockOnDrop {
+            started: Option<std_mpsc::Sender<()>>,
+            release: Arc<Barrier>,
+        }
+
+        impl Drop for BlockOnDrop {
+            fn drop(&mut self) {
+                self.started
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .expect("cleanup start receiver should stay open");
+                self.release.wait();
+            }
+        }
+
+        let (context_tx, context_rx) = std_mpsc::channel();
+        let allow_root_return = Arc::new(AtomicBool::new(false));
+        let allow_root_return2 = allow_root_return.clone();
+        let (spawn_entered_tx, spawn_entered_rx) = std_mpsc::channel();
+        let (release_spawn_tx, release_spawn_rx) = std_mpsc::channel();
+        let (cleanup_started_tx, cleanup_started_rx) = std_mpsc::channel();
+        let cleanup_release = Arc::new(Barrier::new(2));
+        let cleanup_release2 = cleanup_release.clone();
+        let (finished_tx, finished_rx) = std_mpsc::channel();
+
+        // Run the root on a separate thread so the test can drive shutdown
+        // while another thread stalls a concurrent spawn call mid-flight.
+        let runner = thread::spawn(move || {
+            let runner = Runner::new(
+                Config::default().with_shutdown_timeout(Duration::from_secs(3600)),
+            );
+            runner.start(|context| async move {
+                context_tx
+                    .send(context.clone())
+                    .expect("context receiver should stay open");
+                while !allow_root_return2.load(Ordering::Relaxed) {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+            });
+            finished_tx
+                .send(())
+                .expect("runner completion receiver should stay open");
+        });
+
+        // Reuse a cloned context after the root has started so spawn races with
+        // root shutdown from another thread.
+        let context = context_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("root should publish a cloneable context before returning");
+        let spawn = thread::spawn(move || {
+            let handle = context.spawn(move |_| {
+                // Block inside spawn before it can finish registration.
+                spawn_entered_tx
+                    .send(())
+                    .expect("spawn entry receiver should stay open");
+                release_spawn_rx
+                    .recv()
+                    .expect("spawn release sender should stay open");
+                let block_on_drop = BlockOnDrop {
+                    started: Some(cleanup_started_tx),
+                    release: cleanup_release2,
+                };
+                async move {
+                    let _block_on_drop = block_on_drop;
+                    futures::future::pending::<()>().await;
+                }
+            });
+            drop(handle);
+        });
+
+        // Start shutdown while the concurrent spawn is still in progress. The
+        // regression was that `start()` could return from this state.
+        spawn_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawn should block inside the in-flight window");
+        allow_root_return.store(true, Ordering::Relaxed);
+        let returned_early = finished_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        release_spawn_tx
+            .send(())
+            .expect("spawn release receiver should stay open");
+
+        assert!(
+            !returned_early,
+            "root shutdown returned while a spawn was still in flight",
+        );
+        cleanup_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("runner should start task cleanup after the in-flight spawn is released");
+        spawn.join().expect("spawn thread should join cleanly");
+        cleanup_release.wait();
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("runner should finish after the in-flight spawn is released");
+        runner.join().expect("runner thread should join cleanly");
     }
 
     #[test]
