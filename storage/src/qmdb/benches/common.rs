@@ -365,123 +365,6 @@ pub(crate) use dispatch_arm;
 pub(crate) use with_fixed_value_db;
 pub(crate) use with_var_value_db;
 
-/// Internal helper: construct a db from a pre-built config, bind it, execute body.
-macro_rules! dispatch_arm_with_cfg {
-    ($ctx:expr, $db:ident, $body:expr, $DbType:ty, $cfg:expr) => {{
-        #[allow(unused_mut)]
-        let mut $db = <$DbType>::init($ctx.clone(), $cfg.clone()).await.unwrap();
-        $body
-    }};
-}
-
-/// Like `with_fixed_value_db!` but takes pre-built configs to avoid rebuilding them each call.
-macro_rules! with_fixed_value_db_cfg {
-    ($ctx:expr, $variant:expr, $any_fixed:expr, $current_fixed:expr,
-     $any_var:expr, $current_var:expr, |mut $db:ident| $body:expr) => {{
-        use $crate::common::FixedValueVariant::*;
-        match $variant {
-            AnyUnorderedFixed => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyUFixDb,
-                $any_fixed
-            ),
-            AnyOrderedFixed => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyOFixDb,
-                $any_fixed
-            ),
-            AnyUnorderedVariable => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyUVarDigestDb,
-                $any_var
-            ),
-            AnyOrderedVariable => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyOVarDigestDb,
-                $any_var
-            ),
-            CurrentUnorderedFixed => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurUFixDb,
-                $current_fixed
-            ),
-            CurrentOrderedFixed => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurOFixDb,
-                $current_fixed
-            ),
-            CurrentUnorderedVariable => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurUVarDigestDb,
-                $current_var
-            ),
-            CurrentOrderedVariable => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurOVarDigestDb,
-                $current_var
-            ),
-        }
-    }};
-}
-
-/// Like `with_var_value_db!` but takes pre-built configs to avoid rebuilding them each call.
-macro_rules! with_var_value_db_cfg {
-    ($ctx:expr, $variant:expr, $any_var:expr, $current_var:expr,
-     |mut $db:ident| $body:expr) => {{
-        use $crate::common::VarValueVariant::*;
-        match $variant {
-            AnyUnordered => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyUVarVecDb,
-                $any_var
-            ),
-            AnyOrdered => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::AnyOVarVecDb,
-                $any_var
-            ),
-            CurrentUnordered => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurUVarVecDb,
-                $current_var
-            ),
-            CurrentOrdered => $crate::common::dispatch_arm_with_cfg!(
-                $ctx,
-                $db,
-                $body,
-                $crate::common::CurOVarVecDb,
-                $current_var
-            ),
-        }
-    }};
-}
-
-pub(crate) use dispatch_arm_with_cfg;
-pub(crate) use with_fixed_value_db_cfg;
-pub(crate) use with_var_value_db_cfg;
-
 // -- Data generation --
 
 /// Seed a database with `num_elements` entries, then perform `num_operations` random
@@ -540,4 +423,24 @@ pub fn make_fixed_value(rng: &mut StdRng) -> Digest {
 pub fn make_var_value(rng: &mut StdRng) -> Vec<u8> {
     let len = (rng.next_u32() as usize) % VARIABLE_VALUE_MAX_LEN + 1;
     vec![rng.next_u32() as u8; len]
+}
+
+/// Reconstruct the deterministic key set produced by `gen_random_kv`'s seeding phase.
+pub fn seeded_keys(num_elements: u64) -> Vec<Digest> {
+    (0..num_elements)
+        .map(|i| Sha256::hash(&i.to_be_bytes()))
+        .collect()
+}
+
+/// Populate, prune, and sync a database (used in benchmark setup phases).
+pub async fn populate_and_sync<C: DbAny<Key = Digest>>(
+    db: &mut C,
+    elements: u64,
+    operations: u64,
+    commit_frequency: u32,
+    make_value: impl Fn(&mut StdRng) -> C::Value,
+) {
+    gen_random_kv(db, elements, operations, Some(commit_frequency), make_value).await;
+    db.prune(db.inactivity_floor_loc().await).await.unwrap();
+    db.sync().await.unwrap();
 }

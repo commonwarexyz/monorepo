@@ -4,9 +4,7 @@
 //! from the generation benchmarks so they can be filtered easily.
 
 use crate::common::{
-    any_fix_cfg, any_var_digest_cfg, any_var_vec_cfg, cur_fix_cfg, cur_var_digest_cfg,
-    cur_var_vec_cfg, gen_random_kv, make_fixed_value, make_var_value, with_fixed_value_db,
-    with_fixed_value_db_cfg, with_var_value_db, with_var_value_db_cfg, Digest,
+    make_fixed_value, make_var_value, populate_and_sync, with_fixed_value_db, with_var_value_db,
     FIXED_VALUE_VARIANTS, VAR_VALUE_VARIANTS,
 };
 use commonware_runtime::{
@@ -14,9 +12,8 @@ use commonware_runtime::{
     tokio::{Config, Context},
     Runner as _,
 };
-use commonware_storage::qmdb::any::traits::DbAny;
 use criterion::{criterion_group, Criterion};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
@@ -32,18 +29,6 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Populate, prune, and sync a database (used in setup phase).
-async fn populate_and_sync<C: DbAny<Key = Digest>>(
-    db: &mut C,
-    elements: u64,
-    operations: u64,
-    make_value: impl Fn(&mut rand::rngs::StdRng) -> C::Value,
-) {
-    gen_random_kv(db, elements, operations, Some(COMMIT_FREQUENCY), make_value).await;
-    db.prune(db.inactivity_floor_loc().await).await.unwrap();
-    db.sync().await.unwrap();
-}
-
 fn bench_fixed_value_init(c: &mut Criterion) {
     let cfg = Config::default();
     for elements in ELEMENTS {
@@ -52,11 +37,18 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                 // Setup: populate database
                 commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
                     with_fixed_value_db!(ctx, variant, |mut db| {
-                        populate_and_sync(&mut db, elements, operations, make_fixed_value).await;
+                        populate_and_sync(
+                            &mut db,
+                            elements,
+                            operations,
+                            COMMIT_FREQUENCY,
+                            make_fixed_value,
+                        )
+                        .await;
                     });
                 });
 
-                // Benchmark: measure init time
+                // Benchmark: measure init time (excluding config construction)
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
@@ -67,17 +59,15 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
-                            let af = any_fix_cfg(&ctx);
-                            let cf = cur_fix_cfg(&ctx);
-                            let av = any_var_digest_cfg(&ctx);
-                            let cv = cur_var_digest_cfg(&ctx);
-                            let start = Instant::now();
+                            let mut total = Duration::ZERO;
                             for _ in 0..iters {
-                                with_fixed_value_db_cfg!(ctx, variant, af, cf, av, cv, |mut db| {
+                                let start = Instant::now();
+                                with_fixed_value_db!(ctx, variant, |mut db| {
                                     assert_ne!(db.bounds().await.end, 0);
                                 });
+                                total += start.elapsed();
                             }
-                            start.elapsed()
+                            total
                         });
                     },
                 );
@@ -101,11 +91,18 @@ fn bench_var_value_init(c: &mut Criterion) {
                 // Setup: populate database
                 commonware_runtime::tokio::Runner::new(cfg.clone()).start(|ctx| async move {
                     with_var_value_db!(ctx, variant, |mut db| {
-                        populate_and_sync(&mut db, elements, operations, make_var_value).await;
+                        populate_and_sync(
+                            &mut db,
+                            elements,
+                            operations,
+                            COMMIT_FREQUENCY,
+                            make_var_value,
+                        )
+                        .await;
                     });
                 });
 
-                // Benchmark: measure init time
+                // Benchmark: measure init time (excluding config construction)
                 let runner = tokio::Runner::new(cfg.clone());
                 c.bench_function(
                     &format!(
@@ -116,15 +113,15 @@ fn bench_var_value_init(c: &mut Criterion) {
                     |b| {
                         b.to_async(&runner).iter_custom(|iters| async move {
                             let ctx = context::get::<Context>();
-                            let av = any_var_vec_cfg(&ctx);
-                            let cv = cur_var_vec_cfg(&ctx);
-                            let start = Instant::now();
+                            let mut total = Duration::ZERO;
                             for _ in 0..iters {
-                                with_var_value_db_cfg!(ctx, variant, av, cv, |mut db| {
+                                let start = Instant::now();
+                                with_var_value_db!(ctx, variant, |mut db| {
                                     assert_ne!(db.bounds().await.end, 0);
                                 });
+                                total += start.elapsed();
                             }
-                            start.elapsed()
+                            total
                         });
                     },
                 );

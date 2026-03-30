@@ -4,8 +4,19 @@
 
 use criterion::criterion_main;
 
+mod apply_batch;
 mod common;
 mod generate;
+mod get;
 mod init;
+mod merkleize;
+mod proof;
 
-criterion_main!(generate::benches, init::benches);
+criterion_main!(
+    generate::benches,
+    merkleize::benches,
+    apply_batch::benches,
+    get::benches,
+    proof::benches,
+    init::benches,
+);
