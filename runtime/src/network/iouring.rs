@@ -498,18 +498,22 @@ impl crate::Stream for Stream {
 
 #[cfg(test)]
 mod tests {
+    use super::{Sink, Stream};
     use crate::{
         iouring,
         network::{
             iouring::{Config, Network},
             tests,
         },
-        thread, BufferPool, BufferPoolConfig, Error, Listener as _, Network as _, Sink as _,
+        thread, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufMut, IoBufs, Listener as _, Network as _,
+        Sink as _,
         Stream as _,
     };
     use commonware_macros::{select, test_group};
     use prometheus_client::registry::Registry;
     use std::{
+        io::{Read, Write},
+        os::unix::net::UnixStream,
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -528,6 +532,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_trait() {
+        // Verify the io_uring backend satisfies the shared network trait suite.
         tests::test_network_trait(|| {
             Network::start(Config::default(), &mut Registry::default(), test_pool())
                 .expect("Failed to start io_uring")
@@ -538,6 +543,7 @@ mod tests {
     #[test_group("slow")]
     #[tokio::test]
     async fn test_stress_trait() {
+        // Exercise the io_uring backend under the shared stress suite.
         tests::stress_test_network_trait(|| {
             Network::start(
                 Config {
@@ -557,6 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_small_send_read_quickly() {
+        // Verify a small message is delivered promptly through the buffered recv path.
         let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
             .expect("Failed to start io_uring");
 
@@ -586,6 +593,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_timeout_with_partial_data() {
+        // Verify a top-level recv returns timeout after partial progress stalls.
         // Use a short timeout to make the test fast
         let op_timeout = Duration::from_millis(100);
         let network = Network::start(
@@ -629,7 +637,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_unbuffered_mode() {
-        // Set read_buffer_size to 0 to disable buffering
+        // Verify disabling the internal read buffer preserves direct recv behavior.
+        // Set `read_buffer_size` to zero so every recv goes straight to the caller buffer.
         let network = Network::start(
             Config {
                 read_buffer_size: 0,
@@ -644,7 +653,8 @@ mod tests {
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        // Spawn a task to accept and read
+        // Accept one connection and verify that peeking never observes buffered
+        // bytes because the wrapper should not retain any internal read state.
         let reader = tokio::spawn(async move {
             let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
 
@@ -663,21 +673,21 @@ mod tests {
             (buf1, buf2)
         });
 
-        // Connect and send two messages
+        // Send two independent messages so the reader exercises repeated direct recvs.
         let (mut sink, _stream) = network.dial(addr).await.unwrap();
         sink.send([1u8, 2, 3, 4, 5].as_slice()).await.unwrap();
         sink.send([6u8, 7, 8, 9, 10].as_slice()).await.unwrap();
 
-        // Wait for the reader to complete
+        // Both messages should arrive exactly as sent, with no extra bytes hidden in `peek`.
         let (buf1, buf2) = reader.await.unwrap();
 
-        // Verify we got the right data
         assert_eq!(buf1.coalesce(), &[1u8, 2, 3, 4, 5]);
         assert_eq!(buf2.coalesce(), &[6u8, 7, 8, 9, 10]);
     }
 
     #[tokio::test]
     async fn test_op_fd_keeps_descriptor_alive() {
+        // Verify queued recv requests keep their socket fd alive after caller cancellation.
         // When a recv future is cancelled (e.g. via select!) after the Request has
         // been sent to the io_uring channel, the Stream can be dropped while
         // the request is still queued. The request's fd field keeps the socket alive
@@ -724,6 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_peek_with_buffered_data() {
+        // Verify buffered recv calls leave unread bytes visible via peek().
         // Use default buffer size to enable buffering
         let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
             .expect("Failed to start io_uring");
@@ -765,5 +776,184 @@ mod tests {
         sink.send(b"hello world").await.unwrap();
 
         reader.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_submit_recv_returns_bytes_for_this_call() {
+        // Verify `submit_recv` translates the request state's cumulative total
+        // back into the per-call byte count expected by the higher-level recv loop.
+        let mut registry = Registry::default();
+        let (submitter, io_loop) =
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let handle = std::thread::spawn(move || io_loop.run());
+
+        // Build the wrapper directly so the test exercises `submit_recv`
+        // without involving the higher-level buffered recv machinery.
+        let (left, mut right) = UnixStream::pair().unwrap();
+        let stream = Stream::new(
+            Arc::new(left.into()),
+            submitter,
+            Duration::from_secs(1),
+            0,
+            test_pool(),
+        );
+
+        // Pretend the caller already filled two bytes, then complete exactly
+        // three more bytes from the socket.
+        let writer = tokio::task::spawn_blocking(move || right.write_all(b"abc"));
+        let buffer = IoBufMut::with_capacity(5);
+        let (_buffer, result) = stream
+            .submit_recv(buffer, 2, 3, true, Instant::now() + Duration::from_secs(1))
+            .await;
+
+        // The wrapper should report only the bytes read by this invocation,
+        // not the cumulative total tracked inside the request state.
+        writer.await.unwrap().unwrap();
+        assert_eq!(result.unwrap(), 3);
+
+        drop(stream);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_vectored_send_path() {
+        // Verify the network send wrapper drives the vectored `Writev` path end-to-end.
+        let mut registry = Registry::default();
+        let (submitter, io_loop) =
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let handle = std::thread::spawn(move || io_loop.run());
+
+        let (left, mut right) = UnixStream::pair().unwrap();
+        let mut sink = Sink::new(Arc::new(left.into()), submitter, Duration::from_secs(1));
+
+        // Queue two buffers so the wrapper must preserve vectored ordering.
+        let mut bufs = IoBufs::default();
+        bufs.append(IoBuf::from(b"ab"));
+        bufs.append(IoBuf::from(b"cd"));
+
+        // Read from the peer in one shot so the final payload ordering is unambiguous.
+        let reader = tokio::task::spawn_blocking(move || {
+            let mut buf = [0u8; 4];
+            right.read_exact(&mut buf).unwrap();
+            buf
+        });
+
+        // The peer should observe the concatenated payload in-order.
+        sink.send(bufs).await.unwrap();
+        assert_eq!(&reader.await.unwrap(), b"abcd");
+
+        drop(sink);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_zero_length_send_short_circuits_before_submit() {
+        // Verify empty sends return locally without depending on a live io_uring loop.
+        let mut registry = Registry::default();
+        let (submitter, io_loop) =
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        drop(io_loop);
+
+        // Construct a sink whose submitter would fail immediately if the wrapper
+        // tried to hand work to the loop.
+        let (left, _right) = UnixStream::pair().unwrap();
+        let mut sink = Sink::new(
+            Arc::new(left.into()),
+            submitter,
+            Duration::from_secs(1),
+        );
+
+        sink.send(IoBufs::default()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_large_recv_skips_internal_buffer() {
+        // Verify reads that are at least as large as the internal buffer go
+        // straight into the caller-owned output buffer.
+        let network = Network::start(
+            Config {
+                read_buffer_size: 8,
+                ..Default::default()
+            },
+            &mut Registry::default(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let expected = *b"abcdefgh";
+
+        // Accept one connection and issue a recv that exactly matches the
+        // internal buffer size, forcing the direct-recv branch.
+        let reader = tokio::spawn(async move {
+            let (_addr, _sink, mut stream) = listener.accept().await.unwrap();
+            let received = stream.recv(expected.len()).await.unwrap();
+            assert!(stream.peek(1).is_empty());
+            received
+        });
+
+        let (mut sink, _stream) = network.dial(addr).await.unwrap();
+        sink.send(expected.to_vec()).await.unwrap();
+
+        assert_eq!(reader.await.unwrap().coalesce(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_configured_socket_options_cover_accept_and_dial_paths() {
+        // Verify both dial and accept exercise the configured socket-option branches.
+        let network = Network::start(
+            Config {
+                tcp_nodelay: Some(true),
+                so_linger: Some(Duration::ZERO),
+                ..Default::default()
+            },
+            &mut Registry::default(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Accepting the connection covers the listener-side option setters.
+        let accepter = tokio::spawn(async move {
+            let (_addr, _sink, _stream) = listener.accept().await.unwrap();
+        });
+
+        // Dialing the listener covers the client-side option setters.
+        let (_sink, _stream) = network.dial(addr).await.unwrap();
+        accepter.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_channel_close_fallbacks() {
+        // Verify send/recv callers get wrapper-level failures if the io_uring loop disappears.
+        let mut registry = Registry::default();
+        let (submitter, io_loop) =
+            iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
+        let recv_submitter = submitter.clone();
+        drop(io_loop);
+
+        // Send should fail locally once the submission channel has been
+        // disconnected and no loop remains to accept work.
+        let (send_left, _send_right) = UnixStream::pair().unwrap();
+        let mut sink = Sink::new(
+            Arc::new(send_left.into()),
+            submitter,
+            Duration::from_secs(1),
+        );
+        assert!(matches!(sink.send(b"hello").await, Err(Error::SendFailed)));
+
+        // Recv should surface the symmetric wrapper-specific failure.
+        let (recv_left, _recv_right) = UnixStream::pair().unwrap();
+        let mut stream = Stream::new(
+            Arc::new(recv_left.into()),
+            recv_submitter,
+            Duration::from_secs(1),
+            0,
+            test_pool(),
+        );
+        assert!(matches!(stream.recv(1).await, Err(Error::RecvFailed)));
     }
 }
