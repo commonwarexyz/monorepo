@@ -91,7 +91,6 @@ mod tests {
         Committable, Digestible, Hasher as _,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::Manager;
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
     use commonware_utils::NZU16;

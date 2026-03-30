@@ -193,7 +193,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             if primary_addr == secondary_addr {
                 continue;
             }
-            warn!(?index, ?peer, "peer has conflicting primary and secondary addresses");
+            warn!(
+                ?index,
+                ?peer,
+                "peer has conflicting primary and secondary addresses"
+            );
             return None;
         }
 
