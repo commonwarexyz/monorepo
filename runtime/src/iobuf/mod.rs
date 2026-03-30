@@ -2227,6 +2227,15 @@ impl Builder {
         }
     }
 
+    /// Returns true if `current` needs a fresh pool allocation before writing.
+    /// After `flush`, `current` is `IoBufMut::default()` (zero capacity, backed
+    /// by `BytesMut` whose `remaining_mut` returns `isize::MAX`). Checking
+    /// capacity avoids silently writing to a heap-allocated `BytesMut` instead
+    /// of a pool buffer.
+    fn needs_alloc(&self) -> bool {
+        self.current.capacity() == 0 || self.current.remaining_mut() == 0
+    }
+
     /// Freezes `current` and appends it to `bufs` if non-empty.
     fn flush(&mut self) {
         if !self.current.is_empty() {
@@ -2265,7 +2274,7 @@ unsafe impl BufMut for Builder {
     #[inline]
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
         // Lazily allocate a new working buffer when the current one is full.
-        if self.current.remaining_mut() == 0 {
+        if self.needs_alloc() {
             self.flush();
             self.current = self.pool.alloc(self.capacity);
         }
@@ -2275,7 +2284,7 @@ unsafe impl BufMut for Builder {
     fn put_slice(&mut self, mut src: &[u8]) {
         // Write in chunks, flushing and reallocating as needed.
         while !src.is_empty() {
-            if self.current.remaining_mut() == 0 {
+            if self.needs_alloc() {
                 self.flush();
                 self.current = self.pool.alloc(self.capacity);
             }
@@ -2290,7 +2299,7 @@ unsafe impl BufMut for Builder {
         Self: Sized,
     {
         while src.has_remaining() {
-            if self.current.remaining_mut() == 0 {
+            if self.needs_alloc() {
                 self.flush();
                 self.current = self.pool.alloc(self.capacity);
             }
