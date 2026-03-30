@@ -5,8 +5,10 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
-    merkle::storage::Storage as MerkleStorage,
-    mmr::{self, Location, Position, Readable, StandardHasher},
+    merkle::{
+        mmr::{self, Location, Position, Readable, StandardHasher},
+        storage::Storage as MerkleStorage,
+    },
     qmdb::{
         any::{
             self,

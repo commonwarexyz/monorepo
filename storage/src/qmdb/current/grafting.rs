@@ -41,9 +41,10 @@
 //! The grafted MMR is incrementally maintained via [GraftedHasher] when grafted leaves
 //! change.
 
-use crate::{
-    merkle::{hasher::Hasher as HasherTrait, storage::Storage as StorageTrait},
+use crate::merkle::{
+    hasher::Hasher as HasherTrait,
     mmr::{self, iterator::pos_to_height, Error, Location, Position, Readable, StandardHasher},
+    storage::Storage as StorageTrait,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
 use commonware_utils::bitmap::BitMap;

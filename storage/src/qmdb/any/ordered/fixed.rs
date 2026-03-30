@@ -146,8 +146,10 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        merkle::Location as GenericLocation,
-        mmr::{self, Location, StandardHasher as Standard},
+        merkle::{
+            mmr::{self, Location, StandardHasher as Standard},
+            Location as GenericLocation,
+        },
         qmdb::{
             any::{
                 ordered::{
@@ -218,9 +220,7 @@ pub(crate) mod test {
     /// Create n random operations using the default seed (0). Some portion of
     /// the updates are deletes. create_test_ops(n) is a prefix of
     /// create_test_ops(n') for n < n'.
-    pub(crate) fn create_test_ops(
-        n: usize,
-    ) -> Vec<Operation<mmr::Family, Digest, Digest>> {
+    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<mmr::Family, Digest, Digest>> {
         create_test_ops_seeded(n, 0)
     }
 
@@ -284,14 +284,9 @@ pub(crate) mod test {
         executor.start(|mut context| async move {
             let seed = context.next_u64();
             let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
-            let mut db = Db::<
-                mmr::Family,
-                Context,
-                FixedBytes<2>,
-                i32,
-                Sha256,
-                OneCap,
-            >::init(context, config)
+            let mut db = Db::<mmr::Family, Context, FixedBytes<2>, i32, Sha256, OneCap>::init(
+                context, config,
+            )
             .await
             .unwrap();
             let key1 = FixedBytes::<2>::new([1u8, 1u8]);
@@ -1524,17 +1519,13 @@ pub(crate) mod test {
     #[test_traced("INFO")]
     fn test_ordered_fixed_batch_stacked_delete_recreate() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| {
-            batch_stacked_delete_recreate_inner::<mmr::Family>(context)
-        });
+        executor.start(batch_stacked_delete_recreate_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_ordered_fixed_batch_apply_returns_range() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| {
-            batch_apply_returns_range_inner::<mmr::Family>(context)
-        });
+        executor.start(batch_apply_returns_range_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
@@ -1624,7 +1615,7 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            mmr::{iterator::nodes_to_pin, journaled::Mmr},
+            merkle::mmr::{iterator::nodes_to_pin, journaled::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;

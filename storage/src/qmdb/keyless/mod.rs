@@ -58,7 +58,7 @@ use crate::{
             Contiguous, Mutable, Reader,
         },
     },
-    mmr::{self, journaled::Config as MmrConfig, Location, Proof},
+    merkle::mmr::{self, journaled::Config as MmrConfig, Location, Proof},
     qmdb::{any::VariableValue, operation::Committable},
     Context,
 };

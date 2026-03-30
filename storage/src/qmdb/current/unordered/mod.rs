@@ -21,8 +21,10 @@ pub mod tests {
     use crate::{
         index::unordered::Index,
         journal::{contiguous::Mutable, Error as JournalError},
-        merkle::mmr,
-        mmr::{Location, Proof},
+        merkle::{
+            mmr,
+            mmr::{Location, Proof},
+        },
         qmdb::{
             any::{
                 operation::update::Unordered as UnorderedUpdate,

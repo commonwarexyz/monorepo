@@ -4,8 +4,7 @@ use crate::{
         authenticated,
         contiguous::{variable, Reader as _},
     },
-    merkle::{self, mmr},
-    mmr::journaled::Mmr,
+    merkle::{self, mmr, mmr::journaled::Mmr},
     qmdb::{
         any::VariableValue,
         build_snapshot_from_log,

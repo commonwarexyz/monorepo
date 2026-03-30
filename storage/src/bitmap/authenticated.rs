@@ -11,14 +11,18 @@
 //! over elements whose activity state is reflected by the bitmap.
 
 use crate::{
-    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher, storage::Storage},
-    metadata::{Config as MConfig, Metadata},
-    mmr::{
-        self,
-        iterator::nodes_to_pin,
-        mem::{Config, Mmr},
-        verification, Error, Location, Position, Proof,
+    merkle::{
+        batch::MIN_TO_PARALLELIZE,
+        hasher::Hasher,
+        mmr::{
+            self,
+            iterator::nodes_to_pin,
+            mem::{Config, Mmr},
+            verification, Error, Location, Position, Proof,
+        },
+        storage::Storage,
     },
+    metadata::{Config as MConfig, Metadata},
     Context,
 };
 use commonware_codec::DecodeExt;

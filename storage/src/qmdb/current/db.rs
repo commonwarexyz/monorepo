@@ -9,13 +9,17 @@ use crate::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher as _, storage::Storage as MerkleStorage},
-    metadata::{Config as MConfig, Metadata},
-    mmr::{
-        self,
-        iterator::{nodes_to_pin, PeakIterator},
-        Location, Position, StandardHasher,
+    merkle::{
+        batch::MIN_TO_PARALLELIZE,
+        hasher::Hasher as _,
+        mmr::{
+            self,
+            iterator::{nodes_to_pin, PeakIterator},
+            Location, Position, StandardHasher,
+        },
+        storage::Storage as MerkleStorage,
     },
+    metadata::{Config as MConfig, Metadata},
     qmdb::{
         any::{
             self,

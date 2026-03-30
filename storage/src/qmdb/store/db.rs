@@ -80,7 +80,7 @@ use crate::{
         variable::{Config as JournalConfig, Journal},
         Mutable as _, Reader,
     },
-    mmr::Location,
+    merkle::mmr::Location,
     qmdb::{
         any::{
             unordered::{variable::Operation, Update},

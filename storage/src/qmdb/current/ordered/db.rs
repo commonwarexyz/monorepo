@@ -6,7 +6,7 @@
 use crate::{
     index::Ordered as OrderedIndex,
     journal::contiguous::{Contiguous, Mutable, Reader},
-    mmr::{self, Location},
+    merkle::mmr::{self, Location},
     qmdb::{
         any::{
             ordered::{Operation, Update},

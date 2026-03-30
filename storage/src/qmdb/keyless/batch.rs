@@ -3,7 +3,7 @@
 use super::Keyless;
 use crate::{
     journal::authenticated,
-    mmr::{self, Location, Position},
+    merkle::mmr::{self, Location, Position},
     qmdb::{any::VariableValue, keyless::operation::Operation},
     Context,
 };

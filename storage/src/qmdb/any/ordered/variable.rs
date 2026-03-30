@@ -230,9 +230,7 @@ pub(crate) mod test {
     /// Create n random operations using the default seed (0). Some portion of
     /// the updates are deletes. create_test_ops(n) is a prefix of
     /// create_test_ops(n') for n < n'.
-    pub(crate) fn create_test_ops(
-        n: usize,
-    ) -> Vec<Operation<mmr::Family, Digest, Vec<u8>>> {
+    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<mmr::Family, Digest, Vec<u8>>> {
         create_test_ops_seeded(n, 0)
     }
 
@@ -291,8 +289,7 @@ pub(crate) mod test {
     // Tests using FixedBytes<4> keys (for edge cases that require specific key patterns)
 
     /// Type alias for a variable db with FixedBytes<4> keys.
-    type VariableDb =
-        Db<mmr::Family, Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
+    type VariableDb = Db<mmr::Family, Context, FixedBytes<4>, Digest, Sha256, TwoCap>;
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
@@ -614,7 +611,7 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            mmr::{self, iterator::nodes_to_pin, journaled::Mmr},
+            merkle::mmr::{self, iterator::nodes_to_pin, journaled::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;

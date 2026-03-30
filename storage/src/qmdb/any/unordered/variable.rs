@@ -220,8 +220,7 @@ pub(crate) mod test {
     /// create_test_ops(n') for n < n'.
     pub(crate) fn create_test_ops(
         n: usize,
-    ) -> Vec<unordered::Operation<mmr::Family, Digest, VariableEncoding<Vec<u8>>>>
-    {
+    ) -> Vec<unordered::Operation<mmr::Family, Digest, VariableEncoding<Vec<u8>>>> {
         create_test_ops_seeded(n, 0)
     }
 
@@ -230,8 +229,7 @@ pub(crate) mod test {
     pub(crate) fn create_test_ops_seeded(
         n: usize,
         seed: u64,
-    ) -> Vec<unordered::Operation<mmr::Family, Digest, VariableEncoding<Vec<u8>>>>
-    {
+    ) -> Vec<unordered::Operation<mmr::Family, Digest, VariableEncoding<Vec<u8>>>> {
         let mut rng = test_rng_seeded(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -251,9 +249,7 @@ pub(crate) mod test {
     /// Applies the given operations to the database.
     pub(crate) async fn apply_ops(
         db: &mut AnyTest,
-        ops: Vec<
-            unordered::Operation<mmr::Family, Digest, VariableEncoding<Vec<u8>>>,
-        >,
+        ops: Vec<unordered::Operation<mmr::Family, Digest, VariableEncoding<Vec<u8>>>>,
     ) {
         let finalized = {
             let mut batch = db.new_batch();
@@ -643,7 +639,7 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            mmr::{self, iterator::nodes_to_pin, journaled::Mmr},
+            merkle::mmr::{self, iterator::nodes_to_pin, journaled::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
@@ -883,11 +879,7 @@ pub(crate) mod test {
         use commonware_cryptography::sha256;
         use std::collections::HashMap;
 
-        type Snap = MerkleizedBatch<
-            mmr::Family,
-            sha256::Digest,
-            super::Update<Digest, Vec<u8>>,
-        >;
+        type Snap = MerkleizedBatch<mmr::Family, sha256::Digest, super::Update<Digest, Vec<u8>>>;
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

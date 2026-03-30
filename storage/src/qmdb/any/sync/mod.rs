@@ -8,7 +8,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    mmr::{self, journaled, Location, StandardHasher},
+    merkle::mmr::{self, journaled, Location, StandardHasher},
     qmdb::{
         self,
         any::{
@@ -90,8 +90,7 @@ where
     Ok(db)
 }
 
-impl<E, K, V, H, T> qmdb::sync::Database
-    for UnorderedFixedDb<mmr::Family, E, K, V, H, T>
+impl<E, K, V, H, T> qmdb::sync::Database for UnorderedFixedDb<mmr::Family, E, K, V, H, T>
 where
     E: Context,
     K: Array,
@@ -133,8 +132,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> qmdb::sync::Database
-    for UnorderedVariableDb<mmr::Family, E, K, V, H, T>
+impl<E, K, V, H, T> qmdb::sync::Database for UnorderedVariableDb<mmr::Family, E, K, V, H, T>
 where
     E: Context,
     K: Key,
@@ -147,10 +145,7 @@ where
     type Op = UnorderedVariableOp<mmr::Family, K, V>;
     type Journal = variable::Journal<E, Self::Op>;
     type Hasher = H;
-    type Config = VariableConfig<
-        T,
-        <UnorderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg,
-    >;
+    type Config = VariableConfig<T, <UnorderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>;
     type Digest = H::Digest;
 
     async fn from_sync_result(
@@ -180,8 +175,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> qmdb::sync::Database
-    for OrderedFixedDb<mmr::Family, E, K, V, H, T>
+impl<E, K, V, H, T> qmdb::sync::Database for OrderedFixedDb<mmr::Family, E, K, V, H, T>
 where
     E: Context,
     K: Array,
@@ -223,8 +217,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> qmdb::sync::Database
-    for OrderedVariableDb<mmr::Family, E, K, V, H, T>
+impl<E, K, V, H, T> qmdb::sync::Database for OrderedVariableDb<mmr::Family, E, K, V, H, T>
 where
     E: Context,
     K: Key,
@@ -237,8 +230,7 @@ where
     type Op = OrderedVariableOp<mmr::Family, K, V>;
     type Journal = variable::Journal<E, Self::Op>;
     type Hasher = H;
-    type Config =
-        VariableConfig<T, <OrderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>;
+    type Config = VariableConfig<T, <OrderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>;
     type Digest = H::Digest;
 
     async fn from_sync_result(

@@ -6,8 +6,11 @@
 
 use crate::{
     journal::contiguous::{Contiguous, Reader as _},
-    merkle::{hasher::Hasher as _, storage::Storage},
-    mmr::{self, verification, Location, Proof},
+    merkle::{
+        hasher::Hasher as _,
+        mmr::{self, verification, Location, Proof},
+        storage::Storage,
+    },
     qmdb::current::{batch::BitmapRead, grafting},
 };
 use commonware_codec::Codec;

@@ -237,7 +237,7 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    mmr::{self, journaled::Config as MmrConfig, Location, StandardHasher},
+    merkle::mmr::{self, journaled::Config as MmrConfig, Location, StandardHasher},
     qmdb::{
         any::{
             self,

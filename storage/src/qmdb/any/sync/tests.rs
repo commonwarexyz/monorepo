@@ -6,8 +6,7 @@
 
 use crate::{
     journal::contiguous::Contiguous,
-    merkle::mmr,
-    mmr::Location,
+    merkle::{mmr, mmr::Location},
     qmdb::{
         self,
         any::traits::DbAny,
@@ -1688,18 +1687,16 @@ mod harnesses {
 
         fn create_ops(
             n: usize,
-        ) -> Vec<
-            crate::qmdb::any::ordered::fixed::Operation<crate::mmr::Family, Digest, Digest>,
-        > {
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<crate::mmr::Family, Digest, Digest>>
+        {
             crate::qmdb::any::ordered::fixed::test::create_test_ops(n)
         }
 
         fn create_ops_seeded(
             n: usize,
             seed: u64,
-        ) -> Vec<
-            crate::qmdb::any::ordered::fixed::Operation<crate::mmr::Family, Digest, Digest>,
-        > {
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<crate::mmr::Family, Digest, Digest>>
+        {
             crate::qmdb::any::ordered::fixed::test::create_test_ops_seeded(n, seed)
         }
 
@@ -1717,11 +1714,7 @@ mod harnesses {
         async fn apply_ops(
             mut db: Self::Db,
             ops: Vec<
-                crate::qmdb::any::ordered::fixed::Operation<
-                    crate::mmr::Family,
-                    Digest,
-                    Digest,
-                >,
+                crate::qmdb::any::ordered::fixed::Operation<crate::mmr::Family, Digest, Digest>,
             >,
         ) -> Self::Db {
             crate::qmdb::any::ordered::fixed::test::apply_ops(&mut db, ops).await;
@@ -1760,25 +1753,15 @@ mod harnesses {
         fn create_ops_seeded(
             n: usize,
             seed: u64,
-        ) -> Vec<
-            crate::qmdb::any::ordered::variable::Operation<
-                crate::mmr::Family,
-                Digest,
-                Vec<u8>,
-            >,
-        > {
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<crate::mmr::Family, Digest, Vec<u8>>>
+        {
             crate::qmdb::any::ordered::variable::test::create_test_ops_seeded(n, seed)
         }
 
         fn create_ops(
             n: usize,
-        ) -> Vec<
-            crate::qmdb::any::ordered::variable::Operation<
-                crate::mmr::Family,
-                Digest,
-                Vec<u8>,
-            >,
-        > {
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<crate::mmr::Family, Digest, Vec<u8>>>
+        {
             crate::qmdb::any::ordered::variable::test::create_test_ops(n)
         }
 
@@ -1796,11 +1779,7 @@ mod harnesses {
         async fn apply_ops(
             mut db: Self::Db,
             ops: Vec<
-                crate::qmdb::any::ordered::variable::Operation<
-                    crate::mmr::Family,
-                    Digest,
-                    Vec<u8>,
-                >,
+                crate::qmdb::any::ordered::variable::Operation<crate::mmr::Family, Digest, Vec<u8>>,
             >,
         ) -> Self::Db {
             crate::qmdb::any::ordered::variable::test::apply_ops(&mut db, ops).await;
@@ -1836,25 +1815,15 @@ mod harnesses {
         fn create_ops_seeded(
             n: usize,
             seed: u64,
-        ) -> Vec<
-            crate::qmdb::any::unordered::fixed::Operation<
-                crate::mmr::Family,
-                Digest,
-                Digest,
-            >,
-        > {
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<crate::mmr::Family, Digest, Digest>>
+        {
             crate::qmdb::any::unordered::fixed::test::create_test_ops_seeded(n, seed)
         }
 
         fn create_ops(
             n: usize,
-        ) -> Vec<
-            crate::qmdb::any::unordered::fixed::Operation<
-                crate::mmr::Family,
-                Digest,
-                Digest,
-            >,
-        > {
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<crate::mmr::Family, Digest, Digest>>
+        {
             crate::qmdb::any::unordered::fixed::test::create_test_ops(n)
         }
 
@@ -1872,11 +1841,7 @@ mod harnesses {
         async fn apply_ops(
             mut db: Self::Db,
             ops: Vec<
-                crate::qmdb::any::unordered::fixed::Operation<
-                    crate::mmr::Family,
-                    Digest,
-                    Digest,
-                >,
+                crate::qmdb::any::unordered::fixed::Operation<crate::mmr::Family, Digest, Digest>,
             >,
         ) -> Self::Db {
             crate::qmdb::any::unordered::fixed::test::apply_ops(&mut db, ops).await;

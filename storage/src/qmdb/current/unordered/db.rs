@@ -6,7 +6,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
-    mmr::{self, Location},
+    merkle::mmr::{self, Location},
     qmdb::{
         any::{
             operation::update::Unordered as UnorderedUpdate,

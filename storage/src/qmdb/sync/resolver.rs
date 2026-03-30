@@ -1,5 +1,5 @@
 use crate::{
-    mmr::{Location, Proof},
+    merkle::mmr::{Location, Proof},
     qmdb::{
         self,
         any::{

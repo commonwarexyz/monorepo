@@ -30,7 +30,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    mmr::{self, Location, StandardHasher},
+    merkle::mmr::{self, Location, StandardHasher},
     qmdb::{
         self,
         any::{
@@ -132,9 +132,8 @@ where
     // init_from_log, which pads the gap between `pruned_chunks * CHUNK_SIZE_BITS` and the
     // journal's inactivity floor with inactive (false) bits.
     let pruned_chunks = (*range.start / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
-    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks).map_err(|_| {
-        qmdb::Error::<mmr::Family>::DataCorrupted("pruned chunks overflow")
-    })?;
+    let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
+        .map_err(|_| qmdb::Error::<mmr::Family>::DataCorrupted("pruned chunks overflow"))?;
 
     // Build any::Db with bitmap callback.
     //
@@ -169,11 +168,9 @@ where
         let num_grafted_pins = (pruned_chunks as u64).count_ones() as usize;
         let mut pins = Vec::with_capacity(num_grafted_pins);
         for pos in ops_pin_positions.take(num_grafted_pins) {
-            let digest = any.log.merkle.get_node(pos).await?.ok_or(qmdb::Error::<
-                mmr::Family,
-            >::DataCorrupted(
-                "missing ops pinned node"
-            ))?;
+            let digest = any.log.merkle.get_node(pos).await?.ok_or(
+                qmdb::Error::<mmr::Family>::DataCorrupted("missing ops pinned node"),
+            )?;
             pins.push(digest);
         }
         pins

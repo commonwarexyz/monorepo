@@ -143,8 +143,10 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as _,
-        merkle::Location as GenericLocation,
-        mmr::{self, Location, StandardHasher},
+        merkle::{
+            mmr::{self, Location, StandardHasher},
+            Location as GenericLocation,
+        },
         qmdb::{
             any::{
                 test::fixed_db_config,
@@ -201,9 +203,7 @@ pub(crate) mod test {
     /// Create n random operations using the default seed (0). Some portion of
     /// the updates are deletes. create_test_ops(n) is a prefix of
     /// create_test_ops(n') for n < n'.
-    pub(crate) fn create_test_ops(
-        n: usize,
-    ) -> Vec<Operation<mmr::Family, Digest, Digest>> {
+    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<mmr::Family, Digest, Digest>> {
         create_test_ops_seeded(n, 0)
     }
 
@@ -542,17 +542,13 @@ pub(crate) mod test {
     #[test_traced("INFO")]
     fn test_unordered_fixed_batch_stacked_delete_recreate() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| {
-            batch_stacked_delete_recreate_inner::<mmr::Family>(context)
-        });
+        executor.start(batch_stacked_delete_recreate_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_unordered_fixed_batch_apply_returns_range() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| {
-            batch_apply_returns_range_inner::<mmr::Family>(context)
-        });
+        executor.start(batch_apply_returns_range_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
@@ -822,7 +818,7 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            mmr::{iterator::nodes_to_pin, journaled::Mmr},
+            merkle::mmr::{iterator::nodes_to_pin, journaled::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;

@@ -10,7 +10,7 @@ pub use super::db::KeyValueProof;
 use crate::{
     index::ordered::Index,
     journal::contiguous::variable::Journal,
-    mmr::Location,
+    merkle::mmr::Location,
     qmdb::{
         any::{ordered::variable::Operation, value::VariableEncoding, VariableValue},
         current::VariableConfig as Config,
@@ -56,7 +56,7 @@ pub mod partitioned {
     use crate::{
         index::partitioned::ordered::Index,
         journal::contiguous::variable::Journal,
-        mmr::Location,
+        merkle::mmr::Location,
         qmdb::{
             any::{
                 ordered::variable::partitioned::Operation, value::VariableEncoding, VariableValue,

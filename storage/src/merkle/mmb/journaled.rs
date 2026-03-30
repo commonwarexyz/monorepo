@@ -13,7 +13,7 @@
 /// Configuration for a journal-backed MMB.
 pub use crate::merkle::journaled::Config;
 pub use crate::merkle::journaled::UnmerkleizedBatch;
-use crate::mmb::Family;
+use crate::merkle::mmb::Family;
 
 /// Configuration for initializing a journaled MMB for synchronization.
 pub type SyncConfig<D> = crate::merkle::journaled::SyncConfig<Family, D>;

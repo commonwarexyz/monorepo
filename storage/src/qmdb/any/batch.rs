@@ -1509,8 +1509,7 @@ mod tests {
         mutations.insert(2, None); // delete (not a create)
         mutations.insert(3, Some(300)); // update, but not in base diff
 
-        let mut base_diff: BTreeMap<u64, DiffEntry<mmr::Family, u64>> =
-            BTreeMap::new();
+        let mut base_diff: BTreeMap<u64, DiffEntry<mmr::Family, u64>> = BTreeMap::new();
         base_diff.insert(
             1,
             DiffEntry::Deleted {
@@ -1545,8 +1544,7 @@ mod tests {
         let mut mutations: BTreeMap<u64, Option<u64>> = BTreeMap::new();
         mutations.insert(1, None); // deleting a parent-deleted key
 
-        let mut base_diff: BTreeMap<u64, DiffEntry<mmr::Family, u64>> =
-            BTreeMap::new();
+        let mut base_diff: BTreeMap<u64, DiffEntry<mmr::Family, u64>> = BTreeMap::new();
         base_diff.insert(
             1,
             DiffEntry::Deleted {

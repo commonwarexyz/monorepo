@@ -13,7 +13,7 @@
 /// Configuration for a journal-backed MMR.
 pub use crate::merkle::journaled::Config;
 pub use crate::merkle::journaled::UnmerkleizedBatch;
-use crate::mmr::Family;
+use crate::merkle::mmr::Family;
 
 /// Configuration for initializing a journaled MMR for synchronization.
 pub type SyncConfig<D> = crate::merkle::journaled::SyncConfig<Family, D>;
