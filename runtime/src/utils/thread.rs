@@ -1,8 +1,8 @@
-//! Helpers for resolving the default system thread stack size.
+//! Helpers for resolving the configured thread stack size.
 
-use std::{sync::OnceLock, thread};
+use std::{env, sync::OnceLock, thread};
 
-/// Cached system thread stack size.
+/// Cached configured thread stack size.
 static SYSTEM_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
 
 /// Rust's default thread stack size.
@@ -10,10 +10,19 @@ static SYSTEM_THREAD_STACK_SIZE: OnceLock<usize> = OnceLock::new();
 /// See <https://doc.rust-lang.org/std/thread/#stack-size>.
 const RUST_DEFAULT_THREAD_STACK_SIZE: usize = 2 * 1024 * 1024;
 
-/// Returns the system thread stack size.
+/// Returns the value of the `RUST_MIN_STACK` environment variable, if set.
+fn rust_min_stack() -> Option<usize> {
+    env::var_os("RUST_MIN_STACK").and_then(|s| s.to_str().and_then(|s| s.parse().ok()))
+}
+
+/// Resolves the stack size to use for runtime-owned threads.
 ///
-/// On Unix platforms other than macOS, this queries the default stack size for
-/// newly created pthreads via `pthread_attr_init` and `pthread_attr_getstacksize`.
+/// If `RUST_MIN_STACK` is set, this uses that value so runtime-owned threads
+/// preserve Rust's process-wide spawned-thread override.
+///
+/// Otherwise, on Unix platforms other than macOS, this queries the default
+/// stack size for newly created pthreads via `pthread_attr_init` and
+/// `pthread_attr_getstacksize`.
 ///
 /// On macOS, this instead uses `RLIMIT_STACK`. macOS distinguishes between the
 /// process stack limit and the smaller default stack size for secondary
@@ -24,8 +33,11 @@ const RUST_DEFAULT_THREAD_STACK_SIZE: usize = 2 * 1024 * 1024;
 /// On other platforms, or if the platform-specific query fails, this falls back
 /// to [RUST_DEFAULT_THREAD_STACK_SIZE].
 pub(crate) fn system_thread_stack_size() -> usize {
-    *SYSTEM_THREAD_STACK_SIZE
-        .get_or_init(|| system_thread_stack_size_impl().unwrap_or(RUST_DEFAULT_THREAD_STACK_SIZE))
+    *SYSTEM_THREAD_STACK_SIZE.get_or_init(|| {
+        rust_min_stack()
+            .or(system_thread_stack_size_impl())
+            .unwrap_or(RUST_DEFAULT_THREAD_STACK_SIZE)
+    })
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
