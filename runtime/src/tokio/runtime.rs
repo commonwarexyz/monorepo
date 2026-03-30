@@ -17,8 +17,8 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{
-        self, add_attribute, signal::Stopper, supervision::Tree, MetricHandle, Panicker,
-        Registry, ScopeGuard,
+        self, add_attribute, signal::Stopper, supervision::Tree, MetricHandle, Panicker, Registry,
+        ScopeGuard,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
@@ -1069,7 +1069,7 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BufferPoolThreadCache, Runner as _};
+    use crate::Runner as _;
     use commonware_utils::channel::oneshot;
     use std::{
         future::pending,
