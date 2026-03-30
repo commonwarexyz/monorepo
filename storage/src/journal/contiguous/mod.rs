@@ -5,8 +5,8 @@
 //! [variable]-size item journals are supported.
 
 use super::Error;
-use futures::Stream;
 use commonware_utils::AsSlice;
+use futures::Stream;
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
@@ -99,7 +99,7 @@ where
         Self::Nested(items)
     }
 
-    fn batch_count(&self) -> usize {
+    const fn batch_count(&self) -> usize {
         match self {
             Self::Flat(_) => 1,
             Self::Nested(items) => items.len(),

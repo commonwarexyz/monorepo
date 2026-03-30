@@ -375,9 +375,7 @@ where
             .into());
         }
 
-        self.journal
-            .append_many(Many::nested(&batch.items))
-            .await?;
+        self.journal.append_many(Many::nested(&batch.items)).await?;
         self.mmr.apply(batch.changeset)?;
         assert_eq!(*self.mmr.leaves(), self.journal.size().await);
         Ok(())

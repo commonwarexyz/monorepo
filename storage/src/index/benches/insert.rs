@@ -1,11 +1,10 @@
+use super::DummyMetrics;
 use commonware_cryptography::{Hasher, Sha256};
-use commonware_runtime::Metrics;
 use commonware_storage::{
     index::{ordered, partitioned, unordered, Unordered},
     translator::{Cap, FourCap, Hashed, TwoCap},
 };
 use criterion::{criterion_group, Criterion};
-use prometheus_client::registry::Metric;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use std::time::{Duration, Instant};
 
@@ -54,33 +53,6 @@ const VARIANTS: [Variant; 9] = [
     Variant::HashedPartitionedUnordered1,
     Variant::HashedPartitionedUnordered2,
 ];
-
-#[derive(Clone)]
-struct DummyMetrics;
-
-impl Metrics for DummyMetrics {
-    fn label(&self) -> String {
-        "".into()
-    }
-
-    fn with_label(&self, _: &str) -> Self {
-        Self
-    }
-
-    fn encode(&self) -> String {
-        "".into()
-    }
-
-    fn register<N: Into<String>, H: Into<String>>(&self, _: N, _: H, _: impl Metric) {}
-
-    fn with_attribute(&self, _: &str, _: impl std::fmt::Display) -> Self {
-        Self
-    }
-
-    fn with_scope(&self) -> Self {
-        Self
-    }
-}
 
 fn bench_insert(c: &mut Criterion) {
     for items in N_ITEMS {

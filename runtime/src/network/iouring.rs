@@ -25,7 +25,7 @@
 
 use crate::{
     iouring::{self, should_retry, OpBuffer, OpFd, OpIovecs},
-    Buf, BufferPool, Error, IoBuf, IoBufMut, IoBufs,
+    utils, Buf, BufferPool, Error, IoBuf, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::oneshot;
 use io_uring::{opcode, types::Fd};
@@ -51,15 +51,13 @@ pub struct Config {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
     pub tcp_nodelay: Option<bool>,
-    /// Whether or not to set the `SO_LINGER` socket option.
+    /// Whether to set `SO_LINGER` to zero on the socket.
     ///
-    /// When `None`, the system default is used. When
-    /// `Some(duration)`, `SO_LINGER` is enabled with the given timeout.
-    /// `Some(Duration::ZERO)` causes an immediate RST on close, avoiding
+    /// When enabled, causes an immediate RST on close, avoiding
     /// `TIME_WAIT` state. This is useful in adversarial environments to
     /// reclaim socket resources immediately when closing connections to
     /// misbehaving peers.
-    pub so_linger: Option<Duration>,
+    pub zero_linger: bool,
     /// Timeout budget applied to each top-level send/recv call.
     ///
     /// This is a network-level policy and is independent from io_uring loop
@@ -73,17 +71,20 @@ pub struct Config {
     pub read_buffer_size: usize,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
+    /// Stack size for the dedicated send and receive io_uring threads.
+    pub thread_stack_size: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
         let iouring_config = iouring::Config::default();
         Self {
-            tcp_nodelay: None,
-            so_linger: None,
+            tcp_nodelay: Some(true),
+            zero_linger: true,
             read_write_timeout: iouring_config.max_op_timeout,
             iouring_config,
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
+            thread_stack_size: utils::thread::system_thread_stack_size(),
         }
     }
 }
@@ -94,8 +95,8 @@ pub struct Network {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
     tcp_nodelay: Option<bool>,
-    /// Whether or not to set the `SO_LINGER` socket option.
-    so_linger: Option<Duration>,
+    /// Whether to set `SO_LINGER` to zero on the socket.
+    zero_linger: bool,
     /// Used to submit send operations to the send io_uring event loop.
     send_submitter: iouring::Submitter,
     /// Used to submit recv operations to the recv io_uring event loop.
@@ -136,17 +137,17 @@ impl Network {
         let sender_registry = registry.sub_registry_with_prefix("iouring_sender");
         let (send_submitter, send_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config.clone(), sender_registry);
-        std::thread::spawn(move || send_loop.run());
+        utils::thread::spawn(cfg.thread_stack_size, move || send_loop.run());
 
         // Create an io_uring instance to handle receive operations.
         let receiver_registry = registry.sub_registry_with_prefix("iouring_receiver");
         let (recv_submitter, recv_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config, receiver_registry);
-        std::thread::spawn(move || recv_loop.run());
+        utils::thread::spawn(cfg.thread_stack_size, move || recv_loop.run());
 
         Ok(Self {
             tcp_nodelay: cfg.tcp_nodelay,
-            so_linger: cfg.so_linger,
+            zero_linger: cfg.zero_linger,
             send_submitter,
             recv_submitter,
             read_write_timeout: cfg.read_write_timeout,
@@ -165,7 +166,7 @@ impl crate::Network for Network {
             .map_err(|_| Error::BindFailed)?;
         Ok(Listener {
             tcp_nodelay: self.tcp_nodelay,
-            so_linger: self.so_linger,
+            zero_linger: self.zero_linger,
             inner: listener,
             send_submitter: self.send_submitter.clone(),
             recv_submitter: self.recv_submitter.clone(),
@@ -190,9 +191,9 @@ impl crate::Network for Network {
             }
         }
 
-        // Set SO_LINGER if configured
-        if let Some(so_linger) = self.so_linger {
-            if let Err(err) = stream.set_linger(Some(so_linger)) {
+        // Set SO_LINGER to zero if configured
+        if self.zero_linger {
+            if let Err(err) = stream.set_zero_linger() {
                 warn!(?err, "failed to set SO_LINGER");
             }
         }
@@ -228,8 +229,8 @@ pub struct Listener {
     /// If Some, explicitly sets TCP_NODELAY on the socket.
     /// Otherwise uses system default.
     tcp_nodelay: Option<bool>,
-    /// Whether or not to set the `SO_LINGER` socket option.
-    so_linger: Option<Duration>,
+    /// Whether to set `SO_LINGER` to zero on the socket.
+    zero_linger: bool,
     inner: TcpListener,
     /// Used to submit send operations to the send io_uring event loop.
     send_submitter: iouring::Submitter,
@@ -261,9 +262,9 @@ impl crate::Listener for Listener {
             }
         }
 
-        // Set SO_LINGER if configured
-        if let Some(so_linger) = self.so_linger {
-            if let Err(err) = stream.set_linger(Some(so_linger)) {
+        // Set SO_LINGER to zero if configured
+        if self.zero_linger {
+            if let Err(err) = stream.set_zero_linger() {
                 warn!(?err, "failed to set SO_LINGER");
             }
         }
@@ -666,7 +667,8 @@ mod tests {
             iouring::{Config, Network},
             tests,
         },
-        BufferPool, BufferPoolConfig, Error, Listener as _, Network as _, Sink as _, Stream as _,
+        thread, BufferPool, BufferPoolConfig, Error, Listener as _, Network as _, Sink as _,
+        Stream as _,
     };
     use commonware_macros::{select, test_group};
     use prometheus_client::registry::Registry;
@@ -677,6 +679,14 @@ mod tests {
 
     fn test_pool() -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
+    }
+
+    #[test]
+    fn test_default_thread_stack_size_uses_system_default() {
+        assert_eq!(
+            Config::default().thread_stack_size,
+            thread::system_thread_stack_size()
+        );
     }
 
     #[tokio::test]

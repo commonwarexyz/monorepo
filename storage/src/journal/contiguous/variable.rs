@@ -522,9 +522,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         S: AsSlice<V> + Sync,
         V: Sync,
     {
-        let Some((last_batch_index, last_batch_len)) = (0..items.batch_count())
-            .rev()
-            .find_map(|index| {
+        let Some((last_batch_index, last_batch_len)) =
+            (0..items.batch_count()).rev().find_map(|index| {
                 let len = items.batch(index).len();
                 (len > 0).then_some((index, len))
             })

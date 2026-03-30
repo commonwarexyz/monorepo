@@ -1914,6 +1914,29 @@ mod test {
     }
 
     #[test_traced]
+    fn test_keyless_child_root_matches_between_pending_and_committed_paths() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Build the child while the parent is still pending.
+            let parent = db.new_batch().append(vec![1]).merkleize(None);
+            let pending_child = parent.new_batch::<Sha256>().append(vec![2]).merkleize(None);
+
+            // Commit the parent, then rebuild the same logical child from the
+            // committed DB state and compare roots.
+            db.apply_batch(parent.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            let committed_child = db.new_batch().append(vec![2]).merkleize(None);
+
+            assert_eq!(pending_child.root(), committed_child.root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_stale_changeset_child_applied_before_parent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
