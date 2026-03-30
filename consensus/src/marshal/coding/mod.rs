@@ -93,7 +93,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::NZU16;
+    use commonware_utils::{ordered::Set, NZU16};
     use std::time::Duration;
 
     #[test_group("slow")]
@@ -1447,7 +1447,7 @@ mod tests {
             setup_network_links(&mut oracle, &participants[..2], LINK).await;
             oracle
                 .manager()
-                .track(0, participants[..2].to_vec().try_into().unwrap())
+                .track(0, Set::try_from(participants[..2].to_vec()).unwrap())
                 .await;
 
             let mut v0_mailbox = v0_setup.mailbox;

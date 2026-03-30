@@ -84,7 +84,7 @@ mod tests {
         Blocker, Provider,
     };
     use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{non_empty_vec, NZU32};
+    use commonware_utils::{non_empty_vec, ordered::Set, NZU32};
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;
@@ -148,7 +148,9 @@ mod tests {
             .collect();
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
         let mut manager = oracle.manager();
-        manager.track(0, peers.clone().try_into().unwrap()).await;
+        manager
+            .track(0, Set::try_from(peers.clone()).unwrap())
+            .await;
 
         let mut connections = Vec::new();
         for peer in &peers {

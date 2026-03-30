@@ -40,7 +40,7 @@ use commonware_storage::{
     archive::{immutable, prunable},
     translator::EightCap,
 };
-use commonware_utils::{vec::NonEmptyVec, NZUsize, NZU16, NZU64};
+use commonware_utils::{ordered::Set, vec::NonEmptyVec, NZUsize, NZU16, NZU64};
 use futures::StreamExt;
 use rand::{
     seq::{IteratorRandom, SliceRandom},
@@ -1483,7 +1483,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
 
         let mut manager = oracle.manager();
         manager
-            .track(0, participants.clone().try_into().unwrap())
+            .track(0, Set::try_from(participants.clone()).unwrap())
             .await;
 
         for (i, validator) in participants.iter().enumerate() {
@@ -1811,7 +1811,7 @@ pub fn sync_height_floor<H: TestHarness>() {
 
         let mut manager = oracle.manager();
         manager
-            .track(0, participants.clone().try_into().unwrap())
+            .track(0, Set::try_from(participants.clone()).unwrap())
             .await;
 
         // Skip first validator
@@ -2149,7 +2149,9 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         let peers = vec![victim.clone(), attacker.clone()];
 
         let mut manager = oracle.manager();
-        manager.track(0, peers.clone().try_into().unwrap()).await;
+        manager
+            .track(0, Set::try_from(peers.clone()).unwrap())
+            .await;
 
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let (mut victim_mailbox, victim_extra, _victim_application) = H::setup_prunable_validator(
@@ -3105,7 +3107,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         // Register the initial peer set
         let mut manager = oracle.manager();
         manager
-            .track(0, participants.clone().try_into().unwrap())
+            .track(0, Set::try_from(participants.clone()).unwrap())
             .await;
 
         // Set up two validators

@@ -334,10 +334,7 @@ impl NetworkScheme for Lookup {
             oracle
                 .track(
                     index as u64,
-                    peer_list
-                        .clone()
-                        .try_into()
-                        .expect("public keys are unique"),
+                    Map::<_, Address>::try_from(peer_list.clone()).expect("public keys are unique"),
                 )
                 .await;
         }
