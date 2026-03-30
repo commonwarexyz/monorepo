@@ -73,8 +73,11 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// The records of all peers.
     peers: HashMap<C, Record<C>>,
 
-    /// The peer sets
-    sets: BTreeMap<u64, Set<C>>,
+    /// Primary peer sets indexed by their ID.
+    primary_sets: BTreeMap<u64, Set<C>>,
+
+    /// Secondary peer sets indexed by their ID.
+    secondary_sets: BTreeMap<u64, OrderedSet<C>>,
 
     /// Tracks blocked peers and their unblock time. This is the source of truth for
     /// whether a peer is blocked, persisting even if the peer record is deleted.
@@ -122,7 +125,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             block_duration: cfg.block_duration,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
             peers,
-            sets: BTreeMap::new(),
+            primary_sets: BTreeMap::new(),
+            secondary_sets: BTreeMap::new(),
             blocked: PrioritySet::new(),
             releaser,
             metrics,
@@ -131,13 +135,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Setters ----------
 
-    /// Track a new primary peer set and replace the current secondaries.
+    /// Track new primary and secondary peer sets for the given index.
     pub fn track(&mut self, index: u64, primary: OrderedSet<C>, secondary: OrderedSet<C>) -> bool {
-        if !self.add_set(index, primary) {
-            return false;
-        }
-        self.set_secondaries(secondary);
-        true
+        self.add_tracked_sets(index, primary, secondary)
     }
 
     /// Releases a peer.
@@ -155,9 +155,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             record.dial_failure(ingress);
         }
 
-        // We may have to update the sets.
+        // We may have to update the primary sets.
         let want = record.want(self.dial_fail_limit);
-        for set in self.sets.values_mut() {
+        for set in self.primary_sets.values_mut() {
             set.update(peer, !want);
         }
         self.delete_if_needed(peer);
@@ -181,9 +181,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .get_or_create(&metrics::Peer::new(peer))
             .try_set(self.context.current().epoch_millis());
 
-        // We may have to update the sets.
+        // We may have to update the primary sets.
         let want = record.want(self.dial_fail_limit);
-        for set in self.sets.values_mut() {
+        for set in self.primary_sets.values_mut() {
             set.update(peer, !want);
         }
     }
@@ -208,9 +208,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 .get_or_create(&metrics::Peer::new(&peer))
                 .inc();
 
-            // We may have to update the sets.
+            // We may have to update the primary sets.
             let want = record.want(self.dial_fail_limit);
-            for set in self.sets.values_mut() {
+            for set in self.primary_sets.values_mut() {
                 set.update(&peer, !want);
             }
             debug!(?peer, "updated peer record");
@@ -218,80 +218,80 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Stores a new primary peer set.
-    pub fn add_set(&mut self, index: u64, peers: OrderedSet<C>) -> bool {
+    pub fn add_set(&mut self, index: u64, primaries: OrderedSet<C>) -> bool {
+        self.add_tracked_sets(index, primaries, OrderedSet::default())
+    }
+
+    /// Stores new primary and secondary peer sets for the same index.
+    fn add_tracked_sets(
+        &mut self,
+        index: u64,
+        primaries: OrderedSet<C>,
+        secondaries: OrderedSet<C>,
+    ) -> bool {
         // Check if peer set already exists
-        if self.sets.contains_key(&index) {
+        if self.primary_sets.contains_key(&index) {
             warn!(index, "peer set already exists");
             return false;
         }
 
         // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.sets.last_key_value() {
+        if let Some((last, _)) = self.primary_sets.last_key_value() {
             if index <= *last {
                 warn!(?index, ?last, "index must monotonically increase");
                 return false;
             }
         }
 
-        // Create and store new peer set
-        let mut set = Set::new(peers.clone());
-        for peer in peers.iter() {
-            let record = self.peers.entry(peer.clone()).or_insert_with(|| {
+        // Create and store new primary peer set.
+        let mut primary_set = Set::new(primaries.clone());
+        for primary in primaries.iter() {
+            let record = self.peers.entry(primary.clone()).or_insert_with(|| {
                 self.metrics.tracked.inc();
                 Record::unknown()
             });
             record.increment_primary();
-            set.update(peer, !record.want(self.dial_fail_limit));
+            primary_set.update(primary, !record.want(self.dial_fail_limit));
         }
-        self.sets.insert(index, set);
+        self.primary_sets.insert(index, primary_set);
 
-        // Remove oldest entries if necessary
-        while self.sets.len() > self.max_sets {
-            let (index, set) = self.sets.pop_first().unwrap();
-            debug!(index, "removed oldest peer set");
-            set.into_iter().for_each(|peer| {
-                self.peers.get_mut(peer).unwrap().decrement_primary();
-                self.delete_if_needed(peer);
+        // Create and store new secondary peer set.
+        for secondary in secondaries.iter() {
+            let record = self.peers.entry(secondary.clone()).or_insert_with(|| {
+                self.metrics.tracked.inc();
+                Record::unknown()
+            });
+            record.increment_secondary();
+        }
+        self.secondary_sets.insert(index, secondaries);
+
+        // Remove oldest tracked peer sets if necessary.
+        while self.primary_sets.len() > self.max_sets {
+            let (primary_index, primary_set) = self.primary_sets.pop_first().unwrap();
+            let (secondary_index, secondary_set) = self.secondary_sets.pop_first().unwrap();
+            debug_assert_eq!(primary_index, secondary_index);
+            debug!(index = primary_index, "removed oldest tracked peer sets");
+            primary_set.into_iter().for_each(|primary| {
+                self.peers.get_mut(primary).unwrap().decrement_primary();
+                self.delete_if_needed(primary);
+            });
+            secondary_set.iter().for_each(|secondary| {
+                self.peers.get_mut(secondary).unwrap().decrement_secondary();
+                self.delete_if_needed(secondary);
             });
         }
 
         true
     }
 
-    /// Replace the current set of secondary peers.
-    pub fn set_secondaries(&mut self, peers: OrderedSet<C>) {
-        let removed_secondaries: Vec<_> = self
-            .peers
-            .iter()
-            .filter(|(_, record)| record.is_secondary())
-            .filter(|(peer, _)| peers.position(peer).is_none())
-            .map(|(peer, _)| peer.clone())
-            .collect();
-        for peer in removed_secondaries {
-            let Some(record) = self.peers.get_mut(&peer) else {
-                continue;
-            };
-            record.set_secondary(false);
-            self.delete_if_needed(&peer);
-        }
-
-        for peer in peers {
-            let record = self.peers.entry(peer).or_insert_with(|| {
-                self.metrics.tracked.inc();
-                Record::unknown()
-            });
-            record.set_secondary(true);
-        }
-    }
-
-    /// Gets a peer set by index.
+    /// Gets a primary peer set by index.
     pub fn get_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
-        self.sets.get(index).map(Deref::deref)
+        self.primary_sets.get(index).map(Deref::deref)
     }
 
-    /// Returns the latest peer set index.
+    /// Returns the latest tracked primary peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
-        self.sets.keys().last().copied()
+        self.primary_sets.keys().last().copied()
     }
 
     /// Attempt to reserve a peer for the dialer.
@@ -311,7 +311,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns a [types::BitVec] for a random peer set.
     pub fn get_random_bit_vec(&mut self) -> Option<types::BitVec> {
-        let (&index, set) = self.sets.iter().choose(&mut self.context)?;
+        let (&index, set) = self.primary_sets.iter().choose(&mut self.context)?;
         Some(types::BitVec {
             index,
             bits: set.knowledge(),
@@ -372,7 +372,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `None` if the bit vector is malformed.
     pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::Info<C>>> {
-        let Some(set) = self.sets.get(&bit_vec.index) else {
+        let Some(set) = self.primary_sets.get(&bit_vec.index) else {
             // Don't consider unknown indices as errors, just ignore them.
             debug!(index = bit_vec.index, "requested peer set not found");
             return Some(vec![]);
@@ -460,7 +460,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             // Update knowledge bitmaps
             if let Some(record) = self.peers.get(&peer) {
                 let want = record.want(self.dial_fail_limit);
-                for set in self.sets.values_mut() {
+                for set in self.primary_sets.values_mut() {
                     set.update(&peer, !want);
                 }
             }
@@ -540,7 +540,7 @@ mod tests {
     use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
     use commonware_cryptography::{secp256r1::standard::PrivateKey, Signer};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::{bitmap::BitMap, SystemTimeExt};
+    use commonware_utils::{bitmap::BitMap, ordered::Set as OrderedSet, SystemTimeExt};
     use std::net::SocketAddr;
 
     const NAMESPACE: &[u8] = b"test";
@@ -610,6 +610,63 @@ mod tests {
 
             // unblock_expired should not panic
             directory.unblock_expired();
+        });
+    }
+
+    #[test]
+    fn test_secondary_sets_remain_tracked_until_eviction() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let config = Config {
+            allow_private_ips: false,
+            allow_dns: true,
+            max_sets: 2,
+            dial_fail_limit: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+        let primary_0 = PrivateKey::from_seed(1).public_key();
+        let primary_1 = PrivateKey::from_seed(2).public_key();
+        let primary_2 = PrivateKey::from_seed(3).public_key();
+        let secondary_0 = PrivateKey::from_seed(4).public_key();
+        let secondary_1 = PrivateKey::from_seed(5).public_key();
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, vec![], my_info, config, releaser);
+
+            assert!(directory.track(
+                0,
+                [primary_0].try_into().unwrap(),
+                [secondary_0.clone()].try_into().unwrap(),
+            ));
+            assert!(directory
+                .peers
+                .get(&secondary_0)
+                .is_some_and(Record::is_secondary));
+
+            assert!(directory.track(
+                1,
+                [primary_1].try_into().unwrap(),
+                [secondary_1.clone()].try_into().unwrap(),
+            ));
+            assert!(directory
+                .peers
+                .get(&secondary_0)
+                .is_some_and(Record::is_secondary));
+            assert!(directory
+                .peers
+                .get(&secondary_1)
+                .is_some_and(Record::is_secondary));
+
+            assert!(directory.track(2, [primary_2].try_into().unwrap(), OrderedSet::default()));
+            assert!(directory.peers.get(&secondary_0).is_none());
+            assert!(directory
+                .peers
+                .get(&secondary_1)
+                .is_some_and(Record::is_secondary));
         });
     }
 

@@ -71,8 +71,11 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// The records of all peers.
     peers: HashMap<C, Record>,
 
-    /// The peer sets
-    sets: BTreeMap<u64, Set<C>>,
+    /// Primary peer sets indexed by their ID.
+    primary_sets: BTreeMap<u64, Set<C>>,
+
+    /// Secondary peer sets indexed by their ID.
+    secondary_sets: BTreeMap<u64, Set<C>>,
 
     /// Tracks blocked peers and their unblock time. This is the source of truth for
     /// whether a peer is blocked, persisting even if the peer record is deleted.
@@ -106,7 +109,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             block_duration: cfg.block_duration,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
             peers,
-            sets: BTreeMap::new(),
+            primary_sets: BTreeMap::new(),
+            secondary_sets: BTreeMap::new(),
             blocked: PrioritySet::new(),
             releaser,
             metrics,
@@ -115,7 +119,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Setters ----------
 
-    /// Track a new primary peer set and replace the current secondaries.
+    /// Track new primary and secondary peer sets for the given index.
     ///
     /// Returns `(deleted_peers, changed_peers)` across both updates.
     pub fn track(
@@ -124,18 +128,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         primary: Map<C, Address>,
         secondary: Map<C, Address>,
     ) -> Option<(Vec<C>, Vec<C>)> {
-        let (deleted_primary, changed_primary) = self.add_set(index, primary)?;
-        let (deleted_secondary, changed_secondary) = self.set_secondaries(secondary);
-        Some((
-            deleted_primary
-                .into_iter()
-                .chain(deleted_secondary)
-                .collect(),
-            changed_primary
-                .into_iter()
-                .chain(changed_secondary)
-                .collect(),
-        ))
+        self.add_tracked_sets(index, primary, secondary)
     }
 
     /// Releases a peer.
@@ -175,30 +168,47 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// The caller should sever connections for `changed_peers` since those
     /// connections were established to the old address and must be replaced.
     ///
-    /// Returns `None` if the peer set index is invalid (already exists or not monotonically increasing).
-    pub fn add_set(&mut self, index: u64, peers: Map<C, Address>) -> Option<(Vec<C>, Vec<C>)> {
+    /// Returns `None` if the peer set index is invalid (already exists or not monotonically
+    /// increasing).
+    pub fn add_set(
+        &mut self,
+        index: u64,
+        primaries: Map<C, Address>,
+    ) -> Option<(Vec<C>, Vec<C>)> {
+        self.add_tracked_sets(index, primaries, Map::default())
+    }
+
+    /// Stores new primary and secondary peer sets for the same index.
+    fn add_tracked_sets(
+        &mut self,
+        index: u64,
+        primaries: Map<C, Address>,
+        secondaries: Map<C, Address>,
+    ) -> Option<(Vec<C>, Vec<C>)> {
         // Check if peer set already exists
-        if self.sets.contains_key(&index) {
+        if self.primary_sets.contains_key(&index) {
             warn!(index, "peer set already exists");
             return None;
         }
 
         // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.sets.last_key_value() {
+        if let Some((last, _)) = self.primary_sets.last_key_value() {
             if index <= *last {
                 warn!(?index, ?last, "index must monotonically increase");
                 return None;
             }
         }
 
-        // Create and store new peer set (all peers are tracked regardless of address validity)
+        // Create and store new primary peer set (all peers are tracked regardless of address
+        // validity).
+        let mut deleted_peers = Vec::new();
         let mut changed_peers = Vec::new();
-        for (peer, addr) in &peers {
-            let record = match self.peers.entry(peer.clone()) {
+        for (primary, addr) in &primaries {
+            let record = match self.peers.entry(primary.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
                     if entry.update(addr.clone()) {
-                        changed_peers.push(peer.clone());
+                        changed_peers.push(primary.clone());
                     }
                     entry
                 }
@@ -209,66 +219,55 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             };
             record.increment_primary();
         }
-        self.sets.insert(index, peers.into_keys());
+        self.primary_sets.insert(index, primaries.into_keys());
 
-        // Remove oldest entries if necessary
-        let mut deleted_peers = Vec::new();
-        while self.sets.len() > self.max_sets {
-            let (index, set) = self.sets.pop_first().unwrap();
-            debug!(index, "removed oldest peer set");
-            set.into_iter().for_each(|peer| {
-                self.peers.get_mut(&peer).unwrap().decrement_primary();
-                let deleted = self.delete_if_needed(&peer);
-                if deleted {
-                    deleted_peers.push(peer);
+        // Create and store new secondary peer set.
+        for (secondary, addr) in &secondaries {
+            let record = match self.peers.entry(secondary.clone()) {
+                Entry::Occupied(entry) => {
+                    let entry = entry.into_mut();
+                    if entry.update(addr.clone()) {
+                        changed_peers.push(secondary.clone());
+                    }
+                    entry
                 }
-            });
-        }
-
-        Some((deleted_peers, changed_peers))
-    }
-
-    /// Replace the current set of secondary peers.
-    ///
-    /// Returns `(deleted_peers, changed_peers)`, where:
-    /// - `deleted_peers` are peers that are no longer primary or secondary
-    /// - `changed_peers` are peers whose address changed while remaining registered
-    pub fn set_secondaries(&mut self, peers: Map<C, Address>) -> (Vec<C>, Vec<C>) {
-        let mut deleted_peers = Vec::new();
-        let mut changed_peers = Vec::new();
-
-        let removed_secondaries: Vec<_> = self
-            .peers
-            .iter()
-            .filter(|(_, record)| record.is_secondary())
-            .filter(|(peer, _)| peers.keys().position(peer).is_none())
-            .map(|(peer, _)| peer.clone())
-            .collect();
-        for peer in removed_secondaries {
-            let Some(record) = self.peers.get_mut(&peer) else {
-                continue;
-            };
-            record.set_secondary(false);
-            if self.delete_if_needed(&peer) {
-                deleted_peers.push(peer);
-            }
-        }
-
-        for (peer, addr) in peers {
-            let record = match self.peers.entry(peer.clone()) {
-                Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
                     self.metrics.tracked.inc();
                     entry.insert(Record::known(addr.clone()))
                 }
             };
-            if record.update(addr) {
-                changed_peers.push(peer.clone());
-            }
-            record.set_secondary(true);
+            record.increment_secondary();
+        }
+        self.secondary_sets.insert(index, secondaries.into_keys());
+
+        // Remove oldest tracked peer sets if necessary.
+        while self.primary_sets.len() > self.max_sets {
+            let (primary_index, primaries) = self.primary_sets.pop_first().unwrap();
+            let (secondary_index, secondaries) = self.secondary_sets.pop_first().unwrap();
+            debug_assert_eq!(primary_index, secondary_index);
+            debug!(index = primary_index, "removed oldest tracked peer sets");
+            primaries.into_iter().for_each(|primary| {
+                self.peers.get_mut(&primary).unwrap().decrement_primary();
+                let deleted = self.delete_if_needed(&primary);
+                if deleted {
+                    deleted_peers.push(primary);
+                }
+            });
+            secondaries.into_iter().for_each(|secondary| {
+                self.peers.get_mut(&secondary).unwrap().decrement_secondary();
+                let deleted = self.delete_if_needed(&secondary);
+                if deleted {
+                    deleted_peers.push(secondary);
+                }
+            });
         }
 
-        (deleted_peers, changed_peers)
+        let mut seen = HashSet::new();
+        deleted_peers.retain(|peer| seen.insert(peer.clone()));
+        seen.clear();
+        changed_peers.retain(|peer| seen.insert(peer.clone()));
+
+        Some((deleted_peers, changed_peers))
     }
 
     /// Update a tracked peer's address.
@@ -286,14 +285,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         record.update(address)
     }
 
-    /// Gets a peer set by index.
+    /// Gets a primary peer set by index.
     pub fn get_set(&self, index: &u64) -> Option<&Set<C>> {
-        self.sets.get(index)
+        self.primary_sets.get(index)
     }
 
-    /// Returns the latest peer set index.
+    /// Returns the latest tracked primary peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
-        self.sets.keys().last().copied()
+        self.primary_sets.keys().last().copied()
     }
 
     /// Attempt to reserve a peer for the dialer.
@@ -522,7 +521,7 @@ mod tests {
     };
     use commonware_cryptography::{ed25519, Signer};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::{hostname, SystemTimeExt};
+    use commonware_utils::{hostname, ordered::Map, SystemTimeExt};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -599,6 +598,82 @@ mod tests {
                 .add_set(3, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert!(deleted.is_empty(), "No peers should be deleted");
+        });
+    }
+
+    #[test]
+    fn test_secondary_sets_remain_tracked_until_eviction() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = super::Releaser::new(tx);
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: 2,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let primary_0 = ed25519::PrivateKey::from_seed(1).public_key();
+        let primary_0_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+        let primary_1 = ed25519::PrivateKey::from_seed(2).public_key();
+        let primary_1_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1236);
+        let primary_2 = ed25519::PrivateKey::from_seed(3).public_key();
+        let primary_2_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1237);
+        let secondary_0 = ed25519::PrivateKey::from_seed(4).public_key();
+        let secondary_0_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1238);
+        let secondary_1 = ed25519::PrivateKey::from_seed(5).public_key();
+        let secondary_1_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1239);
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            assert!(directory
+                .track(
+                    0,
+                    [(primary_0, addr(primary_0_addr))].try_into().unwrap(),
+                    [(secondary_0.clone(), addr(secondary_0_addr))]
+                        .try_into()
+                        .unwrap(),
+                )
+                .is_some());
+            assert!(directory
+                .peers
+                .get(&secondary_0)
+                .is_some_and(|record| record.is_secondary()));
+
+            assert!(directory
+                .track(
+                    1,
+                    [(primary_1, addr(primary_1_addr))].try_into().unwrap(),
+                    [(secondary_1.clone(), addr(secondary_1_addr))]
+                        .try_into()
+                        .unwrap(),
+                )
+                .is_some());
+            assert!(directory
+                .peers
+                .get(&secondary_0)
+                .is_some_and(|record| record.is_secondary()));
+            assert!(directory
+                .peers
+                .get(&secondary_1)
+                .is_some_and(|record| record.is_secondary()));
+
+            assert!(directory
+                .track(
+                    2,
+                    [(primary_2, addr(primary_2_addr))].try_into().unwrap(),
+                    Map::default(),
+                )
+                .is_some());
+            assert!(directory.peers.get(&secondary_0).is_none());
+            assert!(directory
+                .peers
+                .get(&secondary_1)
+                .is_some_and(|record| record.is_secondary()));
         });
     }
 

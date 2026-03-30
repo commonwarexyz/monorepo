@@ -48,8 +48,8 @@ pub struct Record {
     /// Number of primary peer sets this peer is part of.
     primary_sets: usize,
 
-    /// Whether this peer is registered as a secondary peer.
-    secondary: bool,
+    /// Number of secondary peer sets this peer is part of.
+    secondary_sets: usize,
 
     /// If `true`, the record should persist even if the peer is not part of any peer sets.
     persistent: bool,
@@ -70,7 +70,7 @@ impl Record {
             address: Address::Known(addr),
             status: Status::Inert,
             primary_sets: 0,
-            secondary: false,
+            secondary_sets: 0,
             persistent: false,
             next_reservable_at: SystemTime::UNIX_EPOCH,
             next_dial_at: SystemTime::UNIX_EPOCH,
@@ -83,7 +83,7 @@ impl Record {
             address: Address::Myself,
             status: Status::Inert,
             primary_sets: 0,
-            secondary: false,
+            secondary_sets: 0,
             persistent: true,
             next_reservable_at: SystemTime::UNIX_EPOCH,
             next_dial_at: SystemTime::UNIX_EPOCH,
@@ -118,9 +118,14 @@ impl Record {
         self.primary_sets = self.primary_sets.checked_sub(1).unwrap();
     }
 
-    /// Mark whether this peer is currently registered as a secondary peer.
-    pub const fn set_secondary(&mut self, secondary: bool) {
-        self.secondary = secondary;
+    /// Increase the count of secondary peer sets this peer is part of.
+    pub const fn increment_secondary(&mut self) {
+        self.secondary_sets = self.secondary_sets.checked_add(1).unwrap();
+    }
+
+    /// Decrease the count of secondary peer sets this peer is part of.
+    pub const fn decrement_secondary(&mut self) {
+        self.secondary_sets = self.secondary_sets.checked_sub(1).unwrap();
     }
 
     /// Attempt to reserve the peer for connection.
@@ -175,9 +180,9 @@ impl Record {
         self.primary_sets
     }
 
-    /// Returns whether this peer is currently registered as a secondary peer.
+    /// Returns whether this peer is currently registered in at least one secondary peer set.
     pub const fn is_secondary(&self) -> bool {
-        self.secondary
+        self.secondary_sets > 0
     }
 
     /// Returns `true` if this peer may be used as an outbound dial target.
@@ -254,7 +259,7 @@ impl Record {
     /// Returns `true` if the record can safely be deleted.
     pub const fn deletable(&self) -> bool {
         self.primary_sets == 0
-            && !self.secondary
+            && self.secondary_sets == 0
             && !self.persistent
             && matches!(self.status, Status::Inert)
     }
@@ -263,11 +268,14 @@ impl Record {
     ///
     /// A peer is eligible if:
     /// - It is not ourselves
-    /// - It is part of at least one primary peer set, a secondary peer, or persistent
+    /// - It is part of at least one primary peer set, at least one secondary peer set, or
+    ///   persistent
     pub const fn eligible(&self) -> bool {
         match &self.address {
             Address::Myself => false,
-            Address::Known(_) => self.primary_sets > 0 || self.secondary || self.persistent,
+            Address::Known(_) => {
+                self.primary_sets > 0 || self.secondary_sets > 0 || self.persistent
+            }
         }
     }
 }
