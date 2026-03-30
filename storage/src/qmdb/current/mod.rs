@@ -400,7 +400,10 @@ pub mod tests {
     use super::{ordered, unordered, FConfig, FixedConfig, MmrConfig, VConfig, VariableConfig};
     use crate::{
         qmdb::{
-            any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+            any::{
+                test::colliding_digest,
+                traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+            },
             store::tests::{TestKey, TestValue},
             Error, Location,
         },
@@ -1775,6 +1778,149 @@ pub mod tests {
             for i in 1..10 {
                 assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i)));
             }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_unordered_root_matches_between_pending_and_committed_paths() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedFixedDb =
+                UnorderedFixedDb::init(ctx.clone(), fixed_config::<OneCap>("ucr", &ctx))
+                    .await
+                    .unwrap();
+            let key_a = colliding_digest(0xAA, 1);
+            let key_b = colliding_digest(0xAA, 0);
+
+            // Seed four colliding committed keys, then update only key_a.
+            // The specific 4 / 1 / 0 shape is a concrete counterexample:
+            // key_b remains outside the parent diff and is still resolved
+            // through the committed snapshot in the child.
+            let mut initial = db.new_batch();
+            for i in 0..4 {
+                initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
+            }
+            db.apply_batch(initial.merkleize(None, &db).await.unwrap().finalize())
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+
+            // Update only key_a so the colliding sibling key_b remains outside
+            // the parent diff and must still be resolved through the committed
+            // snapshot in the child.
+            let parent = db
+                .new_batch()
+                .write(key_a, Some(colliding_digest(0xCC, 1)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            // Build the child while the parent is still pending, then rebuild
+            // the same logical child after committing the parent and compare
+            // both canonical and ops roots.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(key_a, Some(colliding_digest(0xDD, 1)))
+                .write(key_b, Some(colliding_digest(0xDD, 0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            db.apply_batch(parent.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(key_a, Some(colliding_digest(0xDD, 1)))
+                .write(key_b, Some(colliding_digest(0xDD, 0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            assert_eq!(pending_child.root(), committed_child.root());
+            assert_eq!(pending_child.ops_root(), committed_child.ops_root());
+
+            // Rebase the pending child onto the committed parent and ensure the
+            // applied wrapper roots still match the committed-path child roots.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(pending_child.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            assert_eq!(db.root(), committed_child.root());
+            assert_eq!(db.ops_root(), committed_child.ops_root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_ordered_root_matches_between_pending_and_committed_paths() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: OrderedFixedDb =
+                OrderedFixedDb::init(ctx.clone(), fixed_config::<OneCap>("ocr", &ctx))
+                    .await
+                    .unwrap();
+            let key_a = colliding_digest(0xAA, 1);
+            let key_b = colliding_digest(0xAA, 0);
+
+            // Match the unordered counterexample shape on the ordered path so
+            // both wrappers exercise the same collision pattern.
+            let mut initial = db.new_batch();
+            for i in 0..4 {
+                initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
+            }
+            db.apply_batch(initial.merkleize(None, &db).await.unwrap().finalize())
+                .await
+                .unwrap();
+            db.commit().await.unwrap();
+
+            // Update only key_a so the colliding sibling key_b remains outside
+            // the parent diff and must still be resolved through the committed
+            // snapshot in the child.
+            let parent = db
+                .new_batch()
+                .write(key_a, Some(colliding_digest(0xCC, 1)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            // Build the child while the parent is still pending, then rebuild
+            // the same logical child after committing the parent.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(key_a, Some(colliding_digest(0xDD, 1)))
+                .write(key_b, Some(colliding_digest(0xDD, 0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            db.apply_batch(parent.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(key_a, Some(colliding_digest(0xDD, 1)))
+                .write(key_b, Some(colliding_digest(0xDD, 0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            assert_eq!(pending_child.root(), committed_child.root());
+            assert_eq!(pending_child.ops_root(), committed_child.ops_root());
+
+            // Rebase the pending child onto the committed parent and compare
+            // the applied wrapper roots with the committed-path child roots.
+            let current_db_size = *db.bounds().await.end;
+            db.apply_batch(pending_child.finalize_from(current_db_size))
+                .await
+                .unwrap();
+            assert_eq!(db.root(), committed_child.root());
+            assert_eq!(db.ops_root(), committed_child.ops_root());
 
             db.destroy().await.unwrap();
         });

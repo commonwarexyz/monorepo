@@ -162,12 +162,35 @@ where
 pub(crate) mod test {
     use super::*;
     use crate::{
-        journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-        qmdb::any::{FixedConfig, MmrConfig, VariableConfig},
+        index::Unordered as UnorderedIndex,
+        journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig, Mutable},
+        mmr::Location,
+        qmdb::any::{
+            db::Db as AnyDb,
+            operation::{update::Update as UpdateTrait, Operation as AnyOperation},
+            traits::{DbAny, MerkleizedBatch as _, Provable, UnmerkleizedBatch as _},
+            FixedConfig, MmrConfig, VariableConfig,
+        },
         translator::OneCap,
     };
+    use commonware_codec::{Codec, CodecShared};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Metrics,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
-    use std::num::{NonZeroU16, NonZeroUsize};
+    use core::{future::Future, pin::Pin};
+    use std::{
+        collections::HashMap,
+        num::{NonZeroU16, NonZeroUsize},
+    };
+
+    pub(crate) fn colliding_digest(prefix: u8, suffix: u64) -> Digest {
+        let mut bytes = [0u8; 32];
+        bytes[0] = prefix;
+        bytes[24..].copy_from_slice(&suffix.to_be_bytes());
+        Digest::from(bytes)
+    }
 
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -222,24 +245,6 @@ pub(crate) mod test {
             translator: T::default(),
         }
     }
-
-    use crate::{
-        index::Unordered as UnorderedIndex,
-        journal::contiguous::Mutable,
-        mmr::Location,
-        qmdb::any::{
-            db::Db as AnyDb,
-            operation::{update::Update as UpdateTrait, Operation as AnyOperation},
-            traits::{DbAny, MerkleizedBatch as _, Provable, UnmerkleizedBatch as _},
-        },
-    };
-    use commonware_codec::{Codec, CodecShared};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Metrics,
-    };
-    use core::{future::Future, pin::Pin};
-    use std::collections::HashMap;
 
     pub(crate) trait RewindableDb {
         fn rewind_to_size(
