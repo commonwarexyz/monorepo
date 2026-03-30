@@ -3,34 +3,31 @@
 use crate::{
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
-    mmr::Location,
-    qmdb::any::{unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
+    merkle::{self, Location},
+    qmdb::{
+        any::{unordered, value::FixedEncoding, FixedConfig as Config, FixedValue},
+        Error,
+    },
     translator::Translator,
     Context,
 };
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
 
-type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
-
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
-pub type Operation<K, V> = unordered::Operation<crate::merkle::mmr::Family, K, FixedEncoding<V>>;
+pub type Operation<F, K, V> = unordered::Operation<F, K, FixedEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T> = super::Db<
-    crate::merkle::mmr::Family,
-    E,
-    Journal<E, Operation<K, V>>,
-    Index<T, Location>,
-    H,
-    Update<K, V>,
->;
+pub type Db<F, E, K, V, H, T> =
+    super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>>;
 
-impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator> Db<E, K, V, H, T> {
+impl<F: merkle::Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator>
+    Db<F, E, K, V, H, T>
+{
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
+    pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error<F>> {
         Self::init_with_callback(context, cfg, None, |_, _| {}).await
     }
 
@@ -43,9 +40,9 @@ impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator> Db<E, K, V, 
     pub(crate) async fn init_with_callback(
         context: E,
         cfg: Config<T>,
-        known_inactivity_floor: Option<Location>,
-        callback: impl FnMut(bool, Option<Location>),
-    ) -> Result<Self, Error> {
+        known_inactivity_floor: Option<Location<F>>,
+        callback: impl FnMut(bool, Option<Location<F>>),
+    ) -> Result<Self, Error<F>> {
         crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
             Index::new(ctx, t)
         })
@@ -63,15 +60,16 @@ pub mod partitioned {
     use crate::{
         index::partitioned::unordered::Index,
         journal::contiguous::fixed::Journal,
-        mmr::Location,
-        qmdb::any::{FixedConfig as Config, FixedValue},
+        merkle::{self, Location},
+        qmdb::{
+            any::{FixedConfig as Config, FixedValue},
+            Error,
+        },
         translator::Translator,
         Context,
     };
     use commonware_cryptography::Hasher;
     use commonware_utils::Array;
-
-    type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
 
     /// A key-value QMDB with a partitioned snapshot index.
     ///
@@ -82,21 +80,28 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
-        crate::merkle::mmr::Family,
+    pub type Db<F, E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
+        F,
         E,
-        Journal<E, Operation<K, V>>,
-        Index<T, Location, P>,
+        Journal<E, Operation<F, K, V>>,
+        Index<T, Location<F>, P>,
         H,
         Update<K, V>,
     >;
 
-    impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, const P: usize>
-        Db<E, K, V, H, T, P>
+    impl<
+            F: merkle::Family,
+            E: Context,
+            K: Array,
+            V: FixedValue,
+            H: Hasher,
+            T: Translator,
+            const P: usize,
+        > Db<F, E, K, V, H, T, P>
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
-        pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error> {
+        pub async fn init(context: E, cfg: Config<T>) -> Result<Self, Error<F>> {
             Self::init_with_callback(context, cfg, None, |_, _| {}).await
         }
 
@@ -109,9 +114,9 @@ pub mod partitioned {
         pub(crate) async fn init_with_callback(
             context: E,
             cfg: Config<T>,
-            known_inactivity_floor: Option<Location>,
-            callback: impl FnMut(bool, Option<Location>),
-        ) -> Result<Self, Error> {
+            known_inactivity_floor: Option<Location<F>>,
+            callback: impl FnMut(bool, Option<Location<F>>),
+        ) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
                 Index::new(ctx, t)
             })
@@ -122,13 +127,13 @@ pub mod partitioned {
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Fixed-value DB with 256 partitions.
-        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 1>;
+        pub type Db<F, E, K, V, H, T> = super::Db<F, E, K, V, H, T, 1>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Fixed-value DB with 65,536 partitions.
-        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 2>;
+        pub type Db<F, E, K, V, H, T> = super::Db<F, E, K, V, H, T, 2>;
     }
 }
 
@@ -139,7 +144,7 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as _,
         merkle::Location as GenericLocation,
-        mmr::{Location, StandardHasher},
+        mmr::{self, Location, StandardHasher},
         qmdb::{
             any::{
                 test::fixed_db_config,
@@ -173,7 +178,8 @@ pub(crate) mod test {
     >;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    pub(crate) type AnyTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap>;
+    pub(crate) type AnyTest =
+        Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap>;
 
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
     async fn open_db_generic<F: crate::merkle::Family>(
@@ -195,13 +201,18 @@ pub(crate) mod test {
     /// Create n random operations using the default seed (0). Some portion of
     /// the updates are deletes. create_test_ops(n) is a prefix of
     /// create_test_ops(n') for n < n'.
-    pub(crate) fn create_test_ops(n: usize) -> Vec<Operation<Digest, Digest>> {
+    pub(crate) fn create_test_ops(
+        n: usize,
+    ) -> Vec<Operation<mmr::Family, Digest, Digest>> {
         create_test_ops_seeded(n, 0)
     }
 
     /// Create n random operations using a specific seed.
     /// Use different seeds when you need non-overlapping keys in the same test.
-    pub(crate) fn create_test_ops_seeded(n: usize, seed: u64) -> Vec<Operation<Digest, Digest>> {
+    pub(crate) fn create_test_ops_seeded(
+        n: usize,
+        seed: u64,
+    ) -> Vec<Operation<mmr::Family, Digest, Digest>> {
         let mut rng = test_rng_seeded(seed);
         let mut prev_key = Digest::random(&mut rng);
         let mut ops = Vec::new();
@@ -219,7 +230,10 @@ pub(crate) mod test {
     }
 
     /// Applies the given operations to the database.
-    pub(crate) async fn apply_ops(db: &mut AnyTest, ops: Vec<Operation<Digest, Digest>>) {
+    pub(crate) async fn apply_ops(
+        db: &mut AnyTest,
+        ops: Vec<Operation<mmr::Family, Digest, Digest>>,
+    ) {
         let finalized = {
             let mut batch = db.new_batch();
             for op in ops {
@@ -498,38 +512,38 @@ pub(crate) mod test {
     #[test_traced("INFO")]
     fn test_unordered_fixed_batch_empty() {
         let executor = deterministic::Runner::default();
-        executor.start(batch_empty_inner::<crate::merkle::mmr::Family>);
+        executor.start(batch_empty_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_unordered_fixed_batch_metadata() {
         let executor = deterministic::Runner::default();
-        executor.start(batch_metadata_inner::<crate::merkle::mmr::Family>);
+        executor.start(batch_metadata_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_unordered_fixed_batch_get_read_through() {
         let executor = deterministic::Runner::default();
-        executor.start(batch_get_read_through_inner::<crate::merkle::mmr::Family>);
+        executor.start(batch_get_read_through_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_unordered_fixed_batch_get_on_merkleized() {
         let executor = deterministic::Runner::default();
-        executor.start(batch_get_on_merkleized_inner::<crate::merkle::mmr::Family>);
+        executor.start(batch_get_on_merkleized_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_unordered_fixed_batch_stacked_get() {
         let executor = deterministic::Runner::default();
-        executor.start(batch_stacked_get_inner::<crate::merkle::mmr::Family>);
+        executor.start(batch_stacked_get_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_unordered_fixed_batch_stacked_delete_recreate() {
         let executor = deterministic::Runner::default();
         executor.start(|context| {
-            batch_stacked_delete_recreate_inner::<crate::merkle::mmr::Family>(context)
+            batch_stacked_delete_recreate_inner::<mmr::Family>(context)
         });
     }
 
@@ -537,20 +551,20 @@ pub(crate) mod test {
     fn test_unordered_fixed_batch_apply_returns_range() {
         let executor = deterministic::Runner::default();
         executor.start(|context| {
-            batch_apply_returns_range_inner::<crate::merkle::mmr::Family>(context)
+            batch_apply_returns_range_inner::<mmr::Family>(context)
         });
     }
 
     #[test_traced("INFO")]
     fn test_unordered_fixed_batch_speculative_root() {
         let executor = deterministic::Runner::default();
-        executor.start(batch_speculative_root_inner::<crate::merkle::mmr::Family>);
+        executor.start(batch_speculative_root_inner::<mmr::Family>);
     }
 
     #[test_traced("WARN")]
     fn test_any_fixed_db_log_replay() {
         let executor = deterministic::Runner::default();
-        executor.start(log_replay_inner::<crate::merkle::mmr::Family>);
+        executor.start(log_replay_inner::<mmr::Family>);
     }
 
     // -- MMB test wrappers --

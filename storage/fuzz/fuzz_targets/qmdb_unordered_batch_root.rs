@@ -5,6 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
+    merkle::mmr::Family,
     mmr::journaled::Config as MmrConfig,
     qmdb::any::{unordered::fixed::Db as AnyDb, FixedConfig as Config},
     translator::OneCap,
@@ -15,7 +16,7 @@ use std::num::NonZeroU16;
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
-type Db = AnyDb<deterministic::Context, Key, Value, Sha256, OneCap>;
+type Db = AnyDb<Family, deterministic::Context, Key, Value, Sha256, OneCap>;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(131);
 const COLLISION_GROUPS: u8 = 4;

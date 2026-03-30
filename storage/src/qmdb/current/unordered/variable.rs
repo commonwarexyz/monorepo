@@ -24,19 +24,26 @@ use commonware_utils::Array;
 
 type Error = crate::qmdb::Error<crate::mmr::Family>;
 
-pub type Db<E, K, V, H, T, const N: usize> =
-    super::db::Db<E, Journal<E, Operation<K, V>>, K, VariableEncoding<V>, Index<T, Location>, H, N>;
+pub type Db<E, K, V, H, T, const N: usize> = super::db::Db<
+    E,
+    Journal<E, Operation<crate::mmr::Family, K, V>>,
+    K,
+    VariableEncoding<V>,
+    Index<T, Location>,
+    H,
+    N,
+>;
 
 impl<E: Context, K: Array, V: VariableValue, H: Hasher, T: Translator, const N: usize>
     Db<E, K, V, H, T, N>
 where
-    Operation<K, V>: Read,
+    Operation<crate::mmr::Family, K, V>: Read,
 {
     /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
     /// the bitmap MMR if a thread pool is provided.
     pub async fn init(
         context: E,
-        config: Config<T, <Operation<K, V> as Read>::Cfg>,
+        config: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
         crate::qmdb::current::init(context, config, |ctx, t| Index::new(ctx, t)).await
     }
@@ -74,7 +81,7 @@ pub mod partitioned {
     pub type Db<E, K, V, H, T, const P: usize, const N: usize> =
         crate::qmdb::current::unordered::db::Db<
             E,
-            Journal<E, Operation<K, V>>,
+            Journal<E, Operation<crate::mmr::Family, K, V>>,
             K,
             VariableEncoding<V>,
             Index<T, Location, P>,
@@ -92,13 +99,13 @@ pub mod partitioned {
             const N: usize,
         > Db<E, K, V, H, T, P, N>
     where
-        Operation<K, V>: Read,
+        Operation<crate::mmr::Family, K, V>: Read,
     {
         /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
         /// the bitmap MMR if a thread pool is provided.
         pub async fn init(
             context: E,
-            config: Config<T, <Operation<K, V> as Read>::Cfg>,
+            config: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
         ) -> Result<Self, Error> {
             crate::qmdb::current::init(context, config, |ctx, t| Index::new(ctx, t)).await
         }

@@ -96,7 +96,7 @@ async fn build_db<E, U, I, H, J, const N: usize>(
     apply_batch_size: usize,
     metadata_partition: String,
     thread_pool: Option<commonware_parallel::ThreadPool>,
-) -> Result<db::Db<E, J, I, H, U, N>, qmdb::Error<crate::merkle::mmr::Family>>
+) -> Result<db::Db<E, J, I, H, U, N>, qmdb::Error<mmr::Family>>
 where
     E: Context,
     U: Update + Send + Sync + 'static,
@@ -133,7 +133,7 @@ where
     // journal's inactivity floor with inactive (false) bits.
     let pruned_chunks = (*range.start / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
     let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks).map_err(|_| {
-        qmdb::Error::<crate::merkle::mmr::Family>::DataCorrupted("pruned chunks overflow")
+        qmdb::Error::<mmr::Family>::DataCorrupted("pruned chunks overflow")
     })?;
 
     // Build any::Db with bitmap callback.
@@ -141,7 +141,7 @@ where
     // init_from_log replays the operations, building the snapshot (index) and invoking
     // our callback for each operation to populate the bitmap.
     let known_inactivity_floor = Location::new(status.len());
-    let any: AnyDb<crate::merkle::mmr::Family, E, J, I, H, U> = AnyDb::init_from_log(
+    let any: AnyDb<mmr::Family, E, J, I, H, U> = AnyDb::init_from_log(
         index,
         log,
         Some(known_inactivity_floor),
@@ -170,7 +170,7 @@ where
         let mut pins = Vec::with_capacity(num_grafted_pins);
         for pos in ops_pin_positions.take(num_grafted_pins) {
             let digest = any.log.merkle.get_node(pos).await?.ok_or(qmdb::Error::<
-                crate::merkle::mmr::Family,
+                mmr::Family,
             >::DataCorrupted(
                 "missing ops pinned node"
             ))?;
@@ -239,7 +239,7 @@ where
     T: Translator,
 {
     type Context = E;
-    type Op = UnorderedFixedOp<K, V>;
+    type Op = UnorderedFixedOp<mmr::Family, K, V>;
     type Journal = fixed::Journal<E, Self::Op>;
     type Hasher = H;
     type Config = FixedConfig<T>;
@@ -252,7 +252,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error<crate::merkle::mmr::Family>> {
+    ) -> Result<Self, qmdb::Error<mmr::Family>> {
         let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
         let thread_pool = config.mmr_config.thread_pool.clone();
@@ -285,13 +285,13 @@ where
     V: VariableValue + 'static,
     H: Hasher,
     T: Translator,
-    UnorderedVariableOp<K, V>: CodecShared,
+    UnorderedVariableOp<mmr::Family, K, V>: CodecShared,
 {
     type Context = E;
-    type Op = UnorderedVariableOp<K, V>;
+    type Op = UnorderedVariableOp<mmr::Family, K, V>;
     type Journal = variable::Journal<E, Self::Op>;
     type Hasher = H;
-    type Config = VariableConfig<T, <UnorderedVariableOp<K, V> as CodecRead>::Cfg>;
+    type Config = VariableConfig<T, <UnorderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>;
     type Digest = H::Digest;
 
     async fn from_sync_result(
@@ -301,7 +301,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error<crate::merkle::mmr::Family>> {
+    ) -> Result<Self, qmdb::Error<mmr::Family>> {
         let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
         let thread_pool = config.mmr_config.thread_pool.clone();
@@ -336,7 +336,7 @@ where
     T: Translator,
 {
     type Context = E;
-    type Op = OrderedFixedOp<K, V>;
+    type Op = OrderedFixedOp<mmr::Family, K, V>;
     type Journal = fixed::Journal<E, Self::Op>;
     type Hasher = H;
     type Config = FixedConfig<T>;
@@ -349,7 +349,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error<crate::merkle::mmr::Family>> {
+    ) -> Result<Self, qmdb::Error<mmr::Family>> {
         let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
         let thread_pool = config.mmr_config.thread_pool.clone();
@@ -382,13 +382,13 @@ where
     V: VariableValue + 'static,
     H: Hasher,
     T: Translator,
-    OrderedVariableOp<K, V>: CodecShared,
+    OrderedVariableOp<mmr::Family, K, V>: CodecShared,
 {
     type Context = E;
-    type Op = OrderedVariableOp<K, V>;
+    type Op = OrderedVariableOp<mmr::Family, K, V>;
     type Journal = variable::Journal<E, Self::Op>;
     type Hasher = H;
-    type Config = VariableConfig<T, <OrderedVariableOp<K, V> as CodecRead>::Cfg>;
+    type Config = VariableConfig<T, <OrderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>;
     type Digest = H::Digest;
 
     async fn from_sync_result(
@@ -398,7 +398,7 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error<crate::merkle::mmr::Family>> {
+    ) -> Result<Self, qmdb::Error<mmr::Family>> {
         let mmr_config = config.mmr_config.clone();
         let metadata_partition = config.grafted_mmr_metadata_partition.clone();
         let thread_pool = config.mmr_config.thread_pool.clone();
@@ -443,8 +443,8 @@ macro_rules! impl_current_resolver {
             $($($where_extra)+)?
         {
             type Digest = H::Digest;
-            type Op = $op<K, V>;
-            type Error = qmdb::Error<crate::merkle::mmr::Family>;
+            type Op = $op<mmr::Family, K, V>;
+            type Error = qmdb::Error<mmr::Family>;
 
             async fn get_operations(
                 &self,
@@ -487,8 +487,8 @@ macro_rules! impl_current_resolver {
             $($($where_extra)+)?
         {
             type Digest = H::Digest;
-            type Op = $op<K, V>;
-            type Error = qmdb::Error<crate::merkle::mmr::Family>;
+            type Op = $op<mmr::Family, K, V>;
+            type Error = qmdb::Error<mmr::Family>;
 
             async fn get_operations(
                 &self,
@@ -497,7 +497,7 @@ macro_rules! impl_current_resolver {
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error<crate::merkle::mmr::Family>> {
+            ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error<mmr::Family>> {
                 let db = self.read().await;
                 let (proof, operations) = db.any
                     .historical_proof(op_count, start_loc, max_ops)
@@ -532,8 +532,8 @@ macro_rules! impl_current_resolver {
             $($($where_extra)+)?
         {
             type Digest = H::Digest;
-            type Op = $op<K, V>;
-            type Error = qmdb::Error<crate::merkle::mmr::Family>;
+            type Op = $op<mmr::Family, K, V>;
+            type Error = qmdb::Error<mmr::Family>;
 
             async fn get_operations(
                 &self,
@@ -542,9 +542,9 @@ macro_rules! impl_current_resolver {
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error<crate::merkle::mmr::Family>> {
+            ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error<mmr::Family>> {
                 let guard = self.read().await;
-                let db = guard.as_ref().ok_or(qmdb::Error::<crate::merkle::mmr::Family>::KeyNotFound)?;
+                let db = guard.as_ref().ok_or(qmdb::Error::<mmr::Family>::KeyNotFound)?;
                 let (proof, operations) = db.any
                     .historical_proof(op_count, start_loc, max_ops)
                     .await?;
@@ -570,7 +570,7 @@ impl_current_resolver!(CurrentUnorderedFixedDb, UnorderedFixedOp, FixedValue, Ar
 // Unordered Variable
 impl_current_resolver!(
     CurrentUnorderedVariableDb, UnorderedVariableOp, VariableValue, Key;
-    UnorderedVariableOp<K, V>: CodecShared,
+    UnorderedVariableOp<mmr::Family, K, V>: CodecShared,
 );
 
 // Ordered Fixed
@@ -579,5 +579,5 @@ impl_current_resolver!(CurrentOrderedFixedDb, OrderedFixedOp, FixedValue, Array)
 // Ordered Variable
 impl_current_resolver!(
     CurrentOrderedVariableDb, OrderedVariableOp, VariableValue, Key;
-    OrderedVariableOp<K, V>: CodecShared,
+    OrderedVariableOp<mmr::Family, K, V>: CodecShared,
 );

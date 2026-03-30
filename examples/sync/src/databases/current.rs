@@ -39,7 +39,7 @@ const CHUNK_SIZE: usize = sha256::Digest::SIZE;
 pub type Database<E> = current::unordered::fixed::Db<E, Key, Value, Hasher, Translator, CHUNK_SIZE>;
 
 /// Operation type alias. Same as the `any` operation type.
-pub type Operation = FixedOperation<Key, Value>;
+pub type Operation = FixedOperation<mmr::Family, Key, Value>;
 
 /// Create a database configuration.
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {

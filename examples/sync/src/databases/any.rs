@@ -23,10 +23,10 @@ use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
 /// Database type alias.
-pub type Database<E> = Db<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = Db<mmr::Family, E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = FixedOperation<Key, Value>;
+pub type Operation = FixedOperation<mmr::Family, Key, Value>;
 
 /// Create a database configuration for use in tests.
 pub fn create_config(context: &impl BufferPooler) -> Config<Translator> {

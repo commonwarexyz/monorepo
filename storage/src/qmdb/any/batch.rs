@@ -1468,6 +1468,7 @@ mod trait_impls {
 mod tests {
     use super::*;
     use crate::{
+        mmr,
         qmdb::any::{
             ordered::fixed::Db as OrderedFixedDb,
             test::{colliding_digest, fixed_db_config},
@@ -1482,7 +1483,7 @@ mod tests {
     /// but without requiring a full Merkleizer instance.
     fn extract_parent_deleted_creates<K: Ord + Clone, V: Clone>(
         mutations: &mut BTreeMap<K, Option<V>>,
-        base_diff: &BTreeMap<K, DiffEntry<crate::merkle::mmr::Family, V>>,
+        base_diff: &BTreeMap<K, DiffEntry<mmr::Family, V>>,
     ) -> BTreeMap<K, (V, Option<crate::mmr::Location>)> {
         let creates: BTreeMap<_, _> = mutations
             .iter()
@@ -1508,7 +1509,7 @@ mod tests {
         mutations.insert(2, None); // delete (not a create)
         mutations.insert(3, Some(300)); // update, but not in base diff
 
-        let mut base_diff: BTreeMap<u64, DiffEntry<crate::merkle::mmr::Family, u64>> =
+        let mut base_diff: BTreeMap<u64, DiffEntry<mmr::Family, u64>> =
             BTreeMap::new();
         base_diff.insert(
             1,
@@ -1544,7 +1545,7 @@ mod tests {
         let mut mutations: BTreeMap<u64, Option<u64>> = BTreeMap::new();
         mutations.insert(1, None); // deleting a parent-deleted key
 
-        let mut base_diff: BTreeMap<u64, DiffEntry<crate::merkle::mmr::Family, u64>> =
+        let mut base_diff: BTreeMap<u64, DiffEntry<mmr::Family, u64>> =
             BTreeMap::new();
         base_diff.insert(
             1,
@@ -1567,6 +1568,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             type TestDb = UnorderedFixedDb<
+                mmr::Family,
                 deterministic::Context,
                 sha256::Digest,
                 sha256::Digest,
@@ -1651,6 +1653,7 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             type TestDb = OrderedFixedDb<
+                mmr::Family,
                 deterministic::Context,
                 sha256::Digest,
                 sha256::Digest,

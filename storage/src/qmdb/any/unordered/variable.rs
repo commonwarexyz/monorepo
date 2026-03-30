@@ -7,10 +7,11 @@
 use crate::{
     index::unordered::Index,
     journal::contiguous::variable::Journal,
-    mmr::Location,
+    merkle::{self, Location},
     qmdb::{
         any::{unordered, value::VariableEncoding, VariableConfig, VariableValue},
         operation::Key,
+        Error,
     },
     translator::Translator,
     Context,
@@ -18,32 +19,25 @@ use crate::{
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 
-type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
-
 pub type Update<K, V> = unordered::Update<K, VariableEncoding<V>>;
-pub type Operation<K, V> = unordered::Operation<crate::merkle::mmr::Family, K, VariableEncoding<V>>;
+pub type Operation<F, K, V> = unordered::Operation<F, K, VariableEncoding<V>>;
 
 /// A key-value QMDB based on an authenticated log of operations, supporting authentication of any
 /// value ever associated with a key.
-pub type Db<E, K, V, H, T> = super::Db<
-    crate::merkle::mmr::Family,
-    E,
-    Journal<E, Operation<K, V>>,
-    Index<T, Location>,
-    H,
-    Update<K, V>,
->;
+pub type Db<F, E, K, V, H, T> =
+    super::Db<F, E, Journal<E, Operation<F, K, V>>, Index<T, Location<F>>, H, Update<K, V>>;
 
-impl<E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator> Db<E, K, V, H, T>
+impl<F: merkle::Family, E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator>
+    Db<F, E, K, V, H, T>
 where
-    Operation<K, V>: Codec,
+    Operation<F, K, V>: Codec,
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
     pub async fn init(
         context: E,
-        cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
-    ) -> Result<Self, Error> {
+        cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg>,
+    ) -> Result<Self, Error<F>> {
         Self::init_with_callback(context, cfg, None, |_, _| {}).await
     }
 
@@ -55,10 +49,10 @@ where
     /// status and previous location (if any).
     pub(crate) async fn init_with_callback(
         context: E,
-        cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
-        known_inactivity_floor: Option<Location>,
-        callback: impl FnMut(bool, Option<Location>),
-    ) -> Result<Self, Error> {
+        cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg>,
+        known_inactivity_floor: Option<Location<F>>,
+        callback: impl FnMut(bool, Option<Location<F>>),
+    ) -> Result<Self, Error<F>> {
         crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
             Index::new(ctx, t)
         })
@@ -76,18 +70,17 @@ pub mod partitioned {
     use crate::{
         index::partitioned::unordered::Index,
         journal::contiguous::variable::Journal,
-        mmr::Location,
+        merkle::{self, Location},
         qmdb::{
             any::{VariableConfig, VariableValue},
             operation::Key,
+            Error,
         },
         translator::Translator,
         Context,
     };
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
-
-    type Error = crate::qmdb::Error<crate::merkle::mmr::Family>;
 
     /// A key-value QMDB with a partitioned snapshot index and variable-size values.
     ///
@@ -98,26 +91,33 @@ pub mod partitioned {
     ///
     /// Use partitioned indices when you have a large number of keys (>> 2^(P*8)) and memory
     /// efficiency is important. Keys should be uniformly distributed across the prefix space.
-    pub type Db<E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
-        crate::merkle::mmr::Family,
+    pub type Db<F, E, K, V, H, T, const P: usize> = crate::qmdb::any::unordered::Db<
+        F,
         E,
-        Journal<E, Operation<K, V>>,
-        Index<T, Location, P>,
+        Journal<E, Operation<F, K, V>>,
+        Index<T, Location<F>, P>,
         H,
         Update<K, V>,
     >;
 
-    impl<E: Context, K: Key, V: VariableValue, H: Hasher, T: Translator, const P: usize>
-        Db<E, K, V, H, T, P>
+    impl<
+            F: merkle::Family,
+            E: Context,
+            K: Key,
+            V: VariableValue,
+            H: Hasher,
+            T: Translator,
+            const P: usize,
+        > Db<F, E, K, V, H, T, P>
     where
-        Operation<K, V>: Codec,
+        Operation<F, K, V>: Codec,
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
         pub async fn init(
             context: E,
-            cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
-        ) -> Result<Self, Error> {
+            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg>,
+        ) -> Result<Self, Error<F>> {
             Self::init_with_callback(context, cfg, None, |_, _| {}).await
         }
 
@@ -129,10 +129,10 @@ pub mod partitioned {
         /// status and previous location (if any).
         pub(crate) async fn init_with_callback(
             context: E,
-            cfg: VariableConfig<T, <Operation<K, V> as Read>::Cfg>,
-            known_inactivity_floor: Option<Location>,
-            callback: impl FnMut(bool, Option<Location>),
-        ) -> Result<Self, Error> {
+            cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg>,
+            known_inactivity_floor: Option<Location<F>>,
+            callback: impl FnMut(bool, Option<Location<F>>),
+        ) -> Result<Self, Error<F>> {
             crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
                 Index::new(ctx, t)
             })
@@ -143,20 +143,20 @@ pub mod partitioned {
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Variable-value DB with 256 partitions.
-        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 1>;
+        pub type Db<F, E, K, V, H, T> = super::Db<F, E, K, V, H, T, 1>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Variable-value DB with 65,536 partitions.
-        pub type Db<E, K, V, H, T> = super::Db<E, K, V, H, T, 2>;
+        pub type Db<F, E, K, V, H, T> = super::Db<F, E, K, V, H, T, 2>;
     }
 }
 
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::{index::Unordered as _, translator::TwoCap};
+    use crate::{index::Unordered as _, mmr, translator::TwoCap};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
@@ -199,7 +199,8 @@ pub(crate) mod test {
         VariableConfig<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))>;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    pub(crate) type AnyTest = Db<deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
+    pub(crate) type AnyTest =
+        Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap>;
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
@@ -219,7 +220,7 @@ pub(crate) mod test {
     /// create_test_ops(n') for n < n'.
     pub(crate) fn create_test_ops(
         n: usize,
-    ) -> Vec<unordered::Operation<crate::merkle::mmr::Family, Digest, VariableEncoding<Vec<u8>>>>
+    ) -> Vec<unordered::Operation<mmr::Family, Digest, VariableEncoding<Vec<u8>>>>
     {
         create_test_ops_seeded(n, 0)
     }
@@ -229,7 +230,7 @@ pub(crate) mod test {
     pub(crate) fn create_test_ops_seeded(
         n: usize,
         seed: u64,
-    ) -> Vec<unordered::Operation<crate::merkle::mmr::Family, Digest, VariableEncoding<Vec<u8>>>>
+    ) -> Vec<unordered::Operation<mmr::Family, Digest, VariableEncoding<Vec<u8>>>>
     {
         let mut rng = test_rng_seeded(seed);
         let mut prev_key = Digest::random(&mut rng);
@@ -251,7 +252,7 @@ pub(crate) mod test {
     pub(crate) async fn apply_ops(
         db: &mut AnyTest,
         ops: Vec<
-            unordered::Operation<crate::merkle::mmr::Family, Digest, VariableEncoding<Vec<u8>>>,
+            unordered::Operation<mmr::Family, Digest, VariableEncoding<Vec<u8>>>,
         >,
     ) {
         let finalized = {
@@ -642,7 +643,7 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            mmr::{iterator::nodes_to_pin, journaled::Mmr},
+            mmr::{self, iterator::nodes_to_pin, journaled::Mmr},
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
@@ -656,7 +657,7 @@ pub(crate) mod test {
                 (self.log.merkle, self.log.journal)
             }
 
-            async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
+            async fn pinned_nodes_at(&self, loc: mmr::Location) -> Vec<Digest> {
                 join_all(nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
                     .await
                     .into_iter()
@@ -670,7 +671,7 @@ pub(crate) mod test {
     #[allow(dead_code, clippy::manual_async_fn)]
     fn issue_2787_regression(
         db: &crate::qmdb::immutable::Immutable<
-            crate::merkle::mmr::Family,
+            mmr::Family,
             deterministic::Context,
             Digest,
             Vec<u8>,
@@ -883,7 +884,7 @@ pub(crate) mod test {
         use std::collections::HashMap;
 
         type Snap = MerkleizedBatch<
-            crate::merkle::mmr::Family,
+            mmr::Family,
             sha256::Digest,
             super::Update<Digest, Vec<u8>>,
         >;

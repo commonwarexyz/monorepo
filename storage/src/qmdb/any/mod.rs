@@ -1060,26 +1060,41 @@ pub(crate) mod test {
     use commonware_runtime::{deterministic, Runner as _};
 
     // Type aliases for all 12 MMR variants (all use OneCap for collision coverage).
-    type UnorderedFixed = UnorderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
-    type UnorderedVariable = UnorderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
-    type OrderedFixed = OrderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
-    type OrderedVariable = OrderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
+    type UnorderedFixed = UnorderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
+    type UnorderedVariable =
+        UnorderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
+    type OrderedFixed = OrderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
+    type OrderedVariable = OrderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
     type UnorderedFixedP1 =
-        unordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1>;
-    type UnorderedVariableP1 =
-        unordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1>;
+        unordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1>;
+    type UnorderedVariableP1 = unordered::variable::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+    >;
     type OrderedFixedP1 =
-        ordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1>;
+        ordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1>;
     type OrderedVariableP1 =
-        ordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1>;
+        ordered::variable::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1>;
     type UnorderedFixedP2 =
-        unordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2>;
-    type UnorderedVariableP2 =
-        unordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2>;
+        unordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 2>;
+    type UnorderedVariableP2 = unordered::variable::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+    >;
     type OrderedFixedP2 =
-        ordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2>;
+        ordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 2>;
     type OrderedVariableP2 =
-        ordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2>;
+        ordered::variable::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 2>;
 
     // MMB type aliases for with_all_variants.
     mod mmb_types {
@@ -1095,7 +1110,6 @@ pub(crate) mod test {
         };
 
         type MmbLocation = Location<mmb::Family>;
-        type MmbError = crate::qmdb::Error<mmb::Family>;
 
         pub type MmbUnorderedFixed = super::super::db::Db<
             mmb::Family,
@@ -1144,42 +1158,6 @@ pub(crate) mod test {
             Sha256,
             update::Ordered<Digest, VariableEncoding<Digest>>,
         >;
-
-        impl MmbUnorderedFixed {
-            pub async fn init(
-                context: Context,
-                cfg: super::FixedConfig<OneCap>,
-            ) -> Result<Self, MmbError> {
-                super::super::init(context, cfg, None, |_, _| {}, UnorderedIndex::new).await
-            }
-        }
-
-        impl MmbUnorderedVariable {
-            pub async fn init(
-                context: Context,
-                cfg: super::VariableConfig<OneCap, ((), ())>,
-            ) -> Result<Self, MmbError> {
-                super::super::init(context, cfg, None, |_, _| {}, UnorderedIndex::new).await
-            }
-        }
-
-        impl MmbOrderedFixed {
-            pub async fn init(
-                context: Context,
-                cfg: super::FixedConfig<OneCap>,
-            ) -> Result<Self, MmbError> {
-                super::super::init(context, cfg, None, |_, _| {}, OrderedIndex::new).await
-            }
-        }
-
-        impl MmbOrderedVariable {
-            pub async fn init(
-                context: Context,
-                cfg: super::VariableConfig<OneCap, ((), ())>,
-            ) -> Result<Self, MmbError> {
-                super::super::init(context, cfg, None, |_, _| {}, OrderedIndex::new).await
-            }
-        }
     }
     use mmb_types::*;
 

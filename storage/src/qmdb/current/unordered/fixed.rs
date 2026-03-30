@@ -24,8 +24,15 @@ use commonware_utils::Array;
 type Error = crate::qmdb::Error<crate::mmr::Family>;
 
 /// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
-pub type Db<E, K, V, H, T, const N: usize> =
-    super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, Index<T, Location>, H, N>;
+pub type Db<E, K, V, H, T, const N: usize> = super::db::Db<
+    E,
+    Journal<E, Operation<crate::mmr::Family, K, V>>,
+    K,
+    FixedEncoding<V>,
+    Index<T, Location>,
+    H,
+    N,
+>;
 
 impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, const N: usize>
     Db<E, K, V, H, T, N>
@@ -69,7 +76,7 @@ pub mod partitioned {
     pub type Db<E, K, V, H, T, const P: usize, const N: usize> =
         crate::qmdb::current::unordered::db::Db<
             E,
-            Journal<E, Operation<K, V>>,
+            Journal<E, Operation<crate::mmr::Family, K, V>>,
             K,
             FixedEncoding<V>,
             Index<T, Location, P>,

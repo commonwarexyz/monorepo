@@ -77,7 +77,8 @@ pub trait Resolver: Send + Sync + Clone + 'static {
 
 macro_rules! impl_resolver {
     ($db:ident, $op:ident, $val_bound:ident) => {
-        impl<E, K, V, H, T> Resolver for Arc<$db<E, K, V, H, T>>
+        impl<E, K, V, H, T> Resolver
+            for Arc<$db<crate::merkle::mmr::Family, E, K, V, H, T>>
         where
             E: Context,
             K: Array,
@@ -87,7 +88,7 @@ macro_rules! impl_resolver {
             T::Key: Send + Sync,
         {
             type Digest = H::Digest;
-            type Op = $op<K, V>;
+            type Op = $op<crate::merkle::mmr::Family, K, V>;
             type Error = qmdb::Error<crate::merkle::mmr::Family>;
 
             async fn get_operations(
@@ -114,7 +115,8 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<E, K, V, H, T>>>
+        impl<E, K, V, H, T> Resolver
+            for Arc<AsyncRwLock<$db<crate::merkle::mmr::Family, E, K, V, H, T>>>
         where
             E: Context,
             K: Array,
@@ -124,7 +126,7 @@ macro_rules! impl_resolver {
             T::Key: Send + Sync,
         {
             type Digest = H::Digest;
-            type Op = $op<K, V>;
+            type Op = $op<crate::merkle::mmr::Family, K, V>;
             type Error = qmdb::Error<crate::merkle::mmr::Family>;
 
             async fn get_operations(
@@ -151,7 +153,8 @@ macro_rules! impl_resolver {
             }
         }
 
-        impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<E, K, V, H, T>>>>
+        impl<E, K, V, H, T> Resolver
+            for Arc<AsyncRwLock<Option<$db<crate::merkle::mmr::Family, E, K, V, H, T>>>>
         where
             E: Context,
             K: Array,
@@ -161,7 +164,7 @@ macro_rules! impl_resolver {
             T::Key: Send + Sync,
         {
             type Digest = H::Digest;
-            type Op = $op<K, V>;
+            type Op = $op<crate::merkle::mmr::Family, K, V>;
             type Error = qmdb::Error<crate::merkle::mmr::Family>;
 
             async fn get_operations(

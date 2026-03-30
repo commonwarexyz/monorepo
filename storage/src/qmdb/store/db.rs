@@ -208,7 +208,7 @@ where
     ///
     /// - There is always at least one commit operation in the log.
     /// - The log is never pruned beyond the inactivity floor.
-    log: Journal<E, Operation<K, V>>,
+    log: Journal<E, Operation<crate::mmr::Family, K, V>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location containing its most recent update.
@@ -268,7 +268,7 @@ where
     /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
-    async fn get_op(&self, loc: Location) -> Result<Operation<K, V>, Error> {
+    async fn get_op(&self, loc: Location) -> Result<Operation<crate::mmr::Family, K, V>, Error> {
         let reader = self.log.reader().await;
         assert!(*loc < reader.bounds().end);
         reader.read(*loc).await.map_err(|e| match e {
@@ -338,10 +338,13 @@ where
     /// Initializes a new [Db] with the given configuration.
     pub async fn init(
         context: E,
-        cfg: Config<T, <Operation<K, V> as Read>::Cfg>,
+        cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mut log =
-            Journal::<E, Operation<K, V>>::init(context.with_label("log"), cfg.log).await?;
+        let mut log = Journal::<E, Operation<crate::mmr::Family, K, V>>::init(
+            context.with_label("log"),
+            cfg.log,
+        )
+        .await?;
 
         // Rewind log to remove uncommitted operations.
         if log.rewind_to(|op| op.is_commit()).await? == 0 {
@@ -398,7 +401,12 @@ where
     #[allow(clippy::type_complexity)]
     const fn as_floor_helper(
         &mut self,
-    ) -> FloorHelper<'_, crate::mmr::Family, Index<T, Location>, Journal<E, Operation<K, V>>> {
+    ) -> FloorHelper<
+        '_,
+        crate::mmr::Family,
+        Index<T, Location>,
+        Journal<E, Operation<crate::mmr::Family, K, V>>,
+    > {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,

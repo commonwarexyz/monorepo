@@ -41,7 +41,7 @@ crate::qmdb::any::traits::impl_db_any! {
         V: VariableValue + 'static,
         H: Hasher,
         T: Translator,
-        VariableOperation<K, V>: Read,
+        VariableOperation<crate::merkle::mmr::Family, K, V>: Read,
     }
     Family = crate::merkle::mmr::Family, Key = K, Value = V, Digest = H::Digest
 }
@@ -69,7 +69,7 @@ impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, const N: usi
 impl<E: Context, K: Array, V: VariableValue, H: Hasher, T: Translator, const N: usize>
     BitmapPrunedBits for variable::Db<E, K, V, H, T, N>
 where
-    VariableOperation<K, V>: Read,
+    VariableOperation<crate::merkle::mmr::Family, K, V>: Read,
 {
     fn pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
@@ -136,7 +136,7 @@ crate::qmdb::any::traits::impl_db_any! {
         V: VariableValue + 'static,
         H: Hasher,
         T: Translator,
-        VariableOperation<K, V>: Read,
+        VariableOperation<crate::merkle::mmr::Family, K, V>: Read,
     }
     Family = crate::merkle::mmr::Family, Key = K, Value = V, Digest = H::Digest
 }
@@ -151,7 +151,7 @@ impl<
         const N: usize,
     > BitmapPrunedBits for variable::partitioned::Db<E, K, V, H, T, P, N>
 where
-    VariableOperation<K, V>: Read,
+    VariableOperation<crate::merkle::mmr::Family, K, V>: Read,
 {
     fn pruned_bits(&self) -> u64 {
         self.status.pruned_bits()
