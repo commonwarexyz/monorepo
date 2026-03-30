@@ -373,61 +373,60 @@ mod tests {
 
                             // Loop forever to account for unexpected message drops
                             loop {
-                                match mode {
+                                let delay = match mode {
                                     Mode::One => {
                                         for recipient in &recipients {
                                             // Loop until success
-                                            'wait_for_send: {
-                                                while let Ok(sent) = sender
+                                            loop {
+                                                let Ok(sent) = sender
                                                     .send(
                                                         Recipients::One(recipient.clone()),
                                                         msg.as_ref().to_vec(),
                                                         true,
                                                     )
                                                     .await
-                                                {
-                                                    if sent.len() == 1 {
-                                                        assert_eq!(&sent[0], recipient);
-                                                        break 'wait_for_send;
-                                                    }
-                                                    context.sleep(Duration::from_millis(100)).await;
-                                                }
-                                                return;
-                                            }
-                                        }
-                                    }
-                                    Mode::Some | Mode::All => {
-                                        // Loop until all peer sends successful
-                                        'wait_for_send: {
-                                            while let Ok(mut sent) = sender
-                                                .send(
-                                                    match mode {
-                                                        Mode::Some => {
-                                                            Recipients::Some(recipients.clone())
-                                                        }
-                                                        Mode::All => Recipients::All,
-                                                        _ => unreachable!(),
-                                                    },
-                                                    msg.as_ref().to_vec(),
-                                                    true,
-                                                )
-                                                .await
-                                            {
-                                                if sent.len() == recipients.len() {
-                                                    // Compare to expected
-                                                    sent.sort();
-                                                    assert_eq!(sent, recipients);
-                                                    break 'wait_for_send;
+                                                else {
+                                                    return;
+                                                };
+                                                if sent.len() == 1 {
+                                                    assert_eq!(&sent[0], recipient);
+                                                    break;
                                                 }
                                                 context.sleep(Duration::from_millis(100)).await;
                                             }
-                                            return;
                                         }
+                                        Duration::from_secs(10)
+                                    }
+                                    Mode::Some | Mode::All => {
+                                        let Ok(mut sent) = sender
+                                            .send(
+                                                match mode {
+                                                    Mode::Some => {
+                                                        Recipients::Some(recipients.clone())
+                                                    }
+                                                    Mode::All => Recipients::All,
+                                                    _ => unreachable!(),
+                                                },
+                                                msg.as_ref().to_vec(),
+                                                true,
+                                            )
+                                            .await
+                                        else {
+                                            return;
+                                        };
+                                        let delay = if sent.len() == recipients.len() {
+                                            // Compare to expected.
+                                            sent.sort();
+                                            assert_eq!(sent, recipients);
+                                            Duration::from_secs(10)
+                                        } else {
+                                            Duration::from_millis(100)
+                                        };
+                                        delay
                                     }
                                 };
 
-                                // Sleep to avoid busy loop
-                                context.sleep(Duration::from_secs(10)).await;
+                                context.sleep(delay).await;
                             }
                         });
 
@@ -1156,30 +1155,27 @@ mod tests {
                     move |context| async move {
                         // Send identity to all peers
                         let msg = signer.public_key();
+                        let mut recipients = addresses.clone();
+                        recipients.remove(i);
+                        recipients.sort();
                         context
                             .with_label("sender")
                             .spawn(move |context| async move {
                                 loop {
-                                    let mut recipients = addresses.clone();
-                                    recipients.remove(i);
-                                    recipients.sort();
-
-                                    'wait_for_send: {
-                                        while let Ok(mut sent) = sender
-                                            .send(Recipients::All, msg.as_ref().to_vec(), true)
-                                            .await
-                                        {
-                                            if sent.len() == recipients.len() {
-                                                sent.sort();
-                                                assert_eq!(sent, recipients);
-                                                break 'wait_for_send;
-                                            }
-                                            context.sleep(Duration::from_millis(100)).await;
-                                        }
+                                    let Ok(mut sent) = sender
+                                        .send(Recipients::All, msg.as_ref().to_vec(), true)
+                                        .await
+                                    else {
                                         return;
-                                    }
-
-                                    context.sleep(Duration::from_secs(10)).await;
+                                    };
+                                    let delay = if sent.len() == recipients.len() {
+                                        sent.sort();
+                                        assert_eq!(sent, recipients);
+                                        Duration::from_secs(10)
+                                    } else {
+                                        Duration::from_millis(100)
+                                    };
+                                    context.sleep(delay).await;
                                 }
                             });
 
@@ -1376,30 +1372,27 @@ mod tests {
                     let addresses = addresses.clone();
                     move |context| async move {
                         let msg = signer.public_key();
+                        let mut recipients = addresses.clone();
+                        recipients.remove(i);
+                        recipients.sort();
                         context
                             .with_label("sender")
                             .spawn(move |context| async move {
                                 loop {
-                                    let mut recipients = addresses.clone();
-                                    recipients.remove(i);
-                                    recipients.sort();
-
-                                    'wait_for_send: {
-                                        while let Ok(mut sent) = sender
-                                            .send(Recipients::All, msg.as_ref().to_vec(), true)
-                                            .await
-                                        {
-                                            if sent.len() == recipients.len() {
-                                                sent.sort();
-                                                assert_eq!(sent, recipients);
-                                                break 'wait_for_send;
-                                            }
-                                            context.sleep(Duration::from_millis(100)).await;
-                                        }
+                                    let Ok(mut sent) = sender
+                                        .send(Recipients::All, msg.as_ref().to_vec(), true)
+                                        .await
+                                    else {
                                         return;
-                                    }
-
-                                    context.sleep(Duration::from_secs(10)).await;
+                                    };
+                                    let delay = if sent.len() == recipients.len() {
+                                        sent.sort();
+                                        assert_eq!(sent, recipients);
+                                        Duration::from_secs(10)
+                                    } else {
+                                        Duration::from_millis(100)
+                                    };
+                                    context.sleep(delay).await;
                                 }
                             });
 
