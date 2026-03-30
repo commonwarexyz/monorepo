@@ -101,7 +101,7 @@ where
         .expect("failed to spawn thread")
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -194,5 +194,15 @@ mod tests {
 
         // macOS may round the requested stack size up when creating the thread
         assert!(observed >= expected);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_falls_back_to_rust_default_thread_stack_size() {
+        assert_eq!(
+            system_thread_stack_size(),
+            RUST_DEFAULT_THREAD_STACK_SIZE,
+            "Windows should fall back to Rust's default spawned-thread stack size",
+        );
     }
 }
