@@ -302,15 +302,16 @@ where
                 )
             };
 
-            // Primary peers are the dealers and players for the active epoch.
+            // Primary peers are the dealers for the active epoch. Secondary peers are the
+            // active-epoch players and the next players we allow to connect early.
             self.manager
                 .track(
                     epoch.get(),
                     TrackedPeers::new(
+                        dealers.clone(),
                         Set::from_iter_dedup(
-                            dealers.iter().cloned().chain(players.iter().cloned()),
+                            players.iter().cloned().chain(next_players.iter().cloned()),
                         ),
-                        next_players.clone(),
                     ),
                 )
                 .await;
