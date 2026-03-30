@@ -609,11 +609,11 @@ impl Runner {
                 .expect("shutdown timeout overflow"),
         );
 
-        match catch_unwind(AssertUnwindSafe(|| executor_loop.drain(shutdown_deadline))) {
-            Ok(true) => trace!("unfinished tasks remaining after shutdown timeout"),
-            Ok(false) => {}
-            Err(payload) => resume_unwind(payload),
-        };
+        let shutdown_result =
+            catch_unwind(AssertUnwindSafe(|| executor_loop.drain(shutdown_deadline)));
+        if let Ok(true) = &shutdown_result {
+            trace!("unfinished tasks remaining after shutdown timeout");
+        }
 
         // Clear any tasks that did not exit cooperatively during shutdown.
         //
@@ -634,12 +634,20 @@ impl Runner {
         // root future is still Pending and holds captured variables with Context references.
         drop(root);
 
-        // Assert the context doesn't escape the start() function (behavior
-        // is undefined in this case)
-        assert!(
-            Arc::weak_count(&executor) == 0,
-            "executor still has weak references"
-        );
+        // Assert the context doesn't escape the start() function on the clean
+        // shutdown path. If shutdown timed out, or if cleanup itself panicked,
+        // tolerate lingering weak references so we do not mask the original
+        // shutdown failure.
+        if matches!(shutdown_result, Ok(false)) {
+            assert!(
+                Arc::weak_count(&executor) == 0,
+                "executor still has weak references"
+            );
+        }
+
+        if let Err(payload) = shutdown_result {
+            resume_unwind(payload);
+        }
 
         // Handle the result — resume the original panic after cleanup if one
         // was caught. If the root completed first, keep monitoring for child
@@ -1407,10 +1415,13 @@ impl crate::Spawner for Context {
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
         let executor = self.executor();
-        let Some(task) = Tasks::reserve_work(&executor.tasks, label.clone()) else {
+        let tasks = executor.tasks.clone();
+        let Some(task) = Tasks::reserve_work(&tasks, label.clone()) else {
             // Shutdown has started and new tasks can no longer be registered.
             return Handle::closed(metric);
         };
+        let panicker = executor.panicker.clone();
+        drop(executor);
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
@@ -1436,10 +1447,10 @@ impl crate::Spawner for Context {
         let (f, handle) = Handle::init(
             future,
             metric,
-            executor.panicker.clone(),
+            panicker,
             Arc::clone(&parent),
         );
-        executor.tasks.install_work(&task.take(), Box::pin(f));
+        tasks.install_work(&task.take(), Box::pin(f));
 
         // Register the task on the parent
         if let Some(aborter) = handle.aborter() {
@@ -2287,6 +2298,176 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("runner should finish after the in-flight spawn is released");
         runner.join().expect("runner thread should join cleanly");
+    }
+
+    #[test]
+    fn test_shutdown_timeout_allows_inflight_spawn_to_finish_without_panic() {
+        let (context_tx, context_rx) = std_mpsc::channel();
+        let allow_root_return = Arc::new(AtomicBool::new(false));
+        let allow_root_return2 = allow_root_return.clone();
+        let (spawn_entered_tx, spawn_entered_rx) = std_mpsc::channel();
+        let (release_spawn_tx, release_spawn_rx) = std_mpsc::channel();
+        let (handle_result_tx, handle_result_rx) = std_mpsc::channel();
+        let (finished_tx, finished_rx) = std_mpsc::channel();
+
+        let runner = thread::spawn(move || {
+            let runner =
+                Runner::new(Config::default().with_shutdown_timeout(Duration::from_millis(1)));
+            runner.start(|context| async move {
+                context_tx
+                    .send(context.clone())
+                    .expect("context receiver should stay open");
+                while !allow_root_return2.load(Ordering::Relaxed) {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+            });
+            finished_tx
+                .send(())
+                .expect("runner completion receiver should stay open");
+        });
+
+        let context = context_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("root should publish a cloneable context before returning");
+        let spawn = thread::spawn(move || {
+            let handle = context.spawn(move |_| {
+                spawn_entered_tx
+                    .send(())
+                    .expect("spawn entry receiver should stay open");
+                release_spawn_rx
+                    .recv()
+                    .expect("spawn release sender should stay open");
+                async move {
+                    futures::future::pending::<()>().await;
+                }
+            });
+            handle_result_tx
+                .send(futures::executor::block_on(handle))
+                .expect("handle result receiver should stay open");
+        });
+
+        spawn_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawn should block inside the in-flight window");
+        allow_root_return.store(true, Ordering::Relaxed);
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("runner should honor shutdown timeout while spawn remains in flight");
+        release_spawn_tx
+            .send(())
+            .expect("spawn release receiver should stay open");
+
+        let handle_result = handle_result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("late spawn should return a closed handle");
+        assert!(
+            matches!(handle_result, Err(Error::Closed)),
+            "late spawn should resolve closed after shutdown timeout",
+        );
+        spawn.join().expect("spawn thread should join cleanly");
+        runner.join().expect("runner thread should join cleanly");
+    }
+
+    #[test]
+    fn test_cleanup_runs_before_drain_panic_is_resumed() {
+        struct UpgradeOnDrop {
+            executor: Weak<Executor>,
+            upgraded: Option<std_mpsc::Sender<bool>>,
+        }
+
+        impl Drop for UpgradeOnDrop {
+            fn drop(&mut self) {
+                self.upgraded
+                    .take()
+                    .unwrap()
+                    .send(self.executor.upgrade().is_some())
+                    .expect("upgrade result receiver should stay open");
+            }
+        }
+
+        struct ProbeFuture {
+            _probe: UpgradeOnDrop,
+        }
+
+        impl Future for ProbeFuture {
+            type Output = ();
+
+            fn poll(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                std::task::Poll::Pending
+            }
+        }
+
+        struct PanicFuture;
+
+        impl Future for PanicFuture {
+            type Output = ();
+
+            fn poll(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                panic!("cleanup panic");
+            }
+        }
+
+        let (upgraded_tx, upgraded_rx) = std_mpsc::channel();
+        let thread = thread::spawn(move || {
+            catch_unwind(AssertUnwindSafe(|| {
+                let runner =
+                    Runner::new(Config::default().with_shutdown_timeout(Duration::from_secs(1)));
+                runner.start(|context| async move {
+                    let executor = context.executor();
+                    let probe_executor = executor.clone();
+
+                    let probe_id = executor.tasks.increment();
+                    executor.tasks.register(
+                        probe_id,
+                        Arc::new(Task {
+                            id: probe_id,
+                            label: Label::task(
+                                "cleanup_probe".to_string(),
+                                crate::Execution::Shared(false),
+                            ),
+                            mode: Mode::Work(Mutex::new(Some(Box::pin(ProbeFuture {
+                                _probe: UpgradeOnDrop {
+                                    executor: Arc::downgrade(&probe_executor),
+                                    upgraded: Some(upgraded_tx),
+                                },
+                            })))),
+                        }),
+                    );
+
+                    let panic_id = executor.tasks.increment();
+                    executor.tasks.register(
+                        panic_id,
+                        Arc::new(Task {
+                            id: panic_id,
+                            label: Label::task(
+                                "cleanup_panic".to_string(),
+                                crate::Execution::Shared(false),
+                            ),
+                            mode: Mode::Work(Mutex::new(Some(Box::pin(PanicFuture)))),
+                        }),
+                    );
+                });
+            }))
+        });
+
+        let result = thread
+            .join()
+            .expect("runner thread should catch its own unwind");
+        assert!(result.is_err(), "cleanup panic should still abort the runner");
+
+        let upgraded = upgraded_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cleanup should drop pending tasks before resuming the panic");
+        assert!(
+            upgraded,
+            "cleanup should drop pending tasks while the executor is still alive",
+        );
     }
 
     #[test]
