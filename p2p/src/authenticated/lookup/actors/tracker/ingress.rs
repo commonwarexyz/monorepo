@@ -202,9 +202,14 @@ impl<C: PublicKey> Oracle<C> {
         Self { sender }
     }
 
-    /// Register only primary peers at the given index.
-    pub async fn track(&mut self, index: u64, primary: Map<C, Address>) {
-        crate::AddressableManager::track(self, index, primary).await;
+    /// Register peers at the given index.
+    ///
+    /// Accepts either a bare primary peer map or an [`AddressableTrackedPeers`] value.
+    pub async fn track<R>(&mut self, index: u64, peers: R)
+    where
+        R: Into<AddressableTrackedPeers<C>> + Send,
+    {
+        crate::AddressableManager::track(self, index, peers).await;
     }
 }
 

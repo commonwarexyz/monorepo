@@ -476,7 +476,10 @@ mod tests {
 
             let (_auth_signer, auth_pk) = new_signer_and_pk(1);
             oracle
-                .track(0, [tracker_pk.clone(), auth_pk.clone()].try_into().unwrap())
+                .track(
+                    0,
+                    Set::try_from([tracker_pk.clone(), auth_pk.clone()]).unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -539,7 +542,7 @@ mod tests {
 
             let (_, pk1) = new_signer_and_pk(1);
             oracle
-                .track(0, [tracker_pk, pk1.clone()].try_into().unwrap())
+                .track(0, Set::try_from([tracker_pk, pk1.clone()]).unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -573,7 +576,7 @@ mod tests {
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
-                .track(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
+                .track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -607,7 +610,7 @@ mod tests {
 
             let (_s1_signer, pk1) = new_signer_and_pk(1);
             oracle
-                .track(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
+                .track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -656,7 +659,7 @@ mod tests {
             let (mut s2_signer, pk2) = new_signer_and_pk(2);
 
             oracle
-                .track(0, [tracker_pk.clone(), pk1.clone()].try_into().unwrap())
+                .track(0, Set::try_from([tracker_pk.clone(), pk1.clone()]).unwrap())
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -806,7 +809,10 @@ mod tests {
             assert!(!mailbox.acceptable(peer_pk3.clone()).await);
 
             oracle
-                .track(0, [peer_pk.clone(), peer_pk2.clone()].try_into().unwrap())
+                .track(
+                    0,
+                    Set::try_from([peer_pk.clone(), peer_pk2.clone()]).unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -835,7 +841,9 @@ mod tests {
             let reservation = mailbox.listen(peer_pk.clone()).await;
             assert!(reservation.is_none());
 
-            oracle.track(0, [peer_pk.clone()].try_into().unwrap()).await;
+            oracle
+                .track(0, Set::try_from([peer_pk.clone()]).unwrap())
+                .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
             assert!(mailbox.acceptable(peer_pk.clone()).await);
@@ -890,15 +898,15 @@ mod tests {
 
             let (_primary_signer, primary_pk) = new_signer_and_pk(1);
             let (mut secondary_signer, secondary_pk) = new_signer_and_pk(2);
-            crate::Manager::track(
-                &mut oracle,
-                0,
-                TrackedPeers::new(
-                    [primary_pk.clone()].try_into().unwrap(),
-                    [secondary_pk.clone()].try_into().unwrap(),
-                ),
-            )
-            .await;
+            oracle
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        Set::try_from([primary_pk.clone()]).unwrap(),
+                        Set::try_from([secondary_pk.clone()]).unwrap(),
+                    ),
+                )
+                .await;
 
             let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 0);
@@ -938,15 +946,15 @@ mod tests {
             let mut subscription = oracle.subscribe().await;
 
             let (_signer, pk) = new_signer_and_pk(1);
-            crate::Manager::track(
-                &mut oracle,
-                0,
-                TrackedPeers::new(
-                    [pk.clone()].try_into().unwrap(),
-                    [pk.clone()].try_into().unwrap(),
-                ),
-            )
-            .await;
+            oracle
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        Set::try_from([pk.clone()]).unwrap(),
+                        Set::try_from([pk.clone()]).unwrap(),
+                    ),
+                )
+                .await;
 
             let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 0);
@@ -1008,7 +1016,7 @@ mod tests {
             oracle
                 .track(
                     0,
-                    [tracker_pk, pk1.clone(), pk2.clone()].try_into().unwrap(),
+                    Set::try_from([tracker_pk, pk1.clone(), pk2.clone()]).unwrap(),
                 )
                 .await;
             context.sleep(Duration::from_millis(10)).await;

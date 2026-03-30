@@ -283,6 +283,7 @@ mod tests {
         deterministic::{self},
         Clock, Runner,
     };
+    use commonware_utils::ordered::Map;
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,
@@ -366,7 +367,10 @@ mod tests {
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .track(0, [(pk.clone(), addr.into())].try_into().unwrap())
+                .track(
+                    0,
+                    Map::<_, crate::Address>::try_from([(pk.clone(), addr.into())]).unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -395,7 +399,10 @@ mod tests {
             let (_, pk1) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
             oracle
-                .track(0, [(pk1.clone(), addr.into())].try_into().unwrap())
+                .track(
+                    0,
+                    Map::<_, crate::Address>::try_from([(pk1.clone(), addr.into())]).unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -452,11 +459,10 @@ mod tests {
             oracle
                 .track(
                     0,
-                    [
+                    Map::<_, crate::Address>::try_from([
                         (peer_pk.clone(), peer_addr.into()),
                         (peer_pk2.clone(), peer_addr2.into()),
-                    ]
-                    .try_into()
+                    ])
                     .unwrap(),
                 )
                 .await;
@@ -501,11 +507,10 @@ mod tests {
             oracle
                 .track(
                     0,
-                    [
+                    Map::<_, crate::Address>::try_from([
                         (peer_pk.clone(), peer_addr.into()),
                         (peer_pk2.clone(), peer_addr2.into()),
-                    ]
-                    .try_into()
+                    ])
                     .unwrap(),
                 )
                 .await;
@@ -552,7 +557,11 @@ mod tests {
             assert!(reservation.is_none());
 
             oracle
-                .track(0, [(peer_pk.clone(), peer_addr.into())].try_into().unwrap())
+                .track(
+                    0,
+                    Map::<_, crate::Address>::try_from([(peer_pk.clone(), peer_addr.into())])
+                        .unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(10)).await; // Allow register to process
 
@@ -587,7 +596,11 @@ mod tests {
                 ..
             } = setup_actor(context.clone(), cfg_initial);
             oracle
-                .track(0, [(boot_pk.clone(), boot_addr.into())].try_into().unwrap())
+                .track(
+                    0,
+                    Map::<_, crate::Address>::try_from([(boot_pk.clone(), boot_addr.into())])
+                        .unwrap(),
+                )
                 .await;
 
             let dialable = mailbox.dialable().await;
@@ -611,7 +624,11 @@ mod tests {
             } = setup_actor(context.clone(), cfg_initial);
 
             oracle
-                .track(0, [(boot_pk.clone(), boot_addr.into())].try_into().unwrap())
+                .track(
+                    0,
+                    Map::<_, crate::Address>::try_from([(boot_pk.clone(), boot_addr.into())])
+                        .unwrap(),
+                )
                 .await;
 
             let result = mailbox.dial(boot_pk.clone()).await;
@@ -650,19 +667,23 @@ mod tests {
             let (_secondary_signer, secondary_pk) = new_signer_and_pk(2);
             let secondary_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9002);
 
-            crate::AddressableManager::track(
-                &mut oracle,
-                0,
-                AddressableTrackedPeers::new(
-                    [(primary_pk.clone(), primary_addr.into())]
-                        .try_into()
+            oracle
+                .track(
+                    0,
+                    AddressableTrackedPeers::new(
+                        Map::<_, crate::Address>::try_from([(
+                            primary_pk.clone(),
+                            primary_addr.into(),
+                        )])
                         .unwrap(),
-                    [(secondary_pk.clone(), secondary_addr.into())]
-                        .try_into()
+                        Map::<_, crate::Address>::try_from([(
+                            secondary_pk.clone(),
+                            secondary_addr.into(),
+                        )])
                         .unwrap(),
-                ),
-            )
-            .await;
+                    ),
+                )
+                .await;
 
             let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 0);
@@ -694,15 +715,15 @@ mod tests {
 
             let (_signer, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9001);
-            crate::AddressableManager::track(
-                &mut oracle,
-                0,
-                AddressableTrackedPeers::new(
-                    [(pk.clone(), addr.into())].try_into().unwrap(),
-                    [(pk.clone(), addr.into())].try_into().unwrap(),
-                ),
-            )
-            .await;
+            oracle
+                .track(
+                    0,
+                    AddressableTrackedPeers::new(
+                        Map::<_, crate::Address>::try_from([(pk.clone(), addr.into())]).unwrap(),
+                        Map::<_, crate::Address>::try_from([(pk.clone(), addr.into())]).unwrap(),
+                    ),
+                )
+                .await;
 
             let (id, new, all) = subscription.recv().await.unwrap();
             assert_eq!(id, 0);
@@ -732,7 +753,11 @@ mod tests {
             let (_peer_signer, peer_pk) = new_signer_and_pk(1);
             let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345);
             oracle
-                .track(0, [(peer_pk.clone(), peer_addr.into())].try_into().unwrap())
+                .track(
+                    0,
+                    Map::<_, crate::Address>::try_from([(peer_pk.clone(), peer_addr.into())])
+                        .unwrap(),
+                )
                 .await;
             // let the register take effect
             context.sleep(Duration::from_millis(10)).await;
@@ -786,11 +811,10 @@ mod tests {
             oracle
                 .track(
                     0,
-                    [
+                    Map::<_, crate::Address>::try_from([
                         (my_pk.clone(), my_addr.into()),
                         (pk_1.clone(), addr_1.into()),
-                    ]
-                    .try_into()
+                    ])
                     .unwrap(),
                 )
                 .await;
@@ -812,7 +836,10 @@ mod tests {
 
             // Register another set which doesn't include first peer
             oracle
-                .track(1, [(pk_2.clone(), addr_2.into())].try_into().unwrap())
+                .track(
+                    1,
+                    Map::<_, crate::Address>::try_from([(pk_2.clone(), addr_2.into())]).unwrap(),
+                )
                 .await;
 
             // Wait for a listener update
@@ -844,11 +871,10 @@ mod tests {
             oracle
                 .track(
                     0,
-                    [
+                    Map::<_, crate::Address>::try_from([
                         (my_pk.clone(), my_addr.into()),
                         (pk_1.clone(), addr_1.into()),
-                    ]
-                    .try_into()
+                    ])
                     .unwrap(),
                 )
                 .await;
@@ -883,7 +909,10 @@ mod tests {
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1002);
 
             oracle
-                .track(0, [(pk.clone(), addr_1.into())].try_into().unwrap())
+                .track(
+                    0,
+                    Map::<_, crate::Address>::try_from([(pk.clone(), addr_1.into())]).unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -922,11 +951,10 @@ mod tests {
             oracle
                 .track(
                     0,
-                    [
+                    Map::<_, crate::Address>::try_from([
                         (my_pk.clone(), my_addr.into()),
                         (pk_1.clone(), addr_1.into()),
-                    ]
-                    .try_into()
+                    ])
                     .unwrap(),
                 )
                 .await;
@@ -981,7 +1009,10 @@ mod tests {
             } = setup_actor(context.clone(), cfg);
 
             oracle
-                .track(0, [(pk_1.clone(), addr_1.into())].try_into().unwrap())
+                .track(
+                    0,
+                    Map::<_, crate::Address>::try_from([(pk_1.clone(), addr_1.into())]).unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1013,7 +1044,10 @@ mod tests {
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1002);
 
             oracle
-                .track(0, [(pk.clone(), addr_1.into())].try_into().unwrap())
+                .track(
+                    0,
+                    Map::<_, crate::Address>::try_from([(pk.clone(), addr_1.into())]).unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1051,7 +1085,10 @@ mod tests {
 
             // Register peer set with peer at address A
             oracle
-                .track(0, [(pk.clone(), addr_a.into())].try_into().unwrap())
+                .track(
+                    0,
+                    Map::<_, crate::Address>::try_from([(pk.clone(), addr_a.into())]).unwrap(),
+                )
                 .await;
             let registered_ips = listener_receiver.recv().await.unwrap();
             assert!(registered_ips.contains(&addr_a.ip()));
@@ -1065,7 +1102,10 @@ mod tests {
 
             // Register new peer set with same peer at address B
             oracle
-                .track(1, [(pk.clone(), addr_b.into())].try_into().unwrap())
+                .track(
+                    1,
+                    Map::<_, crate::Address>::try_from([(pk.clone(), addr_b.into())]).unwrap(),
+                )
                 .await;
 
             // Peer should receive Kill message (connection severed due to address change)
@@ -1101,11 +1141,10 @@ mod tests {
             oracle
                 .track(
                     0,
-                    [
+                    Map::<_, crate::Address>::try_from([
                         (pk_tracked.clone(), addr_1.into()),
                         (pk_unchanged.clone(), addr_unchanged.into()),
-                    ]
-                    .try_into()
+                    ])
                     .unwrap(),
                 )
                 .await;

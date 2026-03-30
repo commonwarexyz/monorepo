@@ -123,8 +123,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `(deleted_peers, changed_peers)` across both updates.
     ///
-    /// Returns `None` if the index is invalid or if a peer appears in both
-    /// the primary and secondary sets with conflicting addresses.
+    /// Returns `None` if the index is invalid.
+    ///
+    /// If a peer appears in both sets, the primary address is authoritative.
     pub fn track(
         &mut self,
         index: u64,
@@ -183,28 +184,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
         }
 
-        // Reject registrations that try to track the same peer in both sets
-        // with different addresses. Accepting these would let the secondary
-        // overwrite the primary's active dial/listen endpoint.
-        for (peer, primary_addr) in &primaries {
-            let Some(secondary_addr) = secondaries.get_value(peer) else {
-                continue;
-            };
-            if primary_addr == secondary_addr {
-                continue;
-            }
-            warn!(
-                ?index,
-                ?peer,
-                "peer has conflicting primary and secondary addresses"
-            );
-            return None;
-        }
-
         // Create and store new primary peer set (all peers are tracked regardless of address
         // validity).
         let mut deleted_peers = Vec::new();
         let mut changed_peers = Vec::new();
+        let primary_keys = primaries.keys().clone();
         for (primary, addr) in &primaries {
             let record = match self.peers.entry(primary.clone()) {
                 Entry::Occupied(entry) => {
@@ -225,6 +209,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // Create and store new secondary peer set.
         for (secondary, addr) in &secondaries {
+            // When a peer is tracked in both roles for the same index, the
+            // primary address remains authoritative.
+            if primary_keys.position(secondary).is_some() {
+                self.peers.get_mut(secondary).unwrap().increment_secondary();
+                continue;
+            }
             let record = match self.peers.entry(secondary.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
@@ -789,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn test_track_rejects_conflicting_primary_secondary_overlap() {
+    fn test_track_primary_wins_conflicting_primary_secondary_overlap() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -810,26 +800,33 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let result = directory.track(
-                0,
-                [(pk_1.clone(), addr(primary_addr))].try_into().unwrap(),
-                [(pk_1.clone(), addr(secondary_addr))].try_into().unwrap(),
-            );
+            let (deleted, changed) = directory
+                .track(
+                    0,
+                    [(pk_1.clone(), addr(primary_addr))].try_into().unwrap(),
+                    [(pk_1.clone(), addr(secondary_addr))].try_into().unwrap(),
+                )
+                .unwrap();
 
-            assert!(result.is_none());
-            assert!(directory.get_set(&0).is_none());
-            assert_eq!(directory.latest_set_index(), None);
-            assert!(!directory.peers.contains_key(&pk_1));
-            assert!(!directory.eligible(&pk_1));
-            assert!(directory.primary().is_empty());
-            assert!(directory.dialable().peers.is_empty());
-            assert!(!directory.listenable().contains(&primary_addr.ip()));
+            assert!(deleted.is_empty());
+            assert!(changed.is_empty());
+            assert_eq!(directory.latest_set_index(), Some(0));
+            assert_eq!(directory.get_set(&0).unwrap(), &[pk_1.clone()].try_into().unwrap());
+            assert!(directory.eligible(&pk_1));
+            assert_eq!(
+                directory.peers.get(&pk_1).unwrap().ingress(),
+                Some(Ingress::Socket(primary_addr))
+            );
+            assert_eq!(directory.primary(), [pk_1.clone()].try_into().unwrap());
+            assert_eq!(directory.dialable().peers, vec![pk_1.clone()]);
+            assert_eq!(directory.dial(&pk_1).unwrap().1, Ingress::Socket(primary_addr));
+            assert!(directory.listenable().contains(&primary_addr.ip()));
             assert!(!directory.listenable().contains(&secondary_addr.ip()));
         });
     }
 
     #[test]
-    fn test_track_rejects_conflicting_overlap_without_mutating_existing_address() {
+    fn test_track_primary_wins_conflicting_overlap_when_updating_existing_address() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -860,24 +857,27 @@ mod tests {
             assert!(initial.0.is_empty());
             assert!(initial.1.is_empty());
 
-            let result = directory.track(
-                1,
-                [(pk_1.clone(), addr(new_addr))].try_into().unwrap(),
-                [(pk_1.clone(), addr(old_addr))].try_into().unwrap(),
-            );
+            let (deleted, changed) = directory
+                .track(
+                    1,
+                    [(pk_1.clone(), addr(new_addr))].try_into().unwrap(),
+                    [(pk_1.clone(), addr(old_addr))].try_into().unwrap(),
+                )
+                .unwrap();
 
-            assert!(result.is_none());
-            assert_eq!(directory.latest_set_index(), Some(0));
-            assert!(directory.get_set(&1).is_none());
+            assert!(deleted.is_empty());
+            assert_eq!(changed, vec![pk_1.clone()]);
+            assert_eq!(directory.latest_set_index(), Some(1));
+            assert_eq!(directory.get_set(&1).unwrap(), &[pk_1.clone()].try_into().unwrap());
             assert_eq!(
                 directory.peers.get(&pk_1).unwrap().ingress(),
-                Some(Ingress::Socket(old_addr))
+                Some(Ingress::Socket(new_addr))
             );
             assert_eq!(directory.primary(), [pk_1.clone()].try_into().unwrap());
             assert_eq!(directory.dialable().peers, vec![pk_1.clone()]);
-            assert_eq!(directory.dial(&pk_1).unwrap().1, Ingress::Socket(old_addr));
-            assert!(directory.listenable().contains(&old_addr.ip()));
-            assert!(!directory.listenable().contains(&new_addr.ip()));
+            assert_eq!(directory.dial(&pk_1).unwrap().1, Ingress::Socket(new_addr));
+            assert!(directory.listenable().contains(&new_addr.ip()));
+            assert!(!directory.listenable().contains(&old_addr.ip()));
         });
     }
 
