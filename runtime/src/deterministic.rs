@@ -1444,12 +1444,7 @@ impl crate::Spawner for Context {
         } else {
             f(self).boxed()
         };
-        let (f, handle) = Handle::init(
-            future,
-            metric,
-            panicker,
-            Arc::clone(&parent),
-        );
+        let (f, handle) = Handle::init(future, metric, panicker, Arc::clone(&parent));
         tasks.install_work(&task.take(), Box::pin(f));
 
         // Register the task on the parent
@@ -2232,9 +2227,8 @@ mod tests {
         // Run the root on a separate thread so the test can drive shutdown
         // while another thread stalls a concurrent spawn call mid-flight.
         let runner = thread::spawn(move || {
-            let runner = Runner::new(
-                Config::default().with_shutdown_timeout(Duration::from_secs(3600)),
-            );
+            let runner =
+                Runner::new(Config::default().with_shutdown_timeout(Duration::from_secs(3600)));
             runner.start(|context| async move {
                 context_tx
                     .send(context.clone())
@@ -2459,7 +2453,10 @@ mod tests {
         let result = thread
             .join()
             .expect("runner thread should catch its own unwind");
-        assert!(result.is_err(), "cleanup panic should still abort the runner");
+        assert!(
+            result.is_err(),
+            "cleanup panic should still abort the runner"
+        );
 
         let upgraded = upgraded_rx
             .recv_timeout(Duration::from_secs(1))
