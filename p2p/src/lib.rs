@@ -298,7 +298,6 @@ stability_scope!(BETA {
         ///
         /// For good connectivity, all peers must track the same peer sets at the same ID.
         ///
-        ///
         /// Callers may pass either a bare [`Set`] (registering only primary peers)
         /// or a [`TrackedPeers`] value containing both primary and secondary peers.
         fn track<R>(
@@ -318,7 +317,6 @@ stability_scope!(BETA {
         /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
         ///
         /// For good connectivity, all peers must track the same peer sets at the same ID.
-        ///
         ///
         /// Callers may pass either a bare [`Map`] (registering only primary peers)
         /// or an [`AddressableTrackedPeers`] value containing both primary and
