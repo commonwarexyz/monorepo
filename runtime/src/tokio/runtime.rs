@@ -391,8 +391,8 @@ impl crate::Runner for Runner {
                         IoUringConfig {
                             storage_directory: self.cfg.storage_directory.clone(),
                             iouring_config: Default::default(),
+                            thread_stack_size: self.cfg.thread_stack_size,
                         },
-                        self.cfg.thread_stack_size,
                         iouring_registry,
                         storage_buffer_pool.clone(),
                     ),
@@ -428,12 +428,12 @@ impl crate::Runner for Runner {
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()
                     },
+                    thread_stack_size: self.cfg.thread_stack_size,
                     ..Default::default()
                 };
                 let network = MeteredNetwork::new(
                     IoUringNetwork::start(
                         config,
-                        self.cfg.thread_stack_size,
                         iouring_registry,
                         network_buffer_pool.clone(),
                     )

@@ -73,6 +73,8 @@ pub struct Config {
     pub read_buffer_size: usize,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
+    /// Stack size for the dedicated send and receive io_uring threads.
+    pub thread_stack_size: usize,
 }
 
 impl Default for Config {
@@ -84,6 +86,7 @@ impl Default for Config {
             read_write_timeout: iouring_config.max_op_timeout,
             iouring_config,
             read_buffer_size: DEFAULT_READ_BUFFER_SIZE,
+            thread_stack_size: utils::thread::system_thread_stack_size(),
         }
     }
 }
@@ -119,7 +122,6 @@ impl Network {
     /// The io_uring `size` should be a multiple of the number of expected connections.
     pub(crate) fn start(
         mut cfg: Config,
-        thread_stack_size: usize,
         registry: &mut Registry,
         pool: BufferPool,
     ) -> Result<Self, Error> {
@@ -137,13 +139,13 @@ impl Network {
         let sender_registry = registry.sub_registry_with_prefix("iouring_sender");
         let (send_submitter, send_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config.clone(), sender_registry);
-        utils::thread::spawn(thread_stack_size, move || send_loop.run());
+        utils::thread::spawn(cfg.thread_stack_size, move || send_loop.run());
 
         // Create an io_uring instance to handle receive operations.
         let receiver_registry = registry.sub_registry_with_prefix("iouring_receiver");
         let (recv_submitter, recv_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config, receiver_registry);
-        utils::thread::spawn(thread_stack_size, move || recv_loop.run());
+        utils::thread::spawn(cfg.thread_stack_size, move || recv_loop.run());
 
         Ok(Self {
             tcp_nodelay: cfg.tcp_nodelay,
@@ -681,16 +683,19 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_network(), &mut Registry::default())
     }
 
+    #[test]
+    fn test_default_thread_stack_size_uses_system_default() {
+        assert_eq!(
+            Config::default().thread_stack_size,
+            thread::system_thread_stack_size()
+        );
+    }
+
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
-            Network::start(
-                Config::default(),
-                thread::system_thread_stack_size(),
-                &mut Registry::default(),
-                test_pool(),
-            )
-            .expect("Failed to start io_uring")
+            Network::start(Config::default(), &mut Registry::default(), test_pool())
+                .expect("Failed to start io_uring")
         })
         .await;
     }
@@ -707,7 +712,6 @@ mod tests {
                     },
                     ..Default::default()
                 },
-                thread::system_thread_stack_size(),
                 &mut Registry::default(),
                 test_pool(),
             )
@@ -718,13 +722,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_small_send_read_quickly() {
-        let network = Network::start(
-            Config::default(),
-            thread::system_thread_stack_size(),
-            &mut Registry::default(),
-            test_pool(),
-        )
-        .expect("Failed to start io_uring");
+        let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
+            .expect("Failed to start io_uring");
 
         // Bind a listener
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
@@ -759,7 +758,6 @@ mod tests {
                 read_write_timeout: op_timeout,
                 ..Default::default()
             },
-            thread::system_thread_stack_size(),
             &mut Registry::default(),
             test_pool(),
         )
@@ -802,7 +800,6 @@ mod tests {
                 read_buffer_size: 0,
                 ..Default::default()
             },
-            thread::system_thread_stack_size(),
             &mut Registry::default(),
             test_pool(),
         )
@@ -856,7 +853,6 @@ mod tests {
                 read_write_timeout: op_timeout,
                 ..Default::default()
             },
-            thread::system_thread_stack_size(),
             &mut Registry::default(),
             test_pool(),
         )
@@ -896,13 +892,8 @@ mod tests {
     #[tokio::test]
     async fn test_peek_with_buffered_data() {
         // Use default buffer size to enable buffering
-        let network = Network::start(
-            Config::default(),
-            thread::system_thread_stack_size(),
-            &mut Registry::default(),
-            test_pool(),
-        )
-        .expect("Failed to start io_uring");
+        let network = Network::start(Config::default(), &mut Registry::default(), test_pool())
+            .expect("Failed to start io_uring");
 
         let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let addr = listener.local_addr().unwrap();

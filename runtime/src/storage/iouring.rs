@@ -69,6 +69,8 @@ pub struct Config {
     pub storage_directory: PathBuf,
     /// Configuration for the iouring instance.
     pub iouring_config: iouring::Config,
+    /// Stack size for the dedicated io_uring worker thread.
+    pub thread_stack_size: usize,
 }
 
 #[derive(Clone)]
@@ -80,22 +82,23 @@ pub struct Storage {
 
 impl Storage {
     /// Returns a new `Storage` instance.
-    pub fn start(
-        mut cfg: Config,
-        thread_stack_size: usize,
-        registry: &mut Registry,
-        pool: BufferPool,
-    ) -> Self {
+    pub fn start(cfg: Config, registry: &mut Registry, pool: BufferPool) -> Self {
+        let Config {
+            storage_directory,
+            mut iouring_config,
+            thread_stack_size,
+        } = cfg;
+
         // Optimize performance by hinting the kernel that a single task will
         // submit requests. This is safe because each iouring instance runs in a
         // dedicated thread, which guarantees that the same thread that creates
         // the ring is the only thread submitting work to it.
-        cfg.iouring_config.single_issuer = true;
+        iouring_config.single_issuer = true;
 
-        let (io_submitter, iouring_loop) = iouring::IoUringLoop::new(cfg.iouring_config, registry);
+        let (io_submitter, iouring_loop) = iouring::IoUringLoop::new(iouring_config, registry);
 
         let storage = Self {
-            storage_directory: cfg.storage_directory,
+            storage_directory,
             io_submitter,
             pool,
         };
@@ -601,8 +604,8 @@ mod tests {
             Config {
                 storage_directory: storage_directory.clone(),
                 iouring_config: Default::default(),
+                thread_stack_size: thread::system_thread_stack_size(),
             },
-            thread::system_thread_stack_size(),
             &mut Registry::default(),
             pool,
         );
