@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::{ReadExt, Write};
+use commonware_codec::{Read, ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
     group::{Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE},
     ops,
@@ -604,7 +604,7 @@ fn fuzz(op: FuzzOperation) {
         FuzzOperation::SerializeScalar { scalar } => {
             let mut encoded = Vec::new();
             scalar.write(&mut encoded);
-            if let Ok(decoded) = Scalar::read(&mut encoded.as_slice()) {
+            if let Ok(decoded) = Scalar::read_cfg(&mut encoded.as_slice(), &false) {
                 assert_eq!(scalar, decoded);
             }
         }

@@ -825,7 +825,7 @@ impl Read for DealerPrivMsg {
         buf: &mut impl bytes::Buf,
         _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self::new(ReadExt::read(buf)?))
+        Ok(Self::new(Scalar::read_cfg(buf, &false)?))
     }
 }
 
