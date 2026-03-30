@@ -80,6 +80,11 @@ impl Tree {
         while let Some(node) = pending.pop() {
             if Arc::strong_count(&node) == 1 {
                 if let Some(parent) = node.parent.lock().take() {
+                    // `Drop` will no longer see this parent after `take()`, so
+                    // account for the stale child before releasing the node.
+                    let mut parent_inner = parent.inner.lock();
+                    parent_inner.note_stale_child();
+                    drop(parent_inner);
                     pending.push(parent);
                 }
             }
@@ -347,6 +352,43 @@ mod tests {
         {
             let inner = root.inner.lock();
             assert_eq!(inner.children.len(), 1, "aborted children were not reaped");
+            assert_eq!(inner.stale_children, 0, "stale child count was not reset");
+        }
+
+        drop(child);
+        drop(root);
+    }
+
+    #[test]
+    fn unique_ancestor_release_counts_stale_child_on_surviving_root() {
+        let root = Tree::root();
+
+        for _ in 0..CHILD_REAP_THRESHOLD {
+            let (parent, aborted) = Tree::child(&root);
+            assert!(!aborted, "parent node unexpectedly aborted");
+
+            let (leaf, aborted) = Tree::child(&parent);
+            assert!(!aborted, "leaf node unexpectedly aborted");
+
+            // Dropping the explicit parent handle leaves the leaf as the only
+            // strong owner of `parent`, so `drop_ancestry` must account for
+            // the stale weak pointer on `root`.
+            drop(parent);
+            drop(leaf);
+        }
+
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.len(), CHILD_REAP_THRESHOLD);
+            assert_eq!(inner.stale_children, CHILD_REAP_THRESHOLD);
+        }
+
+        let (child, aborted) = Tree::child(&root);
+        assert!(!aborted, "child node unexpectedly aborted");
+
+        {
+            let inner = root.inner.lock();
+            assert_eq!(inner.children.len(), 1, "unique ancestors were not reaped");
             assert_eq!(inner.stale_children, 0, "stale child count was not reset");
         }
 
