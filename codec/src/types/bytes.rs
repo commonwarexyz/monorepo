@@ -25,6 +25,11 @@ impl EncodeSize for Bytes {
     fn encode_size(&self) -> usize {
         self.len().encode_size() + self.len()
     }
+
+    #[inline]
+    fn encode_bufs_size(&self) -> usize {
+        self.len().encode_size()
+    }
 }
 
 impl Read for Bytes {

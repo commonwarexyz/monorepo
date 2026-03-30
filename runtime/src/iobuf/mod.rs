@@ -2343,7 +2343,7 @@ pub trait EncodeExt: EncodeSize + Write {
     /// bytes written by [`Write::write_bufs`].
     fn encode_with_pool(&self, pool: &BufferPool) -> IoBufs {
         let len = self.encode_size();
-        let capacity = NonZeroUsize::new(len).unwrap_or(NonZeroUsize::MIN);
+        let capacity = NonZeroUsize::new(self.encode_bufs_size()).unwrap_or(NonZeroUsize::MIN);
         let mut builder = Builder::new(pool, capacity);
         self.write_bufs(&mut builder);
         let bufs = builder.finish();

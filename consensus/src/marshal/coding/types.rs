@@ -87,6 +87,10 @@ impl<C: Scheme, H: Hasher> EncodeSize for Shard<C, H> {
     fn encode_size(&self) -> usize {
         self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_size()
     }
+
+    fn encode_bufs_size(&self) -> usize {
+        self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_bufs_size()
+    }
 }
 
 impl<C: Scheme, H: Hasher> Read for Shard<C, H> {

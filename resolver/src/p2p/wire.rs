@@ -29,6 +29,10 @@ impl<Key: Span> EncodeSize for Message<Key> {
     fn encode_size(&self) -> usize {
         self.id.encode_size() + self.payload.encode_size()
     }
+
+    fn encode_bufs_size(&self) -> usize {
+        self.id.encode_size() + self.payload.encode_bufs_size()
+    }
 }
 
 impl<Key: Span> Read for Message<Key> {
@@ -107,6 +111,14 @@ impl<Key: Span> EncodeSize for Payload<Key> {
         1 + match self {
             Self::Request(key) => key.encode_size(),
             Self::Response(data) => data.encode_size(),
+            Self::Error => 0,
+        }
+    }
+
+    fn encode_bufs_size(&self) -> usize {
+        1 + match self {
+            Self::Request(key) => key.encode_size(),
+            Self::Response(data) => data.encode_bufs_size(),
             Self::Error => 0,
         }
     }

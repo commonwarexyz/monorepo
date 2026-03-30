@@ -22,6 +22,14 @@ pub trait FixedSize {
 pub trait EncodeSize {
     /// Returns the encoded size of this value (in bytes).
     fn encode_size(&self) -> usize;
+
+    /// Returns the size of inline bytes when encoding via [`Write::write_bufs`].
+    /// Override alongside [`Write::write_bufs`] for types where large [`Bytes`]
+    /// fields go via [`BufsMut::push`]; failing to do so will over-allocate the
+    /// working buffer by [`encode_size`](Self::encode_size).
+    fn encode_bufs_size(&self) -> usize {
+        self.encode_size()
+    }
 }
 
 // Automatically implement `EncodeSize` for types that are `FixedSize`.
