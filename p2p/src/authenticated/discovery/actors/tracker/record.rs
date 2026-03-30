@@ -240,12 +240,6 @@ impl<C: PublicKey> Record<C> {
         self.primary_sets
     }
 
-    /// Returns whether this peer is currently registered in at least one secondary peer set.
-    #[cfg(test)]
-    pub const fn is_secondary(&self) -> bool {
-        self.secondary_sets > 0
-    }
-
     /// Check whether this record is dialable at the given time.
     ///
     /// Returns [DialStatus::Now] if the peer can be dialed immediately,

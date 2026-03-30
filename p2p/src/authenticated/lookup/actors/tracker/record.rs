@@ -180,12 +180,6 @@ impl Record {
         self.primary_sets
     }
 
-    /// Returns whether this peer is currently registered in at least one secondary peer set.
-    #[cfg(test)]
-    pub const fn is_secondary(&self) -> bool {
-        self.secondary_sets > 0
-    }
-
     /// Returns `true` if this peer may be used as an outbound dial target.
     ///
     /// Secondary peers remain eligible for inbound connections, but we reserve

@@ -217,12 +217,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
     }
 
-    /// Stores a new primary peer set.
-    #[cfg(test)]
-    pub fn add_set(&mut self, index: u64, primaries: OrderedSet<C>) -> bool {
-        self.add_tracked_sets(index, primaries, OrderedSet::default())
-    }
-
     /// Stores new primary and secondary peer sets for the same index.
     fn add_tracked_sets(
         &mut self,
@@ -329,7 +323,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to block a peer for the configured duration, updating the metrics accordingly.
     ///
     /// Peers can be blocked even if they don't have a record yet. The block will be applied
-    /// when they are added to a peer set via `add_set`.
+    /// when they are later tracked in a peer set.
     pub fn block(&mut self, peer: &C) {
         // Already blocked
         if self.is_blocked(peer) {
@@ -539,9 +533,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 mod tests {
     use super::*;
     use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
-    use commonware_cryptography::{secp256r1::standard::PrivateKey, Signer};
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_cryptography::{secp256r1::standard::PrivateKey, PublicKey, Signer};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{bitmap::BitMap, ordered::Set as OrderedSet, SystemTimeExt};
+    use rand::Rng;
     use std::net::SocketAddr;
 
     const NAMESPACE: &[u8] = b"test";
@@ -567,6 +562,20 @@ mod tests {
             .find(|line| line.starts_with(&format!("{name}{{peer=\"{peer}\"}} ")))
             .and_then(|line| line.split_whitespace().nth(1))
             .and_then(|value| value.parse::<i64>().ok())
+    }
+
+    trait TrackPrimarySetExt<C> {
+        fn track_primary_set(&mut self, index: u64, primaries: OrderedSet<C>) -> bool;
+    }
+
+    impl<E, C> TrackPrimarySetExt<C> for Directory<E, C>
+    where
+        E: Spawner + Rng + Clock + Metrics,
+        C: PublicKey,
+    {
+        fn track_primary_set(&mut self, index: u64, primaries: OrderedSet<C>) -> bool {
+            self.track(index, primaries, OrderedSet::default())
+        }
     }
 
     #[test]
@@ -643,31 +652,19 @@ mod tests {
                 [primary_0].try_into().unwrap(),
                 [secondary_0.clone()].try_into().unwrap(),
             ));
-            assert!(directory
-                .peers
-                .get(&secondary_0)
-                .is_some_and(Record::is_secondary));
+            assert!(directory.eligible(&secondary_0));
 
             assert!(directory.track(
                 1,
                 [primary_1].try_into().unwrap(),
                 [secondary_1.clone()].try_into().unwrap(),
             ));
-            assert!(directory
-                .peers
-                .get(&secondary_0)
-                .is_some_and(Record::is_secondary));
-            assert!(directory
-                .peers
-                .get(&secondary_1)
-                .is_some_and(Record::is_secondary));
+            assert!(directory.eligible(&secondary_0));
+            assert!(directory.eligible(&secondary_1));
 
             assert!(directory.track(2, [primary_2].try_into().unwrap(), OrderedSet::default()));
             assert!(directory.peers.get(&secondary_0).is_none());
-            assert!(directory
-                .peers
-                .get(&secondary_1)
-                .is_some_and(Record::is_secondary));
+            assert!(directory.eligible(&secondary_1));
         });
     }
 
@@ -714,18 +711,18 @@ mod tests {
                 "Peer should not be in peers yet"
             );
 
-            // Now add the peer to a set
+            // Now track the peer in a set
             let peer_set: OrderedSet<_> = [unknown_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
 
             // Peer should now be in peers and blocked (via PrioritySet)
             assert!(
                 directory.peers.contains_key(&unknown_pk),
-                "Peer should be in peers after add_set"
+                "Peer should be in peers after tracking"
             );
             assert!(
                 directory.blocked.contains(&unknown_pk),
-                "Peer should be blocked after add_set"
+                "Peer should be blocked after tracking"
             );
 
             // Peer should not be eligible
@@ -779,7 +776,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
             let peer_set = [pk_1.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
 
             let _reservation = directory.listen(&pk_1).expect("peer should reserve");
             let connected_at: i64 = context.current().epoch_millis().try_into().unwrap();
@@ -825,7 +822,7 @@ mod tests {
             // Register a peer
             let peer_set: OrderedSet<_> =
                 [registered_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
             assert!(
                 directory
                     .metrics
@@ -923,7 +920,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
 
             // Block the peer
             directory.block(&peer_pk);
@@ -989,7 +986,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
 
             // Block the peer
             directory.block(&peer_pk);
@@ -1074,7 +1071,7 @@ mod tests {
 
             // Add pk_1 and block it
             let peer_set: OrderedSet<_> = [pk_1.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
             directory.block(&pk_1);
             assert!(directory.blocked.contains(&pk_1));
             assert!(
@@ -1089,7 +1086,7 @@ mod tests {
             // Add a new set that evicts pk_1 (max_sets=1)
             // The blocked metric should remain since the block persists
             let peer_set_2: OrderedSet<_> = [pk_2.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(1, peer_set_2);
+            directory.track_primary_set(1, peer_set_2);
             assert!(
                 !directory.peers.contains_key(&pk_1),
                 "pk_1 should be removed"
@@ -1105,7 +1102,7 @@ mod tests {
 
             // Re-add pk_1 - should still be blocked because block persists
             let peer_set_3: OrderedSet<_> = [pk_1.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(2, peer_set_3);
+            directory.track_primary_set(2, peer_set_3);
             assert!(
                 directory.blocked.contains(&pk_1),
                 "Re-added pk_1 should still be blocked"
@@ -1167,7 +1164,7 @@ mod tests {
                 .into_iter()
                 .try_collect()
                 .unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
             assert_eq!(directory.blocked(), 0);
 
             // Block all three peers
@@ -1245,7 +1242,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
 
             // Update with peer info so it has a dialable address
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
@@ -1302,7 +1299,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
 
             // Update with peer info
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
@@ -1358,7 +1355,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
 
             // Peer should be eligible before blocking
             assert!(
@@ -1411,7 +1408,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
 
             // Update with peer info
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
@@ -1548,7 +1545,7 @@ mod tests {
                 .into_iter()
                 .try_collect()
                 .unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
 
             // Update with peer info for both (use timestamp 0 to pass the epoch_millis filter)
             let peer_info_1 = types::Info::sign(&peer_signer_1, NAMESPACE, test_socket(), 0);
@@ -1623,7 +1620,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
@@ -1675,7 +1672,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
@@ -1744,7 +1741,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
@@ -1781,7 +1778,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
@@ -1832,7 +1829,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track_primary_set(0, peer_set);
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 

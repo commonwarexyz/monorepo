@@ -159,26 +159,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .try_set(self.context.current().epoch_millis());
     }
 
-    /// Stores a new primary peer set.
-    ///
-    /// Returns `Some((deleted_peers, changed_peers))` on success, where:
-    /// - `deleted_peers`: peers removed due to max_sets eviction
-    /// - `changed_peers`: existing peers whose addresses were updated
-    ///
-    /// The caller should sever connections for `changed_peers` since those
-    /// connections were established to the old address and must be replaced.
-    ///
-    /// Returns `None` if the peer set index is invalid (already exists or not monotonically
-    /// increasing).
-    #[cfg(test)]
-    pub fn add_set(
-        &mut self,
-        index: u64,
-        primaries: Map<C, Address>,
-    ) -> Option<(Vec<C>, Vec<C>)> {
-        self.add_tracked_sets(index, primaries, Map::default())
-    }
-
     /// Stores new primary and secondary peer sets for the same index.
     fn add_tracked_sets(
         &mut self,
@@ -328,7 +308,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to block a peer for the configured duration, updating the metrics accordingly.
     ///
     /// Peers can be blocked even if they don't have a record yet. The block will be applied
-    /// when they are added to a peer set via `add_set`.
+    /// when they are later tracked in a peer set.
     pub fn block(&mut self, peer: &C) {
         // Already blocked
         if self.is_blocked(peer) {
@@ -520,9 +500,10 @@ mod tests {
         types::Address,
         Ingress,
     };
-    use commonware_cryptography::{ed25519, Signer};
-    use commonware_runtime::{deterministic, Clock, Metrics, Runner};
+    use commonware_cryptography::{ed25519, PublicKey, Signer};
+    use commonware_runtime::{deterministic, Clock, Metrics, Runner, Spawner};
     use commonware_utils::{hostname, ordered::Map, SystemTimeExt};
+    use rand::Rng;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -540,8 +521,30 @@ mod tests {
             .and_then(|value| value.parse::<i64>().ok())
     }
 
+    trait TrackPrimarySetExt<C> {
+        fn track_primary_set(
+            &mut self,
+            index: u64,
+            primaries: Map<C, Address>,
+        ) -> Option<(Vec<C>, Vec<C>)>;
+    }
+
+    impl<E, C> TrackPrimarySetExt<C> for Directory<E, C>
+    where
+        E: Spawner + Rng + Clock + Metrics,
+        C: PublicKey,
+    {
+        fn track_primary_set(
+            &mut self,
+            index: u64,
+            primaries: Map<C, Address>,
+        ) -> Option<(Vec<C>, Vec<C>)> {
+            self.track(index, primaries, Map::default())
+        }
+    }
+
     #[test]
-    fn test_add_set_return_value() {
+    fn test_track_primary_set_return_value() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -566,7 +569,7 @@ mod tests {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             let (deleted, _) = directory
-                .add_set(
+                .track_primary_set(
                     0,
                     [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
                         .try_into()
@@ -579,7 +582,7 @@ mod tests {
             );
 
             let (deleted, _) = directory
-                .add_set(
+                .track_primary_set(
                     1,
                     [(pk_2.clone(), addr(addr_2)), (pk_3.clone(), addr(addr_3))]
                         .try_into()
@@ -590,13 +593,13 @@ mod tests {
             assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");
 
             let (deleted, _) = directory
-                .add_set(2, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
+                .track_primary_set(2, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1, "One peer should be deleted");
             assert!(deleted.contains(&pk_2), "Deleted peer should be pk_2");
 
             let (deleted, _) = directory
-                .add_set(3, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
+                .track_primary_set(3, [(pk_3.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert!(deleted.is_empty(), "No peers should be deleted");
         });
@@ -640,10 +643,7 @@ mod tests {
                         .unwrap(),
                 )
                 .is_some());
-            assert!(directory
-                .peers
-                .get(&secondary_0)
-                .is_some_and(|record| record.is_secondary()));
+            assert!(directory.eligible(&secondary_0));
 
             assert!(directory
                 .track(
@@ -654,14 +654,8 @@ mod tests {
                         .unwrap(),
                 )
                 .is_some());
-            assert!(directory
-                .peers
-                .get(&secondary_0)
-                .is_some_and(|record| record.is_secondary()));
-            assert!(directory
-                .peers
-                .get(&secondary_1)
-                .is_some_and(|record| record.is_secondary()));
+            assert!(directory.eligible(&secondary_0));
+            assert!(directory.eligible(&secondary_1));
 
             assert!(directory
                 .track(
@@ -671,15 +665,12 @@ mod tests {
                 )
                 .is_some());
             assert!(directory.peers.get(&secondary_0).is_none());
-            assert!(directory
-                .peers
-                .get(&secondary_1)
-                .is_some_and(|record| record.is_secondary()));
+            assert!(directory.eligible(&secondary_1));
         });
     }
 
     #[test]
-    fn test_add_set_overwrite() {
+    fn test_track_primary_set_overwrite() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let my_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
@@ -705,7 +696,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
-            directory.add_set(
+            directory.track_primary_set(
                 0,
                 [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
                     .try_into()
@@ -722,7 +713,7 @@ mod tests {
             );
             assert!(!directory.peers.contains_key(&pk_3));
 
-            directory.add_set(1, [(pk_1.clone(), addr(addr_4))].try_into().unwrap());
+            directory.track_primary_set(1, [(pk_1.clone(), addr(addr_4))].try_into().unwrap());
             assert!(directory.peers.get(&my_pk).unwrap().ingress().is_none());
             assert_eq!(
                 directory.peers.get(&pk_1).unwrap().ingress(),
@@ -734,7 +725,7 @@ mod tests {
             );
             assert!(!directory.peers.contains_key(&pk_3));
 
-            directory.add_set(2, [(my_pk.clone(), addr(addr_3))].try_into().unwrap());
+            directory.track_primary_set(2, [(my_pk.clone(), addr(addr_3))].try_into().unwrap());
             assert!(directory.peers.get(&my_pk).unwrap().ingress().is_none());
             assert_eq!(
                 directory.peers.get(&pk_1).unwrap().ingress(),
@@ -747,18 +738,18 @@ mod tests {
             assert!(!directory.peers.contains_key(&pk_3));
 
             let (deleted, _) = directory
-                .add_set(3, [(my_pk.clone(), addr(my_addr))].try_into().unwrap())
+                .track_primary_set(3, [(my_pk.clone(), addr(my_addr))].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_2));
 
             let (deleted, _) = directory
-                .add_set(4, [(my_pk.clone(), addr(addr_3))].try_into().unwrap())
+                .track_primary_set(4, [(my_pk.clone(), addr(addr_3))].try_into().unwrap())
                 .unwrap();
             assert_eq!(deleted.len(), 1);
             assert!(deleted.contains(&pk_1));
 
-            let result = directory.add_set(
+            let result = directory.track_primary_set(
                 0,
                 [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
                     .try_into()
@@ -789,7 +780,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
             directory
-                .add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap())
+                .track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap())
                 .unwrap();
 
             let _reservation = directory.listen(&pk_1).expect("peer should reserve");
@@ -834,7 +825,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), my_pk.clone(), config, releaser);
 
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             directory.block(&pk_1);
             assert!(
                 directory.blocked.contains(&pk_1),
@@ -849,7 +840,7 @@ mod tests {
             );
 
             // Update the address while blocked
-            directory.add_set(1, [(pk_1.clone(), addr(addr_2))].try_into().unwrap());
+            directory.track_primary_set(1, [(pk_1.clone(), addr(addr_2))].try_into().unwrap());
             assert!(
                 directory.blocked.contains(&pk_1),
                 "Blocked peer should remain blocked after update"
@@ -920,7 +911,7 @@ mod tests {
 
             // Add set with asymmetric addresses
             let (deleted, _) = directory
-                .add_set(
+                .track_primary_set(
                     0,
                     [
                         (pk_1.clone(), asymmetric_addr.clone()),
@@ -1015,7 +1006,7 @@ mod tests {
 
             // Add set with both socket and DNS addresses
             let (deleted, _) = directory
-                .add_set(
+                .track_primary_set(
                     0,
                     [
                         (pk_socket.clone(), socket_peer_addr.clone()),
@@ -1078,7 +1069,7 @@ mod tests {
 
             // Add set with both public and private egress IPs
             let (deleted, _) = directory
-                .add_set(
+                .track_primary_set(
                     0,
                     [
                         (pk_public.clone(), public_addr.clone()),
@@ -1138,7 +1129,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
 
             // Add both peers with the same IP
-            directory.add_set(
+            directory.track_primary_set(
                 0,
                 [(pk_1.clone(), addr_1), (pk_2.clone(), addr_2)]
                     .try_into()
@@ -1196,7 +1187,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
 
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             // Block the peer
             directory.block(&pk_1);
@@ -1288,7 +1279,7 @@ mod tests {
             );
 
             // Add pk_1 and block it
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             directory.block(&pk_1);
             assert!(directory.blocked.contains(&pk_1));
             assert!(
@@ -1302,7 +1293,7 @@ mod tests {
 
             // Add a new set that evicts pk_1 (max_sets=1)
             // The blocked metric should remain since the block persists
-            directory.add_set(1, [(pk_2.clone(), addr(addr_2))].try_into().unwrap());
+            directory.track_primary_set(1, [(pk_2.clone(), addr(addr_2))].try_into().unwrap());
             assert!(
                 !directory.peers.contains_key(&pk_1),
                 "pk_1 should be removed"
@@ -1317,7 +1308,7 @@ mod tests {
             );
 
             // Re-add pk_1 - should still be blocked because block persists
-            directory.add_set(2, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(2, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             assert!(
                 directory.blocked.contains(&pk_1),
                 "Re-added pk_1 should still be blocked"
@@ -1378,7 +1369,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
 
             // Add all peers
-            directory.add_set(
+            directory.track_primary_set(
                 0,
                 [
                     (pk_1.clone(), addr(addr_1)),
@@ -1527,8 +1518,8 @@ mod tests {
                 "Peer should not be in peers yet"
             );
 
-            // Now add the peer to a set
-            directory.add_set(
+            // Now track the peer in a set
+            directory.track_primary_set(
                 0,
                 [(unknown_pk.clone(), addr(unknown_addr))]
                     .try_into()
@@ -1538,11 +1529,11 @@ mod tests {
             // Peer should now be in peers and blocked
             assert!(
                 directory.peers.contains_key(&unknown_pk),
-                "Peer should be in peers after add_set"
+                "Peer should be in peers after tracking"
             );
             assert!(
                 directory.blocked.contains(&unknown_pk),
-                "Peer should be blocked after add_set"
+                "Peer should be blocked after tracking"
             );
 
             // Peer should not be eligible
@@ -1598,7 +1589,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
 
             // Register a peer
-            directory.add_set(
+            directory.track_primary_set(
                 0,
                 [(registered_pk.clone(), addr(registered_addr))]
                     .try_into()
@@ -1699,7 +1690,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
 
             // Add peer to a set
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             // Peer should be dialable before blocking
             assert!(
@@ -1748,7 +1739,7 @@ mod tests {
 
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             // First reservation succeeds.
             let reservation = directory.dial(&pk_1).expect("first dial should succeed");
@@ -1797,7 +1788,7 @@ mod tests {
 
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             // Reserve and release.
             let reservation = directory.dial(&pk_1).expect("first dial should succeed");
@@ -1860,7 +1851,7 @@ mod tests {
 
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             // Block the only peer. No peers are immediately dialable, but
             // next_query_at should point to the blocked peer's unblock time
@@ -1895,7 +1886,7 @@ mod tests {
 
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             directory.block(&pk_1);
             assert!(directory.dialable().peers.is_empty());
@@ -1941,7 +1932,7 @@ mod tests {
 
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             directory.block(&pk_1);
             assert!(directory.dialable().peers.is_empty());
@@ -1984,7 +1975,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
 
             // Add peer to a set
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             // Peer should be acceptable before blocking
             assert!(
@@ -2035,7 +2026,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
 
             // Add peer to a set
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             // Peer's IP should be listenable before blocking
             assert!(
@@ -2086,7 +2077,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
 
             // Add peer to a set
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             // Peer should be eligible before blocking
             assert!(
@@ -2137,7 +2128,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             assert_eq!(
                 directory.peers.get(&pk_1).unwrap().ingress(),
@@ -2203,8 +2194,8 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
-            directory.add_set(1, [(pk_2.clone(), addr(addr_2))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(1, [(pk_2.clone(), addr(addr_2))].try_into().unwrap());
 
             let success = directory.overwrite(&pk_1, addr(addr_3));
             assert!(!success);
@@ -2234,7 +2225,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), my_pk, config, releaser);
 
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
             directory.block(&pk_1);
 
             let success = directory.overwrite(&pk_1, addr(addr_2));
@@ -2301,7 +2292,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            directory.add_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
+            directory.track_primary_set(0, [(pk_1.clone(), addr(addr_1))].try_into().unwrap());
 
             // First update with different address should succeed
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1236);
