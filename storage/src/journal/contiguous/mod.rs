@@ -5,6 +5,7 @@
 //! [variable]-size item journals are supported.
 
 use super::Error;
+use commonware_utils::AsSlice;
 use futures::Stream;
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
@@ -71,6 +72,51 @@ pub trait Contiguous: Send + Sync {
     fn size(&self) -> impl Future<Output = u64> + Send;
 }
 
+/// Items to append via [Mutable::append_many].
+pub enum Many<'a, T, S = &'a [T]>
+where
+    S: AsSlice<T> + Sync,
+{
+    /// Append a single flat slice of items.
+    Flat(&'a [T]),
+    /// Append multiple nested runs of items in order.
+    Nested(&'a [S]),
+}
+
+impl<'a, T: Sync> Many<'a, T, &'a [T]> {
+    /// Create a flat append request from a single slice.
+    pub const fn flat(items: &'a [T]) -> Self {
+        Self::Flat(items)
+    }
+}
+
+impl<'a, T, S> Many<'a, T, S>
+where
+    S: AsSlice<T> + Sync,
+{
+    /// Create a nested append request from multiple item runs.
+    pub const fn nested(items: &'a [S]) -> Self {
+        Self::Nested(items)
+    }
+
+    const fn batch_count(&self) -> usize {
+        match self {
+            Self::Flat(_) => 1,
+            Self::Nested(items) => items.len(),
+        }
+    }
+
+    fn batch(&self, index: usize) -> &[T] {
+        match self {
+            Self::Flat(items) => {
+                debug_assert_eq!(index, 0);
+                items
+            }
+            Self::Nested(items) => items[index].as_slice(),
+        }
+    }
+}
+
 /// A [Contiguous] journal that supports appending, rewinding, and pruning.
 pub trait Mutable: Contiguous + Send + Sync {
     /// Append a new item to the journal, returning its position.
@@ -88,23 +134,35 @@ pub trait Mutable: Contiguous + Send + Sync {
         item: &Self::Item,
     ) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
 
-    /// Append multiple items to the journal, returning the position of the last item appended.
+    /// Append items to the journal, returning the position of the last item appended.
     ///
     /// The default implementation calls [Self::append] in a loop. Concrete implementations
-    /// may override this to acquire the write lock once for all items.
+    /// may override this to acquire the write lock once for all items or nested runs.
     ///
-    /// No-ops if items is empty, returning the current size (next append position).
-    fn append_many(
-        &mut self,
-        items: &[Self::Item],
-    ) -> impl std::future::Future<Output = Result<u64, Error>> + Send
+    /// No-ops if the input contains no items, returning the current size (next append position).
+    fn append_many<'a, S>(
+        &'a mut self,
+        items: Many<'a, Self::Item, S>,
+    ) -> impl std::future::Future<Output = Result<u64, Error>> + Send + 'a
     where
+        S: AsSlice<Self::Item> + Sync,
         Self::Item: Sync,
     {
         async move {
             let mut last_pos = self.size().await;
-            for item in items {
-                last_pos = self.append(item).await?;
+            match items {
+                Many::Flat(items) => {
+                    for item in items {
+                        last_pos = self.append(item).await?;
+                    }
+                }
+                Many::Nested(batches) => {
+                    for batch in batches {
+                        for item in batch.as_slice() {
+                            last_pos = self.append(item).await?;
+                        }
+                    }
+                }
             }
             Ok(last_pos)
         }

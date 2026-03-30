@@ -14,11 +14,9 @@ commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     pub use thread_local::Cached;
 });
 commonware_macros::stability_scope!(BETA {
-    #[cfg(not(feature = "std"))]
     extern crate alloc;
 
-    #[cfg(not(feature = "std"))]
-    use alloc::{boxed::Box, string::String, vec::Vec};
+    use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
     use bytes::{BufMut, BytesMut};
     use core::{fmt::Write as FmtWrite, time::Duration};
     pub mod faults;
@@ -103,6 +101,30 @@ commonware_macros::stability_scope!(BETA {
     impl EncodeSize for Participant {
         fn encode_size(&self) -> usize {
             UInt(self.0).encode_size()
+        }
+    }
+
+    /// A container that can expose its contents as a slice.
+    pub trait AsSlice<T> {
+        /// Return the contents as a slice.
+        fn as_slice(&self) -> &[T];
+    }
+
+    impl<T> AsSlice<T> for &[T] {
+        fn as_slice(&self) -> &[T] {
+            self
+        }
+    }
+
+    impl<T> AsSlice<T> for Vec<T> {
+        fn as_slice(&self) -> &[T] {
+            self.as_slice()
+        }
+    }
+
+    impl<T> AsSlice<T> for Arc<Vec<T>> {
+        fn as_slice(&self) -> &[T] {
+            self.as_ref().as_slice()
         }
     }
 

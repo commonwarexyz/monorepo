@@ -1,6 +1,6 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
-use super::{Contiguous, Reader as _};
+use super::{Contiguous, Many, Reader as _};
 use crate::{
     journal::{contiguous::Mutable, Error},
     Persistable,
@@ -85,6 +85,8 @@ where
     test_append_many_across_sections(&indexed_factory).await;
     test_append_many_then_append(&indexed_factory).await;
     test_append_many_single_item(&indexed_factory).await;
+    test_append_many_nested_empty(&indexed_factory).await;
+    test_append_many_nested_across_sections(&indexed_factory).await;
 }
 
 /// Test that an empty journal has empty bounds (start == end == 0).
@@ -1123,7 +1125,7 @@ where
     journal.append(&20).await.unwrap();
 
     // append_many with empty slice should no-op and return current size.
-    let pos = journal.append_many(&[]).await.unwrap();
+    let pos = journal.append_many(Many::flat(&[])).await.unwrap();
     assert_eq!(pos, 2);
     assert_eq!(get_bounds(&journal).await.end, 2);
 
@@ -1138,7 +1140,10 @@ where
 {
     let mut journal = factory("append-many-basic".into()).await.unwrap();
 
-    let pos = journal.append_many(&[100, 200, 300]).await.unwrap();
+    let pos = journal
+        .append_many(Many::flat(&[100, 200, 300]))
+        .await
+        .unwrap();
     assert_eq!(pos, 2);
     assert_eq!(get_bounds(&journal).await.end, 3);
 
@@ -1159,7 +1164,7 @@ where
 
     // Append 25 items in one call, crossing section boundaries at 10 and 20.
     let items: Vec<u64> = (0..25).map(|i| i * 10).collect();
-    let pos = journal.append_many(&items).await.unwrap();
+    let pos = journal.append_many(Many::flat(&items)).await.unwrap();
     assert_eq!(pos, 24);
     assert_eq!(get_bounds(&journal).await.end, 25);
 
@@ -1178,7 +1183,10 @@ where
 {
     let mut journal = factory("append-many-then-single".into()).await.unwrap();
 
-    journal.append_many(&[10, 20, 30]).await.unwrap();
+    journal
+        .append_many(Many::flat(&[10, 20, 30]))
+        .await
+        .unwrap();
     let pos = journal.append(&40).await.unwrap();
     assert_eq!(pos, 3);
 
@@ -1198,9 +1206,60 @@ where
 {
     let mut journal = factory("append-many-single".into()).await.unwrap();
 
-    let pos = journal.append_many(&[42]).await.unwrap();
+    let pos = journal.append_many(Many::flat(&[42])).await.unwrap();
     assert_eq!(pos, 0);
     assert_eq!(read_item(&journal, 0).await.unwrap(), 42);
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test append_many with only empty nested runs is a no-op.
+async fn test_append_many_nested_empty<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: PersistableContiguous,
+{
+    let mut journal = factory("append-many-nested-empty".into()).await.unwrap();
+
+    journal.append(&10).await.unwrap();
+    journal.append(&20).await.unwrap();
+
+    let empty: [u64; 0] = [];
+    let pos = journal
+        .append_many(Many::nested(&[&empty[..], &empty[..]]))
+        .await
+        .unwrap();
+    assert_eq!(pos, 2);
+    assert_eq!(get_bounds(&journal).await.end, 2);
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test append_many across multiple nested runs and section boundaries.
+async fn test_append_many_nested_across_sections<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: PersistableContiguous,
+{
+    let mut journal = factory("append-many-nested-sections".into()).await.unwrap();
+
+    let first: Vec<u64> = (0..8).map(|i| i * 10).collect();
+    let second: Vec<u64> = (8..17).map(|i| i * 10).collect();
+    let third: Vec<u64> = (17..25).map(|i| i * 10).collect();
+    let pos = journal
+        .append_many(Many::nested(&[
+            first.as_slice(),
+            second.as_slice(),
+            third.as_slice(),
+        ]))
+        .await
+        .unwrap();
+    assert_eq!(pos, 24);
+    assert_eq!(get_bounds(&journal).await.end, 25);
+
+    for i in 0..25u64 {
+        assert_eq!(read_item(&journal, i).await.unwrap(), i * 10);
+    }
 
     journal.destroy().await.unwrap();
 }
