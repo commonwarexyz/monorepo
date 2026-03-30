@@ -4697,6 +4697,7 @@ mod tests {
             Builder::new(&test_pool(), NonZeroUsize::new(capacity).unwrap())
         }
 
+        // Only inline writes, no pushes.
         #[test]
         fn test_inline_only() {
             let mut b = builder(64);
@@ -4708,6 +4709,7 @@ mod tests {
             assert_eq!(r.get_u8(), 7);
         }
 
+        // Only zero-copy pushes, no inline writes.
         #[test]
         fn test_push_only() {
             let mut b = builder(64);
@@ -4718,6 +4720,7 @@ mod tests {
             assert_eq!(r.copy_to_bytes(1024), data);
         }
 
+        // Interleaved: inline header, zero-copy push, inline trailer.
         #[test]
         fn test_inline_push_inline() {
             let mut b = builder(64);
@@ -4732,6 +4735,7 @@ mod tests {
             assert_eq!(r.get_u8(), 1);
         }
 
+        // Bytes::write_bufs produces identical wire format to Bytes::write.
         #[test]
         fn test_write_bufs_matches_write() {
             let data = Bytes::from(vec![0xCC; 256]);
@@ -4739,23 +4743,24 @@ mod tests {
             data.write_bufs(&mut b);
             let mut bufs = b.finish();
 
-            // Wire format must match.
             let mut out = vec![0u8; bufs.remaining()];
             bufs.copy_to_slice(&mut out);
             assert_eq!(out, data.encode().as_ref());
         }
 
+        // Finishing an unused builder produces empty IoBufs.
         #[test]
         fn test_empty() {
             let bufs = builder(64).finish();
             assert_eq!(bufs.remaining(), 0);
         }
 
+        // Inline writes exceeding capacity trigger flush and reallocation.
         #[test]
         fn test_inline_overflow() {
             let mut b = builder(4);
             b.put_u32(1);
-            b.put_u32(2);
+            b.put_u32(2); // exceeds 4-byte capacity
             b.put_u32(3);
             let mut r = b.finish();
             assert_eq!(r.remaining(), 12);
@@ -4764,6 +4769,7 @@ mod tests {
             assert_eq!(r.get_u32(), 3);
         }
 
+        // Pushing empty Bytes is a no-op.
         #[test]
         fn test_empty_push_ignored() {
             let mut b = builder(64);
@@ -4773,6 +4779,7 @@ mod tests {
             assert_eq!(bufs.remaining(), 1);
         }
 
+        // Consecutive pushes without inline writes between them.
         #[test]
         fn test_multiple_pushes() {
             let mut b = builder(64);
@@ -4786,9 +4793,11 @@ mod tests {
             assert_eq!(r.copy_to_bytes(200), c);
         }
 
+        // put() with source larger than working buffer capacity.
+        // The default BufMut::put would panic here because it asserts
+        // remaining_mut() >= src.remaining().
         #[test]
         fn test_put_exceeding_capacity() {
-            // put() with source larger than the working buffer capacity.
             let mut b = builder(4);
             let src = Bytes::from(vec![0xAB; 100]);
             b.put(src.clone());
@@ -4797,9 +4806,9 @@ mod tests {
             assert_eq!(r.copy_to_bytes(100), src);
         }
 
+        // Single put_slice call spanning multiple working buffers.
         #[test]
         fn test_put_slice_spanning_multiple_buffers() {
-            // Single put_slice larger than capacity, requiring multiple flushes.
             let mut b = builder(4);
             let data = vec![0xFE; 50];
             b.put_slice(&data);
@@ -4809,9 +4818,8 @@ mod tests {
             assert_eq!(&out[..], &data[..]);
         }
 
-        /// Simulates a multi-field struct with a large Bytes field:
-        /// [u16 header | Bytes payload (via push) | u32 trailer]
-        /// Verifies write_bufs produces identical wire format to write.
+        // Simulates a multi-field struct: [u16 | Bytes (via push) | u32].
+        // Verifies write_bufs produces identical wire format to write.
         #[test]
         fn test_multi_field_struct_equivalence() {
             let header: u16 = 0xCAFE;
@@ -4825,7 +4833,7 @@ mod tests {
             payload.write(&mut flat);
             trailer.write(&mut flat);
 
-            // Segmented encoding via write_bufs.
+            // Multi-buffer encoding via write_bufs.
             let mut b = builder(64);
             header.write(&mut b);
             payload.write_bufs(&mut b);
@@ -4837,6 +4845,7 @@ mod tests {
             assert_eq!(out, flat.as_ref());
         }
 
+        // encode_with_pool (Builder path) matches encode (flat BytesMut path).
         #[test]
         fn test_encode_with_pool_matches_encode() {
             let pool = test_pool();
