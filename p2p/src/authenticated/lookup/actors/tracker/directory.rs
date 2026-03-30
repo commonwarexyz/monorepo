@@ -235,7 +235,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 }
             });
             secondaries.into_iter().for_each(|secondary| {
-                self.peers.get_mut(&secondary).unwrap().decrement_secondary();
+                self.peers
+                    .get_mut(&secondary)
+                    .unwrap()
+                    .decrement_secondary();
                 let deleted = self.delete_if_needed(&secondary);
                 if deleted {
                     deleted_peers.push(secondary);

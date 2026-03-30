@@ -316,7 +316,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                         if *refs == 0 {
                             self.primary_refs.remove(public_key);
-                            debug!(?public_key, "removed peer no longer in any tracked primary set");
+                            debug!(
+                                ?public_key,
+                                "removed peer no longer in any tracked primary set"
+                            );
                         }
                     }
 
@@ -2107,7 +2110,10 @@ mod tests {
                 .unwrap();
 
             let msg_1 = vec![1u8; 8];
-            sender_1.send(Recipients::All, msg_1.clone(), true).await.unwrap();
+            sender_1
+                .send(Recipients::All, msg_1.clone(), true)
+                .await
+                .unwrap();
             assert_eq!(receiver_0.recv().await.unwrap().1, msg_1.as_slice());
             assert_eq!(receiver_1.recv().await.unwrap().1, msg_1.as_slice());
 
@@ -2133,7 +2139,10 @@ mod tests {
                 .unwrap();
 
             let msg_2 = vec![2u8; 8];
-            sender_2.send(Recipients::All, msg_2.clone(), true).await.unwrap();
+            sender_2
+                .send(Recipients::All, msg_2.clone(), true)
+                .await
+                .unwrap();
             assert!(receiver_0.recv().now_or_never().is_none());
             assert_eq!(receiver_1.recv().await.unwrap().1, msg_2.as_slice());
         });
