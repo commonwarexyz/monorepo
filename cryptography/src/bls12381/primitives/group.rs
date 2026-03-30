@@ -25,8 +25,8 @@ use blst::{
     blst_p2_cneg, blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2,
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
-    blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
-    blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
+    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -497,7 +497,7 @@ impl Read for Private {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let scalar = Scalar::read(buf)?;
+        let scalar = Scalar::read_cfg(buf, &true)?;
         Ok(Self::new(scalar))
     }
 }
@@ -625,14 +625,18 @@ impl Write for Scalar {
 }
 
 impl Read for Scalar {
-    type Cfg = ();
+    /// When `true`, reject zero scalars (use for private keys per IETF BLS spec).
+    /// When `false`, allow zero scalars (only validate in-range).
+    type Cfg = bool;
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, reject_zero: &bool) -> Result<Self, Error> {
         let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
-        // SAFETY: bytes is a valid 32-byte array. blst_sk_check validates non-zero and in-range.
-        // We use blst_sk_check instead of blst_scalar_fr_check because it also checks non-zero
+        // SAFETY: bytes is a valid 32-byte array.
+        //
+        // When reject_zero is true, blst_sk_check validates non-zero and in-range
         // per IETF BLS12-381 spec (Draft 4+).
+        // When reject_zero is false, blst_scalar_fr_check validates in-range only.
         //
         // References:
         // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
@@ -640,7 +644,12 @@ impl Read for Scalar {
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            if !blst_sk_check(&scalar) {
+            let valid = if *reject_zero {
+                blst_sk_check(&scalar)
+            } else {
+                blst_scalar_fr_check(&scalar)
+            };
+            if !valid {
                 return Err(Invalid("Scalar", "Invalid"));
             }
             blst_fr_from_scalar(&mut ret, &scalar);
@@ -1773,7 +1782,7 @@ impl HashToGroup for G2 {
 mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
     use commonware_math::algebra::{test_suites, Random};
@@ -1835,8 +1844,21 @@ mod tests {
         let original = Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
-        let decoded = Scalar::decode(&mut encoded).unwrap();
+        let decoded = Scalar::decode_cfg(&mut encoded, &true).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_zero_scalar_codec() {
+        let zero = Scalar::zero();
+        let encoded = zero.encode();
+
+        // Allow zero: should succeed
+        let decoded = Scalar::decode_cfg(encoded.clone(), &false).unwrap();
+        assert_eq!(zero, decoded);
+
+        // Reject zero: should fail
+        assert!(Scalar::decode_cfg(encoded, &true).is_err());
     }
 
     #[test]
