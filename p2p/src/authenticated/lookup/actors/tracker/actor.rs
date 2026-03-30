@@ -651,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn test_secondary_peers_are_connectable_but_not_primary() {
+    fn test_secondary_peers_are_acceptable_but_not_primary_or_dialable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
@@ -691,7 +691,8 @@ mod tests {
 
             let dialable = mailbox.dialable().await;
             assert!(dialable.peers.iter().any(|peer| peer == &primary_pk));
-            assert!(dialable.peers.iter().any(|peer| peer == &secondary_pk));
+            assert!(!dialable.peers.iter().any(|peer| peer == &secondary_pk));
+            assert!(mailbox.dial(secondary_pk.clone()).await.is_none());
             assert!(mailbox.acceptable(secondary_pk, secondary_addr.ip()).await);
         });
     }

@@ -180,6 +180,14 @@ impl Record {
         self.secondary
     }
 
+    /// Returns `true` if this peer may be used as an outbound dial target.
+    ///
+    /// Secondary peers remain eligible for inbound connections, but we reserve
+    /// outbound dialing for primary peers.
+    pub const fn is_outbound_target(&self) -> bool {
+        self.primary_sets > 0
+    }
+
     /// Check whether this record is dialable at the given time.
     ///
     /// Returns [DialStatus::Now] if the peer can be dialed immediately,
@@ -191,7 +199,7 @@ impl Record {
         allow_private_ips: bool,
         allow_dns: bool,
     ) -> DialStatus {
-        if self.status != Status::Inert {
+        if self.status != Status::Inert || !self.is_outbound_target() {
             return DialStatus::Unavailable;
         }
         let ingress = match &self.address {

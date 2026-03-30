@@ -277,7 +277,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `Some` on success, `None` otherwise.
     pub fn dial(&mut self, peer: &C) -> Option<(Reservation<C>, Ingress)> {
-        let ingress = self.peers.get(peer)?.ingress()?;
+        let ingress = {
+            let record = self.peers.get(peer)?;
+            if !record.is_outbound_target() {
+                return None;
+            }
+            record.ingress()?
+        };
         let reservation = self.reserve(Metadata::Dialer(peer.clone()))?;
         Some((reservation, ingress))
     }
