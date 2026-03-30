@@ -304,24 +304,6 @@ mod tests {
                 let complete_sender = complete_sender.clone();
                 let peers = peers.clone();
                 move |context| async move {
-                    // Wait for all peers to send their identity
-                    let receiver = context.with_label("receiver").spawn(move |_| async move {
-                        // Wait for all peers to send their identity
-                        let mut received = HashSet::new();
-                        while received.len() < n - 1 {
-                            // Ensure message equals sender identity
-                            let (sender, message) = receiver.recv().await.unwrap();
-                            assert_eq!(message, sender.as_ref());
-
-                            // Add to received set
-                            received.insert(sender);
-                        }
-                        complete_sender.send(()).await.unwrap();
-
-                        // Process messages until all finished (or else sender loops could get stuck as a peer may drop)
-                        while receiver.recv().await.is_ok() {}
-                    });
-
                     // Send identity to all peers
                     context
                         .with_label("sender")
@@ -395,9 +377,18 @@ mod tests {
                             }
                         });
 
-                    // Once this test has observed all expected peers, runtime shutdown may cancel
-                    // the receiver task while the parent is unwinding.
-                    let _ = receiver.await;
+                    // Wait for all peers to send their identity.
+                    let mut received = HashSet::new();
+                    while received.len() < n - 1 {
+                        let (sender, message) = receiver.recv().await.unwrap();
+                        assert_eq!(message, sender.as_ref());
+                        received.insert(sender);
+                    }
+                    complete_sender.send(()).await.unwrap();
+
+                    // Keep draining so other peers' sender loops do not get
+                    // stuck after this peer finishes early.
+                    while receiver.recv().await.is_ok() {}
                 }
             });
         }
@@ -1089,19 +1080,6 @@ mod tests {
                     let complete_sender = complete_sender.clone();
                     let peers = peers.clone();
                     move |context| async move {
-                        // Wait for messages from other peers
-                        let receiver = context.with_label("receiver").spawn(move |_| async move {
-                            let mut received = HashSet::new();
-                            while received.len() < n - 1 {
-                                let (sender, message) = receiver.recv().await.unwrap();
-                                assert_eq!(message, sender.as_ref());
-                                received.insert(sender);
-                            }
-                            complete_sender.send(()).await.unwrap();
-
-                            while receiver.recv().await.is_ok() {}
-                        });
-
                         // Send identity to all peers
                         context
                             .with_label("sender")
@@ -1133,9 +1111,18 @@ mod tests {
                                 }
                             });
 
-                        // Once this test has observed all expected peers, runtime shutdown may cancel
-                        // the receiver task while the parent is unwinding.
-                        let _ = receiver.await;
+                        // Wait for messages from other peers.
+                        let mut received = HashSet::new();
+                        while received.len() < n - 1 {
+                            let (sender, message) = receiver.recv().await.unwrap();
+                            assert_eq!(message, sender.as_ref());
+                            received.insert(sender);
+                        }
+                        complete_sender.send(()).await.unwrap();
+
+                        // Keep draining so other peers' sender loops do not get
+                        // stuck after this peer finishes early.
+                        while receiver.recv().await.is_ok() {}
                     }
                 });
             }
@@ -1216,19 +1203,6 @@ mod tests {
                     let complete_sender = complete_sender.clone();
                     let peers = peers.clone();
                     move |context| async move {
-                        // Wait for messages from other peers
-                        let receiver = context.with_label("receiver").spawn(move |_| async move {
-                            let mut received = HashSet::new();
-                            while received.len() < n - 1 {
-                                let (sender, message) = receiver.recv().await.unwrap();
-                                assert_eq!(message, sender.as_ref());
-                                received.insert(sender);
-                            }
-                            complete_sender.send(()).await.unwrap();
-
-                            while receiver.recv().await.is_ok() {}
-                        });
-
                         // Send identity to all peers
                         context
                             .with_label("sender")
@@ -1260,9 +1234,18 @@ mod tests {
                                 }
                             });
 
-                        // Once this test has observed all expected peers, runtime shutdown may cancel
-                        // the receiver task while the parent is unwinding.
-                        let _ = receiver.await;
+                        // Wait for messages from other peers.
+                        let mut received = HashSet::new();
+                        while received.len() < n - 1 {
+                            let (sender, message) = receiver.recv().await.unwrap();
+                            assert_eq!(message, sender.as_ref());
+                            received.insert(sender);
+                        }
+                        complete_sender.send(()).await.unwrap();
+
+                        // Keep draining so other peers' sender loops do not get
+                        // stuck after this peer finishes early.
+                        while receiver.recv().await.is_ok() {}
                     }
                 });
             }
