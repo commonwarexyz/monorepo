@@ -372,6 +372,12 @@ impl ActiveSend {
         let fd = Fd(self.fd.as_raw_fd());
         match &mut self.write {
             WriteBuffers::Single { buf, cursor } => {
+                assert!(
+                    *cursor <= buf.len(),
+                    "send cursor exceeds buffer length: cursor={} len={}",
+                    *cursor,
+                    buf.len()
+                );
                 // SAFETY: buf is an IoBuf with stable memory. cursor <= buf.len().
                 let ptr = unsafe { buf.as_ptr().add(*cursor) };
                 let remaining = buf.len() - *cursor;
@@ -410,6 +416,9 @@ impl ActiveSend {
                     self.result = Some(Ok(()));
                     CqeAction::Complete
                 } else if matches!(state, WaiterState::CancelRequested) {
+                    // Any send error after partial progress means some prefix
+                    // of the frame may already be on the wire. Callers must
+                    // drop the connection rather than retrying on this sink.
                     self.result = Some(Err(Error::Timeout));
                     CqeAction::Complete
                 } else {
@@ -449,6 +458,10 @@ impl ActiveRecv {
     /// Build the next socket recv SQE for the unread suffix of the target.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.fd.as_raw_fd());
+        assert!(
+            self.received <= self.target_len && self.target_len <= self.buf.capacity(),
+            "recv invariant violated: need received <= target_len <= capacity"
+        );
         // SAFETY: buf is an IoBufMut with stable memory.
         // received <= target_len <= capacity.
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.received) };
@@ -518,6 +531,10 @@ impl ActiveReadAt {
     /// Build the next positioned read SQE for the unread suffix of the target.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.file.as_raw_fd());
+        assert!(
+            self.read <= self.len && self.len <= self.buf.capacity(),
+            "read_at invariant violated: need read <= len <= capacity"
+        );
         // SAFETY: buf is an IoBufMut with stable memory. read <= len <= capacity.
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.read) };
         let remaining = self.len - self.read;
@@ -541,6 +558,11 @@ impl ActiveReadAt {
                 CqeAction::Complete
             }
             RawResult::Positive(n) => {
+                let remaining = self.len - self.read;
+                assert!(
+                    n <= remaining,
+                    "read CQE exceeds requested length: n={n} remaining={remaining}"
+                );
                 self.read += n;
                 if self.read >= self.len {
                     self.result = Some(Ok(()));
@@ -583,6 +605,16 @@ impl ActiveWriteAt {
         let offset = self.offset + self.written as u64;
         match &mut self.write {
             WriteBuffers::Single { buf, cursor } => {
+                assert_eq!(
+                    self.written, *cursor,
+                    "single-buffer write cursor must match written byte count"
+                );
+                assert!(
+                    *cursor <= buf.len(),
+                    "write_at cursor exceeds buffer length: cursor={} len={}",
+                    *cursor,
+                    buf.len()
+                );
                 // SAFETY: buf is an IoBuf with stable memory. cursor <= buf.len().
                 let ptr = unsafe { buf.as_ptr().add(*cursor) };
                 let remaining = buf.len() - *cursor;
@@ -609,8 +641,20 @@ impl ActiveWriteAt {
                 CqeAction::Complete
             }
             RawResult::Positive(n) => {
+                if let WriteBuffers::Single { cursor, .. } = &self.write {
+                    assert_eq!(
+                        self.written, *cursor,
+                        "single-buffer write cursor must match written byte count"
+                    );
+                }
                 self.written += n;
                 self.write.advance(n);
+                if let WriteBuffers::Single { cursor, .. } = &self.write {
+                    assert_eq!(
+                        self.written, *cursor,
+                        "single-buffer write cursor must match written byte count"
+                    );
+                }
                 if self.write.is_complete() {
                     self.result = Some(Ok(()));
                     CqeAction::Complete
