@@ -113,6 +113,8 @@ tv_live_watch: clean_traces
 	TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \
 	./scripts/watch_new_traces.sh "$(TEST_DIR)" "$(FUZZ_TRACES_ROOT)"
 
+test_encoder:
+	cargo test -p commonware-consensus-fuzz -- test_encoder_roundtrip
 ITF_DIR ?= itf_traces
 ITF_SAMPLES ?= 50
 ITF_STEPS ?= 200

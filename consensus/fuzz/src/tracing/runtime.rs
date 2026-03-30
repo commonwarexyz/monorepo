@@ -229,7 +229,13 @@ struct TraceMetrics {
 }
 
 impl TraceMetrics {
-    fn from_entries(entries: &[TraceEntry], faults: usize, n: usize, max_view: u64) -> Self {
+    fn from_entries(
+        entries: &[TraceEntry],
+        faults: usize,
+        n: usize,
+        max_view: u64,
+        filter_n0: bool,
+    ) -> Self {
         let mut vote_entries = 0;
         let mut certificate_entries = 0;
         let mut last_finalized_view = 0;
@@ -308,7 +314,7 @@ impl TraceMetrics {
                     certificate_entries += 1;
                     match cert {
                         TracedCert::Notarization { view, block, .. } => {
-                            if sender != "n0" {
+                            if !filter_n0 || sender != "n0" {
                                 if let Some(correct_idx) = correct_node_offset(sender, faults, n) {
                                     increment_view_vector(
                                         &mut per_view_vectors,
@@ -323,7 +329,7 @@ impl TraceMetrics {
                             unique_blocks.insert(block.clone());
                         }
                         TracedCert::Nullification { view, .. } => {
-                            if sender != "n0" {
+                            if !filter_n0 || sender != "n0" {
                                 if let Some(correct_idx) = correct_node_offset(sender, faults, n) {
                                     increment_view_vector(
                                         &mut per_view_vectors,
@@ -337,7 +343,7 @@ impl TraceMetrics {
                             }
                         }
                         TracedCert::Finalization { view, block, .. } => {
-                            if sender != "n0" {
+                            if !filter_n0 || sender != "n0" {
                                 if let Some(correct_idx) = correct_node_offset(sender, faults, n) {
                                     increment_view_vector(
                                         &mut per_view_vectors,
@@ -618,13 +624,19 @@ fn trace_artifacts_dir(base_dir: &str, strategy_name: &str) -> PathBuf {
         .join(dir_name)
 }
 
-fn persist_trace_if_selected(base_dir: &str, hash_hex: &str, trace_data: &TraceData) -> bool {
+fn persist_trace_if_selected(
+    base_dir: &str,
+    hash_hex: &str,
+    trace_data: &TraceData,
+    filter_n0: bool,
+) -> bool {
     let strategy = configured_trace_selection_strategy();
     let metrics = TraceMetrics::from_entries(
         &trace_data.entries,
         trace_data.faults,
         trace_data.n,
         trace_data.max_view,
+        filter_n0,
     );
     let artifacts_dir = trace_artifacts_dir(base_dir, strategy.name());
     let selected = strategy.is_interesting(&metrics);
@@ -717,6 +729,54 @@ fn encode_reporter_states(
             (node_id, data)
         })
         .collect()
+}
+
+/// Filter trace entries to only keep votes that the batcher actually processed
+/// (i.e. that appear in the reporter state). The sniffer records every delivered
+/// message, but the batcher drops votes for views it considers uninteresting
+/// (already finalized or outside the activity window). Certificates are always kept.
+fn filter_unprocessed(
+    entries: &[TraceEntry],
+    reporter_states: &BTreeMap<String, ReporterReplicaStateData>,
+) -> Vec<TraceEntry> {
+    entries
+        .iter()
+        .filter(|entry| {
+            let TraceEntry::Vote {
+                receiver,
+                vote,
+                ..
+            } = entry
+            else {
+                return true; // keep all certificates
+            };
+            let Some(state) = reporter_states.get(receiver) else {
+                return true; // no reporter for this receiver (fault node), keep
+            };
+            match vote {
+                TracedVote::Notarize { view, sig, .. } => state
+                    .notarize_signers
+                    .get(view)
+                    .is_some_and(|s| s.contains(sig)),
+                TracedVote::Nullify { view, sig } => state
+                    .nullify_signers
+                    .get(view)
+                    .is_some_and(|s| s.contains(sig)),
+                TracedVote::Finalize { view, sig, .. } => state
+                    .finalize_signers
+                    .get(view)
+                    .is_some_and(|s| s.contains(sig)),
+            }
+        })
+        .cloned()
+        .collect()
+}
+
+/// Drain all pending internal work (e.g. batcher-to-voter pipeline messages)
+/// without advancing virtual time. This ensures all channel-driven cascades
+/// complete while consensus timeouts are not triggered.
+async fn drain_pipeline(context: &deterministic::Context) {
+    context.quiesce().await;
 }
 
 macro_rules! stabilize_reporter_states {
@@ -1163,7 +1223,7 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             reporter_states,
         };
 
-        persist_trace_if_selected("simplex_ed25519_quint", &hash_hex, &trace_data);
+        persist_trace_if_selected("simplex_ed25519_quint", &hash_hex, &trace_data, false);
     });
 }
 
@@ -1498,6 +1558,8 @@ pub fn run_quint_twins_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) 
             }));
         }
         join_all(finalizers).await;
+        drain_pipeline(&context).await;
+
         let reporter_states = encode_reporter_states(
             invariants::extract_replayed(&reporters, config.n as usize),
             config.faults as usize,
@@ -1507,15 +1569,15 @@ pub fn run_quint_twins_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) 
         invariants::check::<SimplexEd25519>(config.n, &states);
 
         let trace = trace.lock();
-        let entries = trace.structured.clone();
-        let max_view = entries.iter().map(|e: &TraceEntry| e.view()).max().unwrap_or(1);
+        let filtered = filter_unprocessed(&trace.structured, &reporter_states);
+        let max_view = filtered.iter().map(|e| e.view()).max().unwrap_or(1);
 
         let trace_data = TraceData {
             n: config.n as usize,
             faults: config.faults as usize,
             epoch: EPOCH,
             max_view,
-            entries,
+            entries: filtered,
             required_containers: tracing_input.required_containers,
             reporter_states,
         };
@@ -1524,6 +1586,7 @@ pub fn run_quint_twins_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) 
             "simplex_ed25519_quint_twins_disrupter",
             &hash_hex,
             &trace_data,
+            true,
         );
     });
 }
@@ -1534,6 +1597,9 @@ pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
 }
 
 pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corpus_bytes: &[u8]) {
+    if matches!(actor, ByzantineActor::Disrupter) {
+        return;
+    }
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -1570,7 +1636,7 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
 
             let (vote_sender, vote_receiver) = vote_network;
             let (cert_sender, cert_receiver) = cert_network;
-            let (resolver_sender, resolver_receiver) = resolver_network;
+            let (_resolver_sender, _resolver_receiver) = resolver_network;
 
             let sniffing_vote = SniffingReceiver::new(
                 vote_receiver,
@@ -1588,18 +1654,6 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
             );
 
             match actor {
-                ByzantineActor::Disrupter => {
-                    let disrupter = Disrupter::new(
-                        ctx.with_label("disrupter"),
-                        schemes[0].clone(),
-                        SmallScopeForTracing::new(2, 5),
-                    );
-                    disrupter.start(
-                        (vote_sender, sniffing_vote),
-                        (cert_sender, sniffing_cert),
-                        (resolver_sender, resolver_receiver),
-                    );
-                }
                 ByzantineActor::Equivocator => {
                     let cfg = equivocator::Config {
                         scheme: schemes[0].clone(),
@@ -1659,6 +1713,7 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
                         );
                     outdated.start((vote_sender, sniffing_vote));
                 }
+                ByzantineActor::Disrupter => unreachable!(),
             }
         }
 
@@ -1755,6 +1810,7 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
             }));
         }
         join_all(finalizers).await;
+        drain_pipeline(&context).await;
 
         let reporter_states = encode_reporter_states(
             invariants::extract_replayed(&reporters, config.n as usize),
@@ -1765,19 +1821,19 @@ pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corp
         invariants::check::<SimplexEd25519>(config.n, &states);
 
         let trace = trace.lock();
-        let entries = trace.structured.clone();
-        let max_view = entries.iter().map(|e: &TraceEntry| e.view()).max().unwrap_or(1);
+        let filtered = filter_unprocessed(&trace.structured, &reporter_states);
+        let max_view = filtered.iter().map(|e| e.view()).max().unwrap_or(1);
 
         let trace_data = TraceData {
             n: config.n as usize,
             faults: config.faults as usize,
             epoch: EPOCH,
             max_view,
-            entries,
+            entries: filtered,
             required_containers: tracing_input.required_containers,
             reporter_states,
         };
 
-        persist_trace_if_selected(actor.label(), &hash_hex, &trace_data);
+        persist_trace_if_selected("simplex_ed25519_quint_byzantine", &hash_hex, &trace_data, false);
     });
 }

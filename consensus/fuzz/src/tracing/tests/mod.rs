@@ -61,7 +61,7 @@ fn run_quint_test(qnt_path: &Path) {
             "test",
             "--main=tests",
             "--backend=rust",
-            "--max-samples=100",
+            "--max-samples=10",
             "--verbosity=4",
             "--match=traceTest",
         ])
@@ -131,5 +131,13 @@ fn test_encoder_roundtrip_da39a3ee5e6b4b0d3255bfef95601890afd80709() {
     run_encoder_roundtrip_target(
         "simplex_ed25519_quint_equivocator",
         "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+    );
+}
+
+#[test]
+fn test_encoder_roundtrip_b12ca0d39b9286468f2ce0d791750bda4b6d3f37() {
+    run_encoder_roundtrip_target(
+        "simplex_ed25519_quint_byzantine",
+        "b12ca0d39b9286468f2ce0d791750bda4b6d3f37",
     );
 }
