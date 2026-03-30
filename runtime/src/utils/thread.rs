@@ -84,8 +84,7 @@ fn system_thread_stack_size_impl() -> Option<usize> {
 }
 
 #[cfg(not(unix))]
-#[allow(clippy::missing_const_for_fn)]
-fn system_thread_stack_size_impl() -> Option<usize> {
+const fn system_thread_stack_size_impl() -> Option<usize> {
     None
 }
 
