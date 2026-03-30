@@ -321,6 +321,59 @@ impl<D: EngineDefinition> Plan<D> {
         }
     }
 
+    /// Check post-run properties, log completion, and build the result.
+    async fn finish(
+        &self,
+        ctx: &deterministic::Context,
+        tracker: ProgressTracker<D::PublicKey>,
+        team: &Team<D>,
+        crashes: u64,
+        scheduled_actions: &AtomicU64,
+        delayed_started: bool,
+    ) -> Result<PlanResult<D>, String> {
+        let states = team.active_states();
+        for prop in &self.property {
+            match prop.check(&tracker, &states).await {
+                Ok(()) => {
+                    info!(
+                        target: "simulator",
+                        property = prop.name(),
+                        "post-run property passed"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        target: "simulator",
+                        property = prop.name(),
+                        error = %e,
+                        "post-run property failed"
+                    );
+                    return Err(format!(
+                        "post-run property violation ({}): {e}",
+                        prop.name()
+                    ));
+                }
+            }
+        }
+        let scheduled_actions_applied = scheduled_actions.load(Ordering::Relaxed);
+        info!(
+            target: "simulator",
+            required = self.required_finalizations,
+            exit_condition = self.exit_condition.name(),
+            crashes,
+            scheduled_actions = scheduled_actions_applied,
+            delayed_started,
+            "all validators reached required progress"
+        );
+        Ok(PlanResult {
+            state: ctx.auditor().state(),
+            tracker,
+            crashes,
+            scheduled_actions: scheduled_actions_applied,
+            delayed_started,
+        })
+    }
+
     /// Run the simulation. This is the main async entry point.
     async fn run_inner(&self, mut ctx: deterministic::Context) -> Result<PlanResult<D>, String> {
         let (network, oracle) = Network::<_, D::PublicKey>::new(
@@ -460,48 +513,9 @@ impl<D: EngineDefinition> Plan<D> {
                         )
                     })?;
                 if done {
-                    // Check post-run properties
-                    for prop in &self.property {
-                        match prop.check(&tracker, &states).await {
-                            Ok(()) => {
-                                info!(
-                                    target: "simulator",
-                                    property = prop.name(),
-                                    "post-run property passed"
-                                );
-                            }
-                            Err(e) => {
-                                error!(
-                                    target: "simulator",
-                                    property = prop.name(),
-                                    error = %e,
-                                    "post-run property failed"
-                                );
-                                return Err(format!(
-                                    "post-run property violation ({}): {e}",
-                                    prop.name()
-                                ));
-                            }
-                        }
-                    }
-                    let scheduled_actions_applied = scheduled_actions.load(Ordering::Relaxed);
-
-                    info!(
-                        target: "simulator",
-                        required = self.required_finalizations,
-                        exit_condition = self.exit_condition.name(),
-                        crashes,
-                        scheduled_actions = scheduled_actions_applied,
-                        delayed_started,
-                        "all validators reached required progress"
-                    );
-                    result = Ok(PlanResult {
-                        state: ctx.auditor().state(),
-                        tracker,
-                        crashes,
-                        scheduled_actions: scheduled_actions_applied,
-                        delayed_started,
-                    });
+                    result = self.finish(
+                        &ctx, tracker, &team, crashes, &scheduled_actions, delayed_started,
+                    ).await;
                     break;
                 }
 
@@ -548,48 +562,9 @@ impl<D: EngineDefinition> Plan<D> {
                     continue;
                 }
 
-                // Check post-run properties
-                for prop in &self.property {
-                    match prop.check(&tracker, &states).await {
-                        Ok(()) => {
-                            info!(
-                                target: "simulator",
-                                property = prop.name(),
-                                "post-run property passed"
-                            );
-                        }
-                        Err(e) => {
-                            error!(
-                                target: "simulator",
-                                property = prop.name(),
-                                error = %e,
-                                "post-run property failed"
-                            );
-                            return Err(format!(
-                                "post-run property violation ({}): {e}",
-                                prop.name()
-                            ));
-                        }
-                    }
-                }
-                let scheduled_actions_applied = scheduled_actions.load(Ordering::Relaxed);
-
-                info!(
-                    target: "simulator",
-                    required = self.required_finalizations,
-                    exit_condition = self.exit_condition.name(),
-                    crashes,
-                    scheduled_actions = scheduled_actions_applied,
-                    delayed_started,
-                    "all validators reached required progress"
-                );
-                result = Ok(PlanResult {
-                    state: ctx.auditor().state(),
-                    tracker,
-                    crashes,
-                    scheduled_actions: scheduled_actions_applied,
-                    delayed_started,
-                });
+                result = self.finish(
+                    &ctx, tracker, &team, crashes, &scheduled_actions, delayed_started,
+                ).await;
                 break;
             },
             Some(pk) = restart_rx.recv() else break => {
