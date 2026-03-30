@@ -98,23 +98,44 @@ impl Topology {
         // then this configuration is valid, using `R` as the necessary number
         // of samples.
         //
-        // We try increasing column counts, picking the configuration that's good.
-        // It's possible that the first configuration, with one column, is not good.
-        // To correct for that, we need to add extra checksum columns to guarantee
-        // security.
-        let mut out = Self::with_cols(corrected_data_bytes, n, k, 1);
-        loop {
-            let attempt = Self::with_cols(corrected_data_bytes, n, k, out.data_cols + 1);
-            let required_samples = attempt.required_samples();
-            if required_samples.saturating_mul(n + k) <= attempt.encoded_rows {
-                out = Self {
-                    samples: required_samples.max(attempt.samples),
-                    ..attempt
-                };
-            } else {
-                break;
+        // The validity condition is monotone: as cols increases, encoded_rows
+        // shrinks and required_samples grows, so once the condition fails it
+        // never recovers. We exploit this with a binary search over [1, data_els]
+        // instead of a linear scan, reducing BigRational log2 calls from
+        // O(data_els) to O(log(data_els)).
+        //
+        // It's possible that even cols=1 is not good. To correct for that, we
+        // need to add extra checksum columns to guarantee security.
+        let data_els = F::bits_to_elements(8 * corrected_data_bytes);
+        let is_valid = |cols: usize| -> bool {
+            let t = Self::with_cols(corrected_data_bytes, n, k, cols);
+            t.required_samples().saturating_mul(n + k) <= t.encoded_rows
+        };
+        let mut out = if !is_valid(1) || !is_valid(2) {
+            // Either no column count is valid, or no multi-column config is valid.
+            // Fall back to cols=1 without adjusting samples; correct_column_samples
+            // handles the security requirement in this case.
+            Self::with_cols(corrected_data_bytes, n, k, 1)
+        } else {
+            // At least cols=2 is valid. Binary search for the largest valid cols
+            // in [2, data_els].
+            let mut lo = 2usize;
+            let mut hi = data_els;
+            while lo < hi {
+                let mid = lo + (hi - lo).div_ceil(2);
+                if is_valid(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid - 1;
+                }
             }
-        }
+            let attempt = Self::with_cols(corrected_data_bytes, n, k, lo);
+            let required_samples = attempt.required_samples();
+            Self {
+                samples: required_samples.max(attempt.samples),
+                ..attempt
+            }
+        };
         out.correct_column_samples();
         out.data_bytes = data_bytes;
         out
@@ -153,5 +174,51 @@ mod tests {
             provided >= required,
             "security invariant violated: provided {provided} < required {required}"
         );
+    }
+
+    // Reference implementation using the original linear scan, kept as a
+    // correctness oracle for the differential test below.
+    fn reckon_linear(config: &Config, data_bytes: usize) -> Topology {
+        let n = config.minimum_shards.get() as usize;
+        let k = config.extra_shards.get() as usize;
+        let corrected_data_bytes = data_bytes.max(1);
+        let mut out = Topology::with_cols(corrected_data_bytes, n, k, 1);
+        loop {
+            let attempt = Topology::with_cols(corrected_data_bytes, n, k, out.data_cols + 1);
+            let required_samples = attempt.required_samples();
+            if required_samples.saturating_mul(n + k) <= attempt.encoded_rows {
+                out = Topology {
+                    samples: required_samples.max(attempt.samples),
+                    ..attempt
+                };
+            } else {
+                break;
+            }
+        }
+        out.correct_column_samples();
+        out.data_bytes = data_bytes;
+        out
+    }
+
+    // Exhaustively verify the binary-search implementation matches the linear
+    // scan for all small inputs.
+    #[test]
+    fn reckon_matches_linear_scan() {
+        for data_bytes in 0..=1024usize {
+            for n in 1..=16u16 {
+                for k in 1..=16u16 {
+                    let config = Config {
+                        minimum_shards: n.try_into().unwrap(),
+                        extra_shards: k.try_into().unwrap(),
+                    };
+                    let got = Topology::reckon(&config, data_bytes);
+                    let expected = reckon_linear(&config, data_bytes);
+                    assert_eq!(
+                        got, expected,
+                        "mismatch at data_bytes={data_bytes} n={n} k={k}: got {got:?}, expected {expected:?}"
+                    );
+                }
+            }
+        }
     }
 }
