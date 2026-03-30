@@ -98,10 +98,9 @@ impl TraceEntry {
     }
 }
 
-/// Accumulates quint-formatted trace entries.
+/// Accumulates structured trace entries.
 #[derive(Default)]
 pub struct TraceLog {
-    pub entries: Vec<String>,
     pub structured: Vec<TraceEntry>,
 }
 
@@ -127,29 +126,6 @@ fn pk_to_id(pk: &PublicKey, participants: &[PublicKey]) -> String {
 fn format_block(digest: &Sha256Digest) -> String {
     let bytes: &[u8] = digest.as_ref();
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-/// Formats a vote using the quint constructor syntax from `types.qnt`.
-fn format_vote(vote: &Ed25519Vote) -> String {
-    match vote {
-        Vote::Notarize(n) => {
-            let view = n.proposal.round.view().get();
-            let sig = participant_id(n.signer());
-            let block = format_block(&n.proposal.payload);
-            format!("notarize({}, \"{}\", \"{}\")", view, sig, block)
-        }
-        Vote::Nullify(n) => {
-            let view = n.round.view().get();
-            let sig = participant_id(n.signer());
-            format!("nullify({}, \"{}\")", view, sig)
-        }
-        Vote::Finalize(f) => {
-            let view = f.proposal.round.view().get();
-            let sig = participant_id(f.signer());
-            let block = format_block(&f.proposal.payload);
-            format!("finalize({}, \"{}\", \"{}\")", view, sig, block)
-        }
-    }
 }
 
 /// Extracts a structured [`TracedVote`] from a decoded vote.
@@ -192,64 +168,6 @@ fn extract_cert(cert: &Ed25519Certificate, sender_id: &str) -> TracedCert {
             signers: f.certificate.signers.iter().map(participant_id).collect(),
             ghost_sender: sender_id.to_string(),
         },
-    }
-}
-
-/// Formats a certificate using the quint constructor syntax from `types.qnt`.
-///
-/// The `sender_id` is the node that broadcast this certificate over the
-/// network and becomes the `ghost_sender` field.
-fn format_certificate(cert: &Ed25519Certificate, sender_id: &str) -> String {
-    match cert {
-        Certificate::Notarization(n) => {
-            let view = n.proposal.round.view().get();
-            let block = format_block(&n.proposal.payload);
-            let signers: Vec<String> = n
-                .certificate
-                .signers
-                .iter()
-                .map(|s| format!("\"{}\"", participant_id(s)))
-                .collect();
-            format!(
-                "notarization({}, \"{}\", Set({}), \"{}\")",
-                view,
-                block,
-                signers.join(", "),
-                sender_id
-            )
-        }
-        Certificate::Nullification(n) => {
-            let view = n.round.view().get();
-            let signers: Vec<String> = n
-                .certificate
-                .signers
-                .iter()
-                .map(|s| format!("\"{}\"", participant_id(s)))
-                .collect();
-            format!(
-                "nullification({}, Set({}), \"{}\")",
-                view,
-                signers.join(", "),
-                sender_id
-            )
-        }
-        Certificate::Finalization(f) => {
-            let view = f.proposal.round.view().get();
-            let block = format_block(&f.proposal.payload);
-            let signers: Vec<String> = f
-                .certificate
-                .signers
-                .iter()
-                .map(|s| format!("\"{}\"", participant_id(s)))
-                .collect();
-            format!(
-                "finalization({}, \"{}\", Set({}), \"{}\")",
-                view,
-                block,
-                signers.join(", "),
-                sender_id
-            )
-        }
     }
 }
 
@@ -307,32 +225,24 @@ where
         match self.channel {
             ChannelKind::Vote => {
                 if let Ok(vote) = Ed25519Vote::decode(payload.clone()) {
-                    let formatted = format_vote(&vote);
-                    let entry = format!("// {} -> {}: {}", sender_id, self.node_id, formatted);
                     let structured = TraceEntry::Vote {
                         sender: sender_id.clone(),
                         receiver: self.node_id.clone(),
                         vote: extract_vote(&vote),
                     };
-                    let mut trace = self.trace.lock();
-                    trace.entries.push(entry);
-                    trace.structured.push(structured);
+                    self.trace.lock().structured.push(structured);
                 }
             }
             ChannelKind::Certificate => {
                 if let Ok(cert) =
                     Ed25519Certificate::decode_cfg(payload.clone(), &self.cert_codec_cfg)
                 {
-                    let formatted = format_certificate(&cert, &sender_id);
-                    let entry = format!("// {} -> {}: {}", sender_id, self.node_id, formatted);
                     let structured = TraceEntry::Certificate {
                         sender: sender_id.clone(),
                         receiver: self.node_id.clone(),
                         cert: extract_cert(&cert, &sender_id),
                     };
-                    let mut trace = self.trace.lock();
-                    trace.entries.push(entry);
-                    trace.structured.push(structured);
+                    self.trace.lock().structured.push(structured);
                 }
             }
         }

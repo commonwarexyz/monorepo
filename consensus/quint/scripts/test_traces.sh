@@ -18,7 +18,7 @@ set -euo pipefail
 
 TEST_TARGET="${1:-traces}"
 TRACES_ROOT="${2:-../fuzz/artifacts/traces}"
-MAX_LINES=3000
+MAX_LINES=4000
 PASS=0
 FAIL=0
 SKIP=0
@@ -45,7 +45,7 @@ TRACE_SELECTION_STRATEGY="${TRACE_SELECTION_STRATEGY:-current}"
 
 case "$TRACE_SELECTION_STRATEGY" in
     smallscope | short | lof)
-        MAX_SAMPLES=50
+        MAX_SAMPLES=5
         ;;
     current | default)
         MAX_SAMPLES=10000

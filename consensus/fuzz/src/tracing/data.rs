@@ -17,6 +17,9 @@ pub struct ReporterReplicaStateData {
     pub nullification_signature_counts: BTreeMap<u64, Option<usize>>,
     pub finalizations: BTreeMap<u64, TraceProposalData>,
     pub finalization_signature_counts: BTreeMap<u64, Option<usize>>,
+    /// Views that have any certificate (notarization, nullification, or finalization).
+    #[serde(default)]
+    pub certified: BTreeSet<u64>,
     pub notarize_signers: BTreeMap<u64, BTreeSet<String>>,
     pub nullify_signers: BTreeMap<u64, BTreeSet<String>>,
     pub finalize_signers: BTreeMap<u64, BTreeSet<String>>,

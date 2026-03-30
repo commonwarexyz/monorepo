@@ -156,6 +156,27 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_ed25519_quint_equivocator"
+path = "fuzz_targets/simplex_ed25519_quint_equivocator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_quint_conflicter"
+path = "fuzz_targets/simplex_ed25519_quint_conflicter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_quint_byzantine"
+path = "fuzz_targets/simplex_ed25519_quint_byzantine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_ed25519_quint_twins_disrupter"
 path = "fuzz_targets/simplex_ed25519_quint_twins_disrupter.rs"
 test = false

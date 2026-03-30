@@ -4,9 +4,10 @@ use super::{
 };
 use crate::{
     disrupter::Disrupter, invariants, simplex, strategy::SmallScopeForTracing,
-    types::ReplayedReplicaState, utils::Partition, FuzzInput, SimplexEd25519, EPOCH, N4F1C3,
-    PAGE_CACHE_SIZE, PAGE_SIZE,
+    types::ReplayedReplicaState, utils::Partition, ByzantineActor, FuzzInput, SimplexEd25519,
+    EPOCH, N4F1C3, PAGE_CACHE_SIZE, PAGE_SIZE,
 };
+use commonware_consensus::simplex::mocks::{conflicter, equivocator, nullify_only, nuller, outdated};
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
@@ -707,6 +708,7 @@ fn encode_reporter_states(
                 nullification_signature_counts,
                 finalizations,
                 finalization_signature_counts,
+                certified: state.certified.into_iter().collect(),
                 notarize_signers: state.notarize_signers.into_iter().collect(),
                 nullify_signers: state.nullify_signers.into_iter().collect(),
                 finalize_signers: state.finalize_signers.into_iter().collect(),
@@ -774,6 +776,7 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             configuration: N4F1C3,
             partition: Partition::Connected,
             strategy: input.strategy,
+            byzantine_actor: input.byzantine_actor,
         };
 
         let (oracle, participants, schemes, mut registrations) =
@@ -1182,6 +1185,7 @@ pub fn run_quint_twins_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) 
             configuration: N4F1C3,
             partition: Partition::Connected,
             strategy: input.strategy,
+            byzantine_actor: input.byzantine_actor,
         };
 
         let (oracle, participants, schemes, mut registrations) =
@@ -1494,26 +1498,24 @@ pub fn run_quint_twins_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) 
             }));
         }
         join_all(finalizers).await;
-        let reporter_states = stabilize_reporter_states!(
-            &mut context,
-            &trace,
-            &reporters,
+        let reporter_states = encode_reporter_states(
+            invariants::extract_replayed(&reporters, config.n as usize),
             config.faults as usize,
-            config.n as usize
         );
 
         let states = invariants::extract(&reporters, config.n as usize);
         invariants::check::<SimplexEd25519>(config.n, &states);
 
         let trace = trace.lock();
-        let max_view = trace.structured.iter().map(|e| e.view()).max().unwrap_or(1);
+        let filtered = filter_unprocessed(&trace.structured, &reporter_states);
+        let max_view = filtered.iter().map(|e| e.view()).max().unwrap_or(1);
 
         let trace_data = TraceData {
             n: config.n as usize,
             faults: config.faults as usize,
             epoch: EPOCH,
             max_view,
-            entries: trace.structured.clone(),
+            entries: filtered,
             required_containers: tracing_input.required_containers,
             reporter_states,
         };
@@ -1528,6 +1530,10 @@ pub fn run_quint_twins_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) 
 
 /// Run consensus with a Disrupter as node 0 and quint tracing, capturing messages as JSON.
 pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
+    run_quint_byzantine_tracing(ByzantineActor::Disrupter, input, corpus_bytes);
+}
+
+pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corpus_bytes: &[u8]) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
@@ -1543,6 +1549,7 @@ pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             configuration: N4F1C3,
             partition: Partition::Connected,
             strategy: input.strategy,
+            byzantine_actor: input.byzantine_actor,
         };
 
         let (oracle, participants, schemes, mut registrations) =
@@ -1580,16 +1587,79 @@ pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
                 trace.clone(),
             );
 
-            let disrupter = Disrupter::new(
-                ctx.with_label("disrupter"),
-                schemes[0].clone(),
-                SmallScopeForTracing::new(2, 5),
-            );
-            disrupter.start(
-                (vote_sender, sniffing_vote),
-                (cert_sender, sniffing_cert),
-                (resolver_sender, resolver_receiver),
-            );
+            match actor {
+                ByzantineActor::Disrupter => {
+                    let disrupter = Disrupter::new(
+                        ctx.with_label("disrupter"),
+                        schemes[0].clone(),
+                        SmallScopeForTracing::new(2, 5),
+                    );
+                    disrupter.start(
+                        (vote_sender, sniffing_vote),
+                        (cert_sender, sniffing_cert),
+                        (resolver_sender, resolver_receiver),
+                    );
+                }
+                ByzantineActor::Equivocator => {
+                    let cfg = equivocator::Config {
+                        scheme: schemes[0].clone(),
+                        elector: elector.clone(),
+                        epoch: Epoch::new(EPOCH),
+                        relay: relay.clone(),
+                        hasher: Sha256Hasher::default(),
+                    };
+                    let equivocator =
+                        equivocator::Equivocator::new(ctx.with_label("equivocator"), cfg);
+                    equivocator.start(
+                        (vote_sender, sniffing_vote),
+                        (cert_sender, sniffing_cert),
+                    );
+                }
+                ByzantineActor::Conflicter => {
+                    let cfg = conflicter::Config {
+                        scheme: schemes[0].clone(),
+                    };
+                    let conflicter =
+                        conflicter::Conflicter::<_, _, Sha256Hasher>::new(
+                            ctx.with_label("conflicter"),
+                            cfg,
+                        );
+                    conflicter.start((vote_sender, sniffing_vote));
+                }
+                ByzantineActor::Nuller => {
+                    let cfg = nuller::Config {
+                        scheme: schemes[0].clone(),
+                    };
+                    let nuller = nuller::Nuller::<_, _, Sha256Hasher>::new(
+                        ctx.with_label("nuller"),
+                        cfg,
+                    );
+                    nuller.start((vote_sender, sniffing_vote));
+                }
+                ByzantineActor::NullifyOnly => {
+                    let cfg = nullify_only::Config {
+                        scheme: schemes[0].clone(),
+                    };
+                    let nullify_only =
+                        nullify_only::NullifyOnly::<_, _, Sha256Hasher>::new(
+                            ctx.with_label("nullify_only"),
+                            cfg,
+                        );
+                    nullify_only.start((vote_sender, sniffing_vote));
+                }
+                ByzantineActor::Outdated => {
+                    let cfg = outdated::Config {
+                        scheme: schemes[0].clone(),
+                        view_delta: Delta::new(5),
+                    };
+                    let outdated =
+                        outdated::Outdated::<_, _, Sha256Hasher>::new(
+                            ctx.with_label("outdated"),
+                            cfg,
+                        );
+                    outdated.start((vote_sender, sniffing_vote));
+                }
+            }
         }
 
         for i in (config.faults as usize)..(config.n as usize) {
@@ -1685,30 +1755,30 @@ pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             }));
         }
         join_all(finalizers).await;
-        let reporter_states = stabilize_reporter_states!(
-            &mut context,
-            &trace,
-            &reporters,
+        drain_pipeline(&context).await;
+
+        let reporter_states = encode_reporter_states(
+            invariants::extract_replayed(&reporters, config.n as usize),
             config.faults as usize,
-            config.n as usize
         );
 
         let states = invariants::extract(&reporters, config.n as usize);
         invariants::check::<SimplexEd25519>(config.n, &states);
 
         let trace = trace.lock();
-        let max_view = trace.structured.iter().map(|e| e.view()).max().unwrap_or(1);
+        let filtered = filter_unprocessed(&trace.structured, &reporter_states);
+        let max_view = filtered.iter().map(|e| e.view()).max().unwrap_or(1);
 
         let trace_data = TraceData {
             n: config.n as usize,
             faults: config.faults as usize,
             epoch: EPOCH,
             max_view,
-            entries: trace.structured.clone(),
+            entries: filtered,
             required_containers: tracing_input.required_containers,
             reporter_states,
         };
 
-        persist_trace_if_selected("simplex_ed25519_quint_disrupter", &hash_hex, &trace_data);
+        persist_trace_if_selected(actor.label(), &hash_hex, &trace_data);
     });
 }

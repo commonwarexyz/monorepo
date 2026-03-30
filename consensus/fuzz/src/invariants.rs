@@ -228,6 +228,12 @@ where
             notarizations: extract_notarizations::<S>(reporter, max_participants),
             nullifications: extract_nullifications::<S>(reporter, max_participants),
             finalizations: extract_finalizations::<S>(reporter, max_participants),
+            certified: reporter
+                .certified
+                .lock()
+                .iter()
+                .map(|v| v.get())
+                .collect(),
             notarize_signers: extract_notarize_signers(reporter),
             nullify_signers: extract_nullify_signers(reporter),
             finalize_signers: extract_finalize_signers(reporter),

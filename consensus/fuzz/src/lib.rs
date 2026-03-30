@@ -127,6 +127,30 @@ async fn setup_degraded_network<E: Clock>(
     }
 }
 
+/// Which byzantine actor to use for node 0 in tracing runs.
+#[derive(Debug, Clone, Copy)]
+pub enum ByzantineActor {
+    Disrupter,
+    Equivocator,
+    Conflicter,
+    Nuller,
+    NullifyOnly,
+    Outdated,
+}
+
+impl ByzantineActor {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disrupter => "simplex_ed25519_quint_disrupter",
+            Self::Equivocator => "simplex_ed25519_quint_equivocator",
+            Self::Conflicter => "simplex_ed25519_quint_conflicter",
+            Self::Nuller => "simplex_ed25519_quint_nuller",
+            Self::NullifyOnly => "simplex_ed25519_quint_nullify_only",
+            Self::Outdated => "simplex_ed25519_quint_outdated",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
@@ -135,6 +159,7 @@ pub struct FuzzInput {
     pub configuration: Configuration,
     pub partition: Partition,
     pub strategy: StrategyChoice,
+    pub byzantine_actor: ByzantineActor,
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -181,6 +206,15 @@ impl Arbitrary<'_> for FuzzInput {
             },
         };
 
+        let byzantine_actor = match u.int_in_range(0..=5)? {
+            0 => ByzantineActor::Disrupter,
+            1 => ByzantineActor::Equivocator,
+            2 => ByzantineActor::Conflicter,
+            3 => ByzantineActor::Nuller,
+            4 => ByzantineActor::NullifyOnly,
+            _ => ByzantineActor::Outdated,
+        };
+
         // Collect bytes for RNG
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
@@ -192,6 +226,7 @@ impl Arbitrary<'_> for FuzzInput {
             degraded_network,
             required_containers,
             strategy,
+            byzantine_actor,
         })
     }
 }
@@ -790,4 +825,12 @@ pub fn run_quint_twins_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) 
 
 pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
     tracing::run_quint_disrupter_tracing(input, corpus_bytes);
+}
+
+pub fn run_quint_byzantine_tracing(
+    actor: ByzantineActor,
+    input: FuzzInput,
+    corpus_bytes: &[u8],
+) {
+    tracing::run_quint_byzantine_tracing(actor, input, corpus_bytes);
 }

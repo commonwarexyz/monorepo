@@ -1034,26 +1034,8 @@ fn build_view_proposals(
             );
         }
 
-        if let Some(view_certified_blocks) = certified_blocks.get(&view) {
-            let support = |key: &ProposalKey| {
-                per_view_blocks
-                    .get(&view)
-                    .and_then(|blocks| blocks.get(&key.block_name))
-                    .map_or(0, |(correct_notarizers, _)| correct_notarizers.len())
-            };
-
-            if view_certified_blocks
-                .iter()
-                .max_by(|a, b| {
-                    support(&proposal_key(view, a.0))
-                        .cmp(&support(&proposal_key(view, b.0)))
-                        .then_with(|| a.1.cmp(b.1))
-                        .then_with(|| a.0.cmp(b.0))
-                })
-                .is_some()
-            {
-                last_parent_view = view;
-            }
+        if certified_blocks.contains_key(&view) {
+            last_parent_view = view;
         }
     }
 
@@ -1122,103 +1104,139 @@ fn write_snapshot_expectations(
         views.extend(state.notarizations.keys().copied());
         views.extend(state.nullifications.iter().copied());
         views.extend(state.finalizations.keys().copied());
+        views.extend(state.certified.iter().copied());
 
         for view in views {
             let view_expr = encode_reporter_view_expr(view);
             let has_notarization = state.notarizations.contains_key(&view);
             let has_nullification = state.nullifications.contains(&view);
             let has_finalization = state.finalizations.contains_key(&view);
+            let is_certified = state.certified.contains(&view);
+            let notarization_expr =
+                encode_reporter_option_payload_expr(state.notarizations.get(&view), block_map);
+            let notarization_count_expr = encode_option_usize_expr(
+                state
+                    .notarization_signature_counts
+                    .get(&view)
+                    .copied()
+                    .flatten(),
+            );
+            let nullification_count_expr = encode_option_usize_expr(
+                state
+                    .nullification_signature_counts
+                    .get(&view)
+                    .copied()
+                    .flatten(),
+            );
+            let finalization_expr =
+                encode_reporter_option_payload_expr(state.finalizations.get(&view), block_map);
+            let finalization_count_expr = encode_option_usize_expr(
+                state
+                    .finalization_signature_counts
+                    .get(&view)
+                    .copied()
+                    .flatten(),
+            );
             let action_name = format!("trace_snapshot_id_{}_view_{}", replica_id, view);
 
             writeln!(out, "    action {} =", action_name).unwrap();
             writeln!(out, "        {}", previous).unwrap();
             writeln!(out, "            .then(all {{").unwrap();
-            if has_notarization {
-                let notarization_expr =
-                    encode_reporter_option_payload_expr(state.notarizations.get(&view), block_map);
-                let notarization_count_expr = encode_option_usize_expr(
-                    state
-                        .notarization_signature_counts
-                        .get(&view)
-                        .copied()
-                        .flatten(),
-                );
-                writeln!(
-                    out,
-                    "                assert(replica_has_notarization(\"{}\", {}) == true),",
-                    replica_id, view_expr
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "                assert(replica_notarization_payload(\"{}\", {}) == {}),",
-                    replica_id, view_expr, notarization_expr
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "                assert(replica_notarization_signature_count(\"{}\", {}) == {}),",
-                    replica_id, view_expr, notarization_count_expr
-                )
-                .unwrap();
+            writeln!(
+                out,
+                "                assert(replica_has_notarization(\"{}\", {}) == {}),",
+                replica_id,
+                view_expr,
+                if has_notarization { "true" } else { "false" }
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "                assert(replica_notarization_payload(\"{}\", {}) == {}),",
+                replica_id, view_expr, notarization_expr
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "                assert(replica_notarization_signature_count(\"{}\", {}) == {}),",
+                replica_id, view_expr, notarization_count_expr
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "                assert(replica_has_nullification(\"{}\", {}) == {}),",
+                replica_id,
+                view_expr,
+                if has_nullification { "true" } else { "false" }
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "                assert(replica_nullification_signature_count(\"{}\", {}) == {}),",
+                replica_id, view_expr, nullification_count_expr
+            )
+            .unwrap();
+            if let Some(signers) = state.notarize_signers.get(&view) {
+                if !signers.is_empty() {
+                    let signers_expr = encode_signer_set_expr(Some(signers));
+                    writeln!(
+                        out,
+                        "                assert(replica_has_notarization(\"{r}\", {v}) or replica_is_certified(\"{r}\", {v}) or replica_observed_notarize_signers(\"{r}\", {v}) == {s}),",
+                        r = replica_id, v = view_expr, s = signers_expr
+                    )
+                    .unwrap();
+                }
             }
-            if has_nullification {
-                let nullification_count_expr = encode_option_usize_expr(
-                    state
-                        .nullification_signature_counts
-                        .get(&view)
-                        .copied()
-                        .flatten(),
-                );
-                let nullify_signers_expr = encode_signer_set_expr(state.nullify_signers.get(&view));
-                writeln!(
-                    out,
-                    "                assert(replica_has_nullification(\"{}\", {}) == true),",
-                    replica_id, view_expr
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "                assert(replica_nullification_signature_count(\"{}\", {}) == {}),",
-                    replica_id, view_expr, nullification_count_expr
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "                assert(replica_observed_nullify_signers(\"{}\", {}) == {}),",
-                    replica_id, view_expr, nullify_signers_expr
-                )
-                .unwrap();
+            if let Some(signers) = state.nullify_signers.get(&view) {
+                if !signers.is_empty() {
+                    let signers_expr = encode_signer_set_expr(Some(signers));
+                    writeln!(
+                        out,
+                        "                assert(replica_has_nullification(\"{r}\", {v}) or replica_has_finalization(\"{r}\", {v}) or replica_is_certified(\"{r}\", {v}) or replica_observed_nullify_signers(\"{r}\", {v}) == {s}),",
+                        r = replica_id, v = view_expr, s = signers_expr
+                    )
+                    .unwrap();
+                }
             }
-            if has_finalization {
-                let finalization_expr =
-                    encode_reporter_option_payload_expr(state.finalizations.get(&view), block_map);
-                let finalization_count_expr = encode_option_usize_expr(
-                    state
-                        .finalization_signature_counts
-                        .get(&view)
-                        .copied()
-                        .flatten(),
-                );
-                writeln!(
-                    out,
-                    "                assert(replica_has_finalization(\"{}\", {}) == true),",
-                    replica_id, view_expr
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "                assert(replica_finalization_payload(\"{}\", {}) == {}),",
-                    replica_id, view_expr, finalization_expr
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "                assert(replica_finalization_signature_count(\"{}\", {}) == {}),",
-                    replica_id, view_expr, finalization_count_expr
-                )
-                .unwrap();
+            if let Some(signers) = state.finalize_signers.get(&view) {
+                if !signers.is_empty() {
+                    let signers_expr = encode_signer_set_expr(Some(signers));
+                    writeln!(
+                        out,
+                        "                assert(replica_has_finalization(\"{r}\", {v}) or replica_has_nullification(\"{r}\", {v}) or replica_is_certified(\"{r}\", {v}) or replica_observed_finalize_signers(\"{r}\", {v}) == {s}),",
+                        r = replica_id, v = view_expr, s = signers_expr
+                    )
+                    .unwrap();
+                }
             }
+            writeln!(
+                out,
+                "                assert(replica_has_finalization(\"{}\", {}) == {}),",
+                replica_id,
+                view_expr,
+                if has_finalization { "true" } else { "false" }
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "                assert(replica_is_certified(\"{}\", {}) == {}),",
+                replica_id,
+                view_expr,
+                if is_certified { "true" } else { "false" }
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "                assert(replica_finalization_payload(\"{}\", {}) == {}),",
+                replica_id, view_expr, finalization_expr
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "                assert(replica_finalization_signature_count(\"{}\", {}) == {}),",
+                replica_id, view_expr, finalization_count_expr
+            )
+            .unwrap();
             writeln!(out, "                unchanged_all,").unwrap();
             writeln!(out, "            }})").unwrap();
             writeln!(out).unwrap();
@@ -1366,10 +1384,33 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    writeln!(out, "    def replica_observed_notarize_signers(id: ReplicaId, view: ViewNumber): Set[Signature] = {{").unwrap();
+    writeln!(out, "        val stored = store_notarize_votes.get(id).filter(v => v.proposal.view == view).map(v => v.sig)").unwrap();
+    writeln!(out, "        val local = sent_notarize_votes.filter(v => and {{ v.sig == sig_of(id), v.proposal.view == view }}).map(v => v.sig)").unwrap();
+    writeln!(out, "        stored.union(local)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
     writeln!(out, "    def replica_observed_nullify_signers(id: ReplicaId, view: ViewNumber): Set[Signature] = {{").unwrap();
     writeln!(out, "        val stored = store_nullify_votes.get(id).filter(v => v.view == view).map(v => v.sig)").unwrap();
     writeln!(out, "        val local = sent_nullify_votes.filter(v => and {{ v.sig == sig_of(id), v.view == view }}).map(v => v.sig)").unwrap();
     writeln!(out, "        stored.union(local)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "    def replica_observed_finalize_signers(id: ReplicaId, view: ViewNumber): Set[Signature] = {{").unwrap();
+    writeln!(out, "        val stored = store_finalize_votes.get(id).filter(v => v.proposal.view == view).map(v => v.sig)").unwrap();
+    writeln!(out, "        val local = sent_finalize_votes.filter(v => and {{ v.sig == sig_of(id), v.proposal.view == view }}).map(v => v.sig)").unwrap();
+    writeln!(out, "        stored.union(local)").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "    def replica_is_certified(id: ReplicaId, view: ViewNumber): bool = {{").unwrap();
+    writeln!(out, "        or {{").unwrap();
+    writeln!(out, "            replica_has_notarization(id, view),").unwrap();
+    writeln!(out, "            replica_has_nullification(id, view),").unwrap();
+    writeln!(out, "            replica_has_finalization(id, view),").unwrap();
+    writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
