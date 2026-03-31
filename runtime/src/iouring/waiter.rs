@@ -130,12 +130,13 @@ pub enum StageAction {
     Ignore,
     /// The waiter was canceled while parked in the ready queue and should
     /// complete locally with timeout rather than issuing another SQE.
-    CompleteTimeout(ActiveRequest),
+    Timeout(ActiveRequest),
     /// The waiter is still active and produced an SQE for submission.
     Submit(SqueueEntry),
 }
 
 /// Action produced when handling an operation CQE for a waiter.
+#[allow(clippy::large_enum_variant)]
 pub enum CqeOutcome {
     /// The CQE was stale, referred to a cancel SQE, or otherwise requires no
     /// further loop action.
@@ -263,7 +264,7 @@ impl Waiters {
             let request = self
                 .remove(waiter_id)
                 .expect("cancelled waiter missing from table");
-            return StageAction::CompleteTimeout(request);
+            return StageAction::Timeout(request);
         }
 
         let sqe = self
@@ -276,10 +277,7 @@ impl Waiters {
                 slot.request.build_sqe(waiter_id)
             });
 
-        match sqe {
-            Some(sqe) => StageAction::Submit(sqe),
-            None => StageAction::Ignore,
-        }
+        sqe.map_or_else(|| StageAction::Ignore, StageAction::Submit)
     }
 
     /// Process one CQE for a waiter.
@@ -343,19 +341,6 @@ impl Waiters {
         }
     }
 
-    /// Get mutable access to a request by waiter id.
-    ///
-    /// Used by the loop to build SQEs for requests that are already in the
-    /// waiter table (e.g., from the ready queue).
-    pub fn get_mut(&mut self, waiter_id: WaiterId) -> Option<(&mut ActiveRequest, WaiterState)> {
-        let index = waiter_id.index() as usize;
-        let slot = self.entries[index].as_mut()?;
-        if slot.id != waiter_id {
-            return None;
-        }
-        Some((&mut slot.request, slot.state))
-    }
-
     /// Return whether a waiter currently has an operation SQE in flight.
     pub fn is_in_flight(&self, waiter_id: WaiterId) -> bool {
         let index = waiter_id.index() as usize;
@@ -408,6 +393,12 @@ mod tests {
             sender: tx,
         }));
         (request, rx)
+    }
+
+    fn waiter_state(waiters: &Waiters, waiter_id: WaiterId) -> Option<WaiterState> {
+        let index = waiter_id.index() as usize;
+        let slot = waiters.entries.get(index)?.as_ref()?;
+        (slot.id == waiter_id).then_some(slot.state)
     }
 
     #[test]
@@ -596,7 +587,7 @@ mod tests {
         assert!(matches!(waiters.stage_sqe(active), StageAction::Submit(_)));
         assert!(waiters.cancel(active));
         assert!(waiters.is_in_flight(active));
-        let (_, active_state) = waiters.get_mut(active).expect("active waiter missing");
+        let active_state = waiter_state(&waiters, active).expect("active waiter missing");
         assert!(matches!(active_state, WaiterState::CancelRequested));
 
         // Then build a waiter that has been canceled before any SQE was staged.
@@ -604,7 +595,7 @@ mod tests {
         let ready = waiters.insert(ready_req, Some(3));
         assert!(waiters.cancel(ready));
         assert!(!waiters.is_in_flight(ready));
-        let (_, ready_state) = waiters.get_mut(ready).expect("ready waiter missing");
+        let ready_state = waiter_state(&waiters, ready).expect("ready waiter missing");
         assert!(matches!(ready_state, WaiterState::CancelRequested));
     }
 
@@ -626,9 +617,7 @@ mod tests {
                 waiters.on_cqe(waiter_id.cancel_user_data(), result),
                 CqeOutcome::Ignore
             ));
-            let (_, state) = waiters
-                .get_mut(waiter_id)
-                .expect("waiter should remain tracked");
+            let state = waiter_state(&waiters, waiter_id).expect("waiter should remain tracked");
             assert!(matches!(state, WaiterState::CancelRequested));
         }
     }
@@ -650,9 +639,7 @@ mod tests {
             waiters.on_cqe(waiter_id.cancel_user_data(), -libc::EPERM),
             CqeOutcome::Ignore
         ));
-        let (_, state) = waiters
-            .get_mut(waiter_id)
-            .expect("waiter should remain tracked");
+        let state = waiter_state(&waiters, waiter_id).expect("waiter should remain tracked");
         assert!(matches!(state, WaiterState::CancelRequested));
     }
 
@@ -676,8 +663,8 @@ mod tests {
     }
 
     #[test]
-    fn test_waiters_ignore_stale_get_mut_and_remove() {
-        // Verify stale waiter ids cannot observe or remove a reused slot.
+    fn test_waiters_ignore_stale_state_and_remove() {
+        // Verify stale waiter ids cannot observe state or remove a reused slot.
         let mut waiters = Waiters::new(1);
         let (req0, _rx0) = make_sync_request();
         let waiter_id = waiters.insert(req0, Some(1));
@@ -686,7 +673,7 @@ mod tests {
         let (req1, _rx1) = make_sync_request();
         let reused_id = waiters.insert(req1, Some(2));
         assert_ne!(reused_id, waiter_id);
-        assert!(waiters.get_mut(waiter_id).is_none());
+        assert!(waiter_state(&waiters, waiter_id).is_none());
         assert!(waiters.remove(waiter_id).is_none());
     }
 

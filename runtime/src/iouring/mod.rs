@@ -154,7 +154,7 @@ mod request;
 mod timeout;
 use timeout::{Tick, TimeoutWheel};
 mod waiter;
-use waiter::{CqeOutcome, StageAction, WaiterId, WaiterState, Waiters};
+use waiter::{CqeOutcome, StageAction, WaiterId, Waiters};
 mod waker;
 use waker::{Waker, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
 
@@ -452,7 +452,7 @@ impl IoUringLoop {
     fn stage_request(&mut self, waiter_id: WaiterId, sq: &mut SubmissionQueue<'_>) {
         match self.waiters.stage_sqe(waiter_id) {
             StageAction::Ignore => {}
-            StageAction::CompleteTimeout(request) => request.timeout(),
+            StageAction::Timeout(request) => request.timeout(),
             StageAction::Submit(sqe) => {
                 // SAFETY:
                 // - All resources are stored in `self.waiters` until CQE processing, so
@@ -914,8 +914,8 @@ mod tests {
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
-        // Queue enough cancellations to overflow one staging pass once wake poll
-        // rearm also consumes an SQE.
+        // Queue enough in-flight cancellations to overflow one staging pass once
+        // wake poll rearm also consumes an SQE.
         for _ in 0..cfg.size as usize {
             let (sock_left, _sock_right) =
                 UnixStream::pair().expect("failed to create unix socket pair");
@@ -927,14 +927,14 @@ mod tests {
                 sender: tx,
             }));
             let waiter_id = iouring.waiters.insert(request, None);
-            assert!(
-                iouring.waiters.cancel(waiter_id),
-                "cancel should transition waiter to cancel-requested"
-            );
             assert!(matches!(
                 iouring.waiters.stage_sqe(waiter_id),
                 StageAction::Submit(_)
             ));
+            assert!(
+                iouring.waiters.cancel(waiter_id),
+                "cancel should transition waiter to cancel-requested"
+            );
             iouring.pending_cancels.push_back(waiter_id);
         }
 
@@ -1017,11 +1017,10 @@ mod tests {
         assert!(!at_capacity);
         assert!(iouring.pending_cancels.is_empty());
         assert_eq!(ring.submission().len(), 0);
-        let (_, state) = iouring
-            .waiters
-            .get_mut(waiter_id)
-            .expect("waiter should still be present");
-        assert!(matches!(state, WaiterState::CancelRequested));
+        assert!(matches!(
+            iouring.waiters.stage_sqe(waiter_id),
+            StageAction::Timeout(_)
+        ));
     }
 
     #[tokio::test]
@@ -1878,11 +1877,10 @@ mod tests {
 
         // Timeout should mark the waiter canceled locally without staging `AsyncCancel`.
         assert!(iouring.pending_cancels.is_empty());
-        let (_, state) = iouring
-            .waiters
-            .get_mut(waiter_id)
-            .expect("ready-queue waiter should remain tracked");
-        assert!(matches!(state, WaiterState::CancelRequested));
+        assert!(matches!(
+            iouring.waiters.stage_sqe(waiter_id),
+            StageAction::Timeout(_)
+        ));
     }
 
     #[test]
