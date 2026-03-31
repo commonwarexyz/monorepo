@@ -20,8 +20,8 @@ commonware_macros::stability_scope!(BETA {
 });
 
 commonware_macros::stability_scope!(ALPHA {
-    #[cfg(any(test, feature = "fuzz"))]
-    pub(crate) mod test;
+    #[cfg(any(test, feature = "arbitrary"))]
+    pub mod test;
 });
 
 commonware_macros::stability_scope!(ALPHA {
