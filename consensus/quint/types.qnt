@@ -198,8 +198,6 @@ module types {
         proposal: ViewNumber -> Option[Proposal],
         // first timeout reason observed for each view
         timeout_reason: ViewNumber -> Option[TimeoutReason],
-        // payload this replica has notarized per view
-        notarized: ViewNumber -> Option[Payload],
         // notarization certificates constructed by this replica per view
         notarization: ViewNumber -> Option[NotarizationCert],
         // nullification certificates constructed by this replica per view

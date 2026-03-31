@@ -173,7 +173,7 @@ module replica {
     }
 
     pure def has_notarized(r: ReplicaState): bool = {
-        is_some(r.notarized.get(r.view))
+        r.broadcast_notarize.get(r.view)
     }
 
     pure def is_proposal_notarized_votes(proposal: Proposal, votes: Set[NotarizeVote]): bool = or {
@@ -697,7 +697,6 @@ module replica {
                 broadcast_finalization: VIEWS.mapBy(_ => false),
                 proposal: VIEWS.union(Set(GENESIS_VIEW)).mapBy(_ => None),
                 timeout_reason: VIEWS.mapBy(_ => None),
-                notarized: VIEWS.mapBy(_ => None),
                 notarization: VIEWS.mapBy(_ => None),
                 nullification: VIEWS.mapBy(_ => None),
                 finalization: VIEWS.mapBy(_ => None),
@@ -852,7 +851,6 @@ module replica {
                         ),
                         propose_sent: true,
                         leader_timeout: self.leader_timeout.set(self.view, None),
-                        notarized: self.notarized.put(self.view, Some(new_payload)),
                         ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
                     }),
                     ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
@@ -973,7 +971,6 @@ module replica {
                             NotarizeKind
                         ),
                         leader_timeout: self.leader_timeout.set(self.view, None),
-                        notarized: self.notarized.put(self.view, Some(payload)),
                         ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
                     }),
                 } else all {
@@ -1738,7 +1735,7 @@ module replica {
     val notarized_consistency = CORRECT.forall(id => {
         val self = replica_state.get(id)
         VIEWS.forall(v =>
-            is_some(self.notarized.get(v))
+            self.broadcast_notarize.get(v)
                 iff self.ghost_sent_votes.get(v).indices().exists(i =>
                     self.ghost_sent_votes.get(v)[i] == NotarizeKind
                 )
