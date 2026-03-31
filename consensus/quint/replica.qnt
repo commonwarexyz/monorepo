@@ -1250,24 +1250,24 @@ module replica {
         }
     }
 
-    action _add_notarization(id: ReplicaId, cert: NotarizationCert, is_new_cert: bool): bool = all {
+    action _add_notarization(id: ReplicaId, notarization: NotarizationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
-        val cert_msg: Certificate = Notarization(cert)
+        val cert: Certificate = Notarization(notarization)
         all {
-            cert.signatures.size() >= Q,
+            notarization.signatures.size() >= Q,
 
             if (is_new_cert) all {
-                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert_msg))),
-                sent_certificates' = sent_certificates.union(Set(cert_msg)),
+                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
+                sent_certificates' = sent_certificates.union(Set(cert)),
             } else all {
                 store_certificates' = store_certificates,
                 sent_certificates' = sent_certificates,
             },
 
-            val cert_view_num = cert.proposal.view
-            val cert_payload_val = cert.proposal.payload
+            val cert_view_num = notarization.proposal.view
+            val cert_payload_val = notarization.proposal.payload
             val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
-            val cert_prop = cert.proposal
+            val cert_prop = notarization.proposal
             val proposal_conflicted = has_leader_proposal_conflict(self, cert_prop)
             val timer = forced_timeout_expired(
                 self,
@@ -1331,7 +1331,7 @@ module replica {
                                         observe_round_proposal(self, cert_prop, true),
                                         cert_prop
                                     ),
-                                    cert_msg,
+                                    cert,
                                     is_new_cert
                                 ),
                                 cert_view_num,
@@ -1359,7 +1359,7 @@ module replica {
                                 observe_round_proposal(timer.next_self, cert_prop, true),
                                 cert_prop
                             ),
-                            cert_msg,
+                            cert,
                             is_new_cert
                         ),
                         certify: timer.next_self.certify.set(cert_view_num, Some(false)),
@@ -1380,7 +1380,7 @@ module replica {
                                 observe_round_proposal(self, cert_prop, true),
                                 cert_prop
                             ),
-                            cert_msg,
+                            cert,
                             is_new_cert
                         ),
                         advance_timeout: if (self.view == cert_view_num) self.advance_timeout.set(cert_view_num, None) else self.advance_timeout,
@@ -1391,21 +1391,21 @@ module replica {
         }
     }
 
-    action _add_nullification(id: ReplicaId, cert: NullificationCert, is_new_cert: bool): bool = all {
+    action _add_nullification(id: ReplicaId, nullification: NullificationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
-        val cert_msg: Certificate = Nullification(cert)
-        val cert_view_num = cert.view
+        val cert: Certificate = Nullification(nullification)
+        val cert_view_num = nullification.view
         val should_broadcast_nullification = not(self.broadcast_nullification.get(cert_view_num))
         all {
-            cert.signatures.size() >= Q,
+            nullification.signatures.size() >= Q,
 
             if (is_new_cert) all {
-                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert_msg))),
+                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
             } else all {
                 store_certificates' = store_certificates,
             },
             if (should_broadcast_nullification)
-                sent_certificates' = sent_certificates.union(Set(cert_msg))
+                sent_certificates' = sent_certificates.union(Set(cert))
             else
                 sent_certificates' = sent_certificates,
 
@@ -1417,7 +1417,7 @@ module replica {
                 enter_view(
                     observe_certificate(
                         cancel_all_timers(self, cert_view_num),
-                        cert_msg,
+                        cert,
                         should_broadcast_nullification
                     ),
                     cert_view_num + 1
@@ -1427,23 +1427,23 @@ module replica {
         }
     }
 
-    action _add_finalization(id: ReplicaId, cert: FinalizationCert, is_new_cert: bool): bool = all {
+    action _add_finalization(id: ReplicaId, finalization: FinalizationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
-        val cert_msg: Certificate = Finalization(cert)
+        val cert: Certificate = Finalization(finalization)
         all {
-            cert.signatures.size() >= Q,
+            finalization.signatures.size() >= Q,
 
             if (is_new_cert) all {
-                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert_msg))),
-                sent_certificates' = sent_certificates.union(Set(cert_msg)),
+                store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
+                sent_certificates' = sent_certificates.union(Set(cert)),
             } else all {
                 store_certificates' = store_certificates,
                 sent_certificates' = sent_certificates,
             },
 
-            val cert_view_num = cert.proposal.view
-            val cert_payload_val = cert.proposal.payload
-            val cert_prop = cert.proposal
+            val cert_view_num = finalization.proposal.view
+            val cert_payload_val = finalization.proposal.payload
+            val cert_prop = finalization.proposal
             val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
             val newer = cert_view_num > self.last_finalized
 
@@ -1466,7 +1466,7 @@ module replica {
                                 observe_round_proposal(self, cert_prop, true),
                                 cert_prop
                             ),
-                            cert_msg,
+                            cert,
                             is_new_cert
                         ),
                         last_finalized: if (newer) cert_view_num else self.last_finalized,
