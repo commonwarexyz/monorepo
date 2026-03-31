@@ -21,9 +21,7 @@ pub(crate) struct Tree {
     // This link models ownership of the ancestry chain rather than mutable
     // supervision state. `drop_ancestry` walks that ownership chain using only
     // `Arc<Tree>` handles, so it must be able to sever each parent link without
-    // taking the `inner` lock first. Keeping `parent` separate avoids coupling
-    // `Arc` teardown to the same mutex used for child registration and abort
-    // bookkeeping.
+    // taking the `inner` lock first.
     parent: Mutex<Option<Arc<Self>>>,
     inner: Mutex<TreeInner>,
 }
@@ -83,9 +81,6 @@ impl TreeInner {
 impl Tree {
     /// Drops a strong ancestry chain iteratively to avoid recursive `Arc`
     /// teardown.
-    ///
-    /// This walks `Tree::parent` directly instead of going through `inner`
-    /// because the parent link is ownership metadata, not abort state.
     fn drop_ancestry(parent: Arc<Self>) {
         let mut pending = vec![parent];
         while let Some(node) = pending.pop() {
@@ -163,9 +158,9 @@ impl Tree {
         // not exhaust the thread stack while propagating aborts.
         let mut pending = vec![Arc::clone(self)];
         while let Some(node) = pending.pop() {
+            // Keep the parent link until `Drop` so stale-child accounting
+            // stays centralized in one place.
             let result = {
-                // Keep the parent link until `Drop` so stale-child accounting
-                // stays centralized in one place.
                 let mut inner = node.inner.lock();
                 inner.abort()
             };
@@ -173,9 +168,9 @@ impl Tree {
                 continue;
             };
 
+            // Abort the task before descending so observers see the parent
+            // transition before any surviving children are visited.
             if let Some(aborter) = task {
-                // Abort the task before descending so observers see the parent
-                // transition before any surviving children are visited.
                 aborter.abort();
             }
 
