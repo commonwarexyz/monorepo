@@ -334,7 +334,10 @@ impl<F: Family, E: Context, V: VariableValue, H: Hasher> Keyless<F, E, V, H> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{merkle::hasher::Standard, qmdb::verify_proof};
+    use crate::{
+        merkle::{hasher::Standard, mmb, mmr},
+        qmdb::verify_proof,
+    };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -452,13 +455,13 @@ mod test {
     #[test_traced("INFO")]
     pub fn test_keyless_db_empty() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_empty_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_db_empty_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     pub fn test_keyless_db_empty_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_empty_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_db_empty_inner::<mmb::Family>);
     }
 
     async fn test_keyless_db_build_basic_inner<F: Family>(context: deterministic::Context) {
@@ -520,13 +523,13 @@ mod test {
     #[test_traced("WARN")]
     pub fn test_keyless_db_build_basic() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_build_basic_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_db_build_basic_inner::<mmr::Family>);
     }
 
     #[test_traced("WARN")]
     pub fn test_keyless_db_build_basic_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_build_basic_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_db_build_basic_inner::<mmb::Family>);
     }
 
     async fn test_keyless_db_recovery_inner<F: Family>(mut context: deterministic::Context) {
@@ -596,13 +599,13 @@ mod test {
     #[test_traced("WARN")]
     pub fn test_keyless_db_recovery() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_recovery_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_db_recovery_inner::<mmr::Family>);
     }
 
     #[test_traced("WARN")]
     pub fn test_keyless_db_recovery_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_recovery_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_db_recovery_inner::<mmb::Family>);
     }
 
     /// Test that various types of unclean shutdown while updating a non-empty DB recover to the
@@ -692,13 +695,13 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_non_empty_db_recovery() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_non_empty_db_recovery_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_db_non_empty_db_recovery_inner::<mmr::Family>);
     }
 
     #[test_traced("WARN")]
     fn test_keyless_db_non_empty_db_recovery_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_non_empty_db_recovery_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_db_non_empty_db_recovery_inner::<mmb::Family>);
     }
 
     /// Test that various types of unclean shutdown while updating an empty DB recover to the empty
@@ -785,13 +788,13 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_empty_db_recovery() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_empty_db_recovery_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_db_empty_db_recovery_inner::<mmr::Family>);
     }
 
     #[test_traced("WARN")]
     fn test_keyless_db_empty_db_recovery_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_empty_db_recovery_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_db_empty_db_recovery_inner::<mmb::Family>);
     }
 
     async fn test_keyless_db_proof_generation_and_verification_inner<F: Family>(
@@ -902,17 +905,13 @@ mod test {
     #[test_traced("INFO")]
     pub fn test_keyless_db_proof_generation_and_verification() {
         let executor = deterministic::Runner::default();
-        executor.start(
-            test_keyless_db_proof_generation_and_verification_inner::<crate::merkle::mmr::Family>,
-        );
+        executor.start(test_keyless_db_proof_generation_and_verification_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     pub fn test_keyless_db_proof_generation_and_verification_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(
-            test_keyless_db_proof_generation_and_verification_inner::<crate::merkle::mmb::Family>,
-        );
+        executor.start(test_keyless_db_proof_generation_and_verification_inner::<mmb::Family>);
     }
 
     async fn test_keyless_db_proof_with_pruning_inner<F: Family>(context: deterministic::Context) {
@@ -1045,13 +1044,13 @@ mod test {
     #[test_traced("INFO")]
     pub fn test_keyless_db_proof_with_pruning() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_proof_with_pruning_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_db_proof_with_pruning_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     pub fn test_keyless_db_proof_with_pruning_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_proof_with_pruning_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_db_proof_with_pruning_inner::<mmb::Family>);
     }
 
     async fn test_keyless_db_replay_with_trailing_appends_inner<F: Family>(
@@ -1157,17 +1156,13 @@ mod test {
     #[test_traced("WARN")]
     fn test_keyless_db_replay_with_trailing_appends() {
         let executor = deterministic::Runner::default();
-        executor.start(
-            test_keyless_db_replay_with_trailing_appends_inner::<crate::merkle::mmr::Family>,
-        );
+        executor.start(test_keyless_db_replay_with_trailing_appends_inner::<mmr::Family>);
     }
 
     #[test_traced("WARN")]
     fn test_keyless_db_replay_with_trailing_appends_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(
-            test_keyless_db_replay_with_trailing_appends_inner::<crate::merkle::mmb::Family>,
-        );
+        executor.start(test_keyless_db_replay_with_trailing_appends_inner::<mmb::Family>);
     }
 
     async fn test_keyless_db_get_out_of_bounds_inner<F: Family>(context: deterministic::Context) {
@@ -1207,13 +1202,13 @@ mod test {
     #[test_traced("INFO")]
     pub fn test_keyless_db_get_out_of_bounds() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_get_out_of_bounds_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_db_get_out_of_bounds_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     pub fn test_keyless_db_get_out_of_bounds_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_get_out_of_bounds_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_db_get_out_of_bounds_inner::<mmb::Family>);
     }
 
     async fn test_keyless_db_prune_beyond_commit_inner<F: Family>(context: deterministic::Context) {
@@ -1266,13 +1261,13 @@ mod test {
     #[test_traced("INFO")]
     pub fn test_keyless_db_prune_beyond_commit() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_prune_beyond_commit_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_db_prune_beyond_commit_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     pub fn test_keyless_db_prune_beyond_commit_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_prune_beyond_commit_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_db_prune_beyond_commit_inner::<mmb::Family>);
     }
 
     async fn test_keyless_db_rewind_recovery_inner<F: Family>(context: deterministic::Context) {
@@ -1358,13 +1353,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_db_rewind_recovery() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_rewind_recovery_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_db_rewind_recovery_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_db_rewind_recovery_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_db_rewind_recovery_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_db_rewind_recovery_inner::<mmb::Family>);
     }
 
     async fn test_keyless_db_rewind_pruned_target_errors_inner<F: Family>(
@@ -1416,15 +1411,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_db_rewind_pruned_target_errors() {
         let executor = deterministic::Runner::default();
-        executor
-            .start(test_keyless_db_rewind_pruned_target_errors_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_db_rewind_pruned_target_errors_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_db_rewind_pruned_target_errors_mmb() {
         let executor = deterministic::Runner::default();
-        executor
-            .start(test_keyless_db_rewind_pruned_target_errors_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_db_rewind_pruned_target_errors_inner::<mmb::Family>);
     }
 
     fn is_send<T: Send>(_: T) {}
@@ -1482,13 +1475,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_batch_get() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_get_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_batch_get_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_batch_get_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_get_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_batch_get_inner::<mmb::Family>);
     }
 
     /// Child batch reads parent chain values and its own appends.
@@ -1523,13 +1516,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_batch_stacked_get() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_stacked_get_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_batch_stacked_get_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_batch_stacked_get_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_stacked_get_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_batch_stacked_get_inner::<mmb::Family>);
     }
 
     /// Metadata propagates through merkleize and clears with None.
@@ -1557,13 +1550,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_batch_metadata() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_metadata_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_batch_metadata_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_batch_metadata_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_metadata_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_batch_metadata_inner::<mmb::Family>);
     }
 
     /// MerkleizedBatch::root() matches db.root() after apply_batch().
@@ -1603,13 +1596,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_batch_speculative_root() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_speculative_root_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_batch_speculative_root_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_batch_speculative_root_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_speculative_root_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_batch_speculative_root_inner::<mmb::Family>);
     }
 
     /// MerkleizedBatch::get() reads from the operation chain and base DB.
@@ -1652,13 +1645,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_merkleized_batch_get() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_merkleized_batch_get_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_merkleized_batch_get_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_merkleized_batch_get_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_merkleized_batch_get_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_merkleized_batch_get_inner::<mmb::Family>);
     }
 
     /// Chained child batch can be merkleized, finalized, and applied.
@@ -1712,13 +1705,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_batch_chained_apply() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_chained_apply_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_batch_chained_apply_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_batch_chained_apply_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_chained_apply_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_batch_chained_apply_inner::<mmb::Family>);
     }
 
     /// Alternatively, chained batches can each be applied independently.
@@ -1760,15 +1753,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_batch_chained_apply_sequential() {
         let executor = deterministic::Runner::default();
-        executor
-            .start(test_keyless_batch_chained_apply_sequential_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_batch_chained_apply_sequential_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_batch_chained_apply_sequential_mmb() {
         let executor = deterministic::Runner::default();
-        executor
-            .start(test_keyless_batch_chained_apply_sequential_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_batch_chained_apply_sequential_inner::<mmb::Family>);
     }
 
     /// Many sequential batches accumulate correctly.
@@ -1821,13 +1812,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_batch_many_sequential() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_many_sequential_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_batch_many_sequential_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_batch_many_sequential_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_many_sequential_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_batch_many_sequential_inner::<mmb::Family>);
     }
 
     /// Empty batch (zero appends) produces correct speculative root.
@@ -1862,13 +1853,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_batch_empty() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_empty_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_batch_empty_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_batch_empty_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_empty_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_batch_empty_inner::<mmb::Family>);
     }
 
     /// MerkleizedBatch::get() works on a chained child's merkleized batch.
@@ -1927,15 +1918,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_batch_chained_merkleized_get() {
         let executor = deterministic::Runner::default();
-        executor
-            .start(test_keyless_batch_chained_merkleized_get_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_batch_chained_merkleized_get_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_batch_chained_merkleized_get_mmb() {
         let executor = deterministic::Runner::default();
-        executor
-            .start(test_keyless_batch_chained_merkleized_get_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_batch_chained_merkleized_get_inner::<mmb::Family>);
     }
 
     /// Large single batch with many appends, verifying all values and proof.
@@ -1983,13 +1972,13 @@ mod test {
     #[test_traced("INFO")]
     fn test_keyless_batch_large() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_large_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_batch_large_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
     fn test_keyless_batch_large_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_batch_large_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_batch_large_inner::<mmb::Family>);
     }
 
     async fn test_stale_changeset_rejected_inner<F: Family>(context: deterministic::Context) {
@@ -2025,13 +2014,13 @@ mod test {
     #[test_traced]
     fn test_stale_changeset_rejected() {
         let executor = deterministic::Runner::default();
-        executor.start(test_stale_changeset_rejected_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_stale_changeset_rejected_inner::<mmr::Family>);
     }
 
     #[test_traced]
     fn test_stale_changeset_rejected_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_stale_changeset_rejected_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_stale_changeset_rejected_inner::<mmb::Family>);
     }
 
     async fn test_stale_changeset_chained_inner<F: Family>(context: deterministic::Context) {
@@ -2068,13 +2057,13 @@ mod test {
     #[test_traced]
     fn test_stale_changeset_chained() {
         let executor = deterministic::Runner::default();
-        executor.start(test_stale_changeset_chained_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_stale_changeset_chained_inner::<mmr::Family>);
     }
 
     #[test_traced]
     fn test_stale_changeset_chained_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_stale_changeset_chained_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_stale_changeset_chained_inner::<mmb::Family>);
     }
 
     async fn test_stale_changeset_parent_applied_before_child_inner<F: Family>(
@@ -2110,17 +2099,13 @@ mod test {
     #[test_traced]
     fn test_stale_changeset_parent_applied_before_child() {
         let executor = deterministic::Runner::default();
-        executor.start(
-            test_stale_changeset_parent_applied_before_child_inner::<crate::merkle::mmr::Family>,
-        );
+        executor.start(test_stale_changeset_parent_applied_before_child_inner::<mmr::Family>);
     }
 
     #[test_traced]
     fn test_stale_changeset_parent_applied_before_child_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(
-            test_stale_changeset_parent_applied_before_child_inner::<crate::merkle::mmb::Family>,
-        );
+        executor.start(test_stale_changeset_parent_applied_before_child_inner::<mmb::Family>);
     }
 
     /// Apply parent via finalize(), then child via finalize_from(). Both values present.
@@ -2158,13 +2143,13 @@ mod test {
     #[test_traced]
     fn test_keyless_finalize_from() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_finalize_from_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_finalize_from_inner::<mmr::Family>);
     }
 
     #[test_traced]
     fn test_keyless_finalize_from_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_finalize_from_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_finalize_from_inner::<mmb::Family>);
     }
 
     async fn test_keyless_child_root_matches_between_pending_and_committed_paths_inner<
@@ -2195,7 +2180,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(
             test_keyless_child_root_matches_between_pending_and_committed_paths_inner::<
-                crate::merkle::mmr::Family,
+                mmr::Family,
             >,
         );
     }
@@ -2205,7 +2190,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(
             test_keyless_child_root_matches_between_pending_and_committed_paths_inner::<
-                crate::merkle::mmb::Family,
+                mmb::Family,
             >,
         );
     }
@@ -2243,17 +2228,13 @@ mod test {
     #[test_traced]
     fn test_stale_changeset_child_applied_before_parent() {
         let executor = deterministic::Runner::default();
-        executor.start(
-            test_stale_changeset_child_applied_before_parent_inner::<crate::merkle::mmr::Family>,
-        );
+        executor.start(test_stale_changeset_child_applied_before_parent_inner::<mmr::Family>);
     }
 
     #[test_traced]
     fn test_stale_changeset_child_applied_before_parent_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(
-            test_stale_changeset_child_applied_before_parent_inner::<crate::merkle::mmb::Family>,
-        );
+        executor.start(test_stale_changeset_child_applied_before_parent_inner::<mmb::Family>);
     }
 
     /// to_batch() creates an owned snapshot whose root matches the committed DB.
@@ -2289,12 +2270,12 @@ mod test {
     #[test_traced]
     fn test_keyless_to_batch() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_to_batch_inner::<crate::merkle::mmr::Family>);
+        executor.start(test_keyless_to_batch_inner::<mmr::Family>);
     }
 
     #[test_traced]
     fn test_keyless_to_batch_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_keyless_to_batch_inner::<crate::merkle::mmb::Family>);
+        executor.start(test_keyless_to_batch_inner::<mmb::Family>);
     }
 }
