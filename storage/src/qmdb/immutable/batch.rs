@@ -4,12 +4,11 @@ use super::Immutable;
 use crate::{
     journal::authenticated,
     merkle::{Family, Location, Position},
-    qmdb::{any::VariableValue, immutable::operation::Operation},
+    qmdb::{any::VariableValue, immutable::operation::Operation, operation::Key},
     translator::Translator,
     Context,
 };
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_utils::Array;
 use std::{collections::BTreeMap, sync::Arc};
 
 /// What happened to a key in this batch.
@@ -33,7 +32,7 @@ pub(crate) enum SnapshotDiff<F: Family, K> {
 pub struct UnmerkleizedBatch<F, H, K, V>
 where
     F: Family,
-    K: Array,
+    K: Key,
     V: VariableValue,
     H: CHasher,
 {
@@ -56,7 +55,7 @@ where
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
-pub struct MerkleizedBatch<F: Family, D: Digest, K: Array, V: VariableValue> {
+pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: VariableValue> {
     /// Journal batch (Merkle state + accumulated operation segments).
     journal: authenticated::MerkleizedBatch<F, D, Operation<K, V>>,
 
@@ -71,7 +70,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Array, V: VariableValue> {
 }
 
 /// An owned changeset that can be applied to the database.
-pub struct Changeset<F: Family, K: Array, D: Digest, V: VariableValue> {
+pub struct Changeset<F: Family, K: Key, D: Digest, V: VariableValue> {
     /// The finalized authenticated journal batch (Merkle changeset + item chain).
     pub(super) journal_finalized: authenticated::Changeset<F, D, Operation<K, V>>,
 
@@ -88,7 +87,7 @@ pub struct Changeset<F: Family, K: Array, D: Digest, V: VariableValue> {
 impl<F, H, K, V> UnmerkleizedBatch<F, H, K, V>
 where
     F: Family,
-    K: Array,
+    K: Key,
     V: VariableValue,
     H: CHasher,
 {
@@ -180,7 +179,7 @@ where
     }
 }
 
-impl<F: Family, D: Digest, K: Array, V: VariableValue> MerkleizedBatch<F, D, K, V> {
+impl<F: Family, D: Digest, K: Key, V: VariableValue> MerkleizedBatch<F, D, K, V> {
     /// Return the speculative root.
     pub fn root(&self) -> D {
         self.journal.root()
@@ -282,7 +281,7 @@ impl<F, E, K, V, H, T> Immutable<F, E, K, V, H, T>
 where
     F: Family,
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue,
     H: CHasher,
     T: Translator,

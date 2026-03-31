@@ -22,7 +22,7 @@ pub type Database<E> = immutable::Immutable<mmr::Family, E, Key, Value, Hasher, 
 pub type Operation = immutable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ((), ())> {
     let page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
         context,
         NZU16!(2048),
@@ -41,7 +41,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
             partition: "log".into(),
             items_per_section: NZU64!(4096),
             compression: None,
-            codec_config: (),
+            codec_config: ((), ()),
             write_buffer: NZUsize!(4096),
             page_cache,
         },

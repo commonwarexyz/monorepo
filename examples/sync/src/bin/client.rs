@@ -66,7 +66,8 @@ async fn target_update_task<E, Op, D>(
 ) -> Result<(), Error>
 where
     E: Clock,
-    Op: Read<Cfg = ()> + EncodeShared,
+    Op: Read + EncodeShared,
+    Op::Cfg: commonware_codec::IsUnit,
     D: commonware_cryptography::Digest,
 {
     let mut current_target = initial_target;

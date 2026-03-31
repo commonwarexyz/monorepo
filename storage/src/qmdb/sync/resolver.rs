@@ -14,6 +14,7 @@ use crate::{
             FixedValue, VariableValue,
         },
         immutable::{Immutable, Operation as ImmutableOp},
+        operation::Key,
     },
     translator::Translator,
     Context,
@@ -206,11 +207,11 @@ impl_resolver!(OrderedFixedDb, OrderedFixedOperation, FixedValue);
 // Ordered Variable
 impl_resolver!(OrderedVariableDb, OrderedVariableOperation, VariableValue);
 
-// Immutable (uses mmr::Family as the first type parameter)
+// Immutable
 impl<E, K, V, H, T> Resolver for Arc<Immutable<crate::merkle::mmr::Family, E, K, V, H, T>>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
@@ -247,7 +248,7 @@ impl<E, K, V, H, T> Resolver
     for Arc<AsyncRwLock<Immutable<crate::merkle::mmr::Family, E, K, V, H, T>>>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,
@@ -285,7 +286,7 @@ impl<E, K, V, H, T> Resolver
     for Arc<AsyncRwLock<Option<Immutable<crate::merkle::mmr::Family, E, K, V, H, T>>>>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: VariableValue + Send + Sync + 'static,
     H: Hasher,
     T: Translator + Send + Sync + 'static,

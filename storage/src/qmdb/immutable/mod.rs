@@ -63,13 +63,12 @@ use crate::{
         },
     },
     merkle::{journaled::Config as MmrConfig, Family, Location, Proof},
-    qmdb::{any::VariableValue, build_snapshot_from_log, delete_known_loc, Error},
+    qmdb::{any::VariableValue, build_snapshot_from_log, delete_known_loc, operation::Key, Error},
     translator::Translator,
     Context,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_utils::Array;
 use std::{num::NonZeroU64, ops::Range};
 use tracing::warn;
 
@@ -102,7 +101,7 @@ pub struct Config<T: Translator, C> {
 ///
 /// A key must be set at most once across the database history. Writing the same key more than
 /// once is undefined behavior.
-pub struct Immutable<F: Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator> {
+pub struct Immutable<F: Family, E: Context, K: Key, V: VariableValue, H: CHasher, T: Translator> {
     /// Authenticated journal of operations.
     journal: Journal<F, E, K, V, H>,
 
@@ -117,7 +116,7 @@ pub struct Immutable<F: Family, E: Context, K: Array, V: VariableValue, H: CHash
     last_commit_loc: Location<F>,
 }
 
-impl<F: Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator>
+impl<F: Family, E: Context, K: Key, V: VariableValue, H: CHasher, T: Translator>
     Immutable<F, E, K, V, H, T>
 {
     /// Return the Location of the next operation appended to this db.
@@ -345,7 +344,7 @@ impl<F: Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: Translato
 }
 
 // Initialization.
-impl<F: Family, E: Context, K: Array, V: VariableValue, H: CHasher, T: Translator>
+impl<F: Family, E: Context, K: Key, V: VariableValue, H: CHasher, T: Translator>
     Immutable<F, E, K, V, H, T>
 {
     /// Returns an [Immutable] qmdb initialized from `cfg`. Any uncommitted log operations will be
@@ -510,7 +509,7 @@ pub(super) mod test {
     pub(crate) fn db_config(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> Config<TwoCap, (commonware_codec::RangeCfg<usize>, ())> {
+    ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle_config: MmrConfig {
@@ -525,7 +524,7 @@ pub(super) mod test {
                 partition: format!("log-{suffix}"),
                 items_per_section: NZU64!(ITEMS_PER_SECTION),
                 compression: None,
-                codec_config: ((0..=10000).into(), ()),
+                codec_config: ((), ((0..=10000).into(), ())),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },
