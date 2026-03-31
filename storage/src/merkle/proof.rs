@@ -153,9 +153,10 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        // Empty proof is valid only for an empty tree.
+        // Empty proof is valid only for an empty tree with no extra digest data.
         if elements.is_empty() {
-            return self.leaves == Location::new(0)
+            return self.digests.is_empty()
+                && self.leaves == Location::new(0)
                 && *root == hasher.root(Location::new(0), core::iter::empty());
         }
 
@@ -1373,6 +1374,17 @@ mod tests {
             &[] as &[(D, Location<F>)],
             empty_root
         ));
+
+        // Malformed empty proof with extra digests must be rejected.
+        let malformed_proof: Proof<F, D> = Proof {
+            leaves: Location::new(0),
+            digests: vec![test_digest(0)],
+        };
+        assert!(!malformed_proof.verify_multi_inclusion(
+            &hasher,
+            &[] as &[(D, Location<F>)],
+            empty_root
+        ));
     }
 
     fn multi_proof_deduplication<F: Family>() {
@@ -1698,6 +1710,17 @@ mod tests {
         let empty_mem = Mem::<F, D>::new(&hasher2);
         let empty_proof: Proof<F, D> = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
+            &hasher2,
+            &[] as &[([u8; 8], Location<F>)],
+            empty_mem.root()
+        ));
+
+        // Malformed empty proof with extra digests must be rejected.
+        let malformed_proof: Proof<F, D> = Proof {
+            leaves: Location::new(0),
+            digests: vec![test_digest(0)],
+        };
+        assert!(!malformed_proof.verify_multi_inclusion(
             &hasher2,
             &[] as &[([u8; 8], Location<F>)],
             empty_mem.root()
