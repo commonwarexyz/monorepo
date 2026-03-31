@@ -7,7 +7,7 @@ use std::{
 
 /// Delay reaping dropped children until enough stale weak pointers accumulate to
 /// amortize the cleanup cost for clone-heavy parents.
-const CHILD_REAP_THRESHOLD: usize = 64;
+const CHILD_REAP_THRESHOLD: usize = 32;
 
 /// Tracks the relationship between runtime contexts.
 ///
