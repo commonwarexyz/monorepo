@@ -1380,7 +1380,9 @@ module replica {
                                 cert_view_num,
                                 FinalizeKind
                             ),
-                            advance_timeout: if (self.view == cert_view_num) self.advance_timeout.set(cert_view_num, None) else self.advance_timeout,
+                            // clear_deadlines: matches Rust round.clear_deadlines()
+                            leader_timeout: self.leader_timeout.set(cert_view_num, None),
+                            advance_timeout: self.advance_timeout.set(cert_view_num, None),
                             ghost_last_seen_notarization: seen_notarization,
                             certify: self.certify.set(cert_view_num, Some(true)),
                             certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
@@ -1406,7 +1408,9 @@ module replica {
                                 cert,
                                 should_broadcast_notarization
                             ),
-                            advance_timeout: if (self.view == cert_view_num) self.advance_timeout.set(cert_view_num, None) else self.advance_timeout,
+                            // clear_deadlines: matches Rust round.clear_deadlines()
+                            leader_timeout: self.leader_timeout.set(cert_view_num, None),
+                            advance_timeout: self.advance_timeout.set(cert_view_num, None),
                             ghost_last_seen_notarization: seen_notarization,
                             certify: self.certify.set(cert_view_num, Some(true)),
                             certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
