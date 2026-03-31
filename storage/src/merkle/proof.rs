@@ -4,7 +4,7 @@
 //! family (MMR, MMB, etc.) reuses the shared verification and reconstruction logic in this module,
 //! while retaining any family-specific proof helpers in its submodule.
 
-use crate::merkle::{hasher::Hasher, Family, Location, Position};
+use crate::merkle::{hasher::Hasher, Error, Family, Location, Position};
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec,
@@ -153,9 +153,10 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
-        // Empty proof is valid only for an empty tree.
+        // Empty proof is valid only for an empty tree with no extra digest data.
         if elements.is_empty() {
-            return self.leaves == Location::new(0)
+            return self.digests.is_empty()
+                && self.leaves == Location::new(0)
                 && *root == hasher.root(Location::new(0), core::iter::empty());
         }
 
@@ -235,6 +236,125 @@ impl<F: Family, D: Digest> Proof<F, D> {
         E: AsRef<[u8]>,
     {
         self.reconstruct_root_collecting(hasher, elements, start_loc, None)
+    }
+
+    /// Reconstructs the root digest from the digests in the proof and the provided range
+    /// of elements, returning the (position,digest) of every node whose digest was required by the
+    /// process (including those from the proof itself). Returns [Error::InvalidProof] if the
+    /// input data is invalid and [Error::RootMismatch] if the root does not match the computed
+    /// root.
+    pub fn verify_range_inclusion_and_extract_digests<H, E>(
+        &self,
+        hasher: &H,
+        elements: &[E],
+        start_loc: Location<F>,
+        root: &D,
+    ) -> Result<Vec<(Position<F>, D)>, Error<F>>
+    where
+        H: Hasher<F, Digest = D>,
+        E: AsRef<[u8]>,
+    {
+        let mut collected_digests = Vec::new();
+        let Ok(reconstructed_root) = self.reconstruct_root_collecting(
+            hasher,
+            elements,
+            start_loc,
+            Some(&mut collected_digests),
+        ) else {
+            return Err(Error::InvalidProof);
+        };
+
+        if reconstructed_root != *root {
+            return Err(Error::RootMismatch);
+        }
+
+        Ok(collected_digests)
+    }
+
+    /// Verify that both the proof and the pinned nodes are valid with respect to `root`.
+    ///
+    /// The `pinned_nodes` are the peak digests of the sub-structure at `start_loc`, in the order
+    /// returned by `Family::nodes_to_pin`. Each pinned node is either:
+    ///
+    /// - A peak that precedes the proven range (fold-prefix peak). These are verified by
+    ///   refolding them and comparing against the proof's fold-prefix accumulator.
+    /// - A sibling node within a range peak's reconstruction. These are verified against the
+    ///   digests extracted during proof verification.
+    ///
+    /// Returns `true` only if the proof reconstructs to `root` and every pinned node digest is
+    /// accounted for. When `start_loc` is 0, `pinned_nodes` must be empty.
+    pub fn verify_proof_and_pinned_nodes<H, E>(
+        &self,
+        hasher: &H,
+        elements: &[E],
+        start_loc: Location<F>,
+        pinned_nodes: &[D],
+        root: &D,
+    ) -> bool
+    where
+        H: Hasher<F, Digest = D>,
+        E: AsRef<[u8]>,
+    {
+        let collected = match self
+            .verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        if elements.is_empty() {
+            return pinned_nodes.is_empty();
+        }
+
+        if !start_loc.is_valid() || start_loc > self.leaves {
+            return false;
+        }
+
+        let pinned_positions = F::nodes_to_pin(self.leaves, start_loc);
+        if pinned_positions.len() != pinned_nodes.len() {
+            return false;
+        }
+
+        let Ok(fold_prefix) = Blueprint::fold_prefix(self.leaves, start_loc) else {
+            return false;
+        };
+
+        let mut pinned_map: alloc::collections::BTreeMap<Position<F>, D> = pinned_positions
+            .into_iter()
+            .zip(pinned_nodes.iter().copied())
+            .collect();
+
+        // Verify fold-prefix pinned nodes by recomputing the accumulator (without the leaf
+        // count, which is hashed into the final root independently).
+        if !fold_prefix.is_empty() {
+            if self.digests.is_empty() {
+                return false;
+            }
+            let Some(first) = pinned_map.remove(&fold_prefix[0]) else {
+                return false;
+            };
+            let mut acc = first;
+            for pos in &fold_prefix[1..] {
+                let Some(digest) = pinned_map.remove(pos) else {
+                    return false;
+                };
+                acc = hasher.fold(&acc, &digest);
+            }
+            if acc != self.digests[0] {
+                return false;
+            }
+        }
+
+        // Verify remaining pinned nodes (siblings) against the extracted digests.
+        let extracted: alloc::collections::BTreeMap<Position<F>, D> =
+            collected.into_iter().collect();
+        for (pos, digest) in pinned_map {
+            if extracted.get(&pos) != Some(&digest) {
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Like [`reconstruct_root`](Self::reconstruct_root), but if `collected` is `Some`,
@@ -1254,6 +1374,17 @@ mod tests {
             &[] as &[(D, Location<F>)],
             empty_root
         ));
+
+        // Malformed empty proof with extra digests must be rejected.
+        let malformed_proof: Proof<F, D> = Proof {
+            leaves: Location::new(0),
+            digests: vec![test_digest(0)],
+        };
+        assert!(!malformed_proof.verify_multi_inclusion(
+            &hasher,
+            &[] as &[(D, Location<F>)],
+            empty_root
+        ));
     }
 
     fn multi_proof_deduplication<F: Family>() {
@@ -1579,6 +1710,17 @@ mod tests {
         let empty_mem = Mem::<F, D>::new(&hasher2);
         let empty_proof: Proof<F, D> = Proof::default();
         assert!(empty_proof.verify_multi_inclusion(
+            &hasher2,
+            &[] as &[([u8; 8], Location<F>)],
+            empty_mem.root()
+        ));
+
+        // Malformed empty proof with extra digests must be rejected.
+        let malformed_proof: Proof<F, D> = Proof {
+            leaves: Location::new(0),
+            digests: vec![test_digest(0)],
+        };
+        assert!(!malformed_proof.verify_multi_inclusion(
             &hasher2,
             &[] as &[([u8; 8], Location<F>)],
             empty_mem.root()

@@ -8,7 +8,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    mmr::{journaled, Location, StandardHasher},
+    merkle::mmr::{self, journaled, Location, StandardHasher},
     qmdb::{
         self,
         any::{
@@ -56,10 +56,10 @@ async fn build_db<E, O, I, H, U, C, T>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: Range<Location>,
     apply_batch_size: usize,
-) -> Result<Db<E, C, I, H, U>, qmdb::Error>
+) -> Result<Db<mmr::Family, E, C, I, H, U>, qmdb::Error<mmr::Family>>
 where
     E: Context,
-    O: Operation + Committable + CodecShared + Send + Sync + 'static,
+    O: Operation<mmr::Family> + Committable + CodecShared + Send + Sync + 'static,
     I: IndexFactory<T, Value = Location>,
     H: Hasher,
     U: Send + Sync + 'static,
@@ -81,7 +81,7 @@ where
 
     let index = I::new(context.with_label("index"), translator);
 
-    let log = authenticated::Journal::<_, _, _>::from_components(
+    let log = authenticated::Journal::<mmr::Family, _, _, _>::from_components(
         mmr,
         log,
         hasher,
@@ -98,7 +98,7 @@ macro_rules! impl_sync_database {
      $journal:ty, $config:ty,
      $key_bound:path, $value_bound:ident
      $(; $($where_extra:tt)+)?) => {
-        impl<E, K, V, H, T> qmdb::sync::Database for $db<E, K, V, H, T>
+        impl<E, K, V, H, T> qmdb::sync::Database for $db<mmr::Family, E, K, V, H, T>
         where
             E: Context,
             K: $key_bound,
@@ -108,7 +108,7 @@ macro_rules! impl_sync_database {
             $($($where_extra)+)?
         {
             type Context = E;
-            type Op = $op<K, V>;
+            type Op = $op<mmr::Family, K, V>;
             type Journal = $journal;
             type Hasher = H;
             type Config = $config;
@@ -121,8 +121,8 @@ macro_rules! impl_sync_database {
                 pinned_nodes: Option<Vec<Self::Digest>>,
                 range: Range<Location>,
                 apply_batch_size: usize,
-            ) -> Result<Self, qmdb::Error> {
-                let mmr_config = config.mmr_config.clone();
+            ) -> Result<Self, qmdb::Error<mmr::Family>> {
+                let mmr_config = config.merkle_config.clone();
                 let translator = config.translator.clone();
                 build_db::<_, Self::Op, _, H, $update<K, V>, _, T>(
                     context,
@@ -152,9 +152,9 @@ impl_sync_database!(
 impl_sync_database!(
     UnorderedVariableDb, UnorderedVariableOp, UnorderedVariableUpdate,
     variable::Journal<E, Self::Op>,
-    VariableConfig<T, <UnorderedVariableOp<K, V> as CodecRead>::Cfg>,
+    VariableConfig<T, <UnorderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>,
     Key, VariableValue;
-    UnorderedVariableOp<K, V>: CodecShared
+    UnorderedVariableOp<mmr::Family, K, V>: CodecShared
 );
 
 impl_sync_database!(
@@ -166,7 +166,7 @@ impl_sync_database!(
 impl_sync_database!(
     OrderedVariableDb, OrderedVariableOp, OrderedVariableUpdate,
     variable::Journal<E, Self::Op>,
-    VariableConfig<T, <OrderedVariableOp<K, V> as CodecRead>::Cfg>,
+    VariableConfig<T, <OrderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>,
     Key, VariableValue;
-    OrderedVariableOp<K, V>: CodecShared
+    OrderedVariableOp<mmr::Family, K, V>: CodecShared
 );

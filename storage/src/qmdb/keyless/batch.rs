@@ -3,12 +3,14 @@
 use super::Keyless;
 use crate::{
     journal::authenticated,
-    mmr::{Location, Position},
-    qmdb::{any::VariableValue, keyless::operation::Operation, Error},
+    merkle::mmr::{self, Location, Position},
+    qmdb::{any::VariableValue, keyless::operation::Operation},
     Context,
 };
 use commonware_cryptography::{Digest, Hasher};
 use std::sync::Arc;
+
+type Error = crate::qmdb::Error<mmr::Family>;
 
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
@@ -20,7 +22,7 @@ where
     H: Hasher,
 {
     /// Authenticated journal batch for computing the speculative MMR root.
-    journal_batch: authenticated::UnmerkleizedBatch<H, Operation<V>>,
+    journal_batch: authenticated::UnmerkleizedBatch<mmr::Family, H, Operation<V>>,
 
     /// Pending appends.
     appends: Vec<V>,
@@ -40,7 +42,7 @@ where
 /// in contrast to [`UnmerkleizedBatch`].
 pub struct MerkleizedBatch<D: Digest, V: VariableValue> {
     /// Journal batch (MMR state + accumulated operation segments).
-    journal_batch: authenticated::MerkleizedBatch<D, Operation<V>>,
+    journal_batch: authenticated::MerkleizedBatch<mmr::Family, D, Operation<V>>,
 
     /// Total operation count after this batch.
     total_size: u64,
@@ -52,7 +54,7 @@ pub struct MerkleizedBatch<D: Digest, V: VariableValue> {
 /// An owned changeset that can be applied to the database.
 pub struct Changeset<D: Digest, V: VariableValue> {
     /// The finalized authenticated journal batch (MMR changeset + item chain).
-    pub(super) journal_finalized: authenticated::Changeset<D, Operation<V>>,
+    pub(super) journal_finalized: authenticated::Changeset<mmr::Family, D, Operation<V>>,
 
     /// Total operation count after this batch.
     pub(super) total_size: u64,

@@ -509,34 +509,50 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
     /// reopened to trigger alignment in [Journal::init].
     pub async fn append(&self, item: &V) -> Result<u64, Error> {
+        self.append_many(std::slice::from_ref(item)).await
+    }
+
+    /// Append multiple items to the journal, returning the position of the last item appended.
+    ///
+    /// Acquires the write lock once for all items instead of per-item.
+    /// No-ops if items is empty, returning the current size (next append position).
+    pub async fn append_many(&self, items: &[V]) -> Result<u64, Error> {
+        if items.is_empty() {
+            return Ok(self.inner.read().await.size);
+        }
+
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
-        // Calculate which section this position belongs to
-        let section = position_to_section(inner.size, self.items_per_section);
+        let mut last_position = 0;
+        for (index, item) in items.iter().enumerate() {
+            // Calculate which section this position belongs to.
+            let section = position_to_section(inner.size, self.items_per_section);
 
-        // Append to data journal, get offset
-        let (offset, _size) = inner.data.append(section, item).await?;
+            // Append to data journal, get offset.
+            let (offset, _size) = inner.data.append(section, item).await?;
 
-        // Append offset to offsets journal
-        let offsets_pos = self.offsets.append(&offset).await?;
-        assert_eq!(offsets_pos, inner.size);
+            // Append offset to offsets journal.
+            let offsets_pos = self.offsets.append(&offset).await?;
+            assert_eq!(offsets_pos, inner.size);
 
-        // Return the current position
-        let position = inner.size;
-        inner.size += 1;
+            // Return the current position.
+            last_position = inner.size;
+            inner.size += 1;
 
-        // Return early if no sync is needed (section not full).
-        if !inner.size.is_multiple_of(self.items_per_section) {
-            return Ok(position);
+            // The section was filled and must be synced. Downgrade so readers can continue
+            // during the sync while mutators remain blocked.
+            if inner.size.is_multiple_of(self.items_per_section) {
+                let inner_ref = inner.downgrade_to_upgradable();
+                futures::try_join!(inner_ref.data.sync(section), self.offsets.sync())?;
+                if index + 1 == items.len() {
+                    return Ok(last_position);
+                }
+                inner = inner_ref.upgrade().await;
+            }
         }
 
-        // The section was filled and must be synced. Downgrade so readers can continue during the
-        // sync while mutators remain blocked.
-        let inner = inner.downgrade_to_upgradable();
-        futures::try_join!(inner.data.sync(section), self.offsets.sync())?;
-
-        Ok(position)
+        Ok(last_position)
     }
 
     /// Acquire a reader guard that holds a consistent view of the journal.
@@ -908,6 +924,10 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
         Self::append(self, item).await
     }
 
+    async fn append_many(&mut self, items: &[Self::Item]) -> Result<u64, Error> {
+        Self::append_many(self, items).await
+    }
+
     async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
         Self::prune(self, min_position).await
     }
@@ -937,18 +957,18 @@ impl<E: Context, V: CodecShared> Persistable for Journal<E, V> {
 impl<E: Context, V: CodecShared> crate::journal::authenticated::Inner<E> for Journal<E, V> {
     type Config = Config<V::Cfg>;
 
-    async fn init<H: commonware_cryptography::Hasher>(
+    async fn init<F: crate::merkle::Family, H: commonware_cryptography::Hasher>(
         context: E,
-        mmr_cfg: crate::mmr::journaled::Config,
+        merkle_cfg: crate::merkle::journaled::Config,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&V) -> bool,
     ) -> Result<
-        crate::journal::authenticated::Journal<E, Self, H>,
-        crate::journal::authenticated::Error,
+        crate::journal::authenticated::Journal<F, E, Self, H>,
+        crate::journal::authenticated::Error<F>,
     > {
-        crate::journal::authenticated::Journal::<E, Self, H>::new(
+        crate::journal::authenticated::Journal::<F, E, Self, H>::new(
             context,
-            mmr_cfg,
+            merkle_cfg,
             journal_cfg,
             rewind_predicate,
         )
