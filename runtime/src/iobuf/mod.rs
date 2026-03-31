@@ -2187,10 +2187,10 @@ where
 
 /// Assembles [`IoBufs`] from a mix of inline writes and zero-copy pieces.
 ///
-/// Small fields are written inline via [`BufMut`] into a pool-backed working
-/// buffer. Large [`Bytes`] fields are pushed as zero-copy pieces via
-/// [`BufsMut::push`]. The result is a multi-piece [`IoBufs`] ready for
-/// vectored I/O.
+/// All inline writes go into a single pool-backed buffer. [`BufsMut::push`]
+/// records boundaries without flushing. [`Builder::finish`] freezes the buffer
+/// once and uses [`IoBuf::slice`] to carve it into pieces at the recorded
+/// boundaries, interleaved with the pushed [`Bytes`].
 ///
 /// ```text
 /// builder.put_u16(99);                        // inline
@@ -2199,97 +2199,93 @@ where
 /// let output = builder.finish();
 ///
 /// // output: [ 99 | --- 1 MB shard --- | checksum ]
-/// //           ^          ^                ^
-/// //         pool      Arc clone         pool
+/// //           pool    Arc clone          pool
+/// //            \________________________/
+/// //             slices of one allocation
 /// ```
 pub struct Builder {
     pool: BufferPool,
-    // Size used when allocating new working buffers from the pool.
-    capacity: usize,
-    // Working buffer for inline writes. Flushed into `bufs` when full or
-    // when `push()` is called. Lazily reallocated on the next inline write.
-    current: IoBufMut,
-    // Accumulated output pieces (interleaved inline and zero-copy).
-    bufs: IoBufs,
+    // Single working buffer for all inline writes.
+    buf: IoBufMut,
+    // Each entry is (offset_in_buf, pushed_bytes) recording where a push
+    // interrupts the inline byte stream.
+    pushes: Vec<(usize, Bytes)>,
 }
 
 impl Builder {
-    /// `capacity` sets the size of each pool-allocated working buffer. When a
-    /// working buffer fills up, it is flushed and a new one of this size is
-    /// allocated.
+    /// `capacity` sets the size of the pool-allocated inline buffer.
+    /// Use [`EncodeSize::encode_inline_size`] for an accurate estimate.
+    /// If inline writes exceed capacity, the buffer grows via reallocation.
     pub fn new(pool: &BufferPool, capacity: NonZeroUsize) -> Self {
-        let capacity = capacity.get();
         Self {
             pool: pool.clone(),
-            capacity,
-            current: pool.alloc(capacity),
-            bufs: IoBufs::default(),
+            buf: pool.alloc(capacity.get()),
+            pushes: Vec::new(),
         }
     }
 
-    /// Returns true if `current` needs a fresh pool allocation before writing.
-    /// After `flush`, `current` is `IoBufMut::default()` (zero capacity, backed
-    /// by `BytesMut` whose `remaining_mut` returns `isize::MAX`). Checking
-    /// capacity avoids silently writing to a heap-allocated `BytesMut` instead
-    /// of a pool buffer.
-    fn needs_alloc(&self) -> bool {
-        self.current.capacity() == 0 || self.current.remaining_mut() == 0
+    /// Reallocates `buf` with doubled capacity, copying existing data.
+    fn grow(&mut self) {
+        let new_cap = (self.buf.capacity() * 2).max(64);
+        let mut new_buf = self.pool.alloc(new_cap);
+        new_buf.put_slice(self.buf.as_ref());
+        self.buf = new_buf;
     }
 
-    /// Freezes `current` and appends it to `bufs` if non-empty.
-    fn flush(&mut self) {
-        if !self.current.is_empty() {
-            let flushed = std::mem::take(&mut self.current);
-            self.bufs.append(flushed.freeze());
+    /// Freezes the inline buffer and assembles [`IoBufs`] by slicing at
+    /// the recorded push boundaries.
+    pub fn finish(self) -> IoBufs {
+        let frozen = self.buf.freeze();
+        let mut result = IoBufs::default();
+        let mut pos = 0;
+
+        for (offset, pushed) in self.pushes {
+            if offset > pos {
+                result.append(frozen.slice(pos..offset));
+            }
+            result.append(IoBuf::from(pushed));
+            pos = offset;
         }
-    }
 
-    /// Flushes remaining inline bytes and returns the assembled [`IoBufs`].
-    pub fn finish(mut self) -> IoBufs {
-        self.flush();
-        self.bufs
+        if pos < frozen.len() {
+            result.append(frozen.slice(pos..));
+        }
+
+        result
     }
 }
 
-// SAFETY: All methods delegate to the pool-backed `IoBufMut` in `self.current`,
-// which has a sound `BufMut` implementation. `put_slice`, `put`, and `chunk_mut`
-// are overridden to handle writes that exceed the current buffer by flushing and
-// reallocating. This is necessary because `remaining_mut()` undercounts (returns
-// only the current buffer's remaining), and the default `put_slice`/`put` assert
-// `remaining_mut() >= src.len()`.
+// SAFETY: All methods delegate to `self.buf`, a pool-backed `IoBufMut` with a
+// sound `BufMut` implementation. `put_slice`, `put`, and `chunk_mut` are
+// overridden to grow the buffer on exhaustion. The default `put_slice`/`put`
+// assert `remaining_mut() >= src.len()` which would panic; our overrides
+// handle overflow by growing instead.
 unsafe impl BufMut for Builder {
-    // Returns only the current working buffer's remaining capacity.
-    // The Builder can accept more via flush+realloc, but undercounting is safe
-    // (can't cause out-of-bounds writes).
     #[inline]
     fn remaining_mut(&self) -> usize {
-        self.current.remaining_mut()
+        self.buf.remaining_mut()
     }
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        self.current.advance_mut(cnt);
+        self.buf.advance_mut(cnt);
     }
 
     #[inline]
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
-        // Lazily allocate a new working buffer when the current one is full.
-        if self.needs_alloc() {
-            self.flush();
-            self.current = self.pool.alloc(self.capacity);
+        if self.buf.remaining_mut() == 0 {
+            self.grow();
         }
-        self.current.chunk_mut()
+        self.buf.chunk_mut()
     }
 
     fn put_slice(&mut self, mut src: &[u8]) {
-        // Write in chunks, flushing and reallocating as needed.
         while !src.is_empty() {
-            if self.needs_alloc() {
-                self.flush();
-                self.current = self.pool.alloc(self.capacity);
+            if self.buf.remaining_mut() == 0 {
+                self.grow();
             }
-            let n = src.len().min(self.current.remaining_mut());
-            self.current.put_slice(&src[..n]);
+            let n = src.len().min(self.buf.remaining_mut());
+            self.buf.put_slice(&src[..n]);
             src = &src[n..];
         }
     }
@@ -2299,13 +2295,12 @@ unsafe impl BufMut for Builder {
         Self: Sized,
     {
         while src.has_remaining() {
-            if self.needs_alloc() {
-                self.flush();
-                self.current = self.pool.alloc(self.capacity);
+            if self.buf.remaining_mut() == 0 {
+                self.grow();
             }
             let chunk = src.chunk();
-            let n = chunk.len().min(self.current.remaining_mut());
-            self.current.put_slice(&chunk[..n]);
+            let n = chunk.len().min(self.buf.remaining_mut());
+            self.buf.put_slice(&chunk[..n]);
             src.advance(n);
         }
     }
@@ -2313,9 +2308,10 @@ unsafe impl BufMut for Builder {
 
 impl BufsMut for Builder {
     fn push(&mut self, bytes: impl Into<Bytes>) {
-        // Flush inline bytes written so far, then append the zero-copy piece.
-        self.flush();
-        self.bufs.append(IoBuf::from(bytes.into()));
+        let bytes = bytes.into();
+        if !bytes.is_empty() {
+            self.pushes.push((self.buf.len(), bytes));
+        }
     }
 }
 
@@ -2352,7 +2348,7 @@ pub trait EncodeExt: EncodeSize + Write {
     /// bytes written by [`Write::write_bufs`].
     fn encode_with_pool(&self, pool: &BufferPool) -> IoBufs {
         let len = self.encode_size();
-        let capacity = NonZeroUsize::new(self.encode_bufs_size()).unwrap_or(NonZeroUsize::MIN);
+        let capacity = NonZeroUsize::new(self.encode_inline_size()).unwrap_or(NonZeroUsize::MIN);
         let mut builder = Builder::new(pool, capacity);
         self.write_bufs(&mut builder);
         let bufs = builder.finish();
@@ -4764,7 +4760,7 @@ mod tests {
             assert_eq!(bufs.remaining(), 0);
         }
 
-        // Inline writes exceeding capacity trigger flush and reallocation.
+        // Inline writes exceeding capacity trigger grow.
         #[test]
         fn test_inline_overflow() {
             let mut b = builder(4);
@@ -4802,9 +4798,7 @@ mod tests {
             assert_eq!(r.copy_to_bytes(200), c);
         }
 
-        // put() with source larger than working buffer capacity.
-        // The default BufMut::put would panic here because it asserts
-        // remaining_mut() >= src.remaining().
+        // put() with source larger than capacity.
         #[test]
         fn test_put_exceeding_capacity() {
             let mut b = builder(4);
@@ -4815,9 +4809,9 @@ mod tests {
             assert_eq!(r.copy_to_bytes(100), src);
         }
 
-        // Single put_slice call spanning multiple working buffers.
+        // Single put_slice call larger than capacity, triggering grow.
         #[test]
-        fn test_put_slice_spanning_multiple_buffers() {
+        fn test_put_slice_exceeding_capacity() {
             let mut b = builder(4);
             let data = vec![0xFE; 50];
             b.put_slice(&data);

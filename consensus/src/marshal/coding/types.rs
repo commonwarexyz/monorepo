@@ -88,8 +88,8 @@ impl<C: Scheme, H: Hasher> EncodeSize for Shard<C, H> {
         self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_size()
     }
 
-    fn encode_bufs_size(&self) -> usize {
-        self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_bufs_size()
+    fn encode_inline_size(&self) -> usize {
+        self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_inline_size()
     }
 }
 

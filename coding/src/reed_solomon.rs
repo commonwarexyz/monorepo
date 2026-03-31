@@ -154,8 +154,8 @@ impl<D: Digest> EncodeSize for Chunk<D> {
         self.shard.encode_size() + self.index.encode_size() + self.proof.encode_size()
     }
 
-    fn encode_bufs_size(&self) -> usize {
-        self.shard.encode_bufs_size() + self.index.encode_size() + self.proof.encode_size()
+    fn encode_inline_size(&self) -> usize {
+        self.shard.encode_inline_size() + self.index.encode_size() + self.proof.encode_size()
     }
 }
 

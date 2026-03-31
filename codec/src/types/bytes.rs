@@ -27,7 +27,7 @@ impl EncodeSize for Bytes {
     }
 
     #[inline]
-    fn encode_bufs_size(&self) -> usize {
+    fn encode_inline_size(&self) -> usize {
         self.len().encode_size()
     }
 }
