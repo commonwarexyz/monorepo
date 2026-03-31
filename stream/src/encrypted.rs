@@ -175,7 +175,7 @@ where
 {
     let frame = recv_frame(
         stream,
-        u32::try_from(M::SIZE).expect("fixed-size handshake frame should fit in u32"),
+        u32::try_from(M::SIZE).expect("handshake frame should fit in u32"),
     )
     .await?;
     Ok(M::decode(frame)?)
