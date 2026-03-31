@@ -187,9 +187,11 @@ module tests {
     }
 
     // A notarization certificate with an invalid parent (self-referencing view 2 -> 2)
-    // still triggers certification (application-level, parent-unaware) and advances the
-    // view, but does NOT produce a finalize vote because the parent is locally invalid.
-    run invalidParentNotarizationCertificateDoesNotTriggerFinalizeTest = {
+    // still triggers certification and produces a finalize vote. Certification is
+    // application-level and does not check parent validity. construct_finalize
+    // (matching the implementation) only checks broadcast flags, equivocation,
+    // notarization existence, and certification -- not parent validity.
+    run invalidParentNotarizationCertificateStillFinalizesTest = {
         val bad_proposal = {
             payload: "val_b1",
             view: 2,
@@ -207,11 +209,10 @@ module tests {
                     is_notarization_cert(c)
                         and cert_proposal(c) == Some(bad_proposal)
                 )),
-                assert(not(sent_finalize_votes.exists(v =>
+                // Finalize vote IS sent: construct_finalize does not check parent validity.
+                assert(sent_finalize_votes.exists(v =>
                     v.sig == "n3" and v.proposal == bad_proposal
-                ))),
-                // Certification succeeds (application-level check, independent of parent
-                // validity) but finalize is blocked by invalid parent.
+                )),
                 assert(replica_state.get("n3").certified.get(2) == Some("val_b1")),
                 assert(replica_state.get("n3").view == 3),
                 unchanged_all,

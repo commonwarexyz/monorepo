@@ -176,6 +176,53 @@ module replica {
         r.broadcast_notarize.get(r.view)
     }
 
+    // Returns Some(proposal) if a notarize vote should be constructed.
+    pure def construct_notarize(
+        self: ReplicaState,
+        view: ViewNumber,
+        proposal: Proposal,
+        is_verified: bool
+    ): Option[Proposal] = {
+        if (self.broadcast_notarize.get(view) or self.broadcast_nullify.get(view))
+            None
+        else if (not(is_verified))
+            None
+        else
+            Some(proposal)
+    }
+
+    // Returns true if a nullify vote is not blocked by a prior finalize.
+    pure def construct_nullify(
+        self: ReplicaState,
+        view: ViewNumber
+    ): bool = {
+        not(self.broadcast_finalize.get(view))
+    }
+
+    // Returns Some(proposal) if a finalize vote should be constructed.
+    // The proposal_conflicted parameter maps to !has_unequivocated_proposal()
+    // in the implementation. The is_certified parameter represents the result
+    // of application-level certification (asynchronous in the implementation,
+    // atomic here).
+    pure def construct_finalize(
+        self: ReplicaState,
+        view: ViewNumber,
+        proposal: Proposal,
+        proposal_conflicted: bool,
+        is_certified: bool
+    ): Option[Proposal] = {
+        if (self.broadcast_finalize.get(view) or self.broadcast_nullify.get(view))
+            None
+        else if (proposal_conflicted)
+            None
+        // If we haven't certified the proposal, return false.
+        // Note, this does not require verification.
+        else if (not(is_certified))
+            None
+        else
+            Some(proposal)
+    }
+
     pure def is_proposal_notarized_votes(proposal: Proposal, votes: Set[NotarizeVote]): bool = or {
         proposal.view == GENESIS_VIEW and proposal.payload == GENESIS_PAYLOAD,
         votes
@@ -948,45 +995,48 @@ module replica {
         } else if (can_process_as_proposal) {
             // Proposal processing: validate the leader's proposal and vote
             all {
-                if (payload_ok and parent_ok) all {
-                    sent_notarize_votes' = sent_notarize_votes.union(Set({
-                        proposal: proposal,
-                        sig: sig_of(id),
-                    })),
-                    sent_nullify_votes' = sent_nullify_votes,
-                    sent_finalize_votes' = sent_finalize_votes,
-                    store_notarize_votes' = store_notarize_votes.set(id, store_notarize.union(Set(vote, {
-                        proposal: proposal,
-                        sig: sig_of(id),
-                    }))),
-                    store_nullify_votes' = store_nullify_votes,
-                    store_finalize_votes' = store_finalize_votes,
-                    replica_state' = replica_state.set(id, {
-                        ...mark_vote_broadcast(
-                            observe_leader_proposal(
-                                observe_round_proposal(self, proposal, false),
-                                proposal
+                match construct_notarize(self, view, proposal, payload_ok and parent_ok) {
+                    | Some(_) => all {
+                        sent_notarize_votes' = sent_notarize_votes.union(Set({
+                            proposal: proposal,
+                            sig: sig_of(id),
+                        })),
+                        sent_nullify_votes' = sent_nullify_votes,
+                        sent_finalize_votes' = sent_finalize_votes,
+                        store_notarize_votes' = store_notarize_votes.set(id, store_notarize.union(Set(vote, {
+                            proposal: proposal,
+                            sig: sig_of(id),
+                        }))),
+                        store_nullify_votes' = store_nullify_votes,
+                        store_finalize_votes' = store_finalize_votes,
+                        replica_state' = replica_state.set(id, {
+                            ...mark_vote_broadcast(
+                                observe_leader_proposal(
+                                    observe_round_proposal(self, proposal, false),
+                                    proposal
+                                ),
+                                self.view,
+                                NotarizeKind
                             ),
-                            self.view,
-                            NotarizeKind
+                            leader_timeout: self.leader_timeout.set(self.view, None),
+                            ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
+                        }),
+                    }
+                    | None => all {
+                        sent_notarize_votes' = sent_notarize_votes,
+                        sent_nullify_votes' = timer.next_sent_nullify,
+                        sent_finalize_votes' = sent_finalize_votes,
+                        store_notarize_votes' = store_notarize_votes,
+                        store_nullify_votes' = store_nullify_votes.set(id, timer.next_stored_nullify),
+                        store_finalize_votes' = store_finalize_votes,
+                        replica_state' = replica_state.set(
+                            id,
+                            observe_leader_proposal(
+                                observe_round_proposal(timer.next_self, proposal, false),
+                                proposal
+                            )
                         ),
-                        leader_timeout: self.leader_timeout.set(self.view, None),
-                        ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
-                    }),
-                } else all {
-                    sent_notarize_votes' = sent_notarize_votes,
-                    sent_nullify_votes' = timer.next_sent_nullify,
-                    sent_finalize_votes' = sent_finalize_votes,
-                    store_notarize_votes' = store_notarize_votes,
-                    store_nullify_votes' = store_nullify_votes.set(id, timer.next_stored_nullify),
-                    store_finalize_votes' = store_finalize_votes,
-                    replica_state' = replica_state.set(
-                        id,
-                        observe_leader_proposal(
-                            observe_round_proposal(timer.next_self, proposal, false),
-                            proposal
-                        )
-                    ),
+                    }
                 },
 
                 ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
@@ -1280,44 +1330,27 @@ module replica {
                 sent_nullify_votes,
                 store_nullify_votes.get(id)
             )
-            val locally_valid = and {
-                VALID_PAYLOADS.contains(cert_prop.payload),
-                is_some(parent_payload(self, cert_prop.view, cert_prop.parent, store_certificates.get(id))),
-            }
-            val can_send_finalize = and {
+            val is_certified = and {
                 can_certify(id, cert_payload_val),
-                locally_valid,
-                not(proposal_conflicted),
                 self.certified.get(cert_view_num) == None,
-                not(has_sent_finalize(id, cert_view_num)),
-                // NOTE: The protocol informal description (consensus/src/simplex/mod.rs) does not explicitly
-                // state the reverse guard "no finalize after nullify in the same view".
-                // The Rust voter implementation enforces that exclusion, so this model does that too.
-                not(has_sent_nullify(id, cert_view_num)),
             }
+            val finalize_result = construct_finalize(self, cert_view_num, cert_prop, proposal_conflicted, is_certified)
             val can_send_nullify = and {
-                // Do not immediately nullify on parent conflict.
-                // Equivocation blocks finalization (see can_send_finalize),
-                // and the certification timeout handles nullification.
                 not(can_certify(id, cert_payload_val)),
                 self.view == cert_view_num,
+                construct_nullify(self, cert_view_num),
                 // NOTE: Model simplification: suppress nullify retries (single-shot nullify per view).
-                // Real implementation may rebroadcast nullify for liveness.
-                not(has_sent_nullify(id, cert_view_num)),
-                // NOTE: The protocol informal description (consensus/src/simplex/mod.rs) does not explicitly
-                // state the reverse guard "no nullify after finalize in the same view".
-                // The Rust voter implementation enforces that exclusion, so this model does that too.
-                not(has_sent_finalize(id, cert_view_num))
+                not(self.broadcast_nullify.get(cert_view_num)),
             }
 
-            // Certification succeeds but finalize is blocked.
+            // Certification succeeds but finalize is blocked
+            // (equivocation detected or already broadcast finalize/nullify).
             val cert_succeeds_no_finalize = and {
-                can_certify(id, cert_payload_val),
-                self.certified.get(cert_view_num) == None,
-                not(can_send_finalize),
+                is_certified,
+                finalize_result == None,
             }
 
-            if (can_send_finalize)
+            if (is_some(finalize_result))
                 all {
                     sent_notarize_votes' = sent_notarize_votes,
                     sent_nullify_votes' = sent_nullify_votes,
