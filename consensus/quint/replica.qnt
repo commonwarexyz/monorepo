@@ -522,6 +522,14 @@ module replica {
         next_stored_nullify: Set[NullifyVote]
     }
 
+    type NotarizeEffect = {
+        next_self: ReplicaState,
+        next_sent_nullify: Set[NullifyVote],
+        next_sent_finalize: Set[FinalizeVote],
+        next_stored_nullify: Set[NullifyVote],
+        next_stored_finalize: Set[FinalizeVote],
+    }
+
     pure def timer_expired(
         self: ReplicaState,
         id: ReplicaId,
@@ -1292,13 +1300,134 @@ module replica {
         }
     }
 
+    pure def notarize_effect(
+        self: ReplicaState,
+        id: ReplicaId,
+        notarization: NotarizationCert,
+        can_cert: bool,
+        sent_nullify_votes: Set[NullifyVote],
+        sent_finalize_votes: Set[FinalizeVote],
+        stored_nullify: Set[NullifyVote],
+        stored_finalize: Set[FinalizeVote]
+    ): NotarizeEffect = {
+        val cert: Certificate = Notarization(notarization)
+        val cert_view_num = notarization.proposal.view
+        val cert_payload_val = notarization.proposal.payload
+        val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
+        val cert_prop = notarization.proposal
+        val proposal_conflicted = has_leader_proposal_conflict(self, cert_prop)
+        val should_broadcast = not(self.broadcast_notarization.get(cert_view_num))
+        val timer = forced_timeout_expired(
+            self,
+            id,
+            cert_view_num,
+            FailedCertificationReason,
+            sent_nullify_votes,
+            stored_nullify
+        )
+        val is_certified = and {
+            can_cert,
+            self.certified.get(cert_view_num) == None,
+        }
+        val finalize_result = construct_finalize(self, cert_view_num, cert_prop, proposal_conflicted, is_certified)
+        val can_send_nullify = and {
+            not(can_cert),
+            self.view == cert_view_num,
+            construct_nullify(self, cert_view_num),
+            // NOTE: Model simplification: suppress nullify retries (single-shot nullify per view).
+            not(self.broadcast_nullify.get(cert_view_num)),
+        }
+        val observed = observe_certificate(
+            observe_leader_proposal(observe_round_proposal(self, cert_prop, true), cert_prop),
+            cert,
+            should_broadcast
+        )
+
+        if (is_some(finalize_result))
+            {
+                next_self: enter_view({
+                    ...mark_vote_broadcast(observed, cert_view_num, FinalizeKind),
+                    // clear_deadlines: matches Rust round.clear_deadlines()
+                    leader_timeout: self.leader_timeout.set(cert_view_num, None),
+                    certification_timeout: self.certification_timeout.set(cert_view_num, None),
+                    ghost_last_seen_notarization: seen_notarization,
+                    certify: self.certify.set(cert_view_num, Some(true)),
+                    certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
+                    ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(FinalizeKind))
+                }, cert_view_num + 1),
+                next_sent_nullify: sent_nullify_votes,
+                next_sent_finalize: sent_finalize_votes.union(Set({
+                    proposal: cert_prop,
+                    sig: sig_of(id),
+                })),
+                next_stored_nullify: stored_nullify,
+                next_stored_finalize: stored_finalize.union(Set({
+                    proposal: cert_prop,
+                    sig: sig_of(id),
+                })),
+            }
+        else if (is_certified)
+            {
+                // Certification succeeds but finalize is blocked
+                // (equivocation detected or already broadcast finalize/nullify).
+                next_self: enter_view({
+                    ...observed,
+                    // clear_deadlines: matches Rust round.clear_deadlines()
+                    leader_timeout: self.leader_timeout.set(cert_view_num, None),
+                    certification_timeout: self.certification_timeout.set(cert_view_num, None),
+                    ghost_last_seen_notarization: seen_notarization,
+                    certify: self.certify.set(cert_view_num, Some(true)),
+                    certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
+                }, cert_view_num + 1),
+                next_sent_nullify: sent_nullify_votes,
+                next_sent_finalize: sent_finalize_votes,
+                next_stored_nullify: stored_nullify,
+                next_stored_finalize: stored_finalize,
+            }
+        else if (can_send_nullify)
+            {
+                next_self: {
+                    ...observe_certificate(
+                        observe_leader_proposal(
+                            observe_round_proposal(timer.next_self, cert_prop, true),
+                            cert_prop
+                        ),
+                        cert,
+                        should_broadcast
+                    ),
+                    certify: timer.next_self.certify.set(cert_view_num, Some(false)),
+                    ghost_last_seen_notarization: seen_notarization
+                },
+                next_sent_nullify: timer.next_sent_nullify,
+                next_sent_finalize: sent_finalize_votes,
+                next_stored_nullify: timer.next_stored_nullify,
+                next_stored_finalize: stored_finalize,
+            }
+        else
+            {
+                next_self: {
+                    ...observed,
+                    ghost_last_seen_notarization: seen_notarization
+                },
+                next_sent_nullify: sent_nullify_votes,
+                next_sent_finalize: sent_finalize_votes,
+                next_stored_nullify: stored_nullify,
+                next_stored_finalize: stored_finalize,
+            }
+    }
+
     action _add_notarization(id: ReplicaId, notarization: NotarizationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
         val cert: Certificate = Notarization(notarization)
         val should_broadcast_notarization = not(self.broadcast_notarization.get(notarization.proposal.view))
+        val effect = notarize_effect(
+            self, id, notarization,
+            can_certify(id, notarization.proposal.payload),
+            sent_nullify_votes, sent_finalize_votes,
+            store_nullify_votes.get(id), store_finalize_votes.get(id)
+        )
         all {
             notarization.signatures.size() >= Q,
-
             store_certificates' = if (is_new_cert)
                 store_certificates.setBy(id, old => old.union(Set(cert)))
               else
@@ -1307,149 +1436,13 @@ module replica {
                 sent_certificates.union(Set(cert))
               else
                 sent_certificates,
-
-            val cert_view_num = notarization.proposal.view
-            val cert_payload_val = notarization.proposal.payload
-            val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
-            val cert_prop = notarization.proposal
-            val proposal_conflicted = has_leader_proposal_conflict(self, cert_prop)
-            val timer = forced_timeout_expired(
-                self,
-                id,
-                cert_view_num,
-                FailedCertificationReason,
-                sent_nullify_votes,
-                store_nullify_votes.get(id)
-            )
-            val is_certified = and {
-                can_certify(id, cert_payload_val),
-                self.certified.get(cert_view_num) == None,
-            }
-            val finalize_result = construct_finalize(self, cert_view_num, cert_prop, proposal_conflicted, is_certified)
-            val can_send_nullify = and {
-                not(can_certify(id, cert_payload_val)),
-                self.view == cert_view_num,
-                construct_nullify(self, cert_view_num),
-                // NOTE: Model simplification: suppress nullify retries (single-shot nullify per view).
-                not(self.broadcast_nullify.get(cert_view_num)),
-            }
-
-            // Certification succeeds but finalize is blocked
-            // (equivocation detected or already broadcast finalize/nullify).
-            val cert_succeeds_no_finalize = and {
-                is_certified,
-                finalize_result == None,
-            }
-
-            if (is_some(finalize_result))
-                all {
-                    sent_notarize_votes' = sent_notarize_votes,
-                    sent_nullify_votes' = sent_nullify_votes,
-                    sent_finalize_votes' = sent_finalize_votes.union(Set({
-                        proposal: cert_prop,
-                        sig: sig_of(id),
-                    })),
-                    store_nullify_votes' = store_nullify_votes,
-                    store_finalize_votes' = store_finalize_votes.set(
-                        id,
-                        store_finalize_votes.get(id).union(Set({
-                            proposal: cert_prop,
-                            sig: sig_of(id),
-                        }))
-                    ),
-                    replica_state' = replica_state.set(id, {
-                        ...enter_view({
-                            ...mark_vote_broadcast(
-                                observe_certificate(
-                                    observe_leader_proposal(
-                                        observe_round_proposal(self, cert_prop, true),
-                                        cert_prop
-                                    ),
-                                    cert,
-                                    should_broadcast_notarization
-                                ),
-                                cert_view_num,
-                                FinalizeKind
-                            ),
-                            // clear_deadlines: matches Rust round.clear_deadlines()
-                            leader_timeout: self.leader_timeout.set(cert_view_num, None),
-                            certification_timeout: self.certification_timeout.set(cert_view_num, None),
-                            ghost_last_seen_notarization: seen_notarization,
-                            certify: self.certify.set(cert_view_num, Some(true)),
-                            certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
-                            ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(FinalizeKind))
-                        }, cert_view_num + 1)
-                    }),
-                    ghost_committed_blocks' = ghost_committed_blocks,
-                }
-            else if (cert_succeeds_no_finalize)
-                all {
-                    sent_notarize_votes' = sent_notarize_votes,
-                    sent_nullify_votes' = sent_nullify_votes,
-                    sent_finalize_votes' = sent_finalize_votes,
-                    store_nullify_votes' = store_nullify_votes,
-                    store_finalize_votes' = store_finalize_votes,
-                    replica_state' = replica_state.set(id, {
-                        ...enter_view({
-                            ...observe_certificate(
-                                observe_leader_proposal(
-                                    observe_round_proposal(self, cert_prop, true),
-                                    cert_prop
-                                ),
-                                cert,
-                                should_broadcast_notarization
-                            ),
-                            // clear_deadlines: matches Rust round.clear_deadlines()
-                            leader_timeout: self.leader_timeout.set(cert_view_num, None),
-                            certification_timeout: self.certification_timeout.set(cert_view_num, None),
-                            ghost_last_seen_notarization: seen_notarization,
-                            certify: self.certify.set(cert_view_num, Some(true)),
-                            certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
-                        }, cert_view_num + 1)
-                    }),
-                    ghost_committed_blocks' = ghost_committed_blocks,
-                }
-            else if (can_send_nullify)
-                all {
-                    sent_notarize_votes' = sent_notarize_votes,
-                    sent_nullify_votes' = timer.next_sent_nullify,
-                    sent_finalize_votes' = sent_finalize_votes,
-                    store_nullify_votes' = store_nullify_votes.set(id, timer.next_stored_nullify),
-                    store_finalize_votes' = store_finalize_votes,
-                    replica_state' = replica_state.set(id, {
-                        ...observe_certificate(
-                            observe_leader_proposal(
-                                observe_round_proposal(timer.next_self, cert_prop, true),
-                                cert_prop
-                            ),
-                            cert,
-                            should_broadcast_notarization
-                        ),
-                        certify: timer.next_self.certify.set(cert_view_num, Some(false)),
-                        ghost_last_seen_notarization: seen_notarization
-                    }),
-                    ghost_committed_blocks' = ghost_committed_blocks,
-                }
-            else
-                all {
-                    sent_notarize_votes' = sent_notarize_votes,
-                    sent_nullify_votes' = sent_nullify_votes,
-                    sent_finalize_votes' = sent_finalize_votes,
-                    store_nullify_votes' = store_nullify_votes,
-                    store_finalize_votes' = store_finalize_votes,
-                    replica_state' = replica_state.set(id, {
-                        ...observe_certificate(
-                            observe_leader_proposal(
-                                observe_round_proposal(self, cert_prop, true),
-                                cert_prop
-                            ),
-                            cert,
-                            should_broadcast_notarization
-                        ),
-                        ghost_last_seen_notarization: seen_notarization
-                    }),
-                    ghost_committed_blocks' = ghost_committed_blocks,
-                }
+            sent_notarize_votes' = sent_notarize_votes,
+            sent_nullify_votes' = effect.next_sent_nullify,
+            sent_finalize_votes' = effect.next_sent_finalize,
+            store_nullify_votes' = store_nullify_votes.set(id, effect.next_stored_nullify),
+            store_finalize_votes' = store_finalize_votes.set(id, effect.next_stored_finalize),
+            replica_state' = replica_state.set(id, effect.next_self),
+            ghost_committed_blocks' = ghost_committed_blocks,
         }
     }
 
