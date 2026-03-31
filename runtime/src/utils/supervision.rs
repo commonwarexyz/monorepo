@@ -58,10 +58,6 @@ impl TreeInner {
         self.children.push(Arc::downgrade(child));
     }
 
-    const fn note_stale_child(&mut self) {
-        self.stale_children = self.stale_children.saturating_add(1);
-    }
-
     fn register(&mut self, aborter: Aborter) -> Result<(), Aborter> {
         if self.aborted {
             return Err(aborter);
@@ -98,7 +94,7 @@ impl Tree {
                     // `Drop` will no longer see this parent after `take()`, so
                     // account for the stale child before releasing the node.
                     let mut parent_inner = parent.inner.lock();
-                    parent_inner.note_stale_child();
+                    parent_inner.stale_children = parent_inner.stale_children.saturating_add(1);
                     drop(parent_inner);
                     pending.push(parent);
                 }
@@ -178,7 +174,7 @@ impl Drop for Tree {
         if let Some(parent) = self.parent.get_mut().take() {
             {
                 let mut parent_inner = parent.inner.lock();
-                parent_inner.note_stale_child();
+                parent_inner.stale_children = parent_inner.stale_children.saturating_add(1);
             }
 
             // If dropping this node makes its ancestors uniquely owned as well,
