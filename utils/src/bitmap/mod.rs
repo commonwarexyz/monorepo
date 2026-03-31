@@ -967,12 +967,12 @@ impl<const N: usize> Readable<N> for BitMap<N> {
 }
 
 /// Iterator over the indices of set (1) bits in a bitmap.
-pub struct OnesIter<'a, B: ?Sized, const N: usize> {
+pub struct OnesIter<'a, B, const N: usize> {
     bitmap: &'a B,
     pos: u64,
 }
 
-impl<B: Readable<N> + ?Sized, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
+impl<B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
     type Item = u64;
 
     fn next(&mut self) -> Option<u64> {
