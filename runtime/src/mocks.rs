@@ -69,7 +69,7 @@ impl SinkTrait for Sink {
             return Err(Error::Closed);
         }
 
-        let os_send = {
+        let (os_send, data) = {
             let mut channel = self.channel.lock();
 
             // If the receiver is dead, we cannot send any more messages.
@@ -95,14 +95,10 @@ impl SinkTrait for Sink {
                     .len()
                     .min(requested.max(channel.read_buffer_size));
                 let data = channel.buffer.split_to(send_amount).freeze();
-                Some((os_send, data))
+                (os_send, data)
             } else {
-                None
+                return Ok(());
             }
-        };
-
-        let Some((os_send, data)) = os_send else {
-            return Ok(());
         };
 
         // Resolve the waiter.
