@@ -73,26 +73,26 @@ module tests {
                 assert(replica_state.get("n2").view == 2),
                 assert(replica_state.get("n2").broadcast_nullify.get(2) == true),
                 assert(replica_state.get("n2").leader_timeout.get(2) == Some(true)),
-                assert(replica_state.get("n2").advance_timeout.get(2) == Some(false)),
+                assert(replica_state.get("n2").certification_timeout.get(2) == Some(false)),
                 unchanged_all,
             })
             .expect(test_invariants)
     }
 
-    run advanceTimeoutBroadcastsCurrentViewNullifyTest = {
+    run certificationTimeoutBroadcastsCurrentViewNullifyTest = {
         initWithLeaderAndCertify(
             Map(0 -> "n2", 1 -> "n4", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n4"),
             CERTIFY_ALL_TRUE
         )
             .then(set_timeout_state("n2", 2, false, Some(true), Some(false)))
-            .then(on_timeout("n2", AdvanceTimeoutKind))
+            .then(on_timeout("n2", CertificationTimeoutKind))
             .then(all {
                 assert(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == 2)),
                 assert(not(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == FIRST_VIEW))),
                 assert(replica_state.get("n2").view == 2),
                 assert(replica_state.get("n2").broadcast_nullify.get(2) == true),
                 assert(replica_state.get("n2").leader_timeout.get(2) == Some(true)),
-                assert(replica_state.get("n2").advance_timeout.get(2) == Some(true)),
+                assert(replica_state.get("n2").certification_timeout.get(2) == Some(true)),
                 unchanged_all,
             })
             .expect(test_invariants)
@@ -111,7 +111,7 @@ module tests {
                 assert(replica_state.get("n2").broadcast_nullify.get(2) == false),
                 assert(replica_state.get("n2").broadcast_finalize.get(2) == true),
                 assert(replica_state.get("n2").leader_timeout.get(2) == Some(true)),
-                assert(replica_state.get("n2").advance_timeout.get(2) == Some(false)),
+                assert(replica_state.get("n2").certification_timeout.get(2) == Some(false)),
                 unchanged_all,
             })
             .expect(test_invariants)
@@ -139,7 +139,7 @@ module tests {
                 assert(replica_state.get("n2").broadcast_nullification.get(FIRST_VIEW) == true),
                 assert(replica_state.get("n2").view == 3),
                 assert(replica_state.get("n2").leader_timeout.get(FIRST_VIEW) == None),
-                assert(replica_state.get("n2").advance_timeout.get(FIRST_VIEW) == None),
+                assert(replica_state.get("n2").certification_timeout.get(FIRST_VIEW) == None),
                 unchanged_all,
             })
             .expect(test_invariants)
@@ -164,7 +164,7 @@ module tests {
                 // First nullification: broadcast_nullification set and cert broadcast.
                 assert(replica_state.get("n2").broadcast_nullification.get(FIRST_VIEW) == true),
                 assert(replica_state.get("n2").leader_timeout.get(FIRST_VIEW) == None),
-                assert(replica_state.get("n2").advance_timeout.get(FIRST_VIEW) == None),
+                assert(replica_state.get("n2").certification_timeout.get(FIRST_VIEW) == None),
                 assert(replica_state.get("n2").view == 2),
                 assert(sent_certificates.exists(c => is_nullification_cert(c) and cert_view(c) == FIRST_VIEW)),
                 assert(sent_certificates.filter(c => is_nullification_cert(c) and cert_view(c) == FIRST_VIEW).size() == 1),
@@ -473,7 +473,7 @@ module tests {
         view: ViewNumber,
         broadcast_finalize: bool,
         leader_timeout: Option[bool],
-        advance_timeout: Option[bool]
+        certification_timeout: Option[bool]
     ): bool = all {
         sent_proposal' = sent_proposal,
         sent_notarize_votes' = sent_notarize_votes,
@@ -493,7 +493,7 @@ module tests {
             broadcast_nullify: replica_state.get(id).broadcast_nullify.set(view, false),
             broadcast_finalize: replica_state.get(id).broadcast_finalize.set(view, broadcast_finalize),
             leader_timeout: replica_state.get(id).leader_timeout.set(view, leader_timeout),
-            advance_timeout: replica_state.get(id).advance_timeout.set(view, advance_timeout)
+            certification_timeout: replica_state.get(id).certification_timeout.set(view, certification_timeout)
         }),
         certify_policy' = certify_policy,
         lastAction' = "set_timeout_state",

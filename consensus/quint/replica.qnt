@@ -172,10 +172,6 @@ module replica {
         }
     }
 
-    pure def has_notarized(r: ReplicaState): bool = {
-        r.broadcast_notarize.get(r.view)
-    }
-
     // Returns Some(proposal) if a notarize vote should be constructed.
     pure def construct_notarize(
         self: ReplicaState,
@@ -492,7 +488,7 @@ module replica {
                 broadcast_nullification: self.broadcast_nullification,
                 broadcast_finalization: self.broadcast_finalization,
                 leader_timeout: self.leader_timeout,
-                advance_timeout: self.advance_timeout
+                certification_timeout: self.certification_timeout
             }
     }
 
@@ -508,7 +504,7 @@ module replica {
         {
             ...self,
             leader_timeout: self.leader_timeout.set(view, Some(true)),
-            advance_timeout: self.advance_timeout.set(view, Some(true))
+            certification_timeout: self.certification_timeout.set(view, Some(true))
         }
     }
 
@@ -516,7 +512,7 @@ module replica {
         {
             ...self,
             leader_timeout: self.leader_timeout.set(view, None),
-            advance_timeout: self.advance_timeout.set(view, None)
+            certification_timeout: self.certification_timeout.set(view, None)
         }
     }
 
@@ -539,7 +535,7 @@ module replica {
             sig: sig_of(id),
         }
         val leader_expired = expired == LeaderTimeoutKind
-        val advance_expired = expired == AdvanceTimeoutKind
+        val advance_expired = expired == CertificationTimeoutKind
         if (self.view != view) {
             next_self: self,
             next_sent_nullify: sent_nullify,
@@ -548,7 +544,7 @@ module replica {
             next_self: {
                 ...self,
                 leader_timeout: if (leader_expired) self.leader_timeout.set(view, Some(true)) else self.leader_timeout,
-                advance_timeout: if (advance_expired) self.advance_timeout.set(view, Some(true)) else self.advance_timeout
+                certification_timeout: if (advance_expired) self.certification_timeout.set(view, Some(true)) else self.certification_timeout
             },
             next_sent_nullify: sent_nullify,
             next_stored_nullify: stored_nullify
@@ -566,7 +562,7 @@ module replica {
                         NullifyKind
                     ),
                     leader_timeout: if (leader_expired) self.leader_timeout.set(view, Some(true)) else self.leader_timeout,
-                    advance_timeout: if (advance_expired) self.advance_timeout.set(view, Some(true)) else self.advance_timeout,
+                    certification_timeout: if (advance_expired) self.certification_timeout.set(view, Some(true)) else self.certification_timeout,
                     ghost_sent_votes: self.ghost_sent_votes.setBy(view, old => old.append(NullifyKind))
                 },
                 next_sent_nullify: sent_nullify.union(Set(local_nullify)),
@@ -598,7 +594,7 @@ module replica {
                 next_self: remember_timeout_reason({
                     ...self,
                     leader_timeout: self.leader_timeout.set(view, None),
-                    advance_timeout: self.advance_timeout.set(view, None)
+                    certification_timeout: self.certification_timeout.set(view, None)
                 }, view, reason),
                 next_sent_nullify: sent_nullify,
                 next_stored_nullify: stored_nullify
@@ -612,7 +608,7 @@ module replica {
                         NullifyKind
                     ),
                     leader_timeout: self.leader_timeout.set(view, None),
-                    advance_timeout: self.advance_timeout.set(view, None),
+                    certification_timeout: self.certification_timeout.set(view, None),
                     ghost_sent_votes: self.ghost_sent_votes.setBy(view, old => old.append(NullifyKind))
                 },
                 next_sent_nullify: sent_nullify.union(Set(local_nullify)),
@@ -753,7 +749,7 @@ module replica {
                 certified: VIEWS.mapBy(_ => None),
                 propose_sent: false,
                 leader_timeout: VIEWS.mapBy(_ => Some(false)),
-                advance_timeout: VIEWS.mapBy(_ => Some(false)),
+                certification_timeout: VIEWS.mapBy(_ => Some(false)),
                 ghost_sent_votes: VIEWS.mapBy(_ => List())
             }),
             sent_proposal' = Set(),
@@ -812,7 +808,7 @@ module replica {
                     on_timeout(id, LeaderTimeoutKind)
                 },
                 {
-                    on_timeout(id, AdvanceTimeoutKind)
+                    on_timeout(id, CertificationTimeoutKind)
                 },
                 {
                     val notarize_votes = sent_notarize_votes
@@ -970,7 +966,7 @@ module replica {
         val can_process_as_proposal = and {
             is_leader_vote,
             view == self.view,
-            not(has_notarized(self)),
+            not(self.broadcast_notarize.get(self.view)),
             not(self.broadcast_nullify.get(view)),
         }
 
@@ -1382,7 +1378,7 @@ module replica {
                             ),
                             // clear_deadlines: matches Rust round.clear_deadlines()
                             leader_timeout: self.leader_timeout.set(cert_view_num, None),
-                            advance_timeout: self.advance_timeout.set(cert_view_num, None),
+                            certification_timeout: self.certification_timeout.set(cert_view_num, None),
                             ghost_last_seen_notarization: seen_notarization,
                             certify: self.certify.set(cert_view_num, Some(true)),
                             certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
@@ -1410,7 +1406,7 @@ module replica {
                             ),
                             // clear_deadlines: matches Rust round.clear_deadlines()
                             leader_timeout: self.leader_timeout.set(cert_view_num, None),
-                            advance_timeout: self.advance_timeout.set(cert_view_num, None),
+                            certification_timeout: self.certification_timeout.set(cert_view_num, None),
                             ghost_last_seen_notarization: seen_notarization,
                             certify: self.certify.set(cert_view_num, Some(true)),
                             certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
@@ -1559,9 +1555,9 @@ module replica {
             timeout_pending(self.leader_timeout, self.view)
         }
         val advance_mode = and {
-            expired == AdvanceTimeoutKind,
+            expired == CertificationTimeoutKind,
             timeout_fired(self.leader_timeout, self.view),
-            timeout_pending(self.advance_timeout, self.view)
+            timeout_pending(self.certification_timeout, self.view)
         }
         val timer = timer_expired(
             self,

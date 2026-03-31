@@ -36,7 +36,7 @@ module types {
     type TimeoutKind = str
 
     pure val LeaderTimeoutKind = "LEADER_TIMEOUT_KIND"
-    pure val AdvanceTimeoutKind = "ADVANCE_TIMEOUT_KIND"
+    pure val CertificationTimeoutKind = "CERTIFICATION_TIMEOUT_KIND"
 
     type TimeoutReason = str
 
@@ -185,7 +185,7 @@ module types {
         leader_timeout: ViewNumber -> Option[bool],
         // advance timeout state per view:
         // Some(false) = pending, Some(true) = expired, None = cancelled
-        advance_timeout: ViewNumber -> Option[bool],
+        certification_timeout: ViewNumber -> Option[bool],
         // not in the original spec, the latest view that this replica has seen notarization votes for
         ghost_last_seen_notarization: ViewNumber,
         // sequence if the sent votes

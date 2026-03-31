@@ -134,7 +134,7 @@ module tests {
                 assert(sent_nullify_votes.exists(v => v.sig == "n1" and v.view == FIRST_VIEW)),
                 assert(replica_state.get("n1").broadcast_nullify.get(FIRST_VIEW) == true),
                 assert(replica_state.get("n1").leader_timeout.get(FIRST_VIEW) == Some(true)),
-                assert(replica_state.get("n1").advance_timeout.get(FIRST_VIEW) == Some(true)),
+                assert(replica_state.get("n1").certification_timeout.get(FIRST_VIEW) == Some(true)),
                 assert(replica_state.get("n1").view == FIRST_VIEW),
                 unchanged_all,
             })
@@ -152,7 +152,7 @@ module tests {
                 assert(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == FIRST_VIEW)),
                 assert(replica_state.get("n0").broadcast_nullify.get(FIRST_VIEW) == true),
                 assert(replica_state.get("n0").leader_timeout.get(FIRST_VIEW) == None),
-                assert(replica_state.get("n0").advance_timeout.get(FIRST_VIEW) == None),
+                assert(replica_state.get("n0").certification_timeout.get(FIRST_VIEW) == None),
                 assert(replica_state.get("n0").propose_sent == false),
                 assert(replica_state.get("n0").view == FIRST_VIEW),
                 assert(not(sent_proposal.exists(((s, p)) => s == "n0" and p.view == FIRST_VIEW))),
@@ -255,7 +255,7 @@ module tests {
                 assert(not(sent_notarize_votes.exists(v => v.sig == "n1" and v.proposal.view == FIRST_VIEW))),
                 assert(replica_state.get("n1").broadcast_nullify.get(FIRST_VIEW) == true),
                 assert(replica_state.get("n1").leader_timeout.get(FIRST_VIEW) == None),
-                assert(replica_state.get("n1").advance_timeout.get(FIRST_VIEW) == None),
+                assert(replica_state.get("n1").certification_timeout.get(FIRST_VIEW) == None),
                 assert(replica_state.get("n1").view == FIRST_VIEW),
                 unchanged_all,
             })
