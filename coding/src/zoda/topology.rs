@@ -98,13 +98,23 @@ impl Topology {
         // then this configuration is valid, using `R` as the necessary number
         // of samples.
         //
-        // Within each encoded_rows plateau (a fixed power-of-two value), increasing
-        // cols reduces data_rows and required_samples, so the validity condition
-        // improves as cols increases within a plateau. Valid column counts therefore
-        // form a contiguous suffix within each plateau, and the globally best (largest)
-        // valid col is the rightmost valid col across all plateaus.
-        // A binary search over [2, data_els] finds this rightmost valid col,
-        // reducing BigRational log2 calls from O(data_els) to O(log(data_els)).
+        // encoded_rows = next_power_of_two((n+k)*samples) takes only O(log(data_els))
+        // distinct values as cols varies. Each distinct value defines a "band" of cols.
+        // Within a band, encoded_rows is fixed and required_samples decreases as cols
+        // increases, so the validity condition is non-decreasing within a band (valid
+        // configs form a contiguous suffix). This means the best col in a band is always
+        // its right endpoint (band_hi).
+        //
+        // Across band boundaries, encoded_rows drops sharply, so the condition can go
+        // valid -> invalid -> valid as cols increases. A binary search would incorrectly
+        // discard valid cols to the right of an invalid gap.
+        //
+        // Instead, we enumerate the O(log(data_els)) bands and check each band's right
+        // endpoint. For band P, the right endpoint is the largest cols where
+        // (n+k)*samples > P/2, i.e., band_hi = floor((data_els-1)/(n*(s_min-1)))
+        // where s_min = P/(2*(n+k))+1. If encoded_rows(band_hi) != P, the band is
+        // empty (samples skips that value) and we skip it. This gives O(log(data_els))
+        // BigRational calls instead of O(data_els).
         //
         // It's possible that even cols=1 is not good. To correct for that, we
         // need to add extra checksum columns to guarantee security.
@@ -119,24 +129,39 @@ impl Topology {
             // security requirement via column_samples instead.
             Self::with_cols(corrected_data_bytes, n, k, 1)
         } else {
-            // At least cols=2 is valid. Binary search for the largest valid cols
-            // in [2, data_els].
-            let mut lo = 2usize;
-            let mut hi = data_els;
-            while lo < hi {
-                let mid = lo + (hi - lo).div_ceil(2);
-                if is_valid(mid) {
-                    lo = mid;
+            // Enumerate bands from smallest encoded_rows (largest cols) to largest.
+            // band_hi is non-increasing as p grows, so the first valid band_hi
+            // found is the globally largest valid col.
+            let min_er = Self::with_cols(corrected_data_bytes, n, k, data_els).encoded_rows;
+            let max_er = Self::with_cols(corrected_data_bytes, n, k, 2).encoded_rows;
+            let mut result: Option<Self> = None;
+            let mut p = min_er;
+            loop {
+                let s_min = p / (2 * (n + k)) + 1;
+                let band_hi = if s_min <= 1 {
+                    data_els
                 } else {
-                    hi = mid - 1;
+                    ((data_els - 1) / (n * (s_min - 1))).max(2)
+                };
+                let t = Self::with_cols(corrected_data_bytes, n, k, band_hi);
+                // If t.encoded_rows != p, the band is empty (samples skips s_min).
+                if t.encoded_rows == p {
+                    let req = t.required_samples();
+                    if req.saturating_mul(n + k) <= t.encoded_rows {
+                        result = Some(Self {
+                            samples: req.max(t.samples),
+                            ..t
+                        });
+                        break;
+                    }
                 }
+                if p >= max_er {
+                    break;
+                }
+                p *= 2;
             }
-            let attempt = Self::with_cols(corrected_data_bytes, n, k, lo);
-            let required_samples = attempt.required_samples();
-            Self {
-                samples: required_samples.max(attempt.samples),
-                ..attempt
-            }
+            // is_valid(2) was true, so at least one band has a valid col.
+            result.expect("is_valid(2) ensures at least one valid multi-column config")
         };
         out.correct_column_samples();
         out.data_bytes = data_bytes;
