@@ -43,10 +43,7 @@ impl<F: merkle::Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Trans
         known_inactivity_floor: Option<Location<F>>,
         callback: impl FnMut(bool, Option<Location<F>>),
     ) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
-            Index::new(ctx, t)
-        })
-        .await
+        crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback).await
     }
 }
 
@@ -117,10 +114,7 @@ pub mod partitioned {
             known_inactivity_floor: Option<Location<F>>,
             callback: impl FnMut(bool, Option<Location<F>>),
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback, |ctx, t| {
-                Index::new(ctx, t)
-            })
-            .await
+            crate::qmdb::any::init(context, cfg, known_inactivity_floor, callback).await
         }
     }
 
@@ -188,7 +182,7 @@ pub(crate) mod test {
         context: deterministic::Context,
     ) -> AnyTestGeneric<F> {
         let cfg = fixed_db_config::<TwoCap>("partition", &context);
-        crate::qmdb::any::init(context, cfg, None, |_, _| {}, Index::new)
+        crate::qmdb::any::init(context, cfg, None, |_, _| {})
             .await
             .unwrap()
     }

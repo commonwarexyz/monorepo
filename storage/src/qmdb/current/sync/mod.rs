@@ -25,7 +25,7 @@
 //! above the grafting height.
 
 use crate::{
-    index::{ordered, unordered},
+    index::Factory as IndexFactory,
     journal::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
@@ -86,11 +86,11 @@ impl<T: Translator, J: Clone> Config for super::Config<T, J> {
 /// * Builds the grafted MMR from the bitmap and ops MMR.
 /// * Computes and caches the canonical root.
 #[allow(clippy::too_many_arguments)]
-async fn build_db<E, U, I, H, J, const N: usize>(
+async fn build_db<E, U, I, H, J, T, const N: usize>(
     context: E,
     mmr_config: mmr::journaled::Config,
     log: J,
-    index: I,
+    translator: T,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: Range<Location>,
     apply_batch_size: usize,
@@ -100,8 +100,9 @@ async fn build_db<E, U, I, H, J, const N: usize>(
 where
     E: Context,
     U: Update + Send + Sync + 'static,
-    I: crate::index::Unordered<Value = Location>,
+    I: IndexFactory<T, Value = Location>,
     H: Hasher,
+    T: Translator,
     J: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = crate::journal::Error>,
     Operation<mmr::Family, U>: Codec + Committable + CodecShared,
 {
@@ -117,6 +118,7 @@ where
         &hasher,
     )
     .await?;
+    let index = I::new(context.with_label("index"), translator);
     let log = authenticated::Journal::<mmr::Family, _, _, _>::from_components(
         mmr,
         log,
@@ -227,199 +229,89 @@ where
 
 // --- Database trait implementations ---
 
-impl<E, K, V, H, T, const N: usize> Database for CurrentUnorderedFixedDb<E, K, V, H, T, N>
-where
-    E: Context,
-    K: Array,
-    V: FixedValue + 'static,
-    H: Hasher,
-    T: Translator,
-{
-    type Context = E;
-    type Op = UnorderedFixedOp<mmr::Family, K, V>;
-    type Journal = fixed::Journal<E, Self::Op>;
-    type Hasher = H;
-    type Config = FixedConfig<T>;
-    type Digest = H::Digest;
+macro_rules! impl_current_sync_database {
+    ($db:ident, $op:ident, $update:ident,
+     $journal:ty, $config:ty,
+     $key_bound:path, $value_bound:ident
+     $(; $($where_extra:tt)+)?) => {
+        impl<E, K, V, H, T, const N: usize> Database for $db<E, K, V, H, T, N>
+        where
+            E: Context,
+            K: $key_bound,
+            V: $value_bound + 'static,
+            H: Hasher,
+            T: Translator,
+            $($($where_extra)+)?
+        {
+            type Context = E;
+            type Op = $op<mmr::Family, K, V>;
+            type Journal = $journal;
+            type Hasher = H;
+            type Config = $config;
+            type Digest = H::Digest;
 
-    async fn from_sync_result(
-        context: Self::Context,
-        config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<Location>,
-        apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error<mmr::Family>> {
-        let mmr_config = config.mmr_config.clone();
-        let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.mmr_config.thread_pool.clone();
-        let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
-        build_db::<_, UnorderedFixedUpdate<K, V>, _, H, _, N>(
-            context,
-            mmr_config,
-            log,
-            index,
-            pinned_nodes,
-            range,
-            apply_batch_size,
-            metadata_partition,
-            thread_pool,
-        )
-        .await
-    }
+            async fn from_sync_result(
+                context: Self::Context,
+                config: Self::Config,
+                log: Self::Journal,
+                pinned_nodes: Option<Vec<Self::Digest>>,
+                range: Range<Location>,
+                apply_batch_size: usize,
+            ) -> Result<Self, qmdb::Error<mmr::Family>> {
+                let mmr_config = config.mmr_config.clone();
+                let metadata_partition = config.grafted_mmr_metadata_partition.clone();
+                let thread_pool = config.mmr_config.thread_pool.clone();
+                let translator = config.translator.clone();
+                build_db::<_, $update<K, V>, _, H, _, T, N>(
+                    context,
+                    mmr_config,
+                    log,
+                    translator,
+                    pinned_nodes,
+                    range,
+                    apply_batch_size,
+                    metadata_partition,
+                    thread_pool,
+                )
+                .await
+            }
 
-    /// Returns the ops root (not the canonical root), since the sync engine verifies
-    /// batches against the ops MMR.
-    fn root(&self) -> Self::Digest {
-        self.any.log.root()
-    }
+            /// Returns the ops root (not the canonical root), since the sync engine verifies
+            /// batches against the ops MMR.
+            fn root(&self) -> Self::Digest {
+                self.any.log.root()
+            }
+        }
+    };
 }
 
-impl<E, K, V, H, T, const N: usize> Database for CurrentUnorderedVariableDb<E, K, V, H, T, N>
-where
-    E: Context,
-    K: Key,
-    V: VariableValue + 'static,
-    H: Hasher,
-    T: Translator,
-    UnorderedVariableOp<mmr::Family, K, V>: CodecShared,
-{
-    type Context = E;
-    type Op = UnorderedVariableOp<mmr::Family, K, V>;
-    type Journal = variable::Journal<E, Self::Op>;
-    type Hasher = H;
-    type Config = VariableConfig<T, <UnorderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>;
-    type Digest = H::Digest;
+impl_current_sync_database!(
+    CurrentUnorderedFixedDb, UnorderedFixedOp, UnorderedFixedUpdate,
+    fixed::Journal<E, Self::Op>, FixedConfig<T>,
+    Array, FixedValue
+);
 
-    async fn from_sync_result(
-        context: Self::Context,
-        config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<Location>,
-        apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error<mmr::Family>> {
-        let mmr_config = config.mmr_config.clone();
-        let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.mmr_config.thread_pool.clone();
-        let index = unordered::Index::new(context.with_label("index"), config.translator.clone());
-        build_db::<_, UnorderedVariableUpdate<K, V>, _, H, _, N>(
-            context,
-            mmr_config,
-            log,
-            index,
-            pinned_nodes,
-            range,
-            apply_batch_size,
-            metadata_partition,
-            thread_pool,
-        )
-        .await
-    }
+impl_current_sync_database!(
+    CurrentUnorderedVariableDb, UnorderedVariableOp, UnorderedVariableUpdate,
+    variable::Journal<E, Self::Op>,
+    VariableConfig<T, <UnorderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>,
+    Key, VariableValue;
+    UnorderedVariableOp<mmr::Family, K, V>: CodecShared
+);
 
-    /// Returns the ops root (not the canonical root), since the sync engine verifies
-    /// batches against the ops MMR.
-    fn root(&self) -> Self::Digest {
-        self.any.log.root()
-    }
-}
+impl_current_sync_database!(
+    CurrentOrderedFixedDb, OrderedFixedOp, OrderedFixedUpdate,
+    fixed::Journal<E, Self::Op>, FixedConfig<T>,
+    Array, FixedValue
+);
 
-impl<E, K, V, H, T, const N: usize> Database for CurrentOrderedFixedDb<E, K, V, H, T, N>
-where
-    E: Context,
-    K: Array,
-    V: FixedValue + 'static,
-    H: Hasher,
-    T: Translator,
-{
-    type Context = E;
-    type Op = OrderedFixedOp<mmr::Family, K, V>;
-    type Journal = fixed::Journal<E, Self::Op>;
-    type Hasher = H;
-    type Config = FixedConfig<T>;
-    type Digest = H::Digest;
-
-    async fn from_sync_result(
-        context: Self::Context,
-        config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<Location>,
-        apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error<mmr::Family>> {
-        let mmr_config = config.mmr_config.clone();
-        let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.mmr_config.thread_pool.clone();
-        let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
-        build_db::<_, OrderedFixedUpdate<K, V>, _, H, _, N>(
-            context,
-            mmr_config,
-            log,
-            index,
-            pinned_nodes,
-            range,
-            apply_batch_size,
-            metadata_partition,
-            thread_pool,
-        )
-        .await
-    }
-
-    /// Returns the ops root (not the canonical root), since the sync engine verifies
-    /// batches against the ops MMR.
-    fn root(&self) -> Self::Digest {
-        self.any.log.root()
-    }
-}
-
-impl<E, K, V, H, T, const N: usize> Database for CurrentOrderedVariableDb<E, K, V, H, T, N>
-where
-    E: Context,
-    K: Key,
-    V: VariableValue + 'static,
-    H: Hasher,
-    T: Translator,
-    OrderedVariableOp<mmr::Family, K, V>: CodecShared,
-{
-    type Context = E;
-    type Op = OrderedVariableOp<mmr::Family, K, V>;
-    type Journal = variable::Journal<E, Self::Op>;
-    type Hasher = H;
-    type Config = VariableConfig<T, <OrderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>;
-    type Digest = H::Digest;
-
-    async fn from_sync_result(
-        context: Self::Context,
-        config: Self::Config,
-        log: Self::Journal,
-        pinned_nodes: Option<Vec<Self::Digest>>,
-        range: Range<Location>,
-        apply_batch_size: usize,
-    ) -> Result<Self, qmdb::Error<mmr::Family>> {
-        let mmr_config = config.mmr_config.clone();
-        let metadata_partition = config.grafted_mmr_metadata_partition.clone();
-        let thread_pool = config.mmr_config.thread_pool.clone();
-        let index = ordered::Index::new(context.with_label("index"), config.translator.clone());
-        build_db::<_, OrderedVariableUpdate<K, V>, _, H, _, N>(
-            context,
-            mmr_config,
-            log,
-            index,
-            pinned_nodes,
-            range,
-            apply_batch_size,
-            metadata_partition,
-            thread_pool,
-        )
-        .await
-    }
-
-    /// Returns the ops root (not the canonical root), since the sync engine verifies
-    /// batches against the ops MMR.
-    fn root(&self) -> Self::Digest {
-        self.any.log.root()
-    }
-}
+impl_current_sync_database!(
+    CurrentOrderedVariableDb, OrderedVariableOp, OrderedVariableUpdate,
+    variable::Journal<E, Self::Op>,
+    VariableConfig<T, <OrderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>,
+    Key, VariableValue;
+    OrderedVariableOp<mmr::Family, K, V>: CodecShared
+);
 
 // --- Resolver implementations ---
 //

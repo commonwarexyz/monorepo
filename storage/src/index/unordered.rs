@@ -120,6 +120,12 @@ impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
     }
 }
 
+impl<T: Translator, V: Eq + Send + Sync> super::Factory<T> for Index<T, V> {
+    fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
+        Self::new(ctx, translator)
+    }
+}
+
 impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
     type Value = V;
     type Cursor<'a>

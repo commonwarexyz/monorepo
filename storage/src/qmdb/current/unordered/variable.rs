@@ -45,7 +45,7 @@ where
         context: E,
         config: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        crate::qmdb::current::init(context, config, |ctx, t| Index::new(ctx, t)).await
+        crate::qmdb::current::init(context, config).await
     }
 }
 
@@ -107,7 +107,7 @@ pub mod partitioned {
             context: E,
             config: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
         ) -> Result<Self, Error> {
-            crate::qmdb::current::init(context, config, |ctx, t| Index::new(ctx, t)).await
+            crate::qmdb::current::init(context, config).await
         }
     }
 }
