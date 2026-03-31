@@ -56,7 +56,7 @@
 //! - **0-RTT**: The protocol does not support 0-RTT handshakes (resumed sessions).
 
 use crate::utils::codec::{append_frame, framed_len, recv_frame, send_frame};
-use commonware_codec::{DecodeExt, Encode as _, Error as CodecError};
+use commonware_codec::{DecodeExt, Encode as _, Error as CodecError, FixedSize};
 use commonware_cryptography::{
     handshake::{
         self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
@@ -137,6 +137,9 @@ pub struct Config<S> {
     pub namespace: Vec<u8>,
 
     /// Maximum message size (in bytes). Prevents memory exhaustion DoS attacks.
+    ///
+    /// Fixed-size handshake frames use their protocol-defined sizes instead of
+    /// inheriting this limit.
     pub max_message_size: u32,
 
     /// Maximum time drift allowed for future timestamps. Handles clock skew.
@@ -161,6 +164,21 @@ impl<S> Config<S> {
             ..(current_time_ms.saturating_add(duration_to_u64(self.synchrony_bound)));
         (current_time_ms, ok_timestamps)
     }
+}
+
+// Handshake frames are fixed-size protocol messages, so we cap receives to
+// their exact encoded length instead of the application message limit.
+async fn recv_handshake_frame<M, T>(stream: &mut T) -> Result<M, Error>
+where
+    M: DecodeExt<()> + FixedSize,
+    T: Stream,
+{
+    let frame = recv_frame(
+        stream,
+        u32::try_from(M::SIZE).expect("fixed-size handshake frame should fit in u32"),
+    )
+    .await?;
+    Ok(M::decode(frame)?)
 }
 
 /// Establishes an authenticated connection to a peer as the dialer.
@@ -195,8 +213,7 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
         );
         send_frame(&mut sink, syn.encode(), config.max_message_size).await?;
 
-        let syn_ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-        let syn_ack = SynAck::<S::Signature>::decode(syn_ack_bytes)?;
+        let syn_ack = recv_handshake_frame::<SynAck<S::Signature>, _>(&mut stream).await?;
 
         let (ack, send, recv) = dial_end(state, syn_ack)?;
         send_frame(&mut sink, ack.encode(), config.max_message_size).await?;
@@ -242,14 +259,12 @@ pub async fn listen<
     let pool = ctx.network_buffer_pool().clone();
     let timeout = ctx.sleep(config.handshake_timeout);
     let inner_routine = async move {
-        let peer_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-        let peer = S::PublicKey::decode(peer_bytes)?;
+        let peer = recv_handshake_frame::<S::PublicKey, _>(&mut stream).await?;
         if !bouncer(peer.clone()).await {
             return Err(Error::PeerRejected(peer.encode().to_vec()));
         }
 
-        let msg1_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-        let msg1 = Syn::<S::Signature>::decode(msg1_bytes)?;
+        let msg1 = recv_handshake_frame::<Syn<S::Signature>, _>(&mut stream).await?;
 
         let (current_time, ok_timestamps) = config.time_information(&ctx);
         let (state, syn_ack) = listen_start(
@@ -265,8 +280,7 @@ pub async fn listen<
         )?;
         send_frame(&mut sink, syn_ack.encode(), config.max_message_size).await?;
 
-        let ack_bytes = recv_frame(&mut stream, config.max_message_size).await?;
-        let ack = Ack::decode(ack_bytes)?;
+        let ack = recv_handshake_frame::<Ack, _>(&mut stream).await?;
 
         let (send, recv) = listen_end(state, ack)?;
 
@@ -504,6 +518,7 @@ impl<I: Stream> Receiver<I> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use commonware_codec::varint::UInt;
     use commonware_cryptography::{ed25519::PrivateKey, Signer};
     use commonware_runtime::{
         deterministic, mocks, BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _,
@@ -530,6 +545,10 @@ mod test {
             max_handshake_age: Duration::from_secs(1),
             handshake_timeout: Duration::from_secs(1),
         }
+    }
+
+    fn oversized_handshake_prefix(size: u32) -> IoBuf {
+        IoBuf::from(UInt(size + 1).encode())
     }
 
     struct CountingSink<S> {
@@ -872,5 +891,77 @@ mod test {
             assert_eq!(listener_receiver.recv().await?.coalesce(), recovered);
             Ok(())
         })
+    }
+
+    #[test]
+    fn test_listen_rejects_oversized_fixed_size_peer_key_frame() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let dialer_crypto = PrivateKey::from_seed(42);
+            let listener_crypto = PrivateKey::from_seed(24);
+
+            let (mut dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, _dialer_stream) = mocks::Channel::init();
+
+            let mut listener_config = transport_config(listener_crypto);
+            listener_config.max_message_size = 1024 * 1024;
+
+            dialer_sink
+                .send(oversized_handshake_prefix(
+                    u32::try_from(dialer_crypto.public_key().encode().len())
+                        .expect("public key length should fit in u32"),
+                ))
+                .await
+                .unwrap();
+
+            let result = listen(
+                context,
+                |_| async { true },
+                listener_config,
+                listener_stream,
+                listener_sink,
+            )
+            .await;
+
+            assert!(matches!(result, Err(Error::RecvTooLarge(n)) if n == dialer_crypto.public_key().encode().len() + 1));
+        });
+    }
+
+    #[test]
+    fn test_dial_rejects_oversized_fixed_size_syn_ack_frame() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let dialer_crypto = PrivateKey::from_seed(42);
+            let listener_crypto = PrivateKey::from_seed(24);
+
+            let (dialer_sink, _listener_stream) = mocks::Channel::init();
+            let (mut listener_sink, dialer_stream) = mocks::Channel::init();
+
+            let mut dialer_config = transport_config(dialer_crypto);
+            dialer_config.max_message_size = 1024 * 1024;
+
+            listener_sink
+                .send(oversized_handshake_prefix(
+                    u32::try_from(SynAck::<<PrivateKey as Signer>::Signature>::SIZE)
+                        .expect("syn_ack size should fit in u32"),
+                ))
+                .await
+                .unwrap();
+
+            let result = dial(
+                context,
+                dialer_config,
+                listener_crypto.public_key(),
+                dialer_stream,
+                dialer_sink,
+            )
+            .await;
+
+            assert!(matches!(
+                result,
+                Err(Error::RecvTooLarge(n))
+                    if n == SynAck::<<PrivateKey as Signer>::Signature>::SIZE + 1
+            ));
+        });
     }
 }
