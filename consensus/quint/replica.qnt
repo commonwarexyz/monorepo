@@ -1253,16 +1253,19 @@ module replica {
     action _add_notarization(id: ReplicaId, notarization: NotarizationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
         val cert: Certificate = Notarization(notarization)
+        val should_broadcast_notarization = not(self.broadcast_notarization.get(notarization.proposal.view))
         all {
             notarization.signatures.size() >= Q,
 
             if (is_new_cert) all {
                 store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
-                sent_certificates' = sent_certificates.union(Set(cert)),
             } else all {
                 store_certificates' = store_certificates,
-                sent_certificates' = sent_certificates,
             },
+            if (should_broadcast_notarization)
+                sent_certificates' = sent_certificates.union(Set(cert))
+            else
+                sent_certificates' = sent_certificates,
 
             val cert_view_num = notarization.proposal.view
             val cert_payload_val = notarization.proposal.payload
@@ -1339,7 +1342,7 @@ module replica {
                                         cert_prop
                                     ),
                                     cert,
-                                    is_new_cert
+                                    should_broadcast_notarization
                                 ),
                                 cert_view_num,
                                 FinalizeKind
@@ -1368,7 +1371,7 @@ module replica {
                                     cert_prop
                                 ),
                                 cert,
-                                is_new_cert
+                                should_broadcast_notarization
                             ),
                             advance_timeout: if (self.view == cert_view_num) self.advance_timeout.set(cert_view_num, None) else self.advance_timeout,
                             ghost_last_seen_notarization: seen_notarization,
@@ -1392,7 +1395,7 @@ module replica {
                                 cert_prop
                             ),
                             cert,
-                            is_new_cert
+                            should_broadcast_notarization
                         ),
                         certify: timer.next_self.certify.set(cert_view_num, Some(false)),
                         ghost_last_seen_notarization: seen_notarization
@@ -1413,7 +1416,7 @@ module replica {
                                 cert_prop
                             ),
                             cert,
-                            is_new_cert
+                            should_broadcast_notarization
                         ),
                         ghost_last_seen_notarization: seen_notarization
                     }),
@@ -1461,16 +1464,19 @@ module replica {
     action _add_finalization(id: ReplicaId, finalization: FinalizationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
         val cert: Certificate = Finalization(finalization)
+        val should_broadcast_finalization = not(self.broadcast_finalization.get(finalization.proposal.view))
         all {
             finalization.signatures.size() >= Q,
 
             if (is_new_cert) all {
                 store_certificates' = store_certificates.setBy(id, old => old.union(Set(cert))),
-                sent_certificates' = sent_certificates.union(Set(cert)),
             } else all {
                 store_certificates' = store_certificates,
-                sent_certificates' = sent_certificates,
             },
+            if (should_broadcast_finalization)
+                sent_certificates' = sent_certificates.union(Set(cert))
+            else
+                sent_certificates' = sent_certificates,
 
             val cert_view_num = finalization.proposal.view
             val cert_payload_val = finalization.proposal.payload
@@ -1498,7 +1504,7 @@ module replica {
                                 cert_prop
                             ),
                             cert,
-                            is_new_cert
+                            should_broadcast_finalization
                         ),
                         last_finalized: if (newer) cert_view_num else self.last_finalized,
                         ghost_last_seen_notarization: seen_notarization

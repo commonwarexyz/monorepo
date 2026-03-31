@@ -161,11 +161,26 @@ module tests {
                     is_nullification_cert(c) and cert_view(c) == FIRST_VIEW
                 )),
                 assert(option_has(replica_state.get("n2").nullification.get(FIRST_VIEW), n => n.view == FIRST_VIEW)),
+                // First nullification: broadcast_nullification set and cert broadcast.
                 assert(replica_state.get("n2").broadcast_nullification.get(FIRST_VIEW) == true),
                 assert(replica_state.get("n2").leader_timeout.get(FIRST_VIEW) == None),
                 assert(replica_state.get("n2").advance_timeout.get(FIRST_VIEW) == None),
                 assert(replica_state.get("n2").view == 2),
                 assert(sent_certificates.exists(c => is_nullification_cert(c) and cert_view(c) == FIRST_VIEW)),
+                assert(sent_certificates.filter(c => is_nullification_cert(c) and cert_view(c) == FIRST_VIEW).size() == 1),
+                unchanged_all,
+            })
+            // A 4th nullify vote arrives; on_nullify re-creates a cert but does not re-broadcast.
+            .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n4" }))
+            .then(on_nullify("n2", FIRST_VIEW, Set({ view: FIRST_VIEW, sig: "n4" })))
+            .then(all {
+                assert(replica_state.get("n2").broadcast_nullification.get(FIRST_VIEW) == true),
+                // No second nullification cert was broadcast.
+                assert(sent_certificates.filter(c => is_nullification_cert(c) and cert_view(c) == FIRST_VIEW).size() == 1),
+                // Store still has only one nullification cert for this view.
+                assert(store_certificates.get("n2").filter(c =>
+                    is_nullification_cert(c) and cert_view(c) == FIRST_VIEW
+                ).size() == 1),
                 unchanged_all,
             })
             .expect(test_invariants)
@@ -222,23 +237,30 @@ module tests {
             .then(replica_receives_notarize_vote("n1", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(replica_receives_notarize_vote("n2", "val_b1", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(on_certificate("n3", cert_first))
-            .then(send_notarize_vote({ proposal: proposal, sig: "n4" }))
-            .then(on_certificate("n3", cert_later))
             .then(all {
-                assert(option_has(replica_state.get("n3").notarization.get(FIRST_VIEW), n =>
-                    n.signatures == Set("n0", "n1", "n2")
-                )),
-                unchanged_all,
-            })
-            .then(all {
-                assert(store_certificates.get("n3").exists(c =>
+                // First notarization: broadcast_notarization is set and cert is broadcast.
+                assert(replica_state.get("n3").broadcast_notarization.get(FIRST_VIEW) == true),
+                assert(sent_certificates.exists(c =>
                     is_notarization_cert(c)
                         and cert_view(c) == FIRST_VIEW
                         and cert_signatures(c) == Set("n0", "n1", "n2")
                 )),
                 unchanged_all,
             })
+            .then(send_notarize_vote({ proposal: proposal, sig: "n4" }))
+            .then(on_certificate("n3", cert_later))
             .then(all {
+                // Second notarization (same proposal, different sigs): not broadcast,
+                // broadcast_notarization unchanged.
+                assert(replica_state.get("n3").broadcast_notarization.get(FIRST_VIEW) == true),
+                assert(not(sent_certificates.exists(c =>
+                    is_notarization_cert(c)
+                        and cert_view(c) == FIRST_VIEW
+                        and cert_signatures(c) == Set("n0", "n1", "n2", "n4")
+                ))),
+                assert(option_has(replica_state.get("n3").notarization.get(FIRST_VIEW), n =>
+                    n.signatures == Set("n0", "n1", "n2")
+                )),
                 assert(store_certificates.get("n3").filter(c =>
                     is_notarization_cert(c) and cert_view(c) == FIRST_VIEW
                 ).size() == 1),
@@ -298,18 +320,32 @@ module tests {
                 { proposal: proposal, sig: "n0" },
                 { proposal: proposal, sig: "n1" }
             )))
-            .then(send_finalize_vote({ proposal: proposal, sig: "n4" }))
-            .then(on_finalize("n3", Set(
-                { proposal: proposal, sig: "n4" }
-            )))
             .then(all {
+                // First finalization: broadcast_finalization set and cert broadcast.
+                assert(replica_state.get("n3").broadcast_finalization.get(FIRST_VIEW) == true),
+                assert(sent_certificates.filter(c =>
+                    is_finalization_cert(c) and cert_view(c) == FIRST_VIEW
+                ).size() == 1),
                 assert(option_has(replica_state.get("n3").finalization.get(FIRST_VIEW), f =>
                     f.signatures.size() == Q
                 )),
                 unchanged_all,
             })
+            // A 4th finalize vote arrives; on_finalize re-creates a cert but does not re-broadcast.
+            .then(send_finalize_vote({ proposal: proposal, sig: "n4" }))
+            .then(on_finalize("n3", Set(
+                { proposal: proposal, sig: "n4" }
+            )))
             .then(all {
                 assert(replica_state.get("n3").broadcast_finalization.get(FIRST_VIEW) == true),
+                // No second finalization cert was broadcast.
+                assert(sent_certificates.filter(c =>
+                    is_finalization_cert(c) and cert_view(c) == FIRST_VIEW
+                ).size() == 1),
+                // Store still has only one finalization cert for this view.
+                assert(store_certificates.get("n3").filter(c =>
+                    is_finalization_cert(c) and cert_view(c) == FIRST_VIEW
+                ).size() == 1),
                 unchanged_all,
             })
             .expect(test_invariants)
