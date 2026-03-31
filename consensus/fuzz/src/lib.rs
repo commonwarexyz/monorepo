@@ -206,12 +206,11 @@ impl Arbitrary<'_> for FuzzInput {
             },
         };
 
-        let byzantine_actor = match u.int_in_range(0..=5)? {
-            0 => ByzantineActor::Disrupter,
-            1 => ByzantineActor::Equivocator,
-            2 => ByzantineActor::Conflicter,
-            3 => ByzantineActor::Nuller,
-            4 => ByzantineActor::NullifyOnly,
+        let byzantine_actor = match u.int_in_range(0..=4)? {
+            0 => ByzantineActor::Equivocator,
+            1 => ByzantineActor::Conflicter,
+            2 => ByzantineActor::Nuller,
+            3 => ByzantineActor::NullifyOnly,
             _ => ByzantineActor::Outdated,
         };
 
@@ -819,18 +818,10 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
     tracing::run_quint_twins_tracing(input, corpus_bytes);
 }
 
-pub fn run_quint_twins_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
-    tracing::run_quint_twins_disrupter_tracing(input, corpus_bytes);
-}
-
 pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
     tracing::run_quint_disrupter_tracing(input, corpus_bytes);
 }
 
-pub fn run_quint_byzantine_tracing(
-    actor: ByzantineActor,
-    input: FuzzInput,
-    corpus_bytes: &[u8],
-) {
+pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corpus_bytes: &[u8]) {
     tracing::run_quint_byzantine_tracing(actor, input, corpus_bytes);
 }

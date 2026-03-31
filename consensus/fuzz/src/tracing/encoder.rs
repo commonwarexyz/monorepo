@@ -1405,7 +1405,11 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    writeln!(out, "    def replica_is_certified(id: ReplicaId, view: ViewNumber): bool = {{").unwrap();
+    writeln!(
+        out,
+        "    def replica_is_certified(id: ReplicaId, view: ViewNumber): bool = {{"
+    )
+    .unwrap();
     writeln!(out, "        or {{").unwrap();
     writeln!(out, "            replica_has_notarization(id, view),").unwrap();
     writeln!(out, "            replica_has_nullification(id, view),").unwrap();

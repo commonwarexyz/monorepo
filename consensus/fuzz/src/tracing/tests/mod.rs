@@ -19,7 +19,12 @@ fn fixtures_dir() -> PathBuf {
     fuzz_dir().join("src/tracing/tests/fixtures")
 }
 
-fn generate_json_trace(fuzz_target: &str, trace_dir: &str, corpus_path: &Path, hash: &str) -> PathBuf {
+fn generate_json_trace(
+    fuzz_target: &str,
+    trace_dir: &str,
+    corpus_path: &Path,
+    hash: &str,
+) -> PathBuf {
     let output = Command::new("cargo")
         .args(["+nightly", "fuzz", "run", fuzz_target])
         .arg(corpus_path)
@@ -83,7 +88,11 @@ fn run_quint_test(qnt_path: &Path) {
 }
 
 fn run_encoder_roundtrip(hash: &str) {
-    run_encoder_roundtrip_impl("simplex_ed25519_quint_twins_disrupter", "simplex_ed25519_quint_twins_disrupter", hash);
+    run_encoder_roundtrip_impl(
+        "simplex_ed25519_quint_twins_disrupter",
+        "simplex_ed25519_quint_twins_disrupter",
+        hash,
+    );
 }
 
 fn run_encoder_roundtrip_target(fuzz_target: &str, hash: &str) {
