@@ -273,6 +273,8 @@ mod tests {
         let mut current = root.clone();
         let mut futures = Vec::with_capacity(depth);
 
+        // Build a single-chain supervision tree deep enough to overflow a
+        // recursive abort implementation on typical stacks.
         for _ in 0..depth {
             let (child, aborted) = Tree::child(&current);
             assert!(!aborted, "child node unexpectedly aborted");
@@ -283,6 +285,8 @@ mod tests {
             current = child;
         }
 
+        // Abort from the root and verify every registered descendant is still
+        // reached by the iterative traversal.
         root.abort();
 
         for future in futures {
@@ -296,12 +300,16 @@ mod tests {
         let root = Tree::root();
         let mut current = root.clone();
 
+        // Keep only one strong edge per level so dropping the leaf forces the
+        // ancestry chain to tear down immediately.
         for _ in 0..depth {
             let (child, aborted) = Tree::child(&current);
             assert!(!aborted, "child node unexpectedly aborted");
             current = child;
         }
 
+        // This used to recurse through nested `Arc` drops; now the lineage is
+        // released iteratively.
         drop(current);
         drop(root);
     }
@@ -311,6 +319,7 @@ mod tests {
         let root = Tree::root();
         let mut dropped = Vec::with_capacity(CHILD_REAP_THRESHOLD);
 
+        // Fill the parent's weak child list exactly to the reap threshold.
         for _ in 0..CHILD_REAP_THRESHOLD {
             let (child, aborted) = Tree::child(&root);
             assert!(!aborted, "child node unexpectedly aborted");
@@ -322,11 +331,14 @@ mod tests {
         }
 
         {
+            // Reaping is deferred until the next child arrives, so the stale
+            // weak pointers should still be present here.
             let inner = root.inner.lock();
             assert_eq!(inner.children.len(), CHILD_REAP_THRESHOLD);
             assert_eq!(inner.stale_children, CHILD_REAP_THRESHOLD);
         }
 
+        // The next child creation should trigger one batched compaction pass.
         let (child, aborted) = Tree::child(&root);
         assert!(!aborted, "child node unexpectedly aborted");
 
@@ -345,6 +357,8 @@ mod tests {
         let root = Tree::root();
         let mut aborted = Vec::with_capacity(CHILD_REAP_THRESHOLD);
 
+        // Register enough children to fill the weak child list to the reap
+        // threshold, then abort and drop them all.
         for _ in 0..CHILD_REAP_THRESHOLD {
             let (child, was_aborted) = Tree::child(&root);
             assert!(!was_aborted, "child node unexpectedly aborted");
@@ -357,11 +371,15 @@ mod tests {
         }
 
         {
+            // Aborted children still leave stale weak pointers behind until a
+            // future insert performs the batched cleanup.
             let inner = root.inner.lock();
             assert_eq!(inner.children.len(), CHILD_REAP_THRESHOLD);
             assert_eq!(inner.stale_children, CHILD_REAP_THRESHOLD);
         }
 
+        // A fresh child should compact both normally dropped and previously
+        // aborted entries in the same path.
         let (child, was_aborted) = Tree::child(&root);
         assert!(!was_aborted, "child node unexpectedly aborted");
 
@@ -379,6 +397,8 @@ mod tests {
     fn unique_ancestor_release_counts_stale_child_on_surviving_root() {
         let root = Tree::root();
 
+        // Arrange for each leaf drop to make its parent uniquely owned so
+        // `drop_ancestry` must walk one level higher and mark the root stale.
         for _ in 0..CHILD_REAP_THRESHOLD {
             let (parent, aborted) = Tree::child(&root);
             assert!(!aborted, "parent node unexpectedly aborted");
@@ -394,11 +414,15 @@ mod tests {
         }
 
         {
+            // Those stale entries are still deferred until the next child is
+            // inserted under the surviving root.
             let inner = root.inner.lock();
             assert_eq!(inner.children.len(), CHILD_REAP_THRESHOLD);
             assert_eq!(inner.stale_children, CHILD_REAP_THRESHOLD);
         }
 
+        // Creating one more child should reap the stale root entries produced
+        // by iterative ancestor release.
         let (child, aborted) = Tree::child(&root);
         assert!(!aborted, "child node unexpectedly aborted");
 
@@ -421,6 +445,8 @@ mod tests {
         let mut live = Vec::new();
         let mut dropped = Vec::new();
         let total = CHILD_REAP_THRESHOLD * 2;
+        // Mix live and dropped siblings so the parent accumulates stale weak
+        // pointers before an abort cascade runs through the remaining subtree.
         for idx in 0..total {
             let (child, aborted) = Tree::child(&parent);
             assert!(!aborted, "child node unexpectedly aborted");
@@ -438,6 +464,8 @@ mod tests {
             drop(child);
         }
 
+        // Trigger one more insert so the parent compacts stale entries before
+        // we verify abort propagation across the surviving siblings.
         let (trigger, aborted) = Tree::child(&parent);
         assert!(!aborted, "trigger child unexpectedly aborted");
         let (trigger_aborter, trigger_future) = aborter();
