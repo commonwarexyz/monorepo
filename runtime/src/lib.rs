@@ -79,6 +79,15 @@ stability_scope!(BETA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
+    /// Reason why graceful stopping began.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum StopReason {
+        /// Stopping was explicitly requested through [`Spawner::stop`].
+        Requested(i32),
+        /// Stopping began because runtime shutdown started after the root task exited.
+        Shutdown,
+    }
+
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug)]
     pub enum Error {
@@ -149,9 +158,35 @@ stability_scope!(BETA {
 
         /// Start running a root task.
         ///
-        /// When this function returns, all spawned tasks will be canceled. If clean
-        /// shutdown cannot be implemented via `Drop`, consider using [Spawner::stop] and
-        /// [Spawner::stopped] to coordinate clean shutdown.
+        /// This method runs `f` as the runtime's root task and returns its
+        /// output. When the root task exits, the runtime runs its shutdown
+        /// sequence for the remaining task tree before this method returns.
+        ///
+        /// If spawned tasks need advance notice so they can clean up before the
+        /// root exits, use [`Spawner::stop`] and [`Spawner::stopped`] to
+        /// coordinate graceful stopping.
+        ///
+        /// Calling [`Spawner::stop`] **does not** by itself cause this method to
+        /// return. It begins graceful stopping by resolving
+        /// [`Spawner::stopped`], and the root task may continue running
+        /// indefinitely even after graceful stopping has completed.
+        ///
+        /// **Runtime shutdown begins only once the root task exits.** Shutdown
+        /// implies stopping, so if no task has already called
+        /// [`Spawner::stop`], the runtime first resolves [`Spawner::stopped`]
+        /// to [`StopReason::Shutdown`] so graceful stop handlers can clean up.
+        ///
+        /// Shutdown then waits for graceful stopping to finish. If a shutdown
+        /// timeout is configured, shutdown leaves the graceful phase once that
+        /// timeout elapses. During the graceful phase, tasks may continue
+        /// running and may continue spawning follow-on cleanup work.
+        ///
+        /// If graceful stopping times out, shutdown closes task registration so
+        /// new [`Spawner::spawn`] calls return [`Error::Closed`], aborts the
+        /// remaining supervision tree, and does best-effort final cleanup
+        /// within whatever time remains before this function returns. If no
+        /// shutdown timeout is configured, shutdown waits indefinitely instead
+        /// of leaving the graceful phase on a deadline.
         fn start<F, Fut>(self, f: F) -> Fut::Output
         where
             F: FnOnce(Self::Context) -> Fut,
@@ -220,20 +255,29 @@ stability_scope!(BETA {
             Fut: Future<Output = T> + Send + 'static,
             T: Send + 'static;
 
-        /// Signals the runtime to stop execution and waits for all outstanding tasks
-        /// to perform any required cleanup and exit.
+        /// Requests graceful stopping and waits for all outstanding
+        /// [`signal::Signal`] handles that were already created by
+        /// [`Spawner::stopped`] to be dropped.
         ///
-        /// This method does not actually kill any tasks but rather signals to them, using
-        /// the [signal::Signal] returned by [Spawner::stopped], that they should exit.
-        /// It then waits for all [signal::Signal] references to be dropped before returning.
+        /// This method is still cooperative: it does not shut the runtime down,
+        /// does not close task registration, and does not actually kill any
+        /// tasks. Instead, it resolves the [signal::Signal] returned by
+        /// [`Spawner::stopped`] to [`StopReason::Requested(value)`] so tasks
+        /// can react gracefully.
+        ///
+        /// Tasks that never call [`Spawner::stopped`] do not participate in
+        /// this completion tracking. Even after this method returns, the root
+        /// task may keep running, tasks may still be alive, and new tasks may
+        /// still be spawned.
         ///
         /// ## Multiple Stop Calls
         ///
-        /// This method is idempotent and safe to call multiple times concurrently (on
-        /// different instances of the same context since it consumes `self`). The first
-        /// call initiates shutdown with the provided `value`, and all subsequent calls
-        /// will wait for the same completion regardless of their `value` parameter, i.e.
-        /// the original `value` from the first call is preserved.
+        /// This method is idempotent and safe to call multiple times
+        /// concurrently (on different instances of the same context since it
+        /// consumes `self`). The first call initiates graceful stopping with
+        /// the provided `value`, and all subsequent calls will wait for the
+        /// same completion regardless of their `value` parameter, i.e. the
+        /// original `value` from the first call is preserved.
         ///
         /// ## Timeout
         ///
@@ -245,13 +289,20 @@ stability_scope!(BETA {
             timeout: Option<Duration>,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// Returns an instance of a [signal::Signal] that resolves when [Spawner::stop] is called by
-        /// any task.
+        /// Returns an instance of a [signal::Signal] that resolves when
+        /// [`Spawner::stop`] is called by any task or when runtime shutdown
+        /// begins because the root task exits.
         ///
-        /// If [Spawner::stop] has already been called, the [signal::Signal] returned will resolve
-        /// immediately. The [signal::Signal] returned will always resolve to the value of the
-        /// first [Spawner::stop] call.
-        fn stopped(&self) -> signal::Signal;
+        /// This signal marks the beginning of graceful stopping. It does not
+        /// imply that runtime shutdown has started, nor that the runtime is
+        /// quiescent.
+        ///
+        /// If stopping has already begun, the returned [signal::Signal]
+        /// resolves immediately to the reason produced by the first stop
+        /// trigger. Explicit calls to [`Spawner::stop`] yield
+        /// [`StopReason::Requested`], while runtime shutdown caused by
+        /// root-task exit yields [`StopReason::Shutdown`].
+        fn stopped(&self) -> signal::Signal<StopReason>;
     }
 
     /// Trait for creating [rayon]-compatible thread pools with each worker thread

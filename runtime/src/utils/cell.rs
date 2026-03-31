@@ -136,7 +136,7 @@ where
         self.into_present().stop(value, timeout)
     }
 
-    fn stopped(&self) -> signal::Signal {
+    fn stopped(&self) -> signal::Signal<crate::StopReason> {
         self.as_present().stopped()
     }
 }

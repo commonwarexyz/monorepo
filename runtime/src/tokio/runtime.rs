@@ -21,7 +21,7 @@ use crate::{
         ScopeGuard,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
-    Spawner as _, StreamOf, METRICS_PREFIX,
+    Spawner as _, StopReason, StreamOf, METRICS_PREFIX,
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
@@ -97,7 +97,7 @@ impl Metrics {
 /// Tracks running spawned tasks.
 #[derive(Default)]
 struct TaskTracker {
-    // Current state: bit 0 marks shutdown-closed task registration, the
+    // Current state: bit 0 marks forced-termination-closed task registration, the
     // remaining bits store the live tracked-task count.
     state: AtomicUsize,
     gate: Mutex<()>,
@@ -120,7 +120,8 @@ impl TaskTracker {
 
     /// Reserves a task slot and returns a guard that releases it on drop.
     ///
-    /// Returns `None` if shutdown has already closed task registration.
+    /// Returns `None` if shutdown cleanup has already closed task
+    /// registration.
     fn track(self: &Arc<Self>) -> Option<TaskGuard> {
         // Atomically increment the live-task count only if shutdown has not
         // already closed task registration. This single state transition is
@@ -145,9 +146,14 @@ impl TaskTracker {
         })
     }
 
-    /// Closes task registration for shutdown.
+    /// Closes task registration for shutdown cleanup.
     fn close(&self) {
         self.state.fetch_or(Self::CLOSED, Ordering::Relaxed);
+    }
+
+    /// Returns whether there are no tracked tasks currently alive.
+    fn is_idle(&self) -> bool {
+        Self::live(self.state.load(Ordering::Relaxed)) == 0
     }
 
     /// Waits for all tracked tasks to finish.
@@ -155,12 +161,8 @@ impl TaskTracker {
     /// Task registration must already be closed before calling this function.
     ///
     /// Returns `true` if all tracked tasks finish before `timeout`, or `false`
-    /// if shutdown timed out first.
-    fn wait_for_idle(&self, timeout: Duration) -> bool {
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .expect("shutdown timeout overflow");
-
+    /// if shutdown timed out first. `None` waits indefinitely.
+    fn wait_for_idle(&self, timeout: Option<Duration>) -> bool {
         let mut gate = self.gate.lock();
         let state = self.state.load(Ordering::Relaxed);
         assert!(
@@ -171,19 +173,35 @@ impl TaskTracker {
             return true;
         }
 
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return false;
-        };
-        if remaining.is_zero() {
-            return false;
-        }
+        match timeout {
+            Some(timeout) => {
+                let deadline = Instant::now()
+                    .checked_add(timeout)
+                    .expect("shutdown timeout overflow");
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return false;
+                };
+                if remaining.is_zero() {
+                    return false;
+                }
 
-        // Unlike `std`, `parking_lot`'s `Condvar` does not wake up spuriously,
-        // so we don't need to loop here:
-        //
-        // https://docs.rs/parking_lot/0.12.5/parking_lot/struct.Condvar.html#differences-from-the-standard-library-condvar
-        self.idle.wait_for(&mut gate, remaining);
-        Self::live(self.state.load(Ordering::Relaxed)) == 0
+                // Unlike `std`, `parking_lot`'s `Condvar` does not wake up spuriously,
+                // so we don't need to loop here:
+                //
+                // https://docs.rs/parking_lot/0.12.5/parking_lot/struct.Condvar.html#differences-from-the-standard-library-condvar
+                self.idle.wait_for(&mut gate, remaining);
+                self.is_idle()
+            }
+            None => {
+                // Unlike `std`, `parking_lot`'s `Condvar` does not wake up spuriously,
+                // so we don't need to loop here:
+                //
+                // https://docs.rs/parking_lot/0.12.5/parking_lot/struct.Condvar.html#differences-from-the-standard-library-condvar
+                self.idle.wait(&mut gate);
+                assert!(self.is_idle());
+                true
+            }
+        }
     }
 
     /// Decrements the live task count and wakes a shutdown waiter if this was
@@ -282,8 +300,10 @@ pub struct Config {
     /// Whether spawned tasks should catch panics instead of propagating them.
     catch_panics: bool,
 
-    /// Maximum time to wait for spawned tasks to finish after shutdown begins.
-    shutdown_timeout: Duration,
+    /// Maximum time runtime shutdown waits after the root exits before leaving
+    /// the graceful phase and returning. This single timeout covers graceful
+    /// stopping and final cleanup. `None` waits indefinitely.
+    shutdown_timeout: Option<Duration>,
 
     /// Base directory for all storage operations.
     storage_directory: PathBuf,
@@ -313,7 +333,7 @@ impl Config {
             max_blocking_threads: 512,
             thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
-            shutdown_timeout: Duration::from_secs(60),
+            shutdown_timeout: Some(Duration::from_secs(60)),
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
@@ -344,7 +364,7 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_shutdown_timeout(mut self, d: Duration) -> Self {
+    pub const fn with_shutdown_timeout(mut self, d: Option<Duration>) -> Self {
         self.shutdown_timeout = d;
         self
     }
@@ -402,7 +422,7 @@ impl Config {
         self.catch_panics
     }
     /// See [Config]
-    pub const fn shutdown_timeout(&self) -> Duration {
+    pub const fn shutdown_timeout(&self) -> Option<Duration> {
         self.shutdown_timeout
     }
     /// See [Config]
@@ -456,7 +476,7 @@ pub struct Executor {
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
     handle: TokioHandle,
-    shutdown: Mutex<Stopper>,
+    stopper: Mutex<Stopper<StopReason>>,
     tasks: Arc<TaskTracker>,
     panicker: Panicker,
     thread_stack_size: usize,
@@ -532,7 +552,7 @@ impl crate::Runner for Runner {
                         IoUringConfig {
                             storage_directory: self.cfg.storage_directory.clone(),
                             iouring_config: iouring::Config {
-                                shutdown_timeout: Some(self.cfg.shutdown_timeout),
+                                shutdown_timeout: self.cfg.shutdown_timeout,
                                 ..Default::default()
                             },
                             thread_stack_size: self.cfg.thread_stack_size,
@@ -569,7 +589,7 @@ impl crate::Runner for Runner {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
                         size: IOURING_NETWORK_SIZE,
                         max_op_timeout: self.cfg.network_cfg.read_write_timeout,
-                        shutdown_timeout: Some(self.cfg.shutdown_timeout),
+                        shutdown_timeout: self.cfg.shutdown_timeout,
                         ..Default::default()
                     },
                     thread_stack_size: self.cfg.thread_stack_size,
@@ -602,7 +622,7 @@ impl crate::Runner for Runner {
             registry: Mutex::new(registry),
             metrics,
             handle: runtime.handle().clone(),
-            shutdown: Mutex::new(Stopper::default()),
+            stopper: Mutex::new(Stopper::default()),
             tasks: Arc::new(TaskTracker::default()),
             panicker,
             thread_stack_size: self.cfg.thread_stack_size,
@@ -636,31 +656,61 @@ impl crate::Runner for Runner {
         let result = catch_unwind(AssertUnwindSafe(|| {
             runtime.block_on(panicked.monitor(f(context)))
         }));
+        metric.finish();
+
+        // Shutdown implies graceful stopping. Reuse the existing stop state so
+        // the runtime can wait for stop-aware tasks before continuing
+        // shutdown.
+        let stop = {
+            let mut stopper = executor.stopper.lock();
+            stopper.stop(StopReason::Shutdown)
+        };
+
+        // Enforce the configured shutdown timeout, if any, across both the
+        // graceful stopping phase and tokio's runtime teardown.
+        let shutdown_deadline = self.cfg.shutdown_timeout.map(|timeout| {
+            Instant::now()
+                .checked_add(timeout)
+                .expect("shutdown timeout overflow")
+        });
+        let remaining_shutdown_budget = || {
+            shutdown_deadline.map(|deadline| {
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or(Duration::ZERO)
+            })
+        };
+
+        // Give graceful stop handlers a chance to run before shutdown closes
+        // task registration and aborts the remaining tasks.
+        if !executor.tasks.is_idle() {
+            match remaining_shutdown_budget() {
+                Some(timeout) => {
+                    runtime.block_on(async {
+                        let _ = tokio::time::timeout(timeout, stop).await;
+                    });
+                }
+                None => {
+                    let _ = runtime.block_on(stop);
+                }
+            }
+        }
 
         // Close task registration before aborting the tree so task cleanup
         // cannot enqueue new work while shutdown is propagating.
         executor.tasks.close();
         tree.abort();
-        metric.finish();
-
-        // Enforce the shutdown timeout once across both our own task-tracker wait and
-        // Tokio's runtime teardown. Reusing the full timeout for both phases would
-        // allow shutdown to exceed the configured bound.
-        let shutdown_deadline = Instant::now()
-            .checked_add(self.cfg.shutdown_timeout)
-            .expect("shutdown timeout overflow");
 
         // If a tracked task does not finish before the timeout (may be a blocking task we
         // cannot cancel), log the slow shutdown and continue returning or resuming
         // the original panic.
-        if !executor.tasks.wait_for_idle(self.cfg.shutdown_timeout) {
+        if !executor.tasks.wait_for_idle(remaining_shutdown_budget()) {
             error!("unfinished tasks remaining after shutdown timeout");
         }
-        runtime.shutdown_timeout(
-            shutdown_deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or(Duration::ZERO),
-        );
+        match remaining_shutdown_budget() {
+            Some(timeout) => runtime.shutdown_timeout(timeout),
+            None => drop(runtime),
+        }
 
         // Resume any root or propagated child panic after cleanup. If the root
         // returned normally, also check whether a child panicked while we were
@@ -831,11 +881,12 @@ impl crate::Spawner for Context {
 
     async fn stop(self, value: i32, timeout: Option<Duration>) -> Result<(), Error> {
         let stop_resolved = {
-            let mut shutdown = self.executor.shutdown.lock();
-            shutdown.stop(value)
+            let mut stopper = self.executor.stopper.lock();
+            stopper.stop(StopReason::Requested(value))
         };
 
-        // Wait for all tasks to complete or the timeout to fire
+        // Wait for graceful stopping to complete or for the caller's own
+        // timeout to expire.
         let timeout_future = timeout.map_or_else(
             || futures::future::Either::Right(futures::future::pending()),
             |duration| futures::future::Either::Left(self.sleep(duration)),
@@ -849,8 +900,8 @@ impl crate::Spawner for Context {
         }
     }
 
-    fn stopped(&self) -> Signal {
-        self.executor.shutdown.lock().stopped()
+    fn stopped(&self) -> Signal<StopReason> {
+        self.executor.stopper.lock().stopped()
     }
 }
 
@@ -1159,7 +1210,7 @@ mod tests {
         // while another thread stalls a concurrent spawn call mid-flight.
         let runner = thread::spawn(move || {
             let runner =
-                Runner::new(Config::default().with_shutdown_timeout(Duration::from_secs(1)));
+                Runner::new(Config::default().with_shutdown_timeout(Some(Duration::from_secs(1))));
             runner.start(|context| async move {
                 context_tx
                     .send(context.clone())
@@ -1223,8 +1274,9 @@ mod tests {
         // panic after the root has already entered cleanup.
         let thread = thread::spawn(move || {
             catch_unwind(AssertUnwindSafe(|| {
-                let runner =
-                    Runner::new(Config::default().with_shutdown_timeout(Duration::from_secs(1)));
+                let runner = Runner::new(
+                    Config::default().with_shutdown_timeout(Some(Duration::from_secs(1))),
+                );
                 runner.start(|context| async move {
                     let (started_tx, started_rx) = oneshot::channel();
                     context.shared(true).spawn(move |_| async move {
@@ -1263,13 +1315,14 @@ mod tests {
     }
 
     #[test]
-    fn test_shutdown_timeout_uses_remaining_runtime_budget() {
+    fn test_shutdown_timeout_uses_remaining_runtime_timeout() {
         let shutdown_timeout = Duration::from_millis(300);
         let (root_returned_tx, root_returned_rx) = mpsc::channel();
         let (finished_tx, finished_rx) = mpsc::channel();
 
         let runner = thread::spawn(move || {
-            let runner = Runner::new(Config::default().with_shutdown_timeout(shutdown_timeout));
+            let runner =
+                Runner::new(Config::default().with_shutdown_timeout(Some(shutdown_timeout)));
             runner.start(|context| async move {
                 let (started_tx, started_rx) = oneshot::channel();
                 drop(context.shared(true).spawn(move |_| async move {
@@ -1303,7 +1356,7 @@ mod tests {
 
         assert!(
             finished_at.duration_since(root_returned_at) < Duration::from_millis(450),
-            "shutdown exceeded the configured budget by reusing the full timeout for Tokio teardown",
+            "shutdown exceeded the configured timeout by reusing the full timeout for Tokio teardown",
         );
         runner.join().expect("runner thread should join cleanly");
     }
