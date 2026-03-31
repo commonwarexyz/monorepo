@@ -102,10 +102,10 @@ impl SinkTrait for Sink {
         };
 
         // Resolve the waiter.
-        if os_send.send(data).is_err() {
+        os_send.send(data).map_err(|_| {
             self.poisoned = true;
-            return Err(Error::SendFailed);
-        }
+            Error::SendFailed
+        })?;
 
         Ok(())
     }
