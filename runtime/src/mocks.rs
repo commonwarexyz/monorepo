@@ -69,53 +69,49 @@ impl SinkTrait for Sink {
             return Err(Error::Closed);
         }
 
-        let bufs = bufs.into();
-        let result = async {
-            let (os_send, data) = {
-                let mut channel = self.channel.lock();
-
-                // If the receiver is dead, we cannot send any more messages.
-                if !channel.stream_alive {
-                    return Err(Error::Closed);
-                }
-
-                channel.buffer.put(bufs);
-
-                // If there is a waiter and the buffer is large enough,
-                // return the waiter (while clearing the waiter field).
-                // Otherwise, return early.
-                if channel
-                    .waiter
-                    .as_ref()
-                    .is_some_and(|(requested, _)| *requested <= channel.buffer.len())
-                {
-                    // Send up to read_buffer_size bytes (but at least requested amount)
-                    let (requested, os_send) = channel.waiter.take().unwrap();
-                    let send_amount = channel
-                        .buffer
-                        .len()
-                        .min(requested.max(channel.read_buffer_size));
-                    let data = channel.buffer.split_to(send_amount).freeze();
-                    (os_send, data)
-                } else {
-                    return Ok(());
-                }
-            };
-
-            // Resolve the waiter.
-            os_send.send(data).map_err(|_| Error::SendFailed)?;
-            Ok(())
-        }
-        .await;
-
-        if result.is_err() {
-            self.poisoned = true;
+        let os_send = {
             let mut channel = self.channel.lock();
-            channel.sink_alive = false;
-            channel.waiter.take();
+
+            // If the receiver is dead, we cannot send any more messages.
+            if !channel.stream_alive {
+                self.poisoned = true;
+                return Err(Error::Closed);
+            }
+
+            channel.buffer.put(bufs.into());
+
+            // If there is a waiter and the buffer is large enough,
+            // return the waiter (while clearing the waiter field).
+            // Otherwise, return early.
+            if channel
+                .waiter
+                .as_ref()
+                .is_some_and(|(requested, _)| *requested <= channel.buffer.len())
+            {
+                // Send up to read_buffer_size bytes (but at least requested amount)
+                let (requested, os_send) = channel.waiter.take().unwrap();
+                let send_amount = channel
+                    .buffer
+                    .len()
+                    .min(requested.max(channel.read_buffer_size));
+                let data = channel.buffer.split_to(send_amount).freeze();
+                Some((os_send, data))
+            } else {
+                None
+            }
+        };
+
+        let Some((os_send, data)) = os_send else {
+            return Ok(());
+        };
+
+        // Resolve the waiter.
+        if os_send.send(data).is_err() {
+            self.poisoned = true;
+            return Err(Error::SendFailed);
         }
 
-        result
+        Ok(())
     }
 }
 
@@ -143,57 +139,53 @@ impl StreamTrait for Stream {
             return Err(Error::Closed);
         }
 
-        let result = async {
-            let os_recv = {
-                let mut channel = self.channel.lock();
-
-                // Pull data from channel buffer into local buffer.
-                if !channel.buffer.is_empty() {
-                    let target = len.max(channel.read_buffer_size);
-                    let pull_amount = channel
-                        .buffer
-                        .len()
-                        .min(target.saturating_sub(self.buffer.len()));
-                    if pull_amount > 0 {
-                        let data = channel.buffer.split_to(pull_amount);
-                        self.buffer.extend_from_slice(&data);
-                    }
-                }
-
-                // If we have enough, return immediately.
-                if self.buffer.len() >= len {
-                    return Ok(IoBufs::from(self.buffer.split_to(len).freeze()));
-                }
-
-                // If the sink is dead, we cannot receive any more messages.
-                if !channel.sink_alive {
-                    return Err(Error::Closed);
-                }
-
-                // Set up waiter for remaining amount.
-                let remaining = len - self.buffer.len();
-                assert!(channel.waiter.is_none());
-                let (os_send, os_recv) = oneshot::channel();
-                channel.waiter = Some((remaining, os_send));
-                os_recv
-            };
-
-            // Wait for the waiter to be resolved.
-            let data = os_recv.await.map_err(|_| Error::Closed)?;
-            self.buffer.extend_from_slice(&data);
-
-            assert!(self.buffer.len() >= len);
-            Ok(IoBufs::from(self.buffer.split_to(len).freeze()))
-        }
-        .await;
-
-        if result.is_err() {
-            self.poisoned = true;
+        let os_recv = {
             let mut channel = self.channel.lock();
-            channel.stream_alive = false;
-        }
 
-        result
+            // Pull data from channel buffer into local buffer.
+            if !channel.buffer.is_empty() {
+                let target = len.max(channel.read_buffer_size);
+                let pull_amount = channel
+                    .buffer
+                    .len()
+                    .min(target.saturating_sub(self.buffer.len()));
+                if pull_amount > 0 {
+                    let data = channel.buffer.split_to(pull_amount);
+                    self.buffer.extend_from_slice(&data);
+                }
+            }
+
+            // If we have enough, return immediately.
+            if self.buffer.len() >= len {
+                return Ok(IoBufs::from(self.buffer.split_to(len).freeze()));
+            }
+
+            // If the sink is dead, we cannot receive any more messages.
+            if !channel.sink_alive {
+                self.poisoned = true;
+                return Err(Error::Closed);
+            }
+
+            // Set up waiter for remaining amount.
+            let remaining = len - self.buffer.len();
+            assert!(channel.waiter.is_none());
+            let (os_send, os_recv) = oneshot::channel();
+            channel.waiter = Some((remaining, os_send));
+            os_recv
+        };
+
+        // Wait for the waiter to be resolved.
+        let data = match os_recv.await {
+            Ok(data) => data,
+            Err(_) => {
+                self.poisoned = true;
+                return Err(Error::Closed);
+            }
+        };
+        self.buffer.extend_from_slice(&data);
+
+        assert!(self.buffer.len() >= len);
+        Ok(IoBufs::from(self.buffer.split_to(len).freeze()))
     }
 
     fn peek(&self, max_len: usize) -> &[u8] {
@@ -364,10 +356,6 @@ mod tests {
 
             // After any send error, the mock sink must remain closed.
             let result = sink.send(b"world".as_slice()).await;
-            assert!(matches!(result, Err(Error::Closed)));
-
-            // The matching stream side now observes the channel as closed.
-            let result = stream.recv(1).await;
             assert!(matches!(result, Err(Error::Closed)));
         });
     }
