@@ -95,7 +95,7 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
 fn db_config(
     suffix: &str,
     pooler: &impl BufferPooler,
-) -> Config<TwoCap, VConfig<(RangeCfg<usize>, ())>> {
+) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))>> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle_config: MerkleConfig {
@@ -110,7 +110,7 @@ fn db_config(
             partition: format!("log-{suffix}"),
             items_per_section: NZU64!(ITEMS_PER_SECTION),
             compression: None,
-            codec_config: ((0..=10000).into(), ()),
+            codec_config: ((), ((0..=10000).into(), ())),
             write_buffer: NZUsize!(1024),
             page_cache,
         },

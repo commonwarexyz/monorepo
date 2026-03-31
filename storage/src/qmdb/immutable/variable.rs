@@ -15,10 +15,10 @@ use crate::{
     },
     translator::Translator,
 };
+use crate::qmdb::operation::Key;
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
-use commonware_utils::Array;
 
 /// Type alias for a variable-size operation.
 pub type Operation<K, V> = BaseOperation<K, VariableEncoding<V>>;
@@ -36,7 +36,7 @@ pub type Config<T, C> = BaseConfig<T, JournalConfig<C>>;
 impl<
         F: Family,
         E: Storage + Clock + Metrics,
-        K: Array,
+        K: Key,
         V: VariableValue,
         H: Hasher,
         T: Translator,
@@ -78,7 +78,7 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, ()> {
+    fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, ((), ())> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         super::BaseConfig {
             merkle_config: MmrConfig {
@@ -93,7 +93,7 @@ mod tests {
                 partition: format!("log-{suffix}"),
                 items_per_section: NZU64!(5),
                 compression: None,
-                codec_config: (),
+                codec_config: ((), ()),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },
@@ -135,7 +135,7 @@ mod tests {
         is_send(db.rewind(loc));
     }
 
-    fn small_sections_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, ()> {
+    fn small_sections_config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, ((), ())> {
         let mut cfg = config(suffix, pooler);
         cfg.log.items_per_section = NZU64!(1);
         cfg

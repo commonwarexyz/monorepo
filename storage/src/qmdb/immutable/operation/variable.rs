@@ -1,19 +1,21 @@
 use super::{Operation, COMMIT_CONTEXT, SET_CONTEXT};
-use crate::qmdb::any::{value::VariableEncoding, VariableValue};
+use crate::qmdb::{
+    any::{value::VariableEncoding, VariableValue},
+    operation::Key,
+};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut};
-use commonware_utils::Array;
 
-impl<K: Array, V: VariableValue> EncodeSize for Operation<K, VariableEncoding<V>> {
+impl<K: Key, V: VariableValue> EncodeSize for Operation<K, VariableEncoding<V>> {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::Set(_, v) => K::SIZE + v.encode_size(),
+            Self::Set(k, v) => k.encode_size() + v.encode_size(),
             Self::Commit(v) => v.encode_size(),
         }
     }
 }
 
-impl<K: Array, V: VariableValue> Write for Operation<K, VariableEncoding<V>> {
+impl<K: Key, V: VariableValue> Write for Operation<K, VariableEncoding<V>> {
     fn write(&self, buf: &mut impl BufMut) {
         match &self {
             Self::Set(k, v) => {
@@ -29,17 +31,17 @@ impl<K: Array, V: VariableValue> Write for Operation<K, VariableEncoding<V>> {
     }
 }
 
-impl<K: Array, V: VariableValue> Read for Operation<K, VariableEncoding<V>> {
-    type Cfg = <V as Read>::Cfg;
+impl<K: Key, V: VariableValue> Read for Operation<K, VariableEncoding<V>> {
+    type Cfg = (<K as Read>::Cfg, <V as Read>::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(buf)? {
             SET_CONTEXT => {
-                let key = K::read(buf)?;
-                let value = V::read_cfg(buf, cfg)?;
+                let key = K::read_cfg(buf, &cfg.0)?;
+                let value = V::read_cfg(buf, &cfg.1)?;
                 Ok(Self::Set(key, value))
             }
-            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, cfg)?)),
+            COMMIT_CONTEXT => Ok(Self::Commit(Option::<V>::read_cfg(buf, &cfg.1)?)),
             e => Err(CodecError::InvalidEnum(e)),
         }
     }
@@ -136,6 +138,36 @@ mod tests {
             assert_eq!(op, decoded, "Failed to roundtrip: {op:?}");
             assert_eq!(encoded.len(), op.encode_size(), "Size mismatch for: {op:?}");
         }
+    }
+
+    #[test]
+    fn test_operation_variable_key_roundtrip() {
+        use commonware_codec::Decode as _;
+
+        let key = vec![1u8, 2, 3, 4, 5];
+        let cfg = ((commonware_codec::RangeCfg::from(0..=100usize), ()), ());
+
+        // Test Set with variable-length key
+        let set_op = Operation::Set(key, U64::new(42));
+        let encoded = set_op.encode();
+        assert_eq!(encoded.len(), set_op.encode_size());
+        let decoded =
+            Operation::<Vec<u8>, VariableEncoding<U64>>::decode_cfg(encoded, &cfg).unwrap();
+        assert_eq!(set_op, decoded);
+
+        // Test Commit (key-independent, should work the same)
+        let commit_op = Operation::<Vec<u8>, VariableEncoding<U64>>::Commit(Some(U64::new(42)));
+        let encoded = commit_op.encode();
+        let decoded =
+            Operation::<Vec<u8>, VariableEncoding<U64>>::decode_cfg(encoded, &cfg).unwrap();
+        assert_eq!(commit_op, decoded);
+
+        // Test empty key
+        let empty_key_op = Operation::Set(vec![], U64::new(99));
+        let encoded = empty_key_op.encode();
+        let decoded =
+            Operation::<Vec<u8>, VariableEncoding<U64>>::decode_cfg(encoded, &cfg).unwrap();
+        assert_eq!(empty_key_op, decoded);
     }
 
     #[cfg(feature = "arbitrary")]

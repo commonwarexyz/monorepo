@@ -13,6 +13,7 @@ use crate::{
         any::ValueEncoding,
         build_snapshot_from_log,
         immutable::{self, Operation},
+        operation::Key,
         sync::{self},
         Error,
     },
@@ -21,7 +22,6 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
-use commonware_utils::Array;
 use std::ops::Range;
 
 type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
@@ -29,7 +29,7 @@ type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
 impl<E, K, V, C, H, T> sync::Database for immutable::Immutable<mmr::Family, E, K, V, C, H, T>
 where
     E: Context,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<K, V>>
         + Persistable<Error = JournalError>
@@ -174,7 +174,7 @@ mod tests {
     fn create_sync_config(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> immutable::variable::Config<crate::translator::TwoCap, ()> {
+    ) -> immutable::variable::Config<crate::translator::TwoCap, ((), ())> {
         const PAGE_SIZE: NonZeroU16 = NZU16!(77);
         const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
@@ -193,7 +193,7 @@ mod tests {
                 partition: format!("log-{suffix}"),
                 items_per_section: ITEMS_PER_SECTION,
                 compression: None,
-                codec_config: (),
+                codec_config: ((), ()),
                 page_cache,
                 write_buffer: NZUsize!(1024),
             },

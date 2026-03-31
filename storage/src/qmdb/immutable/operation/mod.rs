@@ -11,10 +11,10 @@ pub(crate) mod variable;
 
 use crate::{
     merkle::{Family, Location},
-    qmdb::{any::ValueEncoding, operation::Operation as OperationTrait},
+    qmdb::{any::ValueEncoding, operation::Key, operation::Operation as OperationTrait},
 };
 use commonware_codec::Encode;
-use commonware_utils::{hex, Array};
+use commonware_utils::hex;
 use core::fmt::Display;
 
 // Context byte prefixes for identifying the operation type.
@@ -26,7 +26,7 @@ pub(crate) const COMMIT_CONTEXT: u8 = 1;
 /// Unlike mutable database operations, immutable operations only support
 /// setting new values and committing - no updates or deletions.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub enum Operation<K: Array, V: ValueEncoding> {
+pub enum Operation<K: Key, V: ValueEncoding> {
     /// Set a key to a value. The key must not already exist.
     Set(K, V::Value),
 
@@ -34,7 +34,7 @@ pub enum Operation<K: Array, V: ValueEncoding> {
     Commit(Option<V::Value>),
 }
 
-impl<K: Array, V: ValueEncoding> Operation<K, V> {
+impl<K: Key, V: ValueEncoding> Operation<K, V> {
     /// If this is an operation involving a key, returns the key. Otherwise, returns None.
     pub const fn key(&self) -> Option<&K> {
         match self {
@@ -49,7 +49,7 @@ impl<K: Array, V: ValueEncoding> Operation<K, V> {
     }
 }
 
-impl<F: Family, K: Array, V: ValueEncoding> OperationTrait<F> for Operation<K, V> {
+impl<F: Family, K: Key, V: ValueEncoding> OperationTrait<F> for Operation<K, V> {
     type Key = K;
 
     fn key(&self) -> Option<&Self::Key> {
@@ -71,13 +71,15 @@ impl<F: Family, K: Array, V: ValueEncoding> OperationTrait<F> for Operation<K, V
     }
 }
 
-impl<K: Array, V: ValueEncoding> Display for Operation<K, V>
+impl<K: Key, V: ValueEncoding> Display for Operation<K, V>
 where
     V::Value: Encode,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Set(key, value) => write!(f, "[key:{key} value:{}]", hex(&value.encode())),
+            Self::Set(key, value) => {
+                write!(f, "[key:{} value:{}]", hex(key), hex(&value.encode()))
+            }
             Self::Commit(value) => {
                 if let Some(value) = value {
                     write!(f, "[commit {}]", hex(&value.encode()))
@@ -90,7 +92,7 @@ where
 }
 
 #[cfg(feature = "arbitrary")]
-impl<K: Array, V: ValueEncoding> arbitrary::Arbitrary<'_> for Operation<K, V>
+impl<K: Key, V: ValueEncoding> arbitrary::Arbitrary<'_> for Operation<K, V>
 where
     K: for<'a> arbitrary::Arbitrary<'a>,
     V::Value: for<'a> arbitrary::Arbitrary<'a>,
@@ -156,7 +158,7 @@ mod tests {
         let set_op = VarOp::Set(key.clone(), value.clone());
         assert_eq!(
             format!("{set_op}"),
-            format!("[key:{key} value:{}]", hex(&value.encode()))
+            format!("[key:{} value:{}]", hex(&key), hex(&value.encode()))
         );
 
         let commit_op = VarOp::Commit(Some(value.clone()));

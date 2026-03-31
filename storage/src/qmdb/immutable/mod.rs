@@ -65,13 +65,12 @@ use crate::{
         Error as JournalError,
     },
     merkle::{journaled::Config as MmrConfig, Family, Location, Proof},
-    qmdb::{any::ValueEncoding, build_snapshot_from_log, delete_known_loc, Error},
+    qmdb::{any::ValueEncoding, build_snapshot_from_log, delete_known_loc, operation::Key, Error},
     translator::Translator,
     Context, Persistable,
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher as CHasher;
-use commonware_utils::Array;
 use std::{num::NonZeroU64, ops::Range};
 use tracing::warn;
 
@@ -108,7 +107,7 @@ pub struct Config<T: Translator, J> {
 pub struct Immutable<
     F: Family,
     E: Context,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
     H: CHasher,
@@ -135,7 +134,7 @@ impl<F, E, K, V, C, H, T> Immutable<F, E, K, V, C, H, T>
 where
     F: Family,
     E: Context,
-    K: Array,
+    K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
     C::Item: EncodeShared,

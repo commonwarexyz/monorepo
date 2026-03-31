@@ -17,6 +17,7 @@ use crate::{
             fixed::{Db as ImmutableFixedDb, Operation as ImmutableFixedOp},
             variable::{Db as ImmutableVariableDb, Operation as ImmutableVariableOp},
         },
+        operation::Key,
     },
     translator::Translator,
     Context,
@@ -212,11 +213,11 @@ impl_resolver!(OrderedVariableDb, OrderedVariableOperation, VariableValue);
 // Immutable types have a different Operation signature (no F parameter),
 // so we use a separate macro.
 macro_rules! impl_resolver_immutable {
-    ($db:ident, $op:ident, $val_bound:ident) => {
+    ($db:ident, $op:ident, $val_bound:ident, $key_bound:path) => {
         impl<E, K, V, H, T> Resolver for Arc<$db<mmr::Family, E, K, V, H, T>>
         where
             E: Context,
-            K: Array,
+            K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
             T: Translator + Send + Sync + 'static,
@@ -253,7 +254,7 @@ macro_rules! impl_resolver_immutable {
         impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<$db<mmr::Family, E, K, V, H, T>>>
         where
             E: Context,
-            K: Array,
+            K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
             T: Translator + Send + Sync + 'static,
@@ -290,7 +291,7 @@ macro_rules! impl_resolver_immutable {
         impl<E, K, V, H, T> Resolver for Arc<AsyncRwLock<Option<$db<mmr::Family, E, K, V, H, T>>>>
         where
             E: Context,
-            K: Array,
+            K: $key_bound,
             V: $val_bound + Send + Sync + 'static,
             H: Hasher,
             T: Translator + Send + Sync + 'static,
@@ -328,10 +329,10 @@ macro_rules! impl_resolver_immutable {
 }
 
 // Immutable Fixed
-impl_resolver_immutable!(ImmutableFixedDb, ImmutableFixedOp, FixedValue);
+impl_resolver_immutable!(ImmutableFixedDb, ImmutableFixedOp, FixedValue, Array);
 
 // Immutable Variable
-impl_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, VariableValue);
+impl_resolver_immutable!(ImmutableVariableDb, ImmutableVariableOp, VariableValue, Key);
 
 #[cfg(test)]
 pub(crate) mod tests {
