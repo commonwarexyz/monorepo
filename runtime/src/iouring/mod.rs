@@ -143,7 +143,7 @@ use io_uring::{
     IoUring,
 };
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
-use request::{ActiveRequest, CqeAction, Request};
+use request::{ActiveRequest, Request};
 use std::{
     collections::VecDeque,
     sync::Arc,
@@ -154,7 +154,7 @@ mod request;
 mod timeout;
 use timeout::{Tick, TimeoutWheel};
 mod waiter;
-use waiter::{WaiterId, WaiterState, Waiters};
+use waiter::{CqeOutcome, StageAction, WaiterId, WaiterState, Waiters};
 mod waker;
 use waker::{Waker, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
 
@@ -429,7 +429,7 @@ impl IoUringLoop {
             Some(deadline) => match self.timeout_wheel.target_tick(deadline) {
                 Some(target_tick) => Some(target_tick),
                 None => {
-                    active.finish_timeout();
+                    active.timeout();
                     return None;
                 }
             },
@@ -450,28 +450,19 @@ impl IoUringLoop {
     /// queue (timeout fired between requeue and staging), it is completed with
     /// a timeout error instead of issuing a follow-up SQE.
     fn stage_request(&mut self, waiter_id: WaiterId, sq: &mut SubmissionQueue<'_>) {
-        let sqe = {
-            let Some((request, state)) = self.waiters.get_mut(waiter_id) else {
-                return;
-            };
-            if matches!(state, WaiterState::CancelRequested) {
-                // No in-flight SQE remains for ready-queue-only timeouts.
-                if let Some(request) = self.waiters.remove(waiter_id) {
-                    request.finish_timeout();
+        match self.waiters.stage_sqe(waiter_id) {
+            StageAction::Ignore => {}
+            StageAction::CompleteTimeout(request) => request.timeout(),
+            StageAction::Submit(sqe) => {
+                // SAFETY:
+                // - All resources are stored in `self.waiters` until CQE processing, so
+                //   SQE pointers remain valid and FD numbers cannot be reused early.
+                // - SQ capacity was checked by caller.
+                unsafe {
+                    sq.push(&sqe).expect("unable to push to queue");
                 }
-                return;
             }
-            request.build_sqe(waiter_id)
-        };
-        // SAFETY:
-        // - All resources are stored in `self.waiters` until CQE processing, so
-        //   SQE pointers remain valid and FD numbers cannot be reused early.
-        // - SQ capacity was checked by caller.
-        unsafe {
-            sq.push(&sqe).expect("unable to push to queue");
         }
-        let marked = self.waiters.mark_in_flight(waiter_id);
-        assert!(marked, "staged request missing from waiter table");
     }
 
     /// Stage requeued requests from `ready_queue` in FIFO order.
@@ -616,30 +607,20 @@ impl IoUringLoop {
             return;
         }
 
-        // Route op/cancel completions through waiter state.
-        let Some((request, state, waiter_id)) = self.waiters.on_cqe(user_data, cqe.result()) else {
-            return;
-        };
-
-        // Let the request state machine process the CQE result.
-        match request.on_cqe(state, cqe.result()) {
-            CqeAction::Complete => {
-                // Remove active deadline tracking when this request completes.
-                if let WaiterState::Active {
-                    target_tick: Some(tick),
-                } = state
-                {
-                    self.timeout_wheel.remove(tick);
-                }
-
-                // Remove request from waiter table and deliver the result.
-                if let Some(completed) = self.waiters.remove(waiter_id) {
-                    completed.finish();
-                }
-            }
-            CqeAction::Requeue => {
+        match self.waiters.on_cqe(user_data, cqe.result()) {
+            CqeOutcome::Ignore => {}
+            CqeOutcome::Requeue(waiter_id) => {
                 // Request needs another SQE. Add it to the ready queue.
                 self.ready_queue.push_back(waiter_id);
+            }
+            CqeOutcome::Complete {
+                request,
+                target_tick,
+            } => {
+                if let Some(tick) = target_tick {
+                    self.timeout_wheel.remove(tick);
+                }
+                request.finish();
             }
         }
     }
@@ -950,7 +931,10 @@ mod tests {
                 iouring.waiters.cancel(waiter_id),
                 "cancel should transition waiter to cancel-requested"
             );
-            assert!(iouring.waiters.mark_in_flight(waiter_id));
+            assert!(matches!(
+                iouring.waiters.stage_sqe(waiter_id),
+                StageAction::Submit(_)
+            ));
             iouring.pending_cancels.push_back(waiter_id);
         }
 
@@ -1107,8 +1091,8 @@ mod tests {
             .send(Request::Recv(RecvRequest {
                 fd: Arc::new(left1.into()),
                 buf: IoBufMut::with_capacity(1),
-                target_len: 1,
-                received: 0,
+                offset: 0,
+                len: 1,
                 exact: false,
                 deadline: Some(Instant::now() + Duration::from_millis(200)),
                 sender: tx1,
@@ -1129,8 +1113,8 @@ mod tests {
             .send(Request::Recv(RecvRequest {
                 fd: Arc::new(left2.into()),
                 buf: IoBufMut::with_capacity(8),
-                target_len: 8,
-                received: 0,
+                offset: 0,
+                len: 8,
                 exact: false,
                 deadline: Some(Instant::now() + Duration::from_millis(80)),
                 sender: tx2,
@@ -1228,19 +1212,18 @@ mod tests {
         }));
         let old_slot = iouring.waiters.insert(old_req, Some(1));
         iouring.timeout_wheel.schedule(old_slot, 1);
-        // Simulate completion: get mut access then remove.
-        if let Some((
-            _request,
-            WaiterState::Active {
-                target_tick: Some(tick),
-            },
-            _,
-        )) = iouring.waiters.on_cqe(old_slot.user_data(), 0)
+        // Simulate completion after the waiter had an op staged.
+        assert!(matches!(
+            iouring.waiters.stage_sqe(old_slot),
+            StageAction::Submit(_)
+        ));
+        if let CqeOutcome::Complete {
+            request,
+            target_tick: Some(tick),
+        } = iouring.waiters.on_cqe(old_slot.user_data(), 0)
         {
             iouring.timeout_wheel.remove(tick);
-        }
-        if let Some(completed) = iouring.waiters.remove(old_slot) {
-            completed.finish();
+            request.finish();
         }
 
         // Reuse the same slot for a new waiter with a later timeout.
@@ -1254,7 +1237,10 @@ mod tests {
         }));
         let slot_index = iouring.waiters.insert(req, Some(3));
         assert_eq!(slot_index.index(), old_slot.index());
-        assert!(iouring.waiters.mark_in_flight(slot_index));
+        assert!(matches!(
+            iouring.waiters.stage_sqe(slot_index),
+            StageAction::Submit(_)
+        ));
         iouring.timeout_wheel.schedule(slot_index, 3);
 
         // At tick 1, only the stale old entry should expire. The new waiter must
@@ -1313,14 +1299,17 @@ mod tests {
         let req = ActiveRequest::from_request(Request::Recv(RecvRequest {
             fd: Arc::new(left.into()),
             buf: IoBufMut::with_capacity(5),
-            target_len: 5,
-            received: 0,
+            offset: 0,
+            len: 5,
             exact: false,
             deadline: Some(Instant::now() + Duration::from_secs(1)),
             sender: tx,
         }));
         let slot_index = iouring.waiters.insert(req, Some(2));
-        assert!(iouring.waiters.mark_in_flight(slot_index));
+        assert!(matches!(
+            iouring.waiters.stage_sqe(slot_index),
+            StageAction::Submit(_)
+        ));
         assert!(
             iouring.waiters.cancel(slot_index),
             "cancel should transition active waiter"
@@ -1330,25 +1319,19 @@ mod tests {
 
         // Simulate op CQE arriving with positive result (5 bytes read).
         // Even though cancel was requested, a complete positive result wins.
-        if let Some((request, state, waiter_id)) = iouring.waiters.on_cqe(slot_index.user_data(), 5)
+        if let CqeOutcome::Complete { request, .. } =
+            iouring.waiters.on_cqe(slot_index.user_data(), 5)
         {
-            match request.on_cqe(state, 5) {
-                CqeAction::Complete => {
-                    if let Some(completed) = iouring.waiters.remove(waiter_id) {
-                        completed.finish();
-                    }
-                }
-                CqeAction::Requeue => {
-                    panic!("should not requeue");
-                }
-            }
+            request.finish();
         }
 
         // Late cancel CQE should be ignored.
-        assert!(iouring
-            .waiters
-            .on_cqe(slot_index.cancel_user_data(), -libc::ECANCELED)
-            .is_none());
+        assert!(matches!(
+            iouring
+                .waiters
+                .on_cqe(slot_index.cancel_user_data(), -libc::ECANCELED),
+            CqeOutcome::Ignore
+        ));
 
         let (_, result) = futures::executor::block_on(rx).expect("missing completion");
         // exact=false recv with 5 bytes should succeed.
@@ -1374,8 +1357,8 @@ mod tests {
                 .send(Request::Recv(RecvRequest {
                     fd: Arc::new(left_pipe.into()),
                     buf: IoBufMut::with_capacity(5),
-                    target_len: 5,
-                    received: 0,
+                    offset: 0,
+                    len: 5,
                     exact: false,
                     deadline: None,
                     sender: recv_tx,
@@ -1434,8 +1417,8 @@ mod tests {
             .send(Request::Recv(RecvRequest {
                 fd: Arc::new(pipe_left.into()),
                 buf: IoBufMut::with_capacity(8),
-                target_len: 8,
-                received: 0,
+                offset: 0,
+                len: 8,
                 exact: false,
                 deadline: Some(Instant::now() + Duration::from_secs(1)),
                 sender: tx,
@@ -1502,8 +1485,8 @@ mod tests {
             .send(Request::Recv(RecvRequest {
                 fd: Arc::new(pipe_left.into()),
                 buf: IoBufMut::with_capacity(8),
-                target_len: 8,
-                received: 0,
+                offset: 0,
+                len: 8,
                 exact: false,
                 deadline: Some(Instant::now() + Duration::from_millis(50)),
                 sender: tx,
@@ -1539,8 +1522,8 @@ mod tests {
             .send(Request::Recv(RecvRequest {
                 fd: Arc::new(pipe_left.into()),
                 buf: IoBufMut::with_capacity(8),
-                target_len: 8,
-                received: 0,
+                offset: 0,
+                len: 8,
                 exact: false,
                 deadline: None,
                 sender: tx,
@@ -1581,8 +1564,8 @@ mod tests {
             .send(Request::Recv(RecvRequest {
                 fd: Arc::new(pipe_left.into()),
                 buf: IoBufMut::with_capacity(8),
-                target_len: 8,
-                received: 0,
+                offset: 0,
+                len: 8,
                 exact: false,
                 deadline: Some(Instant::now() + Duration::from_millis(50)),
                 sender: tx,
@@ -1620,8 +1603,8 @@ mod tests {
             .send(Request::Recv(RecvRequest {
                 fd: Arc::new(pipe_left.into()),
                 buf: IoBufMut::with_capacity(8),
-                target_len: 8,
-                received: 0,
+                offset: 0,
+                len: 8,
                 exact: false,
                 deadline: Some(Instant::now() + Duration::from_millis(500)),
                 sender: tx,
@@ -1671,8 +1654,8 @@ mod tests {
                 .send(Request::Recv(RecvRequest {
                     fd: Arc::new(left.into()),
                     buf: IoBufMut::with_capacity(8),
-                    target_len: 8,
-                    received: 0,
+                    offset: 0,
+                    len: 8,
                     exact: false,
                     deadline: Some(deadline),
                     sender: tx,
@@ -1717,8 +1700,8 @@ mod tests {
             .send(Request::Recv(RecvRequest {
                 fd: Arc::new(left.into()),
                 buf: IoBufMut::with_capacity(total),
-                target_len: total,
-                received: 0,
+                offset: 0,
+                len: total,
                 exact: true,
                 deadline: None,
                 sender: tx,
@@ -1768,8 +1751,8 @@ mod tests {
             .send(Request::Recv(RecvRequest {
                 fd: Arc::new(left.into()),
                 buf: IoBufMut::with_capacity(total),
-                target_len: total,
-                received: 0,
+                offset: 0,
+                len: total,
                 exact: true,
                 deadline: None,
                 sender: tx,
@@ -1826,8 +1809,8 @@ mod tests {
             .send(Request::Recv(RecvRequest {
                 fd: Arc::new(left.into()),
                 buf: IoBufMut::with_capacity(100),
-                target_len: 100,
-                received: 0,
+                offset: 0,
+                len: 100,
                 exact: true,
                 deadline: Some(Instant::now() + Duration::from_millis(80)),
                 sender: tx,
@@ -1869,23 +1852,25 @@ mod tests {
         let request = ActiveRequest::from_request(Request::Recv(RecvRequest {
             fd: Arc::new(left.into()),
             buf: IoBufMut::with_capacity(8),
-            target_len: 8,
-            received: 0,
+            offset: 0,
+            len: 8,
             exact: true,
             deadline: Some(Instant::now() + Duration::from_millis(25)),
             sender: tx,
         }));
         let waiter_id = iouring.waiters.insert(request, Some(1));
-        assert!(iouring.waiters.mark_in_flight(waiter_id));
+        assert!(matches!(
+            iouring.waiters.stage_sqe(waiter_id),
+            StageAction::Submit(_)
+        ));
         iouring.timeout_wheel.schedule(waiter_id, 1);
 
         // Simulate a short recv CQE so the logical request requeues itself but
         // no longer has a kernel op outstanding.
-        let (request, state, waiter_id) = iouring
-            .waiters
-            .on_cqe(waiter_id.user_data(), 4)
-            .expect("missing partial recv completion");
-        assert!(matches!(request.on_cqe(state, 4), CqeAction::Requeue));
+        let waiter_id = match iouring.waiters.on_cqe(waiter_id.user_data(), 4) {
+            CqeOutcome::Requeue(waiter_id) => waiter_id,
+            _ => panic!("missing partial recv completion"),
+        };
         iouring.ready_queue.push_back(waiter_id);
 
         std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(2));
@@ -1997,8 +1982,8 @@ mod tests {
             .send(Request::Recv(RecvRequest {
                 fd: Arc::new(sock_left.into()),
                 buf: IoBufMut::with_capacity(5),
-                target_len: 5,
-                received: 0,
+                offset: 0,
+                len: 5,
                 exact: true,
                 deadline: None,
                 sender: recv_tx,

@@ -3,7 +3,11 @@
 //! This module manages waiter IDs and request lifecycle transitions.
 //! It is the source of truth for in-flight request completion state.
 
-use super::{request::ActiveRequest, Tick, UserData};
+use super::{
+    request::{ActiveRequest, CqeAction},
+    Tick, UserData,
+};
+use io_uring::squeue::Entry as SqueueEntry;
 use tracing::warn;
 
 /// Stable waiter identity packed into SQE/CQE `user_data`.
@@ -120,6 +124,35 @@ struct Waiter {
     request: ActiveRequest,
 }
 
+/// Action produced when staging the next SQE for a waiter.
+pub enum StageAction {
+    /// The waiter id is stale or no longer present.
+    Ignore,
+    /// The waiter was canceled while parked in the ready queue and should
+    /// complete locally with timeout rather than issuing another SQE.
+    CompleteTimeout(ActiveRequest),
+    /// The waiter is still active and produced an SQE for submission.
+    Submit(SqueueEntry),
+}
+
+/// Action produced when handling an operation CQE for a waiter.
+pub enum CqeOutcome {
+    /// The CQE was stale, referred to a cancel SQE, or otherwise requires no
+    /// further loop action.
+    Ignore,
+    /// The logical request needs another SQE and should be placed back in the
+    /// ready queue.
+    Requeue(WaiterId),
+    /// The logical request completed and was removed from the waiter table.
+    Complete {
+        /// The completed request, ready to deliver its cached result.
+        request: ActiveRequest,
+        /// Active deadline tracking to remove from the timeout wheel, when
+        /// completion happened before cancellation was requested.
+        target_tick: Option<Tick>,
+    },
+}
+
 /// Tracks in-flight logical requests and the state needed to complete them.
 pub struct Waiters {
     /// Waiters indexed by slot index.
@@ -206,25 +239,62 @@ impl Waiters {
         }
     }
 
-    /// Get mutable access to a request slot by user_data.
+    /// Stage the next SQE for a waiter.
     ///
+    /// If the waiter timed out while parked in the ready queue, this removes it
+    /// from the table and returns the request for local timeout completion.
+    ///
+    /// When this returns [`StageAction::Submit`], the waiter is marked
+    /// in-flight immediately. In this implementation, the caller pushes the SQE
+    /// right away and treats push failure as fatal.
+    pub fn stage_sqe(&mut self, waiter_id: WaiterId) -> StageAction {
+        let index = waiter_id.index() as usize;
+        let should_timeout_locally = {
+            let Some(slot) = self.entries.get_mut(index).and_then(Option::as_mut) else {
+                return StageAction::Ignore;
+            };
+            if slot.id != waiter_id {
+                return StageAction::Ignore;
+            }
+            matches!(slot.state, WaiterState::CancelRequested)
+        };
+
+        if should_timeout_locally {
+            let request = self
+                .remove(waiter_id)
+                .expect("cancelled waiter missing from table");
+            return StageAction::CompleteTimeout(request);
+        }
+
+        let sqe = self
+            .entries
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .filter(|slot| slot.id == waiter_id)
+            .map(|slot| {
+                slot.in_flight = true;
+                slot.request.build_sqe(waiter_id)
+            });
+
+        match sqe {
+            Some(sqe) => StageAction::Submit(sqe),
+            None => StageAction::Ignore,
+        }
+    }
+
     /// Process one CQE for a waiter.
     ///
-    /// Returns the request, its state, and waiter id if the slot is occupied
-    /// and the generation matches.
-    ///
-    /// Cancel CQEs are handled internally and always return `None`.
-    pub fn on_cqe(
-        &mut self,
-        user_data: UserData,
-        result: i32,
-    ) -> Option<(&mut ActiveRequest, WaiterState, WaiterId)> {
+    /// Cancel CQEs are handled internally. Operation CQEs drive the request
+    /// state machine and return a higher-level loop action.
+    pub fn on_cqe(&mut self, user_data: UserData, result: i32) -> CqeOutcome {
         let (waiter_id, is_cancel) = WaiterId::from_user_data(user_data);
         let index = waiter_id.index() as usize;
 
-        let slot = self.entries[index].as_mut()?;
+        let Some(slot) = self.entries.get_mut(index).and_then(Option::as_mut) else {
+            return CqeOutcome::Ignore;
+        };
         if slot.id != waiter_id {
-            return None;
+            return CqeOutcome::Ignore;
         }
 
         if is_cancel {
@@ -243,14 +313,34 @@ impl Waiters {
             }
 
             // Cancel CQEs acknowledge cancel requests but do not complete waiters.
-            return None;
+            return CqeOutcome::Ignore;
         }
 
         // The operation CQE retires the currently in-flight SQE, regardless of
         // whether the request completes or is requeued for another one.
         slot.in_flight = false;
-        let state = slot.state;
-        Some((&mut slot.request, state, waiter_id))
+        let (state, action) = {
+            let state = slot.state;
+            let action = slot.request.on_cqe(state, result);
+            (state, action)
+        };
+
+        match action {
+            CqeAction::Requeue => CqeOutcome::Requeue(waiter_id),
+            CqeAction::Complete => {
+                let target_tick = match state {
+                    WaiterState::Active { target_tick } => target_tick,
+                    WaiterState::CancelRequested => None,
+                };
+                let request = self
+                    .remove(waiter_id)
+                    .expect("completed waiter missing from table");
+                CqeOutcome::Complete {
+                    request,
+                    target_tick,
+                }
+            }
+        }
     }
 
     /// Get mutable access to a request by waiter id.
@@ -264,21 +354,6 @@ impl Waiters {
             return None;
         }
         Some((&mut slot.request, slot.state))
-    }
-
-    /// Mark a waiter as having an operation SQE in flight.
-    ///
-    /// Returns `true` when the waiter exists and the generation matches.
-    pub fn mark_in_flight(&mut self, waiter_id: WaiterId) -> bool {
-        let index = waiter_id.index() as usize;
-        let Some(slot) = self.entries.get_mut(index).and_then(Option::as_mut) else {
-            return false;
-        };
-        if slot.id != waiter_id {
-            return false;
-        }
-        slot.in_flight = true;
-        true
     }
 
     /// Return whether a waiter currently has an operation SQE in flight.
@@ -376,13 +451,19 @@ mod tests {
 
         // Completion for a stale generation must be ignored.
         let stale = WaiterId::new(id1.index(), id1.generation().wrapping_add(1));
-        assert!(waiters.on_cqe(stale.user_data(), 0).is_none());
+        assert!(matches!(
+            waiters.on_cqe(stale.user_data(), 0),
+            CqeOutcome::Ignore
+        ));
 
         // Complete id1.
-        let result = waiters.on_cqe(id1.user_data(), 0);
-        assert!(result.is_some());
-        let request = waiters.remove(id1);
-        assert!(request.is_some());
+        assert!(matches!(
+            waiters.on_cqe(id1.user_data(), 0),
+            CqeOutcome::Complete {
+                target_tick: Some(9),
+                ..
+            }
+        ));
         assert_eq!(waiters.len(), 1);
 
         // Next allocation reuses the freed slot with incremented generation.
@@ -396,9 +477,7 @@ mod tests {
 
         // All live waiters should still complete and remove cleanly after slot reuse.
         let _ = waiters.on_cqe(id0.user_data(), 0);
-        let _ = waiters.remove(id0);
         let _ = waiters.on_cqe(id2.user_data(), 0);
-        let _ = waiters.remove(id2);
         assert!(waiters.is_empty());
     }
 
@@ -420,40 +499,48 @@ mod tests {
         );
 
         // Cancel CQE does not complete the waiter.
-        assert!(waiters
-            .on_cqe(waiter_id.cancel_user_data(), -libc::ECANCELED)
-            .is_none());
+        assert!(matches!(
+            waiters.on_cqe(waiter_id.cancel_user_data(), -libc::ECANCELED),
+            CqeOutcome::Ignore
+        ));
 
         // Op CQE completes the waiter.
-        let result = waiters.on_cqe(waiter_id.user_data(), 0);
-        assert!(result.is_some());
-        let (_, state, _) = result.unwrap();
-        assert!(matches!(state, WaiterState::CancelRequested));
-        let _ = waiters.remove(waiter_id);
+        assert!(matches!(
+            waiters.on_cqe(waiter_id.user_data(), 0),
+            CqeOutcome::Complete {
+                target_tick: None,
+                ..
+            }
+        ));
         assert!(waiters.is_empty());
 
         // Late cancel CQE for the already-completed waiter should be ignored.
-        assert!(waiters
-            .on_cqe(waiter_id.cancel_user_data(), -libc::ECANCELED)
-            .is_none());
-        assert!(waiters.on_cqe(0, 1).is_none());
+        assert!(matches!(
+            waiters.on_cqe(waiter_id.cancel_user_data(), -libc::ECANCELED),
+            CqeOutcome::Ignore
+        ));
+        assert!(matches!(waiters.on_cqe(0, 1), CqeOutcome::Ignore));
     }
 
     #[test]
     fn test_waiters_track_in_flight_state() {
-        // Verify `mark_in_flight` tracks a staged operation and that the bit is
+        // Verify `stage_sqe` tracks a staged operation and that the bit is
         // cleared again when the matching op CQE is processed.
         let mut waiters = Waiters::new(1);
         let (req, _rx) = make_sync_request();
         let waiter_id = waiters.insert(req, Some(4));
 
         assert!(!waiters.is_in_flight(waiter_id));
-        assert!(waiters.mark_in_flight(waiter_id));
+        assert!(matches!(
+            waiters.stage_sqe(waiter_id),
+            StageAction::Submit(_)
+        ));
         assert!(waiters.is_in_flight(waiter_id));
 
-        let _ = waiters
-            .on_cqe(waiter_id.user_data(), 0)
-            .expect("missing op completion");
+        assert!(matches!(
+            waiters.on_cqe(waiter_id.user_data(), 0),
+            CqeOutcome::Complete { .. }
+        ));
         assert!(!waiters.is_in_flight(waiter_id));
     }
 
@@ -470,9 +557,12 @@ mod tests {
         let active_id = waiters.insert(req1, Some(2));
         assert_ne!(active_id, stale_id);
 
-        assert!(!waiters.mark_in_flight(stale_id));
+        assert!(matches!(waiters.stage_sqe(stale_id), StageAction::Ignore));
         assert!(!waiters.is_in_flight(stale_id));
-        assert!(waiters.mark_in_flight(active_id));
+        assert!(matches!(
+            waiters.stage_sqe(active_id),
+            StageAction::Submit(_)
+        ));
         assert!(waiters.is_in_flight(active_id));
     }
 
@@ -483,11 +573,14 @@ mod tests {
         let mut waiters = Waiters::new(1);
         let out_of_range = WaiterId::new(7, 0);
         assert!(!waiters.cancel(out_of_range));
-        assert!(!waiters.mark_in_flight(out_of_range));
+        assert!(matches!(
+            waiters.stage_sqe(out_of_range),
+            StageAction::Ignore
+        ));
 
         let empty_slot = WaiterId::new(0, 0);
         assert!(!waiters.cancel(empty_slot));
-        assert!(!waiters.mark_in_flight(empty_slot));
+        assert!(matches!(waiters.stage_sqe(empty_slot), StageAction::Ignore));
     }
 
     #[test]
@@ -500,7 +593,7 @@ mod tests {
         // First build a waiter that still has an operation SQE outstanding.
         let (active_req, _active_rx) = make_sync_request();
         let active = waiters.insert(active_req, Some(2));
-        assert!(waiters.mark_in_flight(active));
+        assert!(matches!(waiters.stage_sqe(active), StageAction::Submit(_)));
         assert!(waiters.cancel(active));
         assert!(waiters.is_in_flight(active));
         let (_, active_state) = waiters.get_mut(active).expect("active waiter missing");
@@ -523,12 +616,16 @@ mod tests {
             let mut waiters = Waiters::new(1);
             let (req, _rx) = make_sync_request();
             let waiter_id = waiters.insert(req, Some(2));
-            assert!(waiters.mark_in_flight(waiter_id));
+            assert!(matches!(
+                waiters.stage_sqe(waiter_id),
+                StageAction::Submit(_)
+            ));
             assert!(waiters.cancel(waiter_id));
 
-            assert!(waiters
-                .on_cqe(waiter_id.cancel_user_data(), result)
-                .is_none());
+            assert!(matches!(
+                waiters.on_cqe(waiter_id.cancel_user_data(), result),
+                CqeOutcome::Ignore
+            ));
             let (_, state) = waiters
                 .get_mut(waiter_id)
                 .expect("waiter should remain tracked");
@@ -543,12 +640,16 @@ mod tests {
         let mut waiters = Waiters::new(1);
         let (req, _rx) = make_sync_request();
         let waiter_id = waiters.insert(req, Some(2));
-        assert!(waiters.mark_in_flight(waiter_id));
+        assert!(matches!(
+            waiters.stage_sqe(waiter_id),
+            StageAction::Submit(_)
+        ));
         assert!(waiters.cancel(waiter_id));
 
-        assert!(waiters
-            .on_cqe(waiter_id.cancel_user_data(), -libc::EPERM)
-            .is_none());
+        assert!(matches!(
+            waiters.on_cqe(waiter_id.cancel_user_data(), -libc::EPERM),
+            CqeOutcome::Ignore
+        ));
         let (_, state) = waiters
             .get_mut(waiter_id)
             .expect("waiter should remain tracked");
@@ -562,7 +663,10 @@ mod tests {
         let mut waiters = Waiters::new(1);
         let (req, _rx) = make_sync_request();
         let waiter_id = waiters.insert(req, Some(2));
-        assert!(waiters.mark_in_flight(waiter_id));
+        assert!(matches!(
+            waiters.stage_sqe(waiter_id),
+            StageAction::Submit(_)
+        ));
         assert!(waiters.cancel(waiter_id));
 
         let result = catch_unwind(AssertUnwindSafe(|| {

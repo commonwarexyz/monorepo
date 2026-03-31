@@ -59,19 +59,18 @@ pub struct SendRequest {
 }
 
 /// Network receive request. When `exact` is false, any positive byte count
-/// completes successfully. When `exact` is true, exactly `target_len -
-/// received` additional bytes must be received.
+/// completes successfully. When `exact` is true, exactly `len - offset`
+/// additional bytes must be received.
 pub struct RecvRequest {
     pub fd: Arc<OwnedFd>,
     pub buf: IoBufMut,
-    /// Total byte count target tracked by the active request.
+    /// Byte offset into `buf` where the next recv should write.
+    pub offset: usize,
+    /// Total target length tracked by the active request.
     ///
-    /// This includes any existing `received` offset, so callers appending into
-    /// a partially-filled buffer should pass `offset + bytes_to_read`.
-    pub target_len: usize,
-    /// Byte offset into `buf` where received data starts. The active request
-    /// tracks progress from this offset.
-    pub received: usize,
+    /// This request fills `buf[offset..len]` and may requeue until `offset`
+    /// reaches `len`.
+    pub len: usize,
     pub exact: bool,
     pub deadline: Option<Instant>,
     pub sender: oneshot::Sender<(IoBufMut, Result<usize, Error>)>,
@@ -243,14 +242,14 @@ impl ActiveRequest {
             }),
             Request::Recv(r) => {
                 assert!(
-                    r.received <= r.target_len && r.target_len <= r.buf.capacity(),
-                    "recv invariant violated: need received <= target_len <= capacity"
+                    r.offset <= r.len && r.len <= r.buf.capacity(),
+                    "recv invariant violated: need offset <= len <= capacity"
                 );
                 Self::Recv(ActiveRecv {
                     fd: r.fd,
                     buf: r.buf,
-                    target_len: r.target_len,
-                    received: r.received,
+                    offset: r.offset,
+                    len: r.len,
                     exact: r.exact,
                     result: None,
                     sender: r.sender,
@@ -326,7 +325,7 @@ impl ActiveRequest {
 
     /// Deliver a timeout error. Used when a deadline expires before the
     /// first SQE is submitted.
-    pub fn finish_timeout(self) {
+    pub fn timeout(self) {
         match self {
             Self::Send(s) => {
                 let _ = s.sender.send(Err(Error::Timeout));
@@ -442,10 +441,10 @@ pub struct ActiveRecv {
     fd: Arc<OwnedFd>,
     /// Destination buffer owned by the request.
     buf: IoBufMut,
-    /// Total recv target, including any existing `received` offset.
-    target_len: usize,
-    /// Bytes already written into `buf`.
-    received: usize,
+    /// Byte offset into `buf` where the next recv should write.
+    offset: usize,
+    /// Total recv target, including any existing filled prefix before `offset`.
+    len: usize,
     /// Whether the recv must fill the full target before succeeding.
     exact: bool,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
@@ -459,13 +458,13 @@ impl ActiveRecv {
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.fd.as_raw_fd());
         assert!(
-            self.received <= self.target_len && self.target_len <= self.buf.capacity(),
-            "recv invariant violated: need received <= target_len <= capacity"
+            self.offset <= self.len && self.len <= self.buf.capacity(),
+            "recv invariant violated: need offset <= len <= capacity"
         );
         // SAFETY: buf is an IoBufMut with stable memory.
-        // received <= target_len <= capacity.
-        let ptr = unsafe { self.buf.as_mut_ptr().add(self.received) };
-        let remaining = self.target_len - self.received;
+        // offset <= len <= capacity.
+        let ptr = unsafe { self.buf.as_mut_ptr().add(self.offset) };
+        let remaining = self.len - self.offset;
         opcode::Recv::new(fd, ptr, remaining as u32).build()
     }
 
@@ -487,9 +486,9 @@ impl ActiveRecv {
                 CqeAction::Complete
             }
             RawResult::Positive(n) => {
-                self.received += n;
-                if !self.exact || self.received >= self.target_len {
-                    self.result = Some(Ok(self.received));
+                self.offset += n;
+                if !self.exact || self.offset >= self.len {
+                    self.result = Some(Ok(self.offset));
                     CqeAction::Complete
                 } else if matches!(state, WaiterState::CancelRequested) {
                     self.result = Some(Err(Error::Timeout));
@@ -760,18 +759,14 @@ mod tests {
         )
     }
 
-    fn make_recv_request(
-        target_len: usize,
-        received: usize,
-        exact: bool,
-    ) -> (ActiveRequest, RecvRx) {
+    fn make_recv_request(len: usize, offset: usize, exact: bool) -> (ActiveRequest, RecvRx) {
         let (tx, rx) = oneshot::channel();
         (
             ActiveRequest::from_request(Request::Recv(RecvRequest {
                 fd: make_socket_fd(),
-                buf: IoBufMut::with_capacity(target_len),
-                target_len,
-                received,
+                buf: IoBufMut::with_capacity(len),
+                offset,
+                len,
                 exact,
                 deadline: None,
                 sender: tx,
@@ -837,8 +832,8 @@ mod tests {
         let recv = Request::Recv(RecvRequest {
             fd: make_socket_fd(),
             buf: IoBufMut::with_capacity(8),
-            target_len: 8,
-            received: 0,
+            offset: 0,
+            len: 8,
             exact: true,
             deadline: Some(recv_deadline),
             sender: oneshot::channel().0,
@@ -862,8 +857,8 @@ mod tests {
             let _ = ActiveRequest::from_request(Request::Recv(RecvRequest {
                 fd: make_socket_fd(),
                 buf: IoBufMut::with_capacity(4),
-                target_len: 4,
-                received: 5,
+                offset: 5,
+                len: 4,
                 exact: true,
                 deadline: None,
                 sender: oneshot::channel().0,
@@ -875,8 +870,8 @@ mod tests {
             let _ = ActiveRequest::from_request(Request::Recv(RecvRequest {
                 fd: make_socket_fd(),
                 buf: IoBufMut::with_capacity(4),
-                target_len: 5,
-                received: 0,
+                offset: 0,
+                len: 5,
                 exact: true,
                 deadline: None,
                 sender: oneshot::channel().0,
@@ -1282,7 +1277,7 @@ mod tests {
 
         // Local timeout delivery should use TimedOut for the storage-facing API.
         let (request, rx) = make_sync_request();
-        request.finish_timeout();
+        request.timeout();
         let err = block_on(rx)
             .expect("missing timeout result")
             .expect_err("expected timeout error");
@@ -1337,25 +1332,25 @@ mod tests {
 
         // Network operations should map directly to the shared logical timeout.
         let (request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        request.finish_timeout();
+        request.timeout();
         assert!(matches!(
             block_on(rx).expect("missing send timeout"),
             Err(Error::Timeout)
         ));
 
         let (request, rx) = make_recv_request(5, 0, true);
-        request.finish_timeout();
+        request.timeout();
         let (_buf, result) = block_on(rx).expect("missing recv timeout");
         assert!(matches!(result, Err(Error::Timeout)));
 
         // Storage reads and writes also use the common logical timeout surface.
         let (request, rx) = make_read_request(5);
-        request.finish_timeout();
+        request.timeout();
         let (_buf, result) = block_on(rx).expect("missing read timeout");
         assert!(matches!(result, Err(Error::Timeout)));
 
         let (request, rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
-        request.finish_timeout();
+        request.timeout();
         assert!(matches!(
             block_on(rx).expect("missing write timeout"),
             Err(Error::Timeout)
@@ -1363,7 +1358,7 @@ mod tests {
 
         // Sync uses `std::io::ErrorKind::TimedOut` to match its storage-facing API.
         let (request, rx) = make_sync_request();
-        request.finish_timeout();
+        request.timeout();
         let err = block_on(rx)
             .expect("missing sync timeout")
             .expect_err("sync timeout should be an error");

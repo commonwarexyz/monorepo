@@ -403,10 +403,11 @@ impl Stream {
             .send(IoUringRequest::Recv(RecvRequest {
                 fd: self.fd.clone(),
                 buf: buffer,
-                // The active request tracks progress with `received` starting
-                // at `offset`, so `target_len` is the total target.
-                target_len: offset + len,
-                received: offset,
+                // The request appends into an already-partially-filled
+                // destination buffer, so `offset` is the current write cursor
+                // and `len` is the final target bound for this logical recv.
+                offset,
+                len: offset + len,
                 exact,
                 deadline: Some(deadline),
                 sender: tx,
