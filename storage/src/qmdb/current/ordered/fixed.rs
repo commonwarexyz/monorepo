@@ -104,7 +104,7 @@ pub mod test {
     use super::*;
     use crate::{
         qmdb::{
-            current::{batch::BitmapRead, ordered::tests as shared, tests::fixed_config},
+            current::{ordered::tests as shared, tests::fixed_config},
             Error,
         },
         translator::OneCap,
@@ -112,7 +112,10 @@ pub mod test {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics, Runner as _};
-    use commonware_utils::{bitmap::Prunable as BitMap, NZU64};
+    use commonware_utils::{
+        bitmap::{Prunable as BitMap, Readable as _},
+        NZU64,
+    };
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, OneCap, 32>;

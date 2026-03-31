@@ -26,7 +26,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::bitmap::Prunable as BitMap;
+use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
@@ -70,95 +70,19 @@ fn apply_push_clear<const N: usize>(
     }
 }
 
-/// A bitmap that can be read.
-pub trait BitmapRead<const N: usize> {
-    /// Return the number of complete (fully filled) chunks.
-    fn complete_chunks(&self) -> usize;
-    /// Return the chunk data at the given absolute chunk index.
-    fn get_chunk(&self, chunk: usize) -> [u8; N];
-    /// Return the last chunk and its size in bits.
-    fn last_chunk(&self) -> ([u8; N], u64);
-    /// Return the number of pruned chunks.
-    fn pruned_chunks(&self) -> usize;
-    /// Return the total number of bits.
-    fn len(&self) -> u64;
-    /// Returns true if the bitmap is empty.
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    /// Return the number of pruned bits (i.e. pruned chunks * bits per chunk).
-    fn pruned_bits(&self) -> u64 {
-        (self.pruned_chunks() as u64) * BitMap::<N>::CHUNK_SIZE_BITS
-    }
-    /// Return the value of a single bit.
-    fn get_bit(&self, bit: u64) -> bool {
-        let chunk = self.get_chunk(BitMap::<N>::to_chunk_index(bit));
-        BitMap::<N>::get_bit_from_chunk(&chunk, bit % BitMap::<N>::CHUNK_SIZE_BITS)
-    }
-    /// Return the index of the first set bit at or after `pos`, or `None`.
-    fn next_set_bit(&self, pos: u64) -> Option<u64> {
-        let len = self.len();
-        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
-        let mut cur = pos;
-        while cur < len {
-            let chunk_idx = BitMap::<N>::to_chunk_index(cur);
-            let chunk = self.get_chunk(chunk_idx);
-            let chunk_start = chunk_idx as u64 * chunk_bits;
-            let rel = (cur - chunk_start) as usize;
-            let mut byte_idx = rel / 8;
-            let mut bit_in_byte = rel % 8;
-            while byte_idx < N {
-                let masked = chunk[byte_idx] >> bit_in_byte;
-                if masked != 0 {
-                    let found = chunk_start
-                        + (byte_idx * 8 + bit_in_byte) as u64
-                        + masked.trailing_zeros() as u64;
-                    if found >= len {
-                        return None;
-                    }
-                    return Some(found);
-                }
-                byte_idx += 1;
-                bit_in_byte = 0;
-            }
-            cur = chunk_start + chunk_bits;
-        }
-        None
-    }
-}
-
-impl<const N: usize> BitmapRead<N> for BitMap<N> {
-    fn complete_chunks(&self) -> usize {
-        Self::complete_chunks(self)
-    }
-    fn get_chunk(&self, chunk: usize) -> [u8; N] {
-        *Self::get_chunk(self, chunk)
-    }
-    fn last_chunk(&self) -> ([u8; N], u64) {
-        let (c, n) = Self::last_chunk(self);
-        (*c, n)
-    }
-    fn pruned_chunks(&self) -> usize {
-        Self::pruned_chunks(self)
-    }
-    fn len(&self) -> u64 {
-        Self::len(self)
-    }
-}
-
 /// Bitmap-accelerated floor scan. Skips locations where the bitmap bit is
 /// unset, avoiding I/O reads for inactive operations.
 pub(crate) struct BitmapScan<'a, B, const N: usize> {
     bitmap: &'a B,
 }
 
-impl<'a, B: BitmapRead<N>, const N: usize> BitmapScan<'a, B, N> {
+impl<'a, B: BitmapReadable<N>, const N: usize> BitmapScan<'a, B, N> {
     pub(crate) const fn new(bitmap: &'a B) -> Self {
         Self { bitmap }
     }
 }
 
-impl<B: BitmapRead<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan<'_, B, N> {
+impl<B: BitmapReadable<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan<'_, B, N> {
     fn next_candidate(&mut self, floor: Location, tip: u64) -> Option<Location> {
         let loc = *floor;
         if loc >= tip {
@@ -166,15 +90,14 @@ impl<B: BitmapRead<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan<'_,
         }
         let bitmap_len = self.bitmap.len();
         // Within the bitmap: find the next set bit at or after floor.
-        // next_set_bit returns the first set index in ascending order
-        // so the result is the only possible candidate below bound.
+        // ones_iter_from returns set indices in ascending order so the
+        // first result is the only possible candidate below bound.
         // tip >= bitmap_len always holds (base_size ==
         // bitmap_parent.len()), so bound == bitmap_len and the
-        // length check inside next_set_bit prevents scanning past
-        // bound.
+        // length check inside the iterator prevents scanning past bound.
         if loc < bitmap_len {
             let bound = bitmap_len.min(tip);
-            if let Some(idx) = self.bitmap.next_set_bit(loc) {
+            if let Some(idx) = self.bitmap.ones_iter_from(loc).next() {
                 if idx < bound {
                     return Some(Location::new(idx));
                 }
@@ -194,8 +117,8 @@ impl<B: BitmapRead<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan<'_,
 }
 
 /// Uncommitted bitmap changes on top of a base bitmap. Records pushed bits and cleared bits
-/// without cloning the base. Implements [`BitmapRead`] for read-through access.
-pub struct BitmapDiff<'a, B: BitmapRead<N>, const N: usize> {
+/// without cloning the base. Implements [`BitmapReadable`] for read-through access.
+pub struct BitmapDiff<'a, B: BitmapReadable<N>, const N: usize> {
     /// The parent bitmap this diff is built on top of.
     base: &'a B,
     /// Number of bits in the base bitmap at diff creation time.
@@ -210,7 +133,7 @@ pub struct BitmapDiff<'a, B: BitmapRead<N>, const N: usize> {
     old_grafted_leaves: usize,
 }
 
-impl<'a, B: BitmapRead<N>, const N: usize> BitmapDiff<'a, B, N> {
+impl<'a, B: BitmapReadable<N>, const N: usize> BitmapDiff<'a, B, N> {
     const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
 
     fn new(base: &'a B, old_grafted_leaves: usize) -> Self {
@@ -242,7 +165,7 @@ impl<'a, B: BitmapRead<N>, const N: usize> BitmapDiff<'a, B, N> {
     }
 }
 
-impl<B: BitmapRead<N>, const N: usize> BitmapRead<N> for BitmapDiff<'_, B, N> {
+impl<B: BitmapReadable<N>, const N: usize> BitmapReadable<N> for BitmapDiff<'_, B, N> {
     fn complete_chunks(&self) -> usize {
         (self.len() / Self::CHUNK_SIZE_BITS) as usize
     }
@@ -576,7 +499,7 @@ fn push_operation_bits<U, B, const N: usize>(
     diff: &BTreeMap<U::Key, DiffEntry<mmr::Family, U::Value>>,
 ) where
     U: update::Update,
-    B: BitmapRead<N>,
+    B: BitmapReadable<N>,
     Operation<mmr::Family, U>: Codec,
 {
     for (i, op) in segment.iter().enumerate() {
@@ -605,7 +528,7 @@ fn clear_base_old_locs<K, V, B, const N: usize>(
     diff: &BTreeMap<K, DiffEntry<mmr::Family, V>>,
 ) where
     K: Ord,
-    B: BitmapRead<N>,
+    B: BitmapReadable<N>,
 {
     for entry in diff.values() {
         if let Some(old) = entry.base_old_loc() {
@@ -624,7 +547,7 @@ fn clear_ancestor_superseded<U, B, const N: usize>(
     db_base: u64,
 ) where
     U: update::Update,
-    B: BitmapRead<N>,
+    B: BitmapReadable<N>,
     Operation<mmr::Family, U>: Codec,
 {
     let mut seg_base = db_base;
@@ -795,7 +718,7 @@ impl<const N: usize> BitmapBatch<N> {
     const CHUNK_SIZE_BITS: u64 = BitMap::<N>::CHUNK_SIZE_BITS;
 }
 
-impl<const N: usize> BitmapRead<N> for BitmapBatch<N> {
+impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
     fn complete_chunks(&self) -> usize {
         (self.len() / Self::CHUNK_SIZE_BITS) as usize
     }
@@ -851,7 +774,7 @@ impl<const N: usize> BitmapRead<N> for BitmapBatch<N> {
 
     fn len(&self) -> u64 {
         match self {
-            Self::Base(bm) => BitmapRead::<N>::len(bm.as_ref()),
+            Self::Base(bm) => BitmapReadable::<N>::len(bm.as_ref()),
             Self::Layer(layer) => layer.parent_len + layer.pushed_bits.len() as u64,
         }
     }
