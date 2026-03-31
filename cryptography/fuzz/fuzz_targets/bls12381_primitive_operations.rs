@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{Read, ReadExt, Write};
 use commonware_cryptography::bls12381::primitives::{
-    group::{Private, Scalar, Share, G1, G1_MESSAGE, G2, G2_MESSAGE},
+    group::{Private, Scalar, ScalarReadCfg, Share, G1, G1_MESSAGE, G2, G2_MESSAGE},
     ops,
     variant::{MinPk, MinSig, Variant},
 };
@@ -162,6 +162,7 @@ enum FuzzOperation {
     // Serialization round-trip
     SerializeScalar {
         scalar: Scalar,
+        cfg: ScalarReadCfg,
     },
     SerializeG1 {
         point: G1,
@@ -302,6 +303,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
             }),
             30 => Ok(FuzzOperation::SerializeScalar {
                 scalar: u.arbitrary()?,
+                cfg: u.arbitrary()?,
             }),
             31 => Ok(FuzzOperation::SerializeG1 {
                 point: arbitrary_g1(u)?,
@@ -601,12 +603,16 @@ fn fuzz(op: FuzzOperation) {
             }
         }
 
-        FuzzOperation::SerializeScalar { scalar } => {
+        FuzzOperation::SerializeScalar { scalar, cfg } => {
             let mut encoded = Vec::new();
             scalar.write(&mut encoded);
-            if let Ok(decoded) = Scalar::read_cfg(&mut encoded.as_slice(), &Default::default()) {
-                assert_eq!(scalar, decoded);
+            if cfg == ScalarReadCfg::RejectZero && scalar == Scalar::zero() {
+                assert!(Scalar::read_cfg(&mut encoded.as_slice(), &cfg).is_err());
+                return;
             }
+
+            let decoded = Scalar::read_cfg(&mut encoded.as_slice(), &cfg).unwrap();
+            assert_eq!(scalar, decoded);
         }
 
         FuzzOperation::SerializeG1 { point } => {
