@@ -2238,6 +2238,10 @@ impl Builder {
     /// Freezes the inline buffer and assembles [`IoBufs`] by slicing at
     /// the recorded push boundaries.
     pub fn finish(self) -> IoBufs {
+        if self.pushes.is_empty() {
+            return IoBufs::from(self.buf.freeze());
+        }
+
         let frozen = self.buf.freeze();
         let mut result = IoBufs::default();
         let mut pos = 0;
