@@ -1070,11 +1070,10 @@ module replica {
             votes != Set(),
             nondet vote = votes.oneOf()
             val proposal = vote.proposal
+            all {
+                votes.forall(v => v.proposal == proposal),
 
-            any {
-                all {
-                    votes.forall(v => v.proposal == proposal),
-                    has_leader_proposal_conflict(self, proposal),
+                if (has_leader_proposal_conflict(self, proposal)) all {
                     sent_proposal' = sent_proposal,
                     sent_notarize_votes' = sent_notarize_votes,
                     sent_nullify_votes' = sent_nullify_votes,
@@ -1089,10 +1088,7 @@ module replica {
                     ghost_committed_blocks' = ghost_committed_blocks,
                     leader' = leader,
                     certify_policy' = certify_policy
-                },
-                all {
-                    votes.forall(v => v.proposal == proposal),
-                    not(has_leader_proposal_conflict(self, proposal)),
+                } else all {
                     store_notarize_votes' = store_notarize_votes,
                     store_nullify_votes' = store_nullify_votes,
                     store_finalize_votes' = store_finalize_votes.set(id, store_finalize.union(votes)),
@@ -1121,7 +1117,7 @@ module replica {
                     leader' = leader,
                     ghost_proposal' = ghost_proposal,
                     certify_policy' = certify_policy
-                }
+                },
             },
             lastAction' = "on_finalize"
         }
