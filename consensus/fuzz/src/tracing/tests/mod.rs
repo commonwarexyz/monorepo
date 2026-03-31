@@ -19,7 +19,7 @@ fn fixtures_dir() -> PathBuf {
     fuzz_dir().join("src/tracing/tests/fixtures")
 }
 
-fn generate_json_trace(fuzz_target: &str, corpus_path: &Path, hash: &str) -> PathBuf {
+fn generate_json_trace(fuzz_target: &str, trace_dir: &str, corpus_path: &Path, hash: &str) -> PathBuf {
     let output = Command::new("cargo")
         .args(["+nightly", "fuzz", "run", fuzz_target])
         .arg(corpus_path)
@@ -39,7 +39,7 @@ fn generate_json_trace(fuzz_target: &str, corpus_path: &Path, hash: &str) -> Pat
     );
 
     fuzz_dir()
-        .join(format!("artifacts/traces/{fuzz_target}_smallscope"))
+        .join(format!("artifacts/traces/{trace_dir}_smallscope"))
         .join(format!("{hash}.json"))
 }
 
@@ -83,10 +83,14 @@ fn run_quint_test(qnt_path: &Path) {
 }
 
 fn run_encoder_roundtrip(hash: &str) {
-    run_encoder_roundtrip_target("simplex_ed25519_quint_twins_disrupter", hash);
+    run_encoder_roundtrip_impl("simplex_ed25519_quint_twins_disrupter", "simplex_ed25519_quint_twins_disrupter", hash);
 }
 
 fn run_encoder_roundtrip_target(fuzz_target: &str, hash: &str) {
+    run_encoder_roundtrip_impl(fuzz_target, fuzz_target, hash);
+}
+
+fn run_encoder_roundtrip_impl(fuzz_target: &str, trace_dir: &str, hash: &str) {
     let corpus_path = fixtures_dir().join(hash);
     assert!(
         corpus_path.exists(),
@@ -94,7 +98,7 @@ fn run_encoder_roundtrip_target(fuzz_target: &str, hash: &str) {
         corpus_path.display()
     );
 
-    let json_path = generate_json_trace(fuzz_target, &corpus_path, hash);
+    let json_path = generate_json_trace(fuzz_target, trace_dir, &corpus_path, hash);
     assert!(
         json_path.exists(),
         "JSON trace not generated: {}",
@@ -128,8 +132,9 @@ fn test_encoder_roundtrip_449b2497101c43ad3c59f77013977e8bbb9e1340() {
 
 #[test]
 fn test_encoder_roundtrip_da39a3ee5e6b4b0d3255bfef95601890afd80709() {
-    run_encoder_roundtrip_target(
+    run_encoder_roundtrip_impl(
         "simplex_ed25519_quint_equivocator",
+        "simplex_ed25519_quint_byzantine",
         "da39a3ee5e6b4b0d3255bfef95601890afd80709",
     );
 }
