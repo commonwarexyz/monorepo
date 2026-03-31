@@ -206,10 +206,9 @@ impl Tree {
 impl Drop for Tree {
     fn drop(&mut self) {
         if let Some(parent) = self.parent.get_mut().take() {
-            {
-                let mut parent_inner = parent.inner.lock();
-                parent_inner.children.mark_stale();
-            }
+            let mut parent_inner = parent.inner.lock();
+            parent_inner.children.mark_stale();
+            drop(parent_inner);
 
             // If dropping this node makes its ancestors uniquely owned as well,
             // release that lineage iteratively instead of recursing through
