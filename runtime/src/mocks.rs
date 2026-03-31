@@ -106,7 +106,6 @@ impl SinkTrait for Sink {
             self.poisoned = true;
             Error::SendFailed
         })?;
-
         Ok(())
     }
 }
