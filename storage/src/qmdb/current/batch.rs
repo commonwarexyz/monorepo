@@ -71,9 +71,6 @@ fn apply_push_clear<const N: usize>(
 }
 
 /// A bitmap that can be read.
-///
-/// This mirrors [`commonware_utils::bitmap::Readable`] under a local name so that it
-/// does not collide with [`Readable`] (the MMR node trait).
 pub trait BitmapRead<const N: usize> {
     /// Return the number of complete (fully filled) chunks.
     fn complete_chunks(&self) -> usize;
