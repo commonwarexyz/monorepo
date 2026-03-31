@@ -1033,7 +1033,7 @@ module replica {
                 match create_notarization(id, proposal, new_store_notarize) {
                     | Some(cert) => all {
                         now_notarized,
-                        _process_notarization(id, cert, not(had_notarization))
+                        _add_notarization(id, cert, not(had_notarization))
                     }
                     | None => all {
                         store_certificates' = store_certificates,
@@ -1100,7 +1100,7 @@ module replica {
                     match create_finalization(id, proposal, store_finalize.union(votes)) {
                         | Some(cert) => all {
                             is_proposal_finalized_votes(proposal, store_finalize.union(votes)),
-                            _process_finalization(id, cert, not(store_certificates.get(id).exists(c => and {
+                            _add_finalization(id, cert, not(store_certificates.get(id).exists(c => and {
                                 is_finalization_cert(c),
                                 cert_proposal(c) == Some(proposal),
                             })))
@@ -1246,19 +1246,19 @@ module replica {
                 match (cert) {
                     | Notarization(n) => all {
                         store_notarize_votes' = store_notarize_votes,
-                        _process_notarization(id, n, not(seen_kind_and_view))
+                        _add_notarization(id, n, not(seen_kind_and_view))
                     }
                     | Nullification(n) => all {
                         store_notarize_votes' = store_notarize_votes,
                         store_nullify_votes' = store_nullify_votes,
                         store_finalize_votes' = store_finalize_votes,
-                        _process_nullification(id, n, not(seen_kind_and_view))
+                        _add_nullification(id, n, not(seen_kind_and_view))
                     }
                     | Finalization(f) => all {
                         store_notarize_votes' = store_notarize_votes,
                         store_nullify_votes' = store_nullify_votes,
                         store_finalize_votes' = store_finalize_votes,
-                        _process_finalization(id, f, not(seen_kind_and_view))
+                        _add_finalization(id, f, not(seen_kind_and_view))
                     }
                 }
             },
@@ -1272,7 +1272,7 @@ module replica {
         }
     }
 
-    action _process_notarization(id: ReplicaId, cert: NotarizationCert, is_new_cert: bool): bool = all {
+    action _add_notarization(id: ReplicaId, cert: NotarizationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
         val cert_msg: Certificate = Notarization(cert)
         all {
@@ -1413,7 +1413,7 @@ module replica {
         }
     }
 
-    action _process_nullification(id: ReplicaId, cert: NullificationCert, is_new_cert: bool): bool = all {
+    action _add_nullification(id: ReplicaId, cert: NullificationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
         val cert_msg: Certificate = Nullification(cert)
         val cert_view_num = cert.view
@@ -1449,7 +1449,7 @@ module replica {
         }
     }
 
-    action _process_finalization(id: ReplicaId, cert: FinalizationCert, is_new_cert: bool): bool = all {
+    action _add_finalization(id: ReplicaId, cert: FinalizationCert, is_new_cert: bool): bool = all {
         val self = replica_state.get(id)
         val cert_msg: Certificate = Finalization(cert)
         all {
