@@ -17,7 +17,9 @@ use crate::{
     signal::Signal,
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
-    utils::{add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard},
+    utils::{
+        self, add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard,
+    },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
 };
@@ -42,7 +44,6 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
     sync::Arc,
-    thread,
     time::{Duration, SystemTime},
 };
 use tokio::runtime::{Builder, Runtime};
@@ -94,17 +95,15 @@ pub struct NetworkConfig {
     /// Defaults to `Some(true)`.
     tcp_nodelay: Option<bool>,
 
-    /// Whether or not to set the `SO_LINGER` socket option.
+    /// Whether to set `SO_LINGER` to zero on the socket.
     ///
-    /// When `None`, the system default is used. When
-    /// `Some(duration)`, `SO_LINGER` is enabled with the given timeout.
-    /// `Some(Duration::ZERO)` causes an immediate RST on close, avoiding
+    /// When enabled, causes an immediate RST on close, avoiding
     /// `TIME_WAIT` state. This is useful in adversarial environments to
     /// reclaim socket resources immediately when closing connections to
     /// misbehaving peers.
     ///
-    /// Defaults to `Some(Duration::ZERO)`.
-    so_linger: Option<Duration>,
+    /// Defaults to `true`.
+    zero_linger: bool,
 
     /// Read/write timeout for network operations.
     ///
@@ -118,7 +117,7 @@ impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             tcp_nodelay: Some(true),
-            so_linger: Some(Duration::ZERO),
+            zero_linger: true,
             read_write_timeout: Duration::from_secs(60),
         }
     }
@@ -142,6 +141,14 @@ pub struct Config {
     /// Tokio sets the default value to 512 to avoid hanging on lower-level
     /// operations that require blocking (like `fs` and writing to `Stdout`).
     max_blocking_threads: usize,
+
+    /// Stack size to use for runtime-owned threads.
+    ///
+    /// Defaults to the system stack size when the current platform exposes it,
+    /// and otherwise falls back to Rust's default spawned-thread stack size.
+    ///
+    /// See [utils::thread::system_thread_stack_size].
+    thread_stack_size: usize,
 
     /// Whether or not to catch panics.
     catch_panics: bool,
@@ -172,6 +179,7 @@ impl Config {
         Self {
             worker_threads: 2,
             max_blocking_threads: 512,
+            thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
@@ -193,6 +201,11 @@ impl Config {
         self
     }
     /// See [Config]
+    pub const fn with_thread_stack_size(mut self, n: usize) -> Self {
+        self.thread_stack_size = n;
+        self
+    }
+    /// See [Config]
     pub const fn with_catch_panics(mut self, b: bool) -> Self {
         self.catch_panics = b;
         self
@@ -208,8 +221,8 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_so_linger(mut self, l: Option<Duration>) -> Self {
-        self.network_cfg.so_linger = l;
+    pub const fn with_zero_linger(mut self, l: bool) -> Self {
+        self.network_cfg.zero_linger = l;
         self
     }
     /// See [Config]
@@ -243,6 +256,10 @@ impl Config {
         self.max_blocking_threads
     }
     /// See [Config]
+    pub const fn thread_stack_size(&self) -> usize {
+        self.thread_stack_size
+    }
+    /// See [Config]
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
     }
@@ -255,8 +272,8 @@ impl Config {
         self.network_cfg.tcp_nodelay
     }
     /// See [Config]
-    pub const fn so_linger(&self) -> Option<Duration> {
-        self.network_cfg.so_linger
+    pub const fn zero_linger(&self) -> bool {
+        self.network_cfg.zero_linger
     }
     /// See [Config]
     pub const fn storage_directory(&self) -> &PathBuf {
@@ -299,6 +316,7 @@ pub struct Executor {
     runtime: Runtime,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
+    thread_stack_size: usize,
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -336,6 +354,7 @@ impl crate::Runner for Runner {
         let runtime = Builder::new_multi_thread()
             .worker_threads(self.cfg.worker_threads)
             .max_blocking_threads(self.cfg.max_blocking_threads)
+            .thread_stack_size(self.cfg.thread_stack_size)
             .enable_all()
             .build()
             .expect("failed to create Tokio runtime");
@@ -370,6 +389,7 @@ impl crate::Runner for Runner {
                         IoUringConfig {
                             storage_directory: self.cfg.storage_directory.clone(),
                             iouring_config: Default::default(),
+                            thread_stack_size: self.cfg.thread_stack_size,
                         },
                         iouring_registry,
                         storage_buffer_pool.clone(),
@@ -397,7 +417,7 @@ impl crate::Runner for Runner {
                     runtime_registry.sub_registry_with_prefix("iouring_network");
                 let config = IoUringNetworkConfig {
                     tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
-                    so_linger: self.cfg.network_cfg.so_linger,
+                    zero_linger: self.cfg.network_cfg.zero_linger,
                     read_write_timeout: self.cfg.network_cfg.read_write_timeout,
                     iouring_config: iouring::Config {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
@@ -406,6 +426,7 @@ impl crate::Runner for Runner {
                         shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
                         ..Default::default()
                     },
+                    thread_stack_size: self.cfg.thread_stack_size,
                     ..Default::default()
                 };
                 let network = MeteredNetwork::new(
@@ -422,7 +443,7 @@ impl crate::Runner for Runner {
                     .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
                     .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
-                    .with_so_linger(self.cfg.network_cfg.so_linger);
+                    .with_zero_linger(self.cfg.network_cfg.zero_linger);
                 let network = MeteredNetwork::new(
                     TokioNetwork::new(config, network_buffer_pool.clone()),
                     runtime_registry,
@@ -437,6 +458,7 @@ impl crate::Runner for Runner {
             runtime,
             shutdown: Mutex::new(Stopper::default()),
             panicker,
+            thread_stack_size: self.cfg.thread_stack_size,
         });
 
         // Get metrics
@@ -580,7 +602,7 @@ impl crate::Spawner for Context {
         );
 
         if matches!(past, Execution::Dedicated) {
-            thread::spawn({
+            utils::thread::spawn(executor.thread_stack_size, {
                 // Ensure the task can access the tokio runtime
                 let handle = executor.runtime.handle().clone();
                 move || {
@@ -851,7 +873,6 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BufferPoolThreadCache;
 
     #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {
@@ -860,14 +881,33 @@ mod tests {
         assert_eq!(cfg.worker_threads, 8);
         assert_eq!(
             cfg.resolved_network_buffer_pool_config()
-                .thread_cache_capacity,
-            BufferPoolThreadCache::ForParallelism(NZUsize!(8))
+                .thread_cache_config,
+            BufferPoolConfig::for_network()
+                .with_thread_cache_for_parallelism(NZUsize!(8))
+                .thread_cache_config
         );
         assert_eq!(
             cfg.resolved_storage_buffer_pool_config()
-                .thread_cache_capacity,
-            BufferPoolThreadCache::ForParallelism(NZUsize!(8))
+                .thread_cache_config,
+            BufferPoolConfig::for_storage()
+                .with_thread_cache_for_parallelism(NZUsize!(8))
+                .thread_cache_config
         );
+    }
+
+    #[test]
+    fn test_default_thread_stack_size_uses_system_default() {
+        let cfg = Config::new();
+        assert_eq!(
+            cfg.thread_stack_size(),
+            utils::thread::system_thread_stack_size()
+        );
+    }
+
+    #[test]
+    fn test_thread_stack_size_override() {
+        let cfg = Config::new().with_thread_stack_size(4 * 1024 * 1024);
+        assert_eq!(cfg.thread_stack_size(), 4 * 1024 * 1024);
     }
 
     #[test]
@@ -884,13 +924,17 @@ mod tests {
 
         assert_eq!(
             cfg.resolved_network_buffer_pool_config()
-                .thread_cache_capacity,
-            BufferPoolThreadCache::ForParallelism(NZUsize!(2))
+                .thread_cache_config,
+            BufferPoolConfig::for_network()
+                .with_thread_cache_for_parallelism(NZUsize!(2))
+                .thread_cache_config
         );
         assert_eq!(
             cfg.resolved_storage_buffer_pool_config()
-                .thread_cache_capacity,
-            BufferPoolThreadCache::Disabled
+                .thread_cache_config,
+            BufferPoolConfig::for_storage()
+                .with_thread_cache_disabled()
+                .thread_cache_config
         );
     }
 }

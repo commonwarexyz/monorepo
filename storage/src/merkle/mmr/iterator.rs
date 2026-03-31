@@ -155,7 +155,7 @@ pub(crate) fn nodes_to_pin(start_loc: Location) -> impl Iterator<Item = Position
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mmr::{mem::Mmr, Location, StandardHasher as Standard};
+    use crate::merkle::mmr::{mem::Mmr, Location, StandardHasher as Standard};
     use commonware_cryptography::Sha256;
 
     #[test]

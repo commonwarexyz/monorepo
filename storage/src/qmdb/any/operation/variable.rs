@@ -1,5 +1,5 @@
 use crate::{
-    mmr::Location,
+    merkle::{Family, Location},
     qmdb::{
         any::{
             operation::{
@@ -15,8 +15,9 @@ use crate::{
 use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut};
 
-impl<V, S> OperationCodec<S> for VariableEncoding<V>
+impl<F, V, S> OperationCodec<F, S> for VariableEncoding<V>
 where
+    F: Family,
     S::Key: Write + Read,
     V: VariableValue,
     S: Update<Value = V, ValueEncoding = Self>
@@ -25,7 +26,7 @@ where
 {
     type ReadCfg = (<S::Key as Read>::Cfg, <V as Read>::Cfg);
 
-    fn write_operation(op: &Operation<S>, buf: &mut impl BufMut) {
+    fn write_operation(op: &Operation<F, S>, buf: &mut impl BufMut) {
         match op {
             Operation::Delete(k) => {
                 DELETE_CONTEXT.write(buf);
@@ -43,7 +44,10 @@ where
         }
     }
 
-    fn read_operation(buf: &mut impl Buf, cfg: &Self::ReadCfg) -> Result<Operation<S>, CodecError> {
+    fn read_operation(
+        buf: &mut impl Buf,
+        cfg: &Self::ReadCfg,
+    ) -> Result<Operation<F, S>, CodecError> {
         match u8::read(buf)? {
             DELETE_CONTEXT => {
                 let key = S::Key::read_cfg(buf, &cfg.0)?;
@@ -64,8 +68,9 @@ where
 }
 
 // EncodeSize for ordered variable operations.
-impl<K, V> EncodeSize for Operation<update::Ordered<K, VariableEncoding<V>>>
+impl<F, K, V> EncodeSize for Operation<F, update::Ordered<K, VariableEncoding<V>>>
 where
+    F: Family,
     K: Key + EncodeSize,
     V: VariableValue,
     update::Ordered<K, VariableEncoding<V>>: EncodeSize,
@@ -80,8 +85,9 @@ where
 }
 
 // EncodeSize for unordered variable operations.
-impl<K, V> EncodeSize for Operation<update::Unordered<K, VariableEncoding<V>>>
+impl<F, K, V> EncodeSize for Operation<F, update::Unordered<K, VariableEncoding<V>>>
 where
+    F: Family,
     K: Key + EncodeSize,
     V: VariableValue,
     update::Unordered<K, VariableEncoding<V>>: EncodeSize,

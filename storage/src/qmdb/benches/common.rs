@@ -5,7 +5,7 @@ use commonware_cryptography::{Hasher, Sha256};
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, BufferPooler, ThreadPooler};
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    mmr::journaled::Config as MmrConfig,
+    merkle::mmr::{journaled::Config as MmrConfig, Family},
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
@@ -39,23 +39,23 @@ pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 // -- Fixed value (Digest), fixed storage layout --
 
-pub type AnyUFixDb = UFixed<Context, Digest, Digest, Sha256, EightCap>;
-pub type AnyOFixDb = OFixed<Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyUFixDb = UFixed<Family, Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyOFixDb = OFixed<Family, Context, Digest, Digest, Sha256, EightCap>;
 pub type CurUFixDb = UCFixed<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 pub type CurOFixDb = OCFixed<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
 // -- Fixed value (Digest), variable storage layout --
 // Measures overhead of variable-capable storage when values are fixed-size.
 
-pub type AnyUVarDigestDb = UVariable<Context, Digest, Digest, Sha256, EightCap>;
-pub type AnyOVarDigestDb = OVariable<Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyUVarDigestDb = UVariable<Family, Context, Digest, Digest, Sha256, EightCap>;
+pub type AnyOVarDigestDb = OVariable<Family, Context, Digest, Digest, Sha256, EightCap>;
 pub type CurUVarDigestDb = UCVariable<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 pub type CurOVarDigestDb = OCVariable<Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE>;
 
 // -- Variable value (Vec<u8>), variable storage layout --
 
-pub type AnyUVarVecDb = UVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
-pub type AnyOVarVecDb = OVariable<Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type AnyUVarVecDb = UVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap>;
+pub type AnyOVarVecDb = OVariable<Family, Context, Digest, Vec<u8>, Sha256, EightCap>;
 pub type CurUVarVecDb = UCVariable<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 pub type CurOVarVecDb = OCVariable<Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE>;
 
@@ -173,7 +173,7 @@ fn var_log_cfg<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -> VConfi
 pub fn any_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> AnyFixedConfig<EightCap> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyFixedConfig {
-        mmr_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
         translator: EightCap,
     }
@@ -194,7 +194,7 @@ pub fn any_var_digest_cfg(
 ) -> AnyVariableConfig<EightCap, ((), ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        mmr_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
         translator: EightCap,
     }
@@ -217,7 +217,7 @@ pub fn any_var_vec_cfg(
 ) -> AnyVariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        mmr_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
+        merkle_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
         translator: EightCap,
     }
@@ -493,7 +493,7 @@ pub async fn gen_random_kv<M>(
     commit_frequency: Option<u32>,
     make_value: impl Fn(&mut StdRng) -> M::Value,
 ) where
-    M: DbAny<Key = Digest>,
+    M: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest>,
 {
     let mut rng = StdRng::seed_from_u64(42);
 
