@@ -5,6 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
+    merkle::mmr::Family,
     mmr::journaled::Config as MmrConfig,
     qmdb::{
         any::{
@@ -21,7 +22,7 @@ use std::{num::NonZeroU16, sync::Arc};
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
-type FixedDb = Db<deterministic::Context, Key, Value, Sha256, TwoCap>;
+type FixedDb = Db<Family, deterministic::Context, Key, Value, Sha256, TwoCap>;
 
 const MAX_OPERATIONS: usize = 50;
 
@@ -93,7 +94,7 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
     Config {
-        mmr_config: MmrConfig {
+        merkle_config: MmrConfig {
             journal_partition: format!("{test_name}-mmr"),
             metadata_partition: format!("{test_name}-meta"),
             items_per_blob: NZU64!(3),
@@ -114,7 +115,7 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap> {
 async fn test_sync<
     R: sync::resolver::Resolver<
         Digest = commonware_cryptography::sha256::Digest,
-        Op = FixedOperation<Key, Value>,
+        Op = FixedOperation<Family, Key, Value>,
     >,
 >(
     context: deterministic::Context,

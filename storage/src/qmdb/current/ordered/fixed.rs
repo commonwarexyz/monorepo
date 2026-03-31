@@ -11,11 +11,10 @@ pub use super::db::KeyValueProof;
 use crate::{
     index::ordered::Index,
     journal::contiguous::fixed::Journal,
-    mmr::Location,
+    merkle::mmr::Location,
     qmdb::{
         any::{ordered::fixed::Operation, value::FixedEncoding, FixedValue},
         current::FixedConfig as Config,
-        Error,
     },
     translator::Translator,
     Context,
@@ -23,8 +22,17 @@ use crate::{
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
 
-pub type Db<E, K, V, H, T, const N: usize> =
-    super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, Index<T, Location>, H, N>;
+type Error = crate::qmdb::Error<crate::mmr::Family>;
+
+pub type Db<E, K, V, H, T, const N: usize> = super::db::Db<
+    E,
+    Journal<E, Operation<crate::mmr::Family, K, V>>,
+    K,
+    FixedEncoding<V>,
+    Index<T, Location>,
+    H,
+    N,
+>;
 
 impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, const N: usize>
     Db<E, K, V, H, T, N>
@@ -43,17 +51,18 @@ pub mod partitioned {
     use crate::{
         index::partitioned::ordered::Index,
         journal::contiguous::fixed::Journal,
-        mmr::Location,
+        merkle::mmr::Location,
         qmdb::{
             any::{ordered::fixed::partitioned::Operation, value::FixedEncoding, FixedValue},
             current::FixedConfig as Config,
-            Error,
         },
         translator::Translator,
         Context,
     };
     use commonware_cryptography::Hasher;
     use commonware_utils::Array;
+
+    type Error = crate::qmdb::Error<crate::mmr::Family>;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -64,7 +73,7 @@ pub mod partitioned {
     pub type Db<E, K, V, H, T, const P: usize, const N: usize> =
         crate::qmdb::current::ordered::db::Db<
             E,
-            Journal<E, Operation<K, V>>,
+            Journal<E, Operation<crate::mmr::Family, K, V>>,
             K,
             FixedEncoding<V>,
             Index<T, Location, P>,

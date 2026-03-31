@@ -140,10 +140,18 @@ echo "Generating rustdoc JSON..." >&2
 # Generate rustdoc JSON for all crates in a single invocation
 # Use RUSTFLAGS and RUSTDOCFLAGS for consistent cfg propagation
 # Allow broken intra-doc links since stability-gated types won't be available
+#
+# Prefer cargo +nightly (rustup) but fall back to RUSTC_BOOTSTRAP=1 for
+# non-rustup toolchains (e.g. Nix).
+CARGO_NIGHTLY="cargo +nightly"
+if ! $CARGO_NIGHTLY --version &>/dev/null; then
+    CARGO_NIGHTLY="cargo"
+    export RUSTC_BOOTSTRAP=1
+fi
 if ! RUSTFLAGS="--cfg $STABILITY_CFG" \
     RUSTDOCFLAGS="-Z unstable-options --output-format json --cfg $STABILITY_CFG -Arustdoc::broken_intra_doc_links" \
     CARGO_TARGET_DIR="$target_dir" \
-    cargo +nightly doc "${pkg_args[@]}" --no-deps 2>/dev/null; then
+    $CARGO_NIGHTLY doc "${pkg_args[@]}" --no-deps 2>/dev/null; then
     echo "Error: Could not generate rustdoc" >&2
     exit 1
 fi

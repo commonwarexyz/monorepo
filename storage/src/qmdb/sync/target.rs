@@ -1,9 +1,9 @@
 #[cfg(feature = "arbitrary")]
-use crate::merkle::Family as _;
+use crate::merkle::mmr::Family;
 #[cfg(feature = "arbitrary")]
-use crate::mmr::Family;
+use crate::merkle::Family as _;
 use crate::{
-    mmr::Location,
+    merkle::mmr::Location,
     qmdb::sync::{self, error::EngineError},
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};

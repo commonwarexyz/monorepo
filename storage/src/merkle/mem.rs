@@ -161,29 +161,9 @@ impl<F: Family, D: Digest> Mem<F, D> {
         )
     }
 
-    /// Build a minimal, pruned structure from a precomputed root and pinned peaks.
-    ///
-    /// The resulting structure has no retained nodes -- only the O(log N) pinned peaks needed
-    /// for proof generation and the already-known root. This avoids rehashing.
-    #[cfg(feature = "std")]
-    pub(crate) fn from_pruned(
-        root: D,
-        pruning_boundary: Position<F>,
-        pinned_nodes: BTreeMap<Position<F>, D>,
-    ) -> Self {
-        Self {
-            inner: Arc::new(MemInner {
-                nodes: VecDeque::new(),
-                pruning_boundary,
-                pinned_nodes,
-                root,
-            }),
-        }
-    }
-
     /// Build a pruned structure that retains nodes above the prune boundary.
     ///
-    /// Like [`from_pruned`](Self::from_pruned) but also accepts retained nodes (stored in the
+    /// Like `from_components` but also accepts retained nodes (stored in the
     /// `nodes` deque). Used by `flatten()` and the grafted MMR which has no disk fallback.
     #[cfg(feature = "std")]
     pub(crate) fn from_pruned_with_retained(

@@ -76,11 +76,10 @@ use crate::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    mmr::{journaled::Config as MmrConfig, Location},
+    merkle::{journaled::Config as MerkleConfig, Family, Location},
     qmdb::{
         any::operation::{Operation, Update},
         operation::Committable,
-        Error,
     },
     translator::Translator,
     Context,
@@ -103,8 +102,8 @@ pub mod unordered;
 /// Configuration for an `Any` authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, J> {
-    /// Configuration for the MMR backing the authenticated journal.
-    pub mmr_config: MmrConfig,
+    /// Configuration for the Merkle structure backing the authenticated journal.
+    pub merkle_config: MerkleConfig,
 
     /// Configuration for the operations log journal.
     pub journal_config: J,
@@ -120,27 +119,28 @@ pub type FixedConfig<T> = Config<T, FConfig>;
 pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
 
 /// Initialize an `Any` authenticated db from the given config.
-pub(super) async fn init<E, U, H, T, I, J, F, NewIndex>(
+pub async fn init<F, E, U, H, T, I, J, Cb, NewIndex>(
     context: E,
     cfg: Config<T, J::Config>,
-    known_inactivity_floor: Option<Location>,
-    callback: F,
+    known_inactivity_floor: Option<Location<F>>,
+    callback: Cb,
     new_index: NewIndex,
-) -> Result<db::Db<E, J, I, H, U>, Error>
+) -> Result<db::Db<F, E, J, I, H, U>, crate::qmdb::Error<F>>
 where
+    F: Family,
     E: Context,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
-    I: UnorderedIndex<Value = Location>,
-    J: Inner<E, Item = Operation<U>>,
-    Operation<U>: Committable + CodecShared,
-    F: FnMut(bool, Option<Location>),
+    I: UnorderedIndex<Value = Location<F>>,
+    J: Inner<E, Item = Operation<F, U>>,
+    Operation<F, U>: Committable + CodecShared,
+    Cb: FnMut(bool, Option<Location<F>>),
     NewIndex: FnOnce(E, T) -> I,
 {
-    let mut log = J::init(
+    let mut log = J::init::<F, H>(
         context.with_label("log"),
-        cfg.mmr_config,
+        cfg.merkle_config,
         cfg.journal_config,
         Operation::is_commit,
     )
@@ -163,11 +163,27 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-        qmdb::any::{FixedConfig, MmrConfig, VariableConfig},
+        qmdb::any::{FixedConfig, MerkleConfig, VariableConfig},
         translator::OneCap,
     };
+    use commonware_codec::{Codec, CodecShared};
+    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Metrics,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
-    use std::num::{NonZeroU16, NonZeroUsize};
+    use core::{future::Future, pin::Pin};
+    use std::{
+        collections::HashMap,
+        num::{NonZeroU16, NonZeroUsize},
+    };
+
+    pub(crate) fn colliding_digest(prefix: u8, suffix: u64) -> Digest {
+        let mut bytes = [0u8; 32];
+        bytes[0] = prefix;
+        bytes[24..].copy_from_slice(&suffix.to_be_bytes());
+        Digest::from(bytes)
+    }
 
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -179,7 +195,7 @@ pub(crate) mod test {
     ) -> FixedConfig<T> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
-            mmr_config: MmrConfig {
+            merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -203,7 +219,7 @@ pub(crate) mod test {
     ) -> VariableConfig<T, ((), ())> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            mmr_config: MmrConfig {
+            merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -226,20 +242,16 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as UnorderedIndex,
         journal::contiguous::Mutable,
-        mmr::Location,
+        merkle::mmr,
         qmdb::any::{
             db::Db as AnyDb,
             operation::{update::Update as UpdateTrait, Operation as AnyOperation},
             traits::{DbAny, MerkleizedBatch as _, Provable, UnmerkleizedBatch as _},
         },
     };
-    use commonware_codec::{Codec, CodecShared};
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Metrics,
-    };
-    use core::{future::Future, pin::Pin};
-    use std::collections::HashMap;
+
+    type Error = crate::qmdb::Error<mmr::Family>;
+    type Location = mmr::Location;
 
     pub(crate) trait RewindableDb {
         fn rewind_to_size(
@@ -248,14 +260,14 @@ pub(crate) mod test {
         ) -> impl Future<Output = Result<(), Error>> + Send;
     }
 
-    impl<E, U, C, I, H> RewindableDb for AnyDb<E, C, I, H, U>
+    impl<E, U, C, I, H> RewindableDb for AnyDb<mmr::Family, E, C, I, H, U>
     where
         E: crate::Context,
         U: UpdateTrait,
-        C: Mutable<Item = AnyOperation<U>>,
+        C: Mutable<Item = AnyOperation<mmr::Family, U>>,
         I: UnorderedIndex<Value = Location>,
         H: Hasher,
-        AnyOperation<U>: Codec,
+        AnyOperation<mmr::Family, U>: Codec,
     {
         async fn rewind_to_size(&mut self, size: Location) -> Result<(), Error> {
             self.rewind(size).await?;
@@ -264,13 +276,13 @@ pub(crate) mod test {
     }
 
     /// Test recovery on non-empty db.
-    pub(crate) async fn test_any_db_non_empty_recovery<D, V: Clone + CodecShared>(
+    pub(crate) async fn test_any_db_non_empty_recovery<F: Family, D, V: Clone + CodecShared>(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<Key = Digest, Value = V, Digest = Digest>,
+        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
     {
         const ELEMENTS: u64 = 1000;
 
@@ -360,13 +372,13 @@ pub(crate) mod test {
     }
 
     /// Test recovery on empty db.
-    pub(crate) async fn test_any_db_empty_recovery<D, V: Clone + CodecShared>(
+    pub(crate) async fn test_any_db_empty_recovery<F: Family, D, V: Clone + CodecShared>(
         context: Context,
         db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<Key = Digest, Value = V, Digest = Digest>,
+        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
     {
         let root = db.root();
 
@@ -445,7 +457,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<Key = Digest, Value = V, Digest = Digest> + RewindableDb,
+        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + RewindableDb,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
         let key0 = Sha256::hash(&0u64.to_be_bytes());
@@ -604,9 +616,9 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<Key = Digest, Value = V, Digest = Digest> + Provable,
+        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
         V: CodecShared + Clone + Eq + std::hash::Hash + std::fmt::Debug,
-        <D as Provable>::Operation: Codec,
+        <D as Provable<mmr::Family>>::Operation: Codec,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
 
@@ -684,6 +696,7 @@ pub(crate) mod test {
 
     /// Test that replaying multiple updates of the same key on startup preserves correct state.
     pub(crate) async fn test_any_db_log_replay<
+        F: Family,
         D,
         V: Clone + CodecShared + PartialEq + std::fmt::Debug,
     >(
@@ -692,7 +705,7 @@ pub(crate) mod test {
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<Key = Digest, Value = V, Digest = Digest>,
+        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
     {
         // Update the same key many times within a single batch.
         const UPDATES: u64 = 100;
@@ -726,8 +739,8 @@ pub(crate) mod test {
         mut db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<Key = Digest, Value = V, Digest = Digest> + Provable,
-        <D as Provable>::Operation: Codec + PartialEq + std::fmt::Debug,
+        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
+        <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
         use commonware_utils::NZU64;
@@ -805,8 +818,8 @@ pub(crate) mod test {
         mut db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<Key = Digest, Value = V, Digest = Digest> + Provable,
-        <D as Provable>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
+        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
+        <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug + Clone,
     {
         use crate::{mmr::StandardHasher, qmdb::verify_proof};
         use commonware_utils::NZU64;
@@ -939,8 +952,8 @@ pub(crate) mod test {
         mut db: D,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<Key = Digest, Value = V, Digest = Digest> + Provable,
-        <D as Provable>::Operation: Codec + PartialEq + std::fmt::Debug,
+        D: DbAny<mmr::Family, Key = Digest, Value = V, Digest = Digest> + Provable<mmr::Family>,
+        <D as Provable<mmr::Family>>::Operation: Codec + PartialEq + std::fmt::Debug,
     {
         use commonware_utils::NZU64;
 
@@ -983,13 +996,13 @@ pub(crate) mod test {
     }
 
     /// Test making multiple commits, one of which deletes a key from a previous commit.
-    pub(crate) async fn test_any_db_multiple_commits_delete_replayed<D, V>(
+    pub(crate) async fn test_any_db_multiple_commits_delete_replayed<F: Family, D, V>(
         context: Context,
         mut db: D,
         reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
         make_value: impl Fn(u64) -> V,
     ) where
-        D: DbAny<Key = Digest, Value = V, Digest = Digest>,
+        D: DbAny<F, Key = Digest, Value = V, Digest = Digest>,
         V: Clone + CodecShared + Eq + std::fmt::Debug,
     {
         let mut map = HashMap::<Digest, V>::default();
@@ -1046,34 +1059,132 @@ pub(crate) mod test {
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{deterministic, Runner as _};
 
-    // Type aliases for all 12 variants (all use OneCap for collision coverage).
-    type UnorderedFixed = UnorderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
-    type UnorderedVariable = UnorderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
-    type OrderedFixed = OrderedFixedDb<Context, Digest, Digest, Sha256, OneCap>;
-    type OrderedVariable = OrderedVariableDb<Context, Digest, Digest, Sha256, OneCap>;
+    // Type aliases for all 12 MMR variants (all use OneCap for collision coverage).
+    type UnorderedFixed = UnorderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
+    type UnorderedVariable =
+        UnorderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
+    type OrderedFixed = OrderedFixedDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
+    type OrderedVariable = OrderedVariableDb<mmr::Family, Context, Digest, Digest, Sha256, OneCap>;
     type UnorderedFixedP1 =
-        unordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1>;
-    type UnorderedVariableP1 =
-        unordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1>;
+        unordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1>;
+    type UnorderedVariableP1 = unordered::variable::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        1,
+    >;
     type OrderedFixedP1 =
-        ordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1>;
+        ordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1>;
     type OrderedVariableP1 =
-        ordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 1>;
+        ordered::variable::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1>;
     type UnorderedFixedP2 =
-        unordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2>;
-    type UnorderedVariableP2 =
-        unordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2>;
+        unordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 2>;
+    type UnorderedVariableP2 = unordered::variable::partitioned::Db<
+        mmr::Family,
+        Context,
+        Digest,
+        Digest,
+        Sha256,
+        OneCap,
+        2,
+    >;
     type OrderedFixedP2 =
-        ordered::fixed::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2>;
+        ordered::fixed::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 2>;
     type OrderedVariableP2 =
-        ordered::variable::partitioned::Db<Context, Digest, Digest, Sha256, OneCap, 2>;
+        ordered::variable::partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 2>;
+
+    // MMB type aliases for with_all_variants.
+    mod mmb_types {
+        use super::*;
+        use crate::{
+            index::{ordered::Index as OrderedIndex, unordered::Index as UnorderedIndex},
+            journal::contiguous::{fixed::Journal as FJournal, variable::Journal as VJournal},
+            merkle::{mmb, Location},
+            qmdb::any::{
+                operation::{update, Operation},
+                value::{FixedEncoding, VariableEncoding},
+            },
+        };
+
+        type MmbLocation = Location<mmb::Family>;
+
+        pub type MmbUnorderedFixed = super::super::db::Db<
+            mmb::Family,
+            Context,
+            FJournal<
+                Context,
+                Operation<mmb::Family, update::Unordered<Digest, FixedEncoding<Digest>>>,
+            >,
+            UnorderedIndex<OneCap, MmbLocation>,
+            Sha256,
+            update::Unordered<Digest, FixedEncoding<Digest>>,
+        >;
+
+        pub type MmbUnorderedVariable = super::super::db::Db<
+            mmb::Family,
+            Context,
+            VJournal<
+                Context,
+                Operation<mmb::Family, update::Unordered<Digest, VariableEncoding<Digest>>>,
+            >,
+            UnorderedIndex<OneCap, MmbLocation>,
+            Sha256,
+            update::Unordered<Digest, VariableEncoding<Digest>>,
+        >;
+
+        pub type MmbOrderedFixed = super::super::db::Db<
+            mmb::Family,
+            Context,
+            FJournal<
+                Context,
+                Operation<mmb::Family, update::Ordered<Digest, FixedEncoding<Digest>>>,
+            >,
+            OrderedIndex<OneCap, MmbLocation>,
+            Sha256,
+            update::Ordered<Digest, FixedEncoding<Digest>>,
+        >;
+
+        pub type MmbOrderedVariable = super::super::db::Db<
+            mmb::Family,
+            Context,
+            VJournal<
+                Context,
+                Operation<mmb::Family, update::Ordered<Digest, VariableEncoding<Digest>>>,
+            >,
+            OrderedIndex<OneCap, MmbLocation>,
+            Sha256,
+            update::Ordered<Digest, VariableEncoding<Digest>>,
+        >;
+    }
+    use mmb_types::*;
 
     #[inline]
     fn to_digest(i: u64) -> Digest {
         Sha256::hash(&i.to_be_bytes())
     }
 
-    // Defines all 12 variants in one place. Calls $cb!($($args)*, $label, $type, $config) for each.
+    // Defines MMR-only variants (for tests that require mmr::Family, e.g. proof verification).
+    macro_rules! with_mmr_variants {
+        ($cb:ident!($($args:tt)*)) => {
+            $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
+            $cb!($($args)*, "uv", UnorderedVariable, variable_db_config);
+            $cb!($($args)*, "of", OrderedFixed, fixed_db_config);
+            $cb!($($args)*, "ov", OrderedVariable, variable_db_config);
+            $cb!($($args)*, "ufp1", UnorderedFixedP1, fixed_db_config);
+            $cb!($($args)*, "uvp1", UnorderedVariableP1, variable_db_config);
+            $cb!($($args)*, "ofp1", OrderedFixedP1, fixed_db_config);
+            $cb!($($args)*, "ovp1", OrderedVariableP1, variable_db_config);
+            $cb!($($args)*, "ufp2", UnorderedFixedP2, fixed_db_config);
+            $cb!($($args)*, "uvp2", UnorderedVariableP2, variable_db_config);
+            $cb!($($args)*, "ofp2", OrderedFixedP2, fixed_db_config);
+            $cb!($($args)*, "ovp2", OrderedVariableP2, variable_db_config);
+        };
+    }
+
+    // Defines all variants (MMR + MMB). Calls $cb!($($args)*, $label, $type, $config) for each.
     macro_rules! with_all_variants {
         ($cb:ident!($($args:tt)*)) => {
             $cb!($($args)*, "uf", UnorderedFixed, fixed_db_config);
@@ -1088,6 +1199,10 @@ pub(crate) mod test {
             $cb!($($args)*, "uvp2", UnorderedVariableP2, variable_db_config);
             $cb!($($args)*, "ofp2", OrderedFixedP2, fixed_db_config);
             $cb!($($args)*, "ovp2", OrderedVariableP2, variable_db_config);
+            $cb!($($args)*, "uf_mmb", MmbUnorderedFixed, fixed_db_config);
+            $cb!($($args)*, "uv_mmb", MmbUnorderedVariable, variable_db_config);
+            $cb!($($args)*, "of_mmb", MmbOrderedFixed, fixed_db_config);
+            $cb!($($args)*, "ov_mmb", MmbOrderedVariable, variable_db_config);
         };
     }
 
@@ -1133,13 +1248,24 @@ pub(crate) mod test {
         }};
     }
 
-    // Macro to run a test on all 12 DB variants.
+    // Macro to run a test on all DB variants (MMR + MMB).
     macro_rules! for_all_variants {
         ($ctx:expr, $sfx:expr, with_reopen: $f:expr) => {{
             with_all_variants!(test_with_reopen!($ctx, $sfx, $f));
         }};
         ($ctx:expr, $sfx:expr, with_make_value: $f:expr) => {{
             with_all_variants!(test_with_make_value!($ctx, $sfx, $f));
+        }};
+    }
+
+    // Macro to run a test on MMR-only DB variants (for tests that use mmr::Family-specific
+    // features like Location::new or verify_proof).
+    macro_rules! for_mmr_variants {
+        ($ctx:expr, $sfx:expr, with_reopen: $f:expr) => {{
+            with_mmr_variants!(test_with_reopen!($ctx, $sfx, $f));
+        }};
+        ($ctx:expr, $sfx:expr, with_make_value: $f:expr) => {{
+            with_mmr_variants!(test_with_make_value!($ctx, $sfx, $f));
         }};
     }
 
@@ -1157,7 +1283,7 @@ pub(crate) mod test {
     fn test_all_variants_build_and_authenticate() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for_all_variants!(context, "baa", with_reopen: test_any_db_build_and_authenticate);
+            for_mmr_variants!(context, "baa", with_reopen: test_any_db_build_and_authenticate);
         });
     }
 
@@ -1166,7 +1292,7 @@ pub(crate) mod test {
     fn test_all_variants_historical_proof_basic() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for_all_variants!(context, "hpb", with_make_value: test_any_db_historical_proof_basic);
+            for_mmr_variants!(context, "hpb", with_make_value: test_any_db_historical_proof_basic);
         });
     }
 
@@ -1175,7 +1301,7 @@ pub(crate) mod test {
     fn test_all_variants_historical_proof_invalid() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for_all_variants!(context, "hpi", with_make_value: test_any_db_historical_proof_invalid);
+            for_mmr_variants!(context, "hpi", with_make_value: test_any_db_historical_proof_invalid);
         });
     }
 
@@ -1184,7 +1310,7 @@ pub(crate) mod test {
     fn test_all_variants_historical_proof_edge_cases() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for_all_variants!(context, "hpec", with_make_value: test_any_db_historical_proof_edge_cases);
+            for_mmr_variants!(context, "hpec", with_make_value: test_any_db_historical_proof_edge_cases);
         });
     }
 
@@ -1220,7 +1346,7 @@ pub(crate) mod test {
     fn test_all_variants_rewind_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for_all_variants!(context, "rr", with_reopen: test_any_db_rewind_recovery);
+            for_mmr_variants!(context, "rr", with_reopen: test_any_db_rewind_recovery);
         });
     }
 
@@ -1237,7 +1363,7 @@ pub(crate) mod test {
         db: &mut UnorderedVariable,
         writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
         metadata: Option<Digest>,
-    ) -> std::ops::Range<Location> {
+    ) -> std::ops::Range<crate::mmr::Location> {
         let mut batch = db.new_batch();
         for (k, v) in writes {
             batch = batch.write(k, v);
@@ -1522,7 +1648,7 @@ pub(crate) mod test {
             let range1 = commit_writes(&mut db, writes, None).await;
 
             // Range should start after the initial CommitFloor (location 0).
-            assert_eq!(range1.start, Location::new(1));
+            assert_eq!(range1.start, crate::mmr::Location::new(1));
             // Range length >= 6 (5 writes + 1 CommitFloor + possible floor raise ops).
             assert!(range1.end.saturating_sub(*range1.start) >= 6);
 
@@ -2082,6 +2208,180 @@ pub(crate) mod test {
                 ),
                 "unexpected rewind error: {err:?}"
             );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    // --- MMB family tests ---
+    //
+    // The tests above use MMR-backed databases (via the concrete Db type aliases). The tests
+    // below verify the same core operations work with the MMB family, exercising the generic
+    // `init_fixed`/`init_variable` path with `mmb::Family`.
+
+    type MmbVariable = super::db::Db<
+        crate::merkle::mmb::Family,
+        Context,
+        crate::journal::contiguous::variable::Journal<
+            Context,
+            super::operation::Operation<
+                crate::merkle::mmb::Family,
+                super::operation::update::Unordered<Digest, super::value::VariableEncoding<Digest>>,
+            >,
+        >,
+        crate::index::unordered::Index<OneCap, crate::merkle::Location<crate::merkle::mmb::Family>>,
+        Sha256,
+        super::operation::update::Unordered<Digest, super::value::VariableEncoding<Digest>>,
+    >;
+
+    async fn open_mmb_db(context: Context, suffix: &str) -> MmbVariable {
+        let cfg = variable_db_config::<OneCap>(suffix, &context);
+        super::init(
+            context,
+            cfg,
+            None,
+            |_, _| {},
+            crate::index::unordered::Index::new,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn commit_writes_mmb(
+        db: &mut MmbVariable,
+        writes: impl IntoIterator<Item = (Digest, Option<Digest>)>,
+        metadata: Option<Digest>,
+    ) {
+        let mut batch = db.new_batch();
+        for (k, v) in writes {
+            batch = batch.write(k, v);
+        }
+        let finalized = batch.merkleize(metadata, db).await.unwrap().finalize();
+        db.apply_batch(finalized).await.unwrap();
+        db.commit().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_mmb_batch_crud() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_mmb_db(context.with_label("db"), "crud").await;
+
+            // Insert and read back.
+            commit_writes_mmb(&mut db, [(key(0), Some(val(0)))], None).await;
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+
+            // Update existing key.
+            commit_writes_mmb(&mut db, [(key(0), Some(val(1)))], None).await;
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(1)));
+
+            // Delete key.
+            commit_writes_mmb(&mut db, [(key(0), None)], None).await;
+            assert!(db.get(&key(0)).await.unwrap().is_none());
+
+            // Multiple keys.
+            commit_writes_mmb(
+                &mut db,
+                [(key(1), Some(val(1))), (key(2), Some(val(2)))],
+                None,
+            )
+            .await;
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(db.get(&key(2)).await.unwrap(), Some(val(2)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_mmb_batch_empty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_mmb_db(context.with_label("db"), "empty").await;
+            let root_before = db.root();
+
+            let finalized = db
+                .new_batch()
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
+            assert_ne!(db.root(), root_before);
+
+            commit_writes_mmb(&mut db, [(key(0), Some(val(0)))], None).await;
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_mmb_batch_metadata() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_mmb_db(context.with_label("db"), "meta").await;
+
+            let metadata = val(42);
+            commit_writes_mmb(&mut db, [(key(0), Some(val(0)))], Some(metadata)).await;
+            assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
+
+            let finalized = db
+                .new_batch()
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(finalized).await.unwrap();
+            assert_eq!(db.get_metadata().await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_mmb_recovery() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_mmb_db(context.with_label("db0"), "recovery").await;
+
+            commit_writes_mmb(&mut db, [(key(0), Some(val(0)))], Some(val(99))).await;
+            commit_writes_mmb(&mut db, [(key(1), Some(val(1)))], None).await;
+
+            let root = db.root();
+            let bounds = db.bounds().await;
+            db.sync().await.unwrap();
+            drop(db);
+
+            // Reopen and verify state.
+            let db = open_mmb_db(context.with_label("db1"), "recovery").await;
+            assert_eq!(db.root(), root);
+            assert_eq!(db.bounds().await, bounds);
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(db.get_metadata().await.unwrap(), None);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_mmb_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_mmb_db(context.with_label("db"), "prune").await;
+
+            for i in 0u64..20 {
+                commit_writes_mmb(&mut db, [(key(i), Some(val(i)))], None).await;
+            }
+
+            let floor = db.inactivity_floor_loc();
+            db.prune(floor).await.unwrap();
+
+            // All keys still accessible.
+            for i in 0u64..20 {
+                assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i)));
+            }
 
             db.destroy().await.unwrap();
         });

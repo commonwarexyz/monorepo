@@ -21,7 +21,10 @@ pub mod tests {
     use crate::{
         index::unordered::Index,
         journal::{contiguous::Mutable, Error as JournalError},
-        mmr::{Location, Proof},
+        merkle::{
+            mmr,
+            mmr::{Location, Proof},
+        },
         qmdb::{
             any::{
                 operation::update::Unordered as UnorderedUpdate,
@@ -60,9 +63,9 @@ pub mod tests {
     /// and verifies state is preserved across close/reopen cycles.
     pub fn test_build_small_close_reopen<C, F, Fut>(mut open_db: F)
     where
-        C: DbAny + BitmapPrunedBits,
+        C: DbAny<mmr::Family> + BitmapPrunedBits,
         C::Key: TestKey,
-        <C as DbAny>::Value: TestValue,
+        <C as DbAny<mmr::Family>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
@@ -80,7 +83,7 @@ pub mod tests {
 
             // Add one key.
             let k1: C::Key = TestKey::from_seed(0);
-            let v1: <C as DbAny>::Value = TestValue::from_seed(10);
+            let v1: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed(10);
             assert!(db.get(&k1).await.unwrap().is_none());
             let finalized = db
                 .new_batch()
@@ -105,7 +108,7 @@ pub mod tests {
 
             // Delete that one key.
             assert!(db.get(&k1).await.unwrap().is_some());
-            let metadata: <C as DbAny>::Value = TestValue::from_seed(1);
+            let metadata: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed(1);
             let finalized = db
                 .new_batch()
                 .write(k1, None)
@@ -166,10 +169,12 @@ pub mod tests {
     /// to forge proofs by swapping locations or flipping activity bits.
     pub(super) fn test_verify_proof_over_bits_in_uncommitted_chunk<C, V, F, Fut>(mut open_db: F)
     where
-        C: Mutable<Item = Operation<Digest, V>> + Persistable<Error = JournalError> + 'static,
+        C: Mutable<Item = Operation<mmr::Family, Digest, V>>
+            + Persistable<Error = JournalError>
+            + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
-        Operation<Digest, V>: Codec,
-        TestDb<C, V>: DbAny<Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        Operation<mmr::Family, Digest, V>: Codec,
+        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         F: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<C, V>>,
     {
@@ -336,10 +341,12 @@ pub mod tests {
     /// proof, and that adding extra chunks causes verification to fail.
     pub(super) fn test_range_proofs<C, V, F, Fut>(mut open_db: F)
     where
-        C: Mutable<Item = Operation<Digest, V>> + Persistable<Error = JournalError> + 'static,
+        C: Mutable<Item = Operation<mmr::Family, Digest, V>>
+            + Persistable<Error = JournalError>
+            + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
-        Operation<Digest, V>: Codec,
-        TestDb<C, V>: DbAny<Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        Operation<mmr::Family, Digest, V>: Codec,
+        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         F: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<C, V>>,
     {
@@ -424,10 +431,12 @@ pub mod tests {
     /// wrong keys, wrong values, and wrong roots.
     pub(super) fn test_key_value_proof<C, V, F, Fut>(mut open_db: F)
     where
-        C: Mutable<Item = Operation<Digest, V>> + Persistable<Error = JournalError> + 'static,
+        C: Mutable<Item = Operation<mmr::Family, Digest, V>>
+            + Persistable<Error = JournalError>
+            + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
-        Operation<Digest, V>: Codec,
-        TestDb<C, V>: DbAny<Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        Operation<mmr::Family, Digest, V>: Codec,
+        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         F: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<C, V>>,
     {
@@ -518,10 +527,12 @@ pub mod tests {
     /// value's proof fails.
     pub(super) fn test_proving_repeated_updates<C, V, F, Fut>(mut open_db: F)
     where
-        C: Mutable<Item = Operation<Digest, V>> + Persistable<Error = JournalError> + 'static,
+        C: Mutable<Item = Operation<mmr::Family, Digest, V>>
+            + Persistable<Error = JournalError>
+            + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
-        Operation<Digest, V>: Codec,
-        TestDb<C, V>: DbAny<Key = Digest, Value = Digest, Digest = Digest> + 'static,
+        Operation<mmr::Family, Digest, V>: Codec,
+        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         F: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<C, V>>,
     {

@@ -1,6 +1,6 @@
 //! Gap detection algorithm for sync operations.
 
-use crate::mmr::Location;
+use crate::merkle::mmr::Location;
 use core::{num::NonZeroU64, ops::Range};
 use std::collections::BTreeMap;
 

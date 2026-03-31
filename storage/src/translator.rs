@@ -1,5 +1,6 @@
 //! Primitive implementations of [Translator].
 
+use commonware_utils::GOLDEN_RATIO;
 use core::hash::{BuildHasher, Hash, Hasher};
 
 /// Translate keys into a new representation (often a smaller one).
@@ -21,15 +22,15 @@ pub trait Translator: Clone + BuildHasher + Send + Sync + 'static {
     fn transform(&self, key: &[u8]) -> Self::Key;
 }
 
-/// A “do-nothing” hasher for `uint`.
+/// A lightweight hasher for translated `uint` keys.
 ///
 /// Most users typically store keys that are **already hashed** (shortened by the [Translator]).
 /// Re-hashing them with SipHash (by [std::collections::HashMap]) would waste CPU, so we give
-/// [std::collections::HashMap] this identity hasher instead:
+/// [std::collections::HashMap] this custom hasher instead:
 ///
 /// * [Hasher::write_u8], [Hasher::write_u16], [Hasher::write_u32], [Hasher::write_u64] copies the
 ///   input into an internal field;
-/// * [Hasher::finish] returns that value unchanged.
+/// * [Hasher::finish] returns that value multiplied by a mixing constant.
 ///
 /// # Warning
 ///
@@ -71,7 +72,10 @@ impl Hasher for UintIdentity {
 
     #[inline]
     fn finish(&self) -> u64 {
-        self.value
+        // Multiply by the mixing constant to spread low-order bits across all 64 bits.
+        // Without this, hashbrown's h2 control bytes (top 7 bits) are all zero for small
+        // keys, defeating its SIMD fast-reject filter.
+        self.value.wrapping_mul(GOLDEN_RATIO)
     }
 }
 
@@ -124,7 +128,7 @@ define_cap_translator!(TwoCap, 2, u16);
 define_cap_translator!(FourCap, 4, u32);
 define_cap_translator!(EightCap, 8, u64);
 
-/// Define a special array type for which we'll implement our own identity hasher. This avoids the
+/// Define a special array type for which we'll implement our own lightweight hasher. This avoids the
 /// overhead of the default Array hasher which unnecessarily (for our use case) includes a length
 /// prefix.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -363,10 +367,59 @@ mod tests {
     }
 
     #[test]
-    fn identity_hasher_works_on_small_slice() {
-        let mut h = UintIdentity::default();
-        h.write(b"abc");
-        assert_eq!(h.finish(), u64::from_le_bytes(cap::<8>(b"abc")));
+    fn identity_hasher_small_slices_differ() {
+        let hash = |bytes: &[u8]| {
+            let mut h = UintIdentity::default();
+            h.write(bytes);
+            h.finish()
+        };
+        assert_ne!(hash(b"abc"), hash(b"abd"));
+        assert_ne!(hash(b"a"), hash(b"b"));
+        assert_ne!(hash(b""), hash(b"a"));
+    }
+
+    #[test]
+    fn identity_hasher_sets_high_bits() {
+        // The mixing step must spread small values into the top 7 bits so that
+        // hashbrown's h2 SIMD filter is effective.
+        for i in [1u64, 7, 17, 255] {
+            let mut h = UintIdentity::default();
+            h.write_u64(i);
+            assert_ne!(h.finish() >> 57, 0, "high bits all zero for input {i}");
+        }
+    }
+
+    #[test]
+    fn identity_hasher_integer_writes_differ() {
+        let hash_u8 = |v: u8| {
+            let mut h = UintIdentity::default();
+            h.write_u8(v);
+            h.finish()
+        };
+        let hash_u16 = |v: u16| {
+            let mut h = UintIdentity::default();
+            h.write_u16(v);
+            h.finish()
+        };
+        let hash_u32 = |v: u32| {
+            let mut h = UintIdentity::default();
+            h.write_u32(v);
+            h.finish()
+        };
+        let hash_u64 = |v: u64| {
+            let mut h = UintIdentity::default();
+            h.write_u64(v);
+            h.finish()
+        };
+        assert_ne!(hash_u8(0), hash_u8(1));
+        assert_ne!(hash_u16(0), hash_u16(1));
+        assert_ne!(hash_u32(0), hash_u32(1));
+        assert_ne!(hash_u64(0), hash_u64(1));
+
+        // Same numeric value through different write widths must agree.
+        assert_eq!(hash_u8(7), hash_u16(7));
+        assert_eq!(hash_u16(7), hash_u32(7));
+        assert_eq!(hash_u32(7), hash_u64(7));
     }
 
     #[test]
