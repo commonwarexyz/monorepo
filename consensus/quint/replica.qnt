@@ -950,61 +950,46 @@ module replica {
         } else if (can_process_as_proposal) {
             // Proposal processing: validate the leader's proposal and vote
             all {
-                view == self.view,
-                vote.sig == sig_of(leader.get(view)),
-                not(has_notarized(self)),
-                not(self.broadcast_nullify.get(view)),
-
-                any {
-                    all {
-                        payload_ok,
-                        parent_ok,
-
-                        sent_notarize_votes' = sent_notarize_votes.union(Set({
-                            proposal: proposal,
-                            sig: sig_of(id),
-                        })),
-                        sent_nullify_votes' = sent_nullify_votes,
-                        sent_finalize_votes' = sent_finalize_votes,
-                        store_notarize_votes' = store_notarize_votes.set(id, store_notarize.union(Set(vote, {
-                            proposal: proposal,
-                            sig: sig_of(id),
-                        }))),
-                        store_nullify_votes' = store_nullify_votes,
-                        store_finalize_votes' = store_finalize_votes,
-                        replica_state' = replica_state.set(id, {
-                            ...mark_vote_broadcast(
-                                observe_leader_proposal(
-                                    observe_round_proposal(self, proposal, false),
-                                    proposal
-                                ),
-                                self.view,
-                                NotarizeKind
-                            ),
-                            leader_timeout: self.leader_timeout.set(self.view, None),
-                            notarized: self.notarized.put(self.view, Some(payload)),
-                            ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
-                        }),
-                    },
-                    all {
-                        or {
-                            not(payload_ok),
-                            not(parent_ok),
-                        },
-                        sent_notarize_votes' = sent_notarize_votes,
-                        sent_nullify_votes' = timer.next_sent_nullify,
-                        sent_finalize_votes' = sent_finalize_votes,
-                        store_notarize_votes' = store_notarize_votes,
-                        store_nullify_votes' = store_nullify_votes.set(id, timer.next_stored_nullify),
-                        store_finalize_votes' = store_finalize_votes,
-                        replica_state' = replica_state.set(
-                            id,
+                if (payload_ok and parent_ok) all {
+                    sent_notarize_votes' = sent_notarize_votes.union(Set({
+                        proposal: proposal,
+                        sig: sig_of(id),
+                    })),
+                    sent_nullify_votes' = sent_nullify_votes,
+                    sent_finalize_votes' = sent_finalize_votes,
+                    store_notarize_votes' = store_notarize_votes.set(id, store_notarize.union(Set(vote, {
+                        proposal: proposal,
+                        sig: sig_of(id),
+                    }))),
+                    store_nullify_votes' = store_nullify_votes,
+                    store_finalize_votes' = store_finalize_votes,
+                    replica_state' = replica_state.set(id, {
+                        ...mark_vote_broadcast(
                             observe_leader_proposal(
-                                observe_round_proposal(timer.next_self, proposal, false),
+                                observe_round_proposal(self, proposal, false),
                                 proposal
-                            )
+                            ),
+                            self.view,
+                            NotarizeKind
                         ),
-                    }
+                        leader_timeout: self.leader_timeout.set(self.view, None),
+                        notarized: self.notarized.put(self.view, Some(payload)),
+                        ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
+                    }),
+                } else all {
+                    sent_notarize_votes' = sent_notarize_votes,
+                    sent_nullify_votes' = timer.next_sent_nullify,
+                    sent_finalize_votes' = sent_finalize_votes,
+                    store_notarize_votes' = store_notarize_votes,
+                    store_nullify_votes' = store_nullify_votes.set(id, timer.next_stored_nullify),
+                    store_finalize_votes' = store_finalize_votes,
+                    replica_state' = replica_state.set(
+                        id,
+                        observe_leader_proposal(
+                            observe_round_proposal(timer.next_self, proposal, false),
+                            proposal
+                        )
+                    ),
                 },
 
                 ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
