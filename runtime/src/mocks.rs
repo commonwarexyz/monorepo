@@ -46,10 +46,12 @@ impl Channel {
         (
             Sink {
                 channel: channel.clone(),
+                poisoned: false,
             },
             Stream {
                 channel,
                 buffer: BytesMut::new(),
+                poisoned: false,
             },
         )
     }
@@ -58,15 +60,21 @@ impl Channel {
 /// A mock sink that implements the Sink trait.
 pub struct Sink {
     channel: Arc<Mutex<Channel>>,
+    poisoned: bool,
 }
 
 impl SinkTrait for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+        if self.poisoned {
+            return Err(Error::Closed);
+        }
+
         let (os_send, data) = {
             let mut channel = self.channel.lock();
 
             // If the receiver is dead, we cannot send any more messages.
             if !channel.stream_alive {
+                self.poisoned = true;
                 return Err(Error::Closed);
             }
 
@@ -94,7 +102,10 @@ impl SinkTrait for Sink {
         };
 
         // Resolve the waiter.
-        os_send.send(data).map_err(|_| Error::SendFailed)?;
+        os_send.send(data).map_err(|_| {
+            self.poisoned = true;
+            Error::SendFailed
+        })?;
         Ok(())
     }
 }
@@ -114,10 +125,15 @@ pub struct Stream {
     channel: Arc<Mutex<Channel>>,
     /// Local buffer for data that has been received but not yet consumed.
     buffer: BytesMut,
+    poisoned: bool,
 }
 
 impl StreamTrait for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
+        if self.poisoned {
+            return Err(Error::Closed);
+        }
+
         let os_recv = {
             let mut channel = self.channel.lock();
 
@@ -141,6 +157,7 @@ impl StreamTrait for Stream {
 
             // If the sink is dead, we cannot receive any more messages.
             if !channel.sink_alive {
+                self.poisoned = true;
                 return Err(Error::Closed);
             }
 
@@ -153,7 +170,10 @@ impl StreamTrait for Stream {
         };
 
         // Wait for the waiter to be resolved.
-        let data = os_recv.await.map_err(|_| Error::Closed)?;
+        let data = os_recv.await.map_err(|_| {
+            self.poisoned = true;
+            Error::Closed
+        })?;
         self.buffer.extend_from_slice(&data);
 
         assert!(self.buffer.len() >= len);
@@ -238,6 +258,8 @@ mod tests {
                 async {
                     let result = stream.recv(5).await;
                     assert!(matches!(result, Err(Error::Closed)));
+                    let result = stream.recv(5).await;
+                    assert!(matches!(result, Err(Error::Closed)));
                 },
                 async {
                     // Wait for the stream to start waiting
@@ -255,6 +277,8 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
+            let result = stream.recv(5).await;
+            assert!(matches!(result, Err(Error::Closed)));
             let result = stream.recv(5).await;
             assert!(matches!(result, Err(Error::Closed)));
         });
@@ -285,6 +309,8 @@ mod tests {
             // Try to send a message. The stream is dropped, so this should fail.
             let result = sink.send(b"hello world".as_slice()).await;
             assert!(matches!(result, Err(Error::Closed)));
+            let result = sink.send(b"hello world".as_slice()).await;
+            assert!(matches!(result, Err(Error::Closed)));
         });
     }
 
@@ -296,6 +322,32 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let result = sink.send(b"hello world".as_slice()).await;
+            assert!(matches!(result, Err(Error::Closed)));
+            let result = sink.send(b"hello world".as_slice()).await;
+            assert!(matches!(result, Err(Error::Closed)));
+        });
+    }
+
+    #[test]
+    fn test_send_error_canceled_recv_poisoned() {
+        let (mut sink, mut stream) = Channel::init();
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Cancel a pending recv without dropping the stream.
+            select! {
+                v = stream.recv(5) => {
+                    panic!("unexpected value: {v:?}");
+                },
+                _ = context.sleep(Duration::from_millis(50)) => {},
+            };
+
+            // The first send hits the canceled waiter and fails.
+            let result = sink.send(b"hello".as_slice()).await;
+            assert!(matches!(result, Err(Error::SendFailed)));
+
+            // After any send error, the mock sink must remain closed.
+            let result = sink.send(b"world".as_slice()).await;
             assert!(matches!(result, Err(Error::Closed)));
         });
     }
