@@ -7,7 +7,7 @@ use std::{
 
 /// Delay reaping dropped children until enough stale weak pointers accumulate to
 /// amortize the cleanup cost for clone-heavy parents.
-const CHILD_REAP_THRESHOLD: usize = 32;
+const STALE_CHILD_THRESHOLD: usize = 32;
 
 /// Tracks the relationship between runtime contexts.
 ///
@@ -35,9 +35,9 @@ struct Children {
 
 impl Children {
     /// Appends a weak reference to `child`, compacting stale entries first if
-    /// the stale count has reached [`CHILD_REAP_THRESHOLD`].
+    /// the stale count has reached [`STALE_CHILD_THRESHOLD`].
     fn push(&mut self, child: &Arc<Tree>) {
-        if self.stale >= CHILD_REAP_THRESHOLD {
+        if self.stale >= STALE_CHILD_THRESHOLD {
             self.links.retain(|weak| weak.strong_count() > 0);
             self.stale = 0;
         }
@@ -345,10 +345,10 @@ mod tests {
     #[test]
     fn child_reaping_batches_compaction_for_clone_heavy_parent() {
         let root = Tree::root();
-        let mut dropped = Vec::with_capacity(CHILD_REAP_THRESHOLD);
+        let mut dropped = Vec::with_capacity(STALE_CHILD_THRESHOLD);
 
         // Fill the parent's weak child list exactly to the reap threshold.
-        for _ in 0..CHILD_REAP_THRESHOLD {
+        for _ in 0..STALE_CHILD_THRESHOLD {
             let (child, aborted) = Tree::child(&root);
             assert!(!aborted, "child node unexpectedly aborted");
             dropped.push(child);
@@ -362,8 +362,8 @@ mod tests {
             // Reaping is deferred until the next child arrives, so the stale
             // weak pointers should still be present here.
             let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), CHILD_REAP_THRESHOLD);
-            assert_eq!(inner.children.stale, CHILD_REAP_THRESHOLD);
+            assert_eq!(inner.children.links.len(), STALE_CHILD_THRESHOLD);
+            assert_eq!(inner.children.stale, STALE_CHILD_THRESHOLD);
         }
 
         // The next child creation should trigger one batched compaction pass.
@@ -387,11 +387,11 @@ mod tests {
     #[test]
     fn aborted_children_still_count_toward_batched_reaping() {
         let root = Tree::root();
-        let mut aborted = Vec::with_capacity(CHILD_REAP_THRESHOLD);
+        let mut aborted = Vec::with_capacity(STALE_CHILD_THRESHOLD);
 
         // Register enough children to fill the weak child list to the reap
         // threshold, then abort and drop them all.
-        for _ in 0..CHILD_REAP_THRESHOLD {
+        for _ in 0..STALE_CHILD_THRESHOLD {
             let (child, was_aborted) = Tree::child(&root);
             assert!(!was_aborted, "child node unexpectedly aborted");
             aborted.push(child);
@@ -406,8 +406,8 @@ mod tests {
             // Aborted children still leave stale weak pointers behind until a
             // future insert performs the batched cleanup.
             let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), CHILD_REAP_THRESHOLD);
-            assert_eq!(inner.children.stale, CHILD_REAP_THRESHOLD);
+            assert_eq!(inner.children.links.len(), STALE_CHILD_THRESHOLD);
+            assert_eq!(inner.children.stale, STALE_CHILD_THRESHOLD);
         }
 
         // A fresh child should compact both normally dropped and previously
@@ -435,7 +435,7 @@ mod tests {
 
         // Arrange for each leaf drop to make its parent uniquely owned so
         // `drop_ancestry` must walk one level higher and mark the root stale.
-        for _ in 0..CHILD_REAP_THRESHOLD {
+        for _ in 0..STALE_CHILD_THRESHOLD {
             let (parent, aborted) = Tree::child(&root);
             assert!(!aborted, "parent node unexpectedly aborted");
 
@@ -453,8 +453,8 @@ mod tests {
             // Those stale entries are still deferred until the next child is
             // inserted under the surviving root.
             let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), CHILD_REAP_THRESHOLD);
-            assert_eq!(inner.children.stale, CHILD_REAP_THRESHOLD);
+            assert_eq!(inner.children.links.len(), STALE_CHILD_THRESHOLD);
+            assert_eq!(inner.children.stale, STALE_CHILD_THRESHOLD);
         }
 
         // Creating one more child should reap the stale root entries produced
@@ -484,7 +484,7 @@ mod tests {
 
         let mut live = Vec::new();
         let mut dropped = Vec::new();
-        let total = CHILD_REAP_THRESHOLD * 2;
+        let total = STALE_CHILD_THRESHOLD * 2;
         // Mix live and dropped siblings so the parent accumulates stale weak
         // pointers before an abort cascade runs through the remaining subtree.
         for idx in 0..total {
