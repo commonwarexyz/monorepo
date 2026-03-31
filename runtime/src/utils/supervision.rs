@@ -27,9 +27,6 @@ pub(crate) struct Tree {
 }
 
 /// Weak child pointers with a deferred-compaction counter.
-///
-/// `stale` tracks how many entries in `links` are known-dead. Once it reaches
-/// [`CHILD_REAP_THRESHOLD`], the next insertion compacts the list.
 #[derive(Default)]
 struct Children {
     links: Vec<Weak<Tree>>,
