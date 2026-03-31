@@ -98,11 +98,13 @@ impl Topology {
         // then this configuration is valid, using `R` as the necessary number
         // of samples.
         //
-        // The validity condition is monotone: as cols increases, encoded_rows
-        // shrinks and required_samples grows, so once the condition fails it
-        // never recovers. We exploit this with a binary search over [1, data_els]
-        // instead of a linear scan, reducing BigRational log2 calls from
-        // O(data_els) to O(log(data_els)).
+        // Within each encoded_rows plateau (a fixed power-of-two value), increasing
+        // cols reduces data_rows and required_samples, so the validity condition
+        // improves as cols increases within a plateau. Valid column counts therefore
+        // form a contiguous suffix within each plateau, and the globally best (largest)
+        // valid col is the rightmost valid col across all plateaus.
+        // A binary search over [2, data_els] finds this rightmost valid col,
+        // reducing BigRational log2 calls from O(data_els) to O(log(data_els)).
         //
         // It's possible that even cols=1 is not good. To correct for that, we
         // need to add extra checksum columns to guarantee security.
@@ -112,9 +114,9 @@ impl Topology {
             t.required_samples().saturating_mul(n + k) <= t.encoded_rows
         };
         let mut out = if !is_valid(1) || !is_valid(2) {
-            // Either no column count is valid, or no multi-column config is valid.
-            // Fall back to cols=1 without adjusting samples; correct_column_samples
-            // handles the security requirement in this case.
+            // cols=1 is the best we can do. Return it without applying the
+            // required_samples adjustment; correct_column_samples handles the
+            // security requirement via column_samples instead.
             Self::with_cols(corrected_data_bytes, n, k, 1)
         } else {
             // At least cols=2 is valid. Binary search for the largest valid cols
@@ -165,8 +167,8 @@ mod tests {
         assert_eq!(topology.total_shards, 4);
 
         // Verify we hit the 1-column fallback and the security invariant holds.
-        // When the loop in reckon() exits without finding a multi-column config,
-        // correct_column_samples() must compensate by adding column samples.
+        // When reckon() cannot find a valid multi-column config, correct_column_samples()
+        // must compensate by adding column samples.
         assert_eq!(topology.data_cols, 1);
         let required = topology.required_samples();
         let provided = topology.samples * (topology.column_samples / 2);
@@ -176,9 +178,10 @@ mod tests {
         );
     }
 
-    // Reference implementation using the original linear scan, kept as a
-    // correctness oracle for the differential test below.
-    fn reckon_linear(config: &Config, data_bytes: usize) -> Topology {
+    // Fast oracle: stops at the first invalid col (original loop behavior).
+    // Used for the exhaustive small-input test because non-monotone patterns
+    // do not arise for small data sizes, so this agrees with the full scan.
+    fn reckon_initial_run(config: &Config, data_bytes: usize) -> Topology {
         let n = config.minimum_shards.get() as usize;
         let k = config.extra_shards.get() as usize;
         let corrected_data_bytes = data_bytes.max(1);
@@ -200,8 +203,59 @@ mod tests {
         out
     }
 
-    // Exhaustively verify the binary-search implementation matches the linear
-    // scan for all small inputs.
+    // Slow oracle: scans all column counts to find the globally largest valid one.
+    // Used for the large-input spot-check test where non-monotone patterns can
+    // arise, so stopping at the first invalid col would miss better configs.
+    fn reckon_full_scan(config: &Config, data_bytes: usize) -> Topology {
+        let n = config.minimum_shards.get() as usize;
+        let k = config.extra_shards.get() as usize;
+        let corrected_data_bytes = data_bytes.max(1);
+        let data_els = F::bits_to_elements(8 * corrected_data_bytes);
+        let mut best: Option<Topology> = None;
+        for cols in 2..=data_els {
+            let attempt = Topology::with_cols(corrected_data_bytes, n, k, cols);
+            let required_samples = attempt.required_samples();
+            if required_samples.saturating_mul(n + k) <= attempt.encoded_rows {
+                best = Some(Topology {
+                    samples: required_samples.max(attempt.samples),
+                    ..attempt
+                });
+            }
+        }
+        // If no valid multi-column config was found, fall back to cols=1 without
+        // applying the required_samples adjustment, matching the binary search
+        // fallback path.
+        let mut out = best.unwrap_or_else(|| Topology::with_cols(corrected_data_bytes, n, k, 1));
+        out.correct_column_samples();
+        out.data_bytes = data_bytes;
+        out
+    }
+
+    fn check_security_invariant(t: &Topology) {
+        let required = t.required_samples();
+        // When a multi-column config was found, samples must satisfy the security
+        // requirement on its own, without relying on column_samples to compensate.
+        if t.data_cols > 1 {
+            assert!(
+                required.saturating_mul(t.total_shards) <= t.encoded_rows,
+                "multi-column security invariant violated: required={required} total_shards={} encoded_rows={}",
+                t.total_shards,
+                t.encoded_rows,
+            );
+        }
+        // column_samples must always cover the security requirement, whether or
+        // not a multi-column config was found.
+        let provided = t.samples * (t.column_samples / 2).max(1);
+        assert!(
+            provided >= required,
+            "column_samples security invariant violated: provided={provided} required={required}"
+        );
+    }
+
+    // Exhaustively verify the binary search matches the initial-run oracle for
+    // all small inputs and check the security invariant on every result.
+    // Non-monotone patterns do not arise for these small data sizes, so the
+    // fast initial-run oracle is correct here.
     #[test]
     fn reckon_matches_linear_scan() {
         for data_bytes in 0..=1024usize {
@@ -212,12 +266,36 @@ mod tests {
                         extra_shards: k.try_into().unwrap(),
                     };
                     let got = Topology::reckon(&config, data_bytes);
-                    let expected = reckon_linear(&config, data_bytes);
+                    let expected = reckon_initial_run(&config, data_bytes);
                     assert_eq!(
                         got, expected,
                         "mismatch at data_bytes={data_bytes} n={n} k={k}: got {got:?}, expected {expected:?}"
                     );
+                    check_security_invariant(&got);
                 }
+            }
+        }
+    }
+
+    // Spot-check the binary search against the full-scan oracle at larger inputs
+    // where non-monotone patterns can arise, to verify the binary search finds
+    // the globally optimal col count in those cases.
+    #[test]
+    fn reckon_matches_full_scan_large() {
+        let configs: &[(u16, u16)] = &[(4, 2), (8, 4), (10, 5), (16, 16)];
+        for &data_bytes in &[10_000usize, 100_000] {
+            for &(n, k) in configs {
+                let config = Config {
+                    minimum_shards: n.try_into().unwrap(),
+                    extra_shards: k.try_into().unwrap(),
+                };
+                let got = Topology::reckon(&config, data_bytes);
+                let expected = reckon_full_scan(&config, data_bytes);
+                assert_eq!(
+                    got, expected,
+                    "mismatch at data_bytes={data_bytes} n={n} k={k}: got {got:?}, expected {expected:?}"
+                );
+                check_security_invariant(&got);
             }
         }
     }
