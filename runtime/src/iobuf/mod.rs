@@ -4875,6 +4875,7 @@ mod tests {
             assert!(initial >= 64);
             let chunk = b.chunk_mut();
             chunk[0..1].copy_from_slice(&[0xAB]);
+            // SAFETY: We just wrote 1 byte into chunk_mut above.
             unsafe { b.advance_mut(1) };
             assert_eq!(b.remaining_mut(), initial - 1);
             let mut r = b.finish();
@@ -4892,6 +4893,7 @@ mod tests {
             assert_eq!(b.remaining_mut(), 0);
             let chunk = b.chunk_mut(); // must grow
             chunk[0..1].copy_from_slice(&[0x42]);
+            // SAFETY: We just wrote 1 byte into chunk_mut above.
             unsafe { b.advance_mut(1) };
             let mut r = b.finish();
             assert_eq!(r.remaining(), cap + 1);
