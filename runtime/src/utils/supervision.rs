@@ -45,7 +45,7 @@ impl Children {
     }
 
     /// Records that one weak child pointer is known-dead.
-    fn mark_stale(&mut self) {
+    const fn mark_stale(&mut self) {
         self.stale = self.stale.saturating_add(1);
     }
 
