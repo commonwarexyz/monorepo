@@ -56,9 +56,6 @@ impl Children {
 }
 
 struct TreeInner {
-    // Mutable supervision state guarded together during child registration and
-    // abort traversal. This intentionally excludes the strong parent link; see
-    // `Tree::parent` above.
     children: Children,
     task: Option<Aborter>,
     aborted: bool,
