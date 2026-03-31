@@ -214,6 +214,7 @@ where
 pub type DST = &'static [u8];
 
 /// Configuration for [`Scalar`]'s [`Read`] implementation.
+#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ScalarReadCfg {
     /// Accept any in-range scalar, including zero.
