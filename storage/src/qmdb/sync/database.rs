@@ -16,7 +16,7 @@ impl<T: Translator, J: Clone> Config for crate::qmdb::any::Config<T, J> {
 }
 
 impl<T: Translator, C: Clone> Config for crate::qmdb::immutable::Config<T, C> {
-    type JournalConfig = crate::journal::contiguous::variable::Config<C>;
+    type JournalConfig = C;
 
     fn journal_config(&self) -> Self::JournalConfig {
         self.log.clone()

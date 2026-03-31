@@ -2,38 +2,51 @@ use crate::{
     index::unordered::Index,
     journal::{
         authenticated,
-        contiguous::{variable, Reader as _},
+        contiguous::{Mutable, Reader as _},
+        Error as JournalError,
     },
-    merkle::{self, mmr, mmr::journaled::Mmr},
+    merkle::{
+        journaled::{self, Journaled},
+        mmr, Location,
+    },
     qmdb::{
-        any::VariableValue,
+        any::ValueEncoding,
         build_snapshot_from_log,
         immutable::{self, Operation},
         sync::{self},
+        Error,
     },
     translator::Translator,
-    Context,
+    Context, Persistable,
 };
+use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
 use std::ops::Range;
 
-impl<E, K, V, H, T> sync::Database for immutable::Immutable<mmr::Family, E, K, V, H, T>
+type StandardHasher<H> = crate::merkle::hasher::Standard<H>;
+
+impl<E, K, V, C, H, T> sync::Database for immutable::Immutable<mmr::Family, E, K, V, C, H, T>
 where
     E: Context,
     K: Array,
-    V: VariableValue,
+    V: ValueEncoding,
+    C: Mutable<Item = Operation<K, V>>
+        + Persistable<Error = JournalError>
+        + sync::Journal<Context = E, Op = Operation<K, V>>,
+    C::Item: EncodeShared,
+    C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
 {
     type Op = Operation<K, V>;
-    type Journal = variable::Journal<E, Self::Op>;
+    type Journal = C;
     type Hasher = H;
-    type Config = immutable::Config<T, V::Cfg>;
+    type Config = immutable::Config<T, C::Config>;
     type Digest = H::Digest;
     type Context = E;
 
-    /// Returns a [super::Immutable] initialized data collected in the sync process.
+    /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
     ///
     /// # Behavior
     ///
@@ -56,13 +69,13 @@ where
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: Range<mmr::Location>,
         apply_batch_size: usize,
-    ) -> Result<Self, crate::qmdb::Error<mmr::Family>> {
-        let hasher = merkle::hasher::Standard::new();
+    ) -> Result<Self, Error<mmr::Family>> {
+        let hasher = StandardHasher::new();
 
         // Initialize Merkle structure for sync
-        let mmr = Mmr::init_sync(
-            context.with_label("mmr"),
-            crate::mmr::journaled::SyncConfig {
+        let merkle = Journaled::init_sync(
+            context.with_label("merkle"),
+            journaled::SyncConfig {
                 config: db_config.merkle_config.clone(),
                 range,
                 pinned_nodes,
@@ -71,8 +84,8 @@ where
         )
         .await?;
 
-        let journal = authenticated::Journal::<mmr::Family, _, _, _>::from_components(
-            mmr,
+        let journal = authenticated::Journal::<_, _, _, _>::from_components(
+            merkle,
             log,
             hasher,
             apply_batch_size as u64,
@@ -89,9 +102,15 @@ where
             let start_loc = mmr::Location::new(bounds.start);
 
             // Build snapshot from the log
-            build_snapshot_from_log(start_loc, &reader, &mut snapshot, |_, _| {}).await?;
+            build_snapshot_from_log::<mmr::Family, _, _, _>(
+                start_loc,
+                &reader,
+                &mut snapshot,
+                |_, _| {},
+            )
+            .await?;
 
-            mmr::Location::new(bounds.end.checked_sub(1).expect("commit should exist"))
+            Location::new(bounds.end.checked_sub(1).expect("commit should exist"))
         };
 
         let db = Self {
@@ -112,10 +131,10 @@ where
 #[cfg(test)]
 mod tests {
     use crate::{
-        merkle::mmr::{self, Location},
+        merkle::mmr::Location,
         qmdb::{
             immutable,
-            immutable::Operation,
+            immutable::variable::Operation,
             sync::{
                 self,
                 engine::{Config, NextStep},
@@ -142,8 +161,8 @@ mod tests {
     };
 
     /// Type alias for sync tests with simple codec config
-    type ImmutableSyncTest = immutable::Immutable<
-        mmr::Family,
+    type ImmutableSyncTest = immutable::variable::Db<
+        crate::merkle::mmr::Family,
         deterministic::Context,
         sha256::Digest,
         sha256::Digest,
@@ -155,14 +174,14 @@ mod tests {
     fn create_sync_config(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> immutable::Config<crate::translator::TwoCap, ()> {
+    ) -> immutable::variable::Config<crate::translator::TwoCap, ()> {
         const PAGE_SIZE: NonZeroU16 = NZU16!(77);
         const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
-            merkle_config: crate::mmr::journaled::Config {
+            merkle_config: crate::merkle::journaled::Config {
                 journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
@@ -620,7 +639,7 @@ mod tests {
                 create_sync_config(&format!("partial_{}", context.next_u64()), &context);
             let client_context = context.with_label("client");
             let mut sync_db: ImmutableSyncTest =
-                immutable::Immutable::init(client_context.clone(), sync_db_config.clone())
+                immutable::variable::Db::init(client_context.clone(), sync_db_config.clone())
                     .await
                     .unwrap();
 
@@ -683,7 +702,7 @@ mod tests {
                 create_sync_config(&format!("exact_{}", context.next_u64()), &context);
             let client_context = context.with_label("client");
             let mut sync_db: ImmutableSyncTest =
-                immutable::Immutable::init(client_context.clone(), sync_config.clone())
+                immutable::variable::Db::init(client_context.clone(), sync_config.clone())
                     .await
                     .unwrap();
 
