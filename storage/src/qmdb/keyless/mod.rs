@@ -170,6 +170,13 @@ impl<F: Family, E: Context, V: VariableValue, H: Hasher> Keyless<F, E, V, H> {
     ///     - the last operation performed, or
     ///     - the operation `max_ops` from the start.
     ///  2. the operations corresponding to the leaves in this range.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
+    ///   >= the number of operations.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `start_loc` has
+    ///   been pruned.
     pub async fn proof(
         &self,
         start_loc: Location<F>,
@@ -184,10 +191,10 @@ impl<F: Family, E: Context, V: VariableValue, H: Hasher> Keyless<F, E, V, H> {
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::Merkle`] if `op_count` or `start_loc` >
-    ///   [Family::MAX_LEAVES].
-    /// - Returns [`Error::Merkle`] if `start_loc` >= `op_count` or
-    ///   `op_count` > number of operations.
+    /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
+    ///   >= `op_count` or `op_count` > number of operations.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `start_loc` has
+    ///   been pruned.
     pub async fn historical_proof(
         &self,
         op_count: Location<F>,
@@ -204,9 +211,7 @@ impl<F: Family, E: Context, V: VariableValue, H: Hasher> Keyless<F, E, V, H> {
     ///
     /// # Errors
     ///
-    /// - Returns [`Error::PruneBeyondMinRequired`] if `loc`
-    ///   > last commit point.
-    /// - Returns [`Error::Merkle`] if `loc` > [Family::MAX_LEAVES].
+    /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > last commit point.
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
         if loc > self.last_commit_loc {
             return Err(Error::PruneBeyondMinRequired(loc, self.last_commit_loc));
@@ -223,11 +228,11 @@ impl<F: Family, E: Context, V: VariableValue, H: Hasher> Keyless<F, E, V, H> {
     ///
     /// # Errors
     ///
-    /// Returns an error when:
-    /// - `size` is not a valid rewind target
-    /// - the target's required logical range is not fully retained (for keyless, this means the
-    ///   oldest retained location is already beyond the rewind boundary)
-    /// - `size - 1` is not a commit operation
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::InvalidRewind`] if `size` is 0
+    ///   or exceeds the current committed size.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if the operation at
+    ///   `size - 1` has been pruned.
+    /// - Returns [`Error::UnexpectedData`] if the operation at `size - 1` is not a commit.
     ///
     /// Any error from this method is fatal for this handle. Rewind may mutate journal state
     /// before this method finishes updating in-memory rewind state. Callers must drop this
