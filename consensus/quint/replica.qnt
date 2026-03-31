@@ -1707,21 +1707,15 @@ module replica {
         Q == N - F,
     }
 
-    // No two correct replicas disagree on which payload was finalized in a view.
-    // With watermark-only finalization (no ancestor walk), we check set agreement
-    // rather than prefix agreement: the set of committed payloads at each replica
-    // must be consistent (any payload committed by one must also be committed by
-    // the other, or not yet committed).
-    val agreement = tuples(CORRECT, CORRECT).forall(((p1, p2)) => {
-        val blocks1 = ghost_committed_blocks.get(p1)
-        val blocks2 = ghost_committed_blocks.get(p2)
-        val set1 = blocks1.indices().map(i => blocks1[i])
-        val set2 = blocks2.indices().map(i => blocks2[i])
-        // Every payload committed by p1 is either committed by p2 or will be
-        // (subset in either direction).
+    val agreement = tuples(CORRECT, CORRECT).forall(((id1, id2)) => {
+        val blocks1 = ghost_committed_blocks.get(id1)
+        val blocks2 = ghost_committed_blocks.get(id2)
         or {
-            set1.subseteq(set2),
-            set2.subseteq(set1),
+            id1 == id2,
+            // ignore this case, as there is a symmetric one
+            blocks1.length() > blocks2.length(),
+            // the shorter sequence is a prefix of the longer one
+            blocks1.indices().forall(i => blocks1[i] == blocks2[i])
         }
     })
 
