@@ -233,8 +233,7 @@ pub(crate) fn leaf_pos(leaf_index: Location) -> Position {
     Family::location_to_position(leaf_index)
 }
 
-/// Return the set of pruned node positions (pos < `prune_pos`) that must be retained after
-/// pruning.
+/// Return a sufficient set of pruned node positions (pos < `prune_pos`) to retain after pruning.
 ///
 /// The peaks of a sub-MMB at the prune boundary are sufficient for root computation and for
 /// proving the boundary leaf (they are exactly the left-siblings needed to authenticate the
@@ -243,8 +242,10 @@ pub(crate) fn leaf_pos(leaf_index: Location) -> Position {
 /// may lie in the pruned region without being a peak of the boundary sub-MMB.
 ///
 /// This function therefore pins every pruned child of every retained parent, which covers all
-/// possible update paths. It uses leaf-range checks to skip subtrees that are fully retained and
-/// to pin roots of subtrees that are fully pruned. Each sliced peak contributes at most O(height)
+/// possible update paths. The result is intentionally conservative: it is a sufficient set, not a
+/// minimal or canonical one. Generic callers should therefore treat it as a safe superset of nodes
+/// to retain. It uses leaf-range checks to skip subtrees that are fully retained and to pin roots
+/// of subtrees that are fully pruned. Each sliced peak contributes at most O(height)
 /// pinned/traversed nodes, and there are O(log N) peaks, so worst-case total work is O(log^2 N).
 ///
 /// If `update_leaf` after pruning is not needed (e.g., append-only with pruning but no
