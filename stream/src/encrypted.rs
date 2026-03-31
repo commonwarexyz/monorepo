@@ -547,7 +547,8 @@ mod test {
         }
     }
 
-    fn oversized_handshake_prefix(size: u32) -> IoBuf {
+    fn oversized_handshake_prefix(message: &impl commonware_codec::Encode) -> IoBuf {
+        let size = u32::try_from(message.encode().len()).expect("message length should fit in u32");
         IoBuf::from(UInt(size + 1).encode())
     }
 
@@ -899,6 +900,7 @@ mod test {
         executor.start(|context| async move {
             let dialer_crypto = PrivateKey::from_seed(42);
             let listener_crypto = PrivateKey::from_seed(24);
+            let peer = dialer_crypto.public_key();
 
             let (mut dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, _dialer_stream) = mocks::Channel::init();
@@ -907,10 +909,7 @@ mod test {
             listener_config.max_message_size = 1024 * 1024;
 
             dialer_sink
-                .send(oversized_handshake_prefix(
-                    u32::try_from(dialer_crypto.public_key().encode().len())
-                        .expect("public key length should fit in u32"),
-                ))
+                .send(oversized_handshake_prefix(&peer))
                 .await
                 .unwrap();
 
@@ -923,7 +922,7 @@ mod test {
             )
             .await;
 
-            assert!(matches!(result, Err(Error::RecvTooLarge(n)) if n == dialer_crypto.public_key().encode().len() + 1));
+            assert!(matches!(result, Err(Error::RecvTooLarge(n)) if n == peer.encode().len() + 1));
         });
     }
 
@@ -940,11 +939,33 @@ mod test {
             let mut dialer_config = transport_config(dialer_crypto);
             dialer_config.max_message_size = 1024 * 1024;
 
+            let (current_time, ok_timestamps) = dialer_config.time_information(&context);
+            let mut listener_rng = context.clone();
+            let (_, syn) = dial_start(
+                context.clone(),
+                Context::new(
+                    &Transcript::new(&dialer_config.namespace),
+                    current_time,
+                    ok_timestamps.clone(),
+                    dialer_config.signing_key.clone(),
+                    listener_crypto.public_key(),
+                ),
+            );
+            let (_, syn_ack) = listen_start(
+                &mut listener_rng,
+                Context::new(
+                    &Transcript::new(&dialer_config.namespace),
+                    current_time,
+                    ok_timestamps,
+                    listener_crypto.clone(),
+                    dialer_config.signing_key.public_key(),
+                ),
+                syn,
+            )
+            .expect("mock handshake should produce a valid syn_ack");
+
             listener_sink
-                .send(oversized_handshake_prefix(
-                    u32::try_from(SynAck::<<PrivateKey as Signer>::Signature>::SIZE)
-                        .expect("syn_ack size should fit in u32"),
-                ))
+                .send(oversized_handshake_prefix(&syn_ack))
                 .await
                 .unwrap();
 
@@ -960,7 +981,7 @@ mod test {
             assert!(matches!(
                 result,
                 Err(Error::RecvTooLarge(n))
-                    if n == SynAck::<<PrivateKey as Signer>::Signature>::SIZE + 1
+                    if n == syn_ack.encode().len() + 1
             ));
         });
     }
