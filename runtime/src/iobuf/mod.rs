@@ -2185,6 +2185,9 @@ where
     written
 }
 
+/// Minimum capacity when growing. Avoids degenerate doubling from tiny buffers.
+const MIN_GROW_CAPACITY: usize = 64;
+
 /// Assembles [`IoBufs`] from a mix of inline writes and zero-copy pieces.
 ///
 /// All inline writes go into a single pool-backed buffer. [`BufsMut::push`]
@@ -2203,9 +2206,6 @@ where
 /// //            \________________________/
 /// //             slices of one allocation
 /// ```
-/// Minimum capacity when growing. Avoids degenerate doubling from tiny buffers.
-const MIN_GROW_CAPACITY: usize = 64;
-
 pub struct Builder {
     pool: BufferPool,
     // Single working buffer for all inline writes.
