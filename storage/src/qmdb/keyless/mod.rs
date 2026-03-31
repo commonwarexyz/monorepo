@@ -58,13 +58,15 @@ use crate::{
             Contiguous, Mutable, Reader,
         },
     },
-    mmr::{journaled::Config as MmrConfig, Location, Proof},
-    qmdb::{any::VariableValue, operation::Committable, Error},
+    merkle::mmr::{self, journaled::Config as MmrConfig, Location, Proof},
+    qmdb::{any::VariableValue, operation::Committable},
+    Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage};
 use std::num::NonZeroU64;
 use tracing::{debug, warn};
+
+type Error = crate::qmdb::Error<mmr::Family>;
 
 pub mod batch;
 mod operation;
@@ -81,10 +83,11 @@ pub struct Config<C> {
 }
 
 /// A keyless QMDB for variable length data.
-type Journal<E, V, H> = authenticated::Journal<E, ContiguousJournal<E, Operation<V>>, H>;
+type Journal<E, V, H> =
+    authenticated::Journal<crate::merkle::mmr::Family, E, ContiguousJournal<E, Operation<V>>, H>;
 
 /// A keyless authenticated database for variable-length data.
-pub struct Keyless<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
+pub struct Keyless<E: Context, V: VariableValue, H: Hasher> {
     /// Authenticated journal of operations.
     journal: Journal<E, V, H>,
 
@@ -92,7 +95,7 @@ pub struct Keyless<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
     last_commit_loc: Location,
 }
 
-impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Keyless<E, V, H> {
+impl<E: Context, V: VariableValue, H: Hasher> Keyless<E, V, H> {
     /// Get the value at location `loc` in the database.
     ///
     /// # Errors
@@ -773,7 +776,7 @@ mod test {
             assert!(matches!(
                 db.historical_proof(db.bounds().await.end + 1, Location::new(5), NZU64!(10))
                     .await,
-                Err(Error::Mmr(crate::mmr::Error::RangeOutOfBounds(_)))
+                Err(Error::Merkle(crate::mmr::Error::RangeOutOfBounds(_)))
             ));
 
             let root = db.root();
@@ -1908,6 +1911,29 @@ mod test {
             // Both values present.
             assert_eq!(db.get(parent_loc).await.unwrap(), Some(vec![1]));
             assert_eq!(db.get(child_loc).await.unwrap(), Some(vec![2]));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_keyless_child_root_matches_between_pending_and_committed_paths() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // Build the child while the parent is still pending.
+            let parent = db.new_batch().append(vec![1]).merkleize(None);
+            let pending_child = parent.new_batch::<Sha256>().append(vec![2]).merkleize(None);
+
+            // Commit the parent, then rebuild the same logical child from the
+            // committed DB state and compare roots.
+            db.apply_batch(parent.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            let committed_child = db.new_batch().append(vec![2]).merkleize(None);
+
+            assert_eq!(pending_child.root(), committed_child.root());
 
             db.destroy().await.unwrap();
         });

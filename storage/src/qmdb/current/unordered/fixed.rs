@@ -10,30 +10,32 @@ pub use super::db::KeyValueProof;
 use crate::{
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
-    mmr::Location,
+    merkle::mmr::Location,
     qmdb::{
         any::{unordered::fixed::Operation, value::FixedEncoding, FixedValue},
         current::FixedConfig as Config,
-        Error,
     },
     translator::Translator,
+    Context,
 };
 use commonware_cryptography::Hasher;
-use commonware_runtime::{Clock, Metrics, Storage as RStorage};
 use commonware_utils::Array;
 
-/// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
-pub type Db<E, K, V, H, T, const N: usize> =
-    super::db::Db<E, Journal<E, Operation<K, V>>, K, FixedEncoding<V>, Index<T, Location>, H, N>;
+type Error = crate::qmdb::Error<crate::mmr::Family>;
 
-impl<
-        E: RStorage + Clock + Metrics,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-    > Db<E, K, V, H, T, N>
+/// A specialization of [super::db::Db] for unordered key spaces and fixed-size values.
+pub type Db<E, K, V, H, T, const N: usize> = super::db::Db<
+    E,
+    Journal<E, Operation<crate::mmr::Family, K, V>>,
+    K,
+    FixedEncoding<V>,
+    Index<T, Location>,
+    H,
+    N,
+>;
+
+impl<E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, const N: usize>
+    Db<E, K, V, H, T, N>
 {
     /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
     /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
@@ -52,17 +54,18 @@ pub mod partitioned {
     use crate::{
         index::partitioned::unordered::Index,
         journal::contiguous::fixed::Journal,
-        mmr::Location,
+        merkle::mmr::Location,
         qmdb::{
             any::{unordered::fixed::partitioned::Operation, value::FixedEncoding, FixedValue},
             current::FixedConfig as Config,
-            Error,
         },
         translator::Translator,
+        Context,
     };
     use commonware_cryptography::Hasher;
-    use commonware_runtime::{Clock, Metrics, Storage as RStorage};
     use commonware_utils::Array;
+
+    type Error = crate::qmdb::Error<crate::mmr::Family>;
 
     /// A partitioned variant of [super::Db].
     ///
@@ -73,7 +76,7 @@ pub mod partitioned {
     pub type Db<E, K, V, H, T, const P: usize, const N: usize> =
         crate::qmdb::current::unordered::db::Db<
             E,
-            Journal<E, Operation<K, V>>,
+            Journal<E, Operation<crate::mmr::Family, K, V>>,
             K,
             FixedEncoding<V>,
             Index<T, Location, P>,
@@ -82,7 +85,7 @@ pub mod partitioned {
         >;
 
     impl<
-            E: RStorage + Clock + Metrics,
+            E: Context,
             K: Array,
             V: FixedValue,
             H: Hasher,

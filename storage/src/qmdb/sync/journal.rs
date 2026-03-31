@@ -13,7 +13,10 @@ pub trait Journal: Sized + Send {
     type Op: Send;
 
     /// The error type returned by the journal
-    type Error: std::error::Error + Send + 'static + Into<crate::qmdb::Error>;
+    type Error: std::error::Error
+        + Send
+        + 'static
+        + Into<crate::qmdb::Error<crate::merkle::mmr::Family>>;
 
     /// Create/open a journal for syncing the given range.
     ///
@@ -45,7 +48,7 @@ pub trait Journal: Sized + Send {
 
 impl<E, V> Journal for crate::journal::contiguous::variable::Journal<E, V>
 where
-    E: commonware_runtime::Clock + commonware_runtime::Storage + commonware_runtime::Metrics,
+    E: crate::Context,
     V: commonware_codec::CodecShared,
 {
     type Context = E;
@@ -84,7 +87,7 @@ where
 
 impl<E, A> Journal for crate::journal::contiguous::fixed::Journal<E, A>
 where
-    E: commonware_runtime::Clock + commonware_runtime::Storage + commonware_runtime::Metrics,
+    E: crate::Context,
     A: commonware_codec::CodecFixedShared,
 {
     type Context = E;

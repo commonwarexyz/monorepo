@@ -22,7 +22,7 @@ const COMMITS_PER_ITERATION: u64 = 100;
 
 /// Benchmark a populated database: generate data, prune, sync. Returns elapsed time (excluding
 /// destroy).
-async fn bench_db<C: DbAny<Key = Digest>>(
+async fn bench_db<C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest>>(
     mut db: C,
     elements: u64,
     operations: u64,

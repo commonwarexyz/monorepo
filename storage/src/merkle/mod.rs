@@ -9,6 +9,8 @@ pub mod batch;
 #[cfg(test)]
 pub(crate) mod conformance;
 pub mod hasher;
+#[cfg(feature = "std")]
+pub mod journaled;
 mod location;
 pub mod mem;
 pub mod mmb;
@@ -19,6 +21,8 @@ mod proof;
 mod read;
 #[cfg(feature = "std")]
 pub mod storage;
+#[cfg(feature = "std")]
+pub mod verification;
 
 use alloc::vec::Vec;
 use core::fmt::Debug;
@@ -68,9 +72,16 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     /// Compute positions of nodes that must be pinned when pruning to `prune_loc`
     /// in a structure with the given leaf count.
     ///
+    /// Implementations may return a conservative superset of the minimally required nodes.
+    /// Callers must therefore treat the result as "safe to retain" rather than assuming it is
+    /// minimal or canonical. Families may also differ in how this set depends on `leaves`; for
+    /// example, some families may ignore `leaves`, while others may grow the returned set as the
+    /// structure is appended to.
+    ///
     /// # Panics
     ///
-    /// Panics if leaves or prune_loc are invalid.
+    /// Implementations panic if `leaves` or `prune_loc` are invalid (i.e., exceed
+    /// [`MAX_LEAVES`](Self::MAX_LEAVES)). Callers must validate inputs before calling.
     fn nodes_to_pin(leaves: Location<Self>, prune_loc: Location<Self>) -> Vec<Position<Self>>;
 
     /// Return the positions of the left and right children of the node at `pos` with the
