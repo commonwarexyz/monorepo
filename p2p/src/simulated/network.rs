@@ -576,15 +576,22 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Get all peers that should be exposed to `Recipients::All`.
     ///
-    /// When peer sets are enabled, production networking only auto-targets
-    /// primary peers. Secondary peers may receive `Recipients::All` traffic
-    /// only after they establish a real connection first, and the simulated
-    /// network does not track that state.
+    /// When peer sets are enabled, the simulated network treats all tracked
+    /// peers as reachable. Primary peers remain the ones targeted for
+    /// primary-only behavior such as dialing, but secondaries still receive
+    /// broadcast traffic, matching the expectations of higher-level tests
+    /// built on this abstraction.
     fn all_connected_peers(&self) -> Vec<P> {
         if self.tracked_peer_sets.is_none() {
             return self.peers.keys().cloned().collect();
         }
-        self.primary_refs.keys().cloned().collect()
+        let mut out: Vec<P> = self.primary_refs.keys().cloned().collect();
+        for peer in self.secondary_refs.keys() {
+            if !self.primary_refs.contains_key(peer) {
+                out.push(peer.clone());
+            }
+        }
+        out
     }
 
     /// Returns whether the peer is currently allowed to use the network.
@@ -1946,7 +1953,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recipients_all_excludes_secondary_peers() {
+    fn test_overlapping_primary_secondary_no_duplicate_recipients() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -2008,15 +2015,19 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(sent_to, vec![pk2.clone()]);
+            // pk2 should only appear once in the sent-to list.
+            let pk2_count = sent_to.iter().filter(|pk| *pk == &pk2).count();
+            assert_eq!(pk2_count, 1, "pk2 received duplicate sends");
+            assert!(sent_to.iter().any(|pk| pk == &pk3));
 
-            // Primary peers receive `Recipients::All`.
             context.sleep(Duration::from_millis(10)).await;
             let (from2, data2) = recv2.recv().await.unwrap();
             assert_eq!(from2, pk1);
             assert_eq!(data2, msg.as_slice());
+            let (from3, data3) = recv3.recv().await.unwrap();
+            assert_eq!(from3, pk1);
+            assert_eq!(data3, msg.as_slice());
             assert!(recv2.recv().now_or_never().is_none());
-            assert!(recv3.recv().now_or_never().is_none());
         });
     }
 
