@@ -90,7 +90,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
             write_buffer: NZUsize!(1024),
             page_cache,
         },
-        grafted_mmr_metadata_partition: format!("{name}-grafted"),
+        grafted_metadata_partition: format!("{name}-grafted"),
         translator: OneCap,
     }
 }

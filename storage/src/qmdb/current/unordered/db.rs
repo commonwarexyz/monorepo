@@ -6,7 +6,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::contiguous::{Contiguous, Mutable},
-    merkle::mmr::{self, Location},
+    merkle::{self, Location},
     qmdb::{
         any::{
             operation::update::Unordered as UnorderedUpdate,
@@ -14,6 +14,7 @@ use crate::{
             ValueEncoding,
         },
         current::proof::OperationProof,
+        Error,
     },
     Context,
 };
@@ -21,33 +22,32 @@ use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
 
-type Error = crate::qmdb::Error<crate::mmr::Family>;
-
 /// Proof information for verifying a key has a particular value in the database.
-pub type KeyValueProof<D, const N: usize> = OperationProof<D, N>;
+pub type KeyValueProof<F, D, const N: usize> = OperationProof<F, D, N>;
 
 /// The generic Db type for unordered Current QMDB variants.
 ///
 /// This type is generic over the index type `I`, allowing it to be used with both regular
 /// and partitioned indices.
-pub type Db<E, C, K, V, I, H, const N: usize> =
-    crate::qmdb::current::db::Db<E, C, I, H, Update<K, V>, N>;
+pub type Db<F, E, C, K, V, I, H, const N: usize> =
+    crate::qmdb::current::db::Db<F, E, C, I, H, Update<K, V>, N>;
 
 // Shared read-only functionality.
 impl<
+        F: merkle::Graftable,
         E: Context,
-        C: Contiguous<Item = Operation<mmr::Family, K, V>>,
+        C: Contiguous<Item = Operation<F, K, V>>,
         K: Array,
         V: ValueEncoding,
-        I: UnorderedIndex<Value = Location>,
+        I: UnorderedIndex<Value = Location<F>>,
         H: Hasher,
         const N: usize,
-    > Db<E, C, K, V, I, H, N>
+    > Db<F, E, C, K, V, I, H, N>
 where
-    Operation<mmr::Family, K, V>: Codec,
+    Operation<F, K, V>: Codec,
 {
     /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
+    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         self.any.get(key).await
     }
 
@@ -57,7 +57,7 @@ where
         hasher: &mut H,
         key: K,
         value: V::Value,
-        proof: &KeyValueProof<H::Digest, N>,
+        proof: &KeyValueProof<F, H::Digest, N>,
         root: &H::Digest,
     ) -> bool {
         let op = Operation::Update(UnorderedUpdate(key, value));
@@ -67,16 +67,17 @@ where
 }
 
 impl<
+        F: merkle::Graftable,
         E: Context,
-        C: Mutable<Item = Operation<mmr::Family, K, V>>,
+        C: Mutable<Item = Operation<F, K, V>>,
         K: Array,
         V: ValueEncoding,
-        I: UnorderedIndex<Value = Location>,
+        I: UnorderedIndex<Value = Location<F>>,
         H: Hasher,
         const N: usize,
-    > Db<E, C, K, V, I, H, N>
+    > Db<F, E, C, K, V, I, H, N>
 where
-    Operation<mmr::Family, K, V>: Codec,
+    Operation<F, K, V>: Codec,
 {
     /// Generate and return a proof of the current value of `key`, along with the other
     /// [KeyValueProof] required to verify the proof. Returns KeyNotFound error if the key is not
@@ -89,10 +90,10 @@ where
         &self,
         hasher: &mut H,
         key: K,
-    ) -> Result<KeyValueProof<H::Digest, N>, Error> {
+    ) -> Result<KeyValueProof<F, H::Digest, N>, Error<F>> {
         let op_loc = self.any.get_with_loc(&key).await?;
         let Some((_, loc)) = op_loc else {
-            return Err(Error::KeyNotFound);
+            return Err(Error::<F>::KeyNotFound);
         };
         self.operation_proof(hasher, loc).await
     }

@@ -3,25 +3,25 @@
 //! Contains implementation of [crate::qmdb::sync::Database] for all [Db](crate::qmdb::current::db::Db)
 //! variants (ordered/unordered, fixed/variable).
 //!
-//! The canonical root of a `current` database combines the ops root, grafted MMR root, and
+//! The canonical root of a `current` database combines the ops root, grafted-tree root, and
 //! optional partial chunk into a single hash (see the [Root structure](super) section in the
 //! module documentation). The sync engine operates on the **ops root**, not the canonical root:
 //! it downloads operations and verifies each batch against the ops root using standard MMR
 //! range proofs (identical to `any` sync). Validating that the ops root is part of the
 //! canonical root is the caller's responsibility; the sync engine does not perform this check.
 //!
-//! After all operations are synced, the bitmap and grafted MMR are reconstructed
+//! After all operations are synced, the bitmap and grafted tree are reconstructed
 //! deterministically from the operations. The canonical root is then computed from the
-//! ops root, the reconstructed grafted MMR root, and any partial chunk.
+//! ops root, the reconstructed grafted-tree root, and any partial chunk.
 //!
 //! The [Database]`::`[root()](crate::qmdb::sync::Database::root)
 //! implementation returns the **ops root** (not the canonical root) because that is what the
 //! sync engine verifies against.
 //!
-//! For pruned databases (`range.start > 0`), grafted MMR pinned nodes for the pruned region
+//! For pruned databases (`range.start > 0`), grafted-tree pinned nodes for the pruned region
 //! are read directly from the ops MMR after it is built. This works because of the zero-chunk
 //! identity: for all-zero bitmap chunks (which all pruned chunks are), the grafted leaf equals
-//! the ops subtree root, making the grafted MMR structurally identical to the ops MMR at and
+//! the ops subtree root, making the grafted tree structurally identical to the ops MMR at and
 //! above the grafting height.
 
 use crate::{
@@ -30,7 +30,10 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    merkle::mmr::{self, Location, StandardHasher},
+    merkle::{
+        self,
+        mmr::{self, Family, Location, StandardHasher},
+    },
     qmdb::{
         self,
         any::{
@@ -83,7 +86,7 @@ impl<T: Translator, J: Clone> Config for super::Config<T, J> {
 /// This follows the same pattern as `any/sync/mod.rs::build_db` but additionally:
 /// * Builds the activity bitmap by replaying the operations log.
 /// * Extracts grafted pinned nodes from the ops MMR (zero-chunk identity).
-/// * Builds the grafted MMR from the bitmap and ops MMR.
+/// * Builds the grafted tree from the bitmap and ops MMR.
 /// * Computes and caches the canonical root.
 #[allow(clippy::too_many_arguments)]
 async fn build_db<E, U, I, H, J, T, const N: usize>(
@@ -96,15 +99,15 @@ async fn build_db<E, U, I, H, J, T, const N: usize>(
     apply_batch_size: usize,
     metadata_partition: String,
     thread_pool: Option<commonware_parallel::ThreadPool>,
-) -> Result<db::Db<E, J, I, H, U, N>, qmdb::Error<mmr::Family>>
+) -> Result<db::Db<Family, E, J, I, H, U, N>, qmdb::Error<Family>>
 where
     E: Context,
     U: Update + Send + Sync + 'static,
     I: IndexFactory<T, Value = Location>,
     H: Hasher,
     T: Translator,
-    J: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = crate::journal::Error>,
-    Operation<mmr::Family, U>: Codec + Committable + CodecShared,
+    J: Mutable<Item = Operation<Family, U>> + Persistable<Error = crate::journal::Error>,
+    Operation<Family, U>: Codec + Committable + CodecShared,
 {
     // Build authenticated log.
     let hasher = StandardHasher::<H>::new();
@@ -119,7 +122,7 @@ where
     )
     .await?;
     let index = I::new(context.with_label("index"), translator);
-    let log = authenticated::Journal::<mmr::Family, _, _, _>::from_components(
+    let log = authenticated::Journal::<Family, _, _, _>::from_components(
         mmr,
         log,
         hasher,
@@ -135,14 +138,14 @@ where
     // journal's inactivity floor with inactive (false) bits.
     let pruned_chunks = (*range.start / BitMap::<N>::CHUNK_SIZE_BITS) as usize;
     let mut status = BitMap::<N>::new_with_pruned_chunks(pruned_chunks)
-        .map_err(|_| qmdb::Error::<mmr::Family>::DataCorrupted("pruned chunks overflow"))?;
+        .map_err(|_| qmdb::Error::<Family>::DataCorrupted("pruned chunks overflow"))?;
 
     // Build any::Db with bitmap callback.
     //
     // init_from_log replays the operations, building the snapshot (index) and invoking
     // our callback for each operation to populate the bitmap.
     let known_inactivity_floor = Location::new(status.len());
-    let any: AnyDb<mmr::Family, E, J, I, H, U> = AnyDb::init_from_log(
+    let any: AnyDb<Family, E, J, I, H, U> = AnyDb::init_from_log(
         index,
         log,
         Some(known_inactivity_floor),
@@ -165,22 +168,23 @@ where
     // `nodes_to_pin(range.start)` returns all ops peaks, but only the first
     // `popcount(pruned_chunks)` are at or above the grafting height. The remaining
     // smaller peaks cover the partial trailing chunk and are not grafted pinned nodes.
-    let grafted_pinned_nodes = {
-        let ops_pin_positions = mmr::iterator::nodes_to_pin(range.start);
-        let num_grafted_pins = (pruned_chunks as u64).count_ones() as usize;
-        let mut pins = Vec::with_capacity(num_grafted_pins);
-        for pos in ops_pin_positions.take(num_grafted_pins) {
-            let digest = any.log.merkle.get_node(pos).await?.ok_or(
-                qmdb::Error::<mmr::Family>::DataCorrupted("missing ops pinned node"),
-            )?;
-            pins.push(digest);
-        }
-        pins
-    };
+    let grafted_pinned_nodes =
+        {
+            let ops_pin_positions = mmr::iterator::nodes_to_pin(range.start);
+            let num_grafted_pins = (pruned_chunks as u64).count_ones() as usize;
+            let mut pins = Vec::with_capacity(num_grafted_pins);
+            for pos in ops_pin_positions.take(num_grafted_pins) {
+                let digest = any.log.merkle.get_node(pos).await?.ok_or(
+                    qmdb::Error::<Family>::DataCorrupted("missing ops pinned node"),
+                )?;
+                pins.push(digest);
+            }
+            pins
+        };
 
-    // Build grafted MMR.
+    // Build the grafted tree.
     let hasher = StandardHasher::<H>::new();
-    let grafted_mmr = db::build_grafted_mmr::<H, N>(
+    let grafted_tree = db::build_grafted_tree::<Family, H, N>(
         &hasher,
         &status,
         &grafted_pinned_nodes,
@@ -192,9 +196,9 @@ where
     // Compute the canonical root. The grafted root is deterministic from the ops
     // (which are authenticated by the engine) and the bitmap (which is deterministic
     // from the ops).
-    let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.merkle);
+    let storage = grafting::Storage::new(&grafted_tree, grafting::height::<N>(), &any.log.merkle);
     let partial = db::partial_chunk(&status);
-    let grafted_mmr_root = db::compute_grafted_mmr_root(&hasher, &storage).await?;
+    let grafted_root = db::compute_grafted_root(&hasher, &status, &storage).await?;
     let ops_root = any.log.root();
     let partial_digest = partial.map(|(chunk, next_bit)| {
         let digest = hasher.digest(&chunk);
@@ -203,19 +207,21 @@ where
     let root = db::combine_roots(
         &hasher,
         &ops_root,
-        &grafted_mmr_root,
+        &grafted_root,
         partial_digest.as_ref().map(|(nb, d)| (*nb, d)),
     );
 
     // Initialize metadata store and construct the Db.
-    let (metadata, _, _) =
-        db::init_metadata::<E, DigestOf<H>>(context.with_label("metadata"), &metadata_partition)
-            .await?;
+    let (metadata, _, _) = db::init_metadata::<Family, E, DigestOf<H>>(
+        context.with_label("metadata"),
+        &metadata_partition,
+    )
+    .await?;
 
     let current_db = db::Db {
         any,
         status: crate::qmdb::current::batch::BitmapBatch::Base(Arc::new(status)),
-        grafted_mmr: crate::mmr::batch::MerkleizedBatch::Base(grafted_mmr),
+        grafted_tree: merkle::batch::MerkleizedBatch::Base(grafted_tree),
         metadata: AsyncMutex::new(metadata),
         thread_pool,
         root,
@@ -234,7 +240,7 @@ macro_rules! impl_current_sync_database {
      $journal:ty, $config:ty,
      $key_bound:path, $value_bound:ident
      $(; $($where_extra:tt)+)?) => {
-        impl<E, K, V, H, T, const N: usize> Database for $db<E, K, V, H, T, N>
+        impl<E, K, V, H, T, const N: usize> Database for $db<Family, E, K, V, H, T, N>
         where
             E: Context,
             K: $key_bound,
@@ -244,7 +250,7 @@ macro_rules! impl_current_sync_database {
             $($($where_extra)+)?
         {
             type Context = E;
-            type Op = $op<mmr::Family, K, V>;
+            type Op = $op<Family, K, V>;
             type Journal = $journal;
             type Hasher = H;
             type Config = $config;
@@ -257,9 +263,9 @@ macro_rules! impl_current_sync_database {
                 pinned_nodes: Option<Vec<Self::Digest>>,
                 range: Range<Location>,
                 apply_batch_size: usize,
-            ) -> Result<Self, qmdb::Error<mmr::Family>> {
+            ) -> Result<Self, qmdb::Error<Family>> {
                 let mmr_config = config.mmr_config.clone();
-                let metadata_partition = config.grafted_mmr_metadata_partition.clone();
+                let metadata_partition = config.grafted_metadata_partition.clone();
                 let thread_pool = config.mmr_config.thread_pool.clone();
                 let translator = config.translator.clone();
                 build_db::<_, $update<K, V>, _, H, _, T, N>(
@@ -294,9 +300,9 @@ impl_current_sync_database!(
 impl_current_sync_database!(
     CurrentUnorderedVariableDb, UnorderedVariableOp, UnorderedVariableUpdate,
     variable::Journal<E, Self::Op>,
-    VariableConfig<T, <UnorderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>,
+    VariableConfig<T, <UnorderedVariableOp<Family, K, V> as CodecRead>::Cfg>,
     Key, VariableValue;
-    UnorderedVariableOp<mmr::Family, K, V>: CodecShared
+    UnorderedVariableOp<Family, K, V>: CodecShared
 );
 
 impl_current_sync_database!(
@@ -308,9 +314,9 @@ impl_current_sync_database!(
 impl_current_sync_database!(
     CurrentOrderedVariableDb, OrderedVariableOp, OrderedVariableUpdate,
     variable::Journal<E, Self::Op>,
-    VariableConfig<T, <OrderedVariableOp<mmr::Family, K, V> as CodecRead>::Cfg>,
+    VariableConfig<T, <OrderedVariableOp<Family, K, V> as CodecRead>::Cfg>,
     Key, VariableValue;
-    OrderedVariableOp<mmr::Family, K, V>: CodecShared
+    OrderedVariableOp<Family, K, V>: CodecShared
 );
 
 // --- Resolver implementations ---
@@ -321,7 +327,7 @@ impl_current_sync_database!(
 macro_rules! impl_current_resolver {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {
         impl<E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
-            for std::sync::Arc<$db<E, K, V, H, T, N>>
+            for std::sync::Arc<$db<Family, E, K, V, H, T, N>>
         where
             E: Context,
             K: $key_bound,
@@ -332,8 +338,8 @@ macro_rules! impl_current_resolver {
             $($($where_extra)+)?
         {
             type Digest = H::Digest;
-            type Op = $op<mmr::Family, K, V>;
-            type Error = qmdb::Error<mmr::Family>;
+            type Op = $op<Family, K, V>;
+            type Error = qmdb::Error<Family>;
 
             async fn get_operations(
                 &self,
@@ -363,7 +369,7 @@ macro_rules! impl_current_resolver {
         impl<E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
             for std::sync::Arc<
                 commonware_utils::sync::AsyncRwLock<
-                    $db<E, K, V, H, T, N>,
+                    $db<Family, E, K, V, H, T, N>,
                 >,
             >
         where
@@ -376,8 +382,8 @@ macro_rules! impl_current_resolver {
             $($($where_extra)+)?
         {
             type Digest = H::Digest;
-            type Op = $op<mmr::Family, K, V>;
-            type Error = qmdb::Error<mmr::Family>;
+            type Op = $op<Family, K, V>;
+            type Error = qmdb::Error<Family>;
 
             async fn get_operations(
                 &self,
@@ -386,7 +392,7 @@ macro_rules! impl_current_resolver {
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error<mmr::Family>> {
+            ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error<Family>> {
                 let db = self.read().await;
                 let (proof, operations) = db.any
                     .historical_proof(op_count, start_loc, max_ops)
@@ -408,7 +414,7 @@ macro_rules! impl_current_resolver {
         impl<E, K, V, H, T, const N: usize> crate::qmdb::sync::Resolver
             for std::sync::Arc<
                 commonware_utils::sync::AsyncRwLock<
-                    Option<$db<E, K, V, H, T, N>>,
+                    Option<$db<Family, E, K, V, H, T, N>>,
                 >,
             >
         where
@@ -421,8 +427,8 @@ macro_rules! impl_current_resolver {
             $($($where_extra)+)?
         {
             type Digest = H::Digest;
-            type Op = $op<mmr::Family, K, V>;
-            type Error = qmdb::Error<mmr::Family>;
+            type Op = $op<Family, K, V>;
+            type Error = qmdb::Error<Family>;
 
             async fn get_operations(
                 &self,
@@ -431,9 +437,9 @@ macro_rules! impl_current_resolver {
                 max_ops: std::num::NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error<mmr::Family>> {
+            ) -> Result<crate::qmdb::sync::FetchResult<Self::Op, Self::Digest>, qmdb::Error<Family>> {
                 let guard = self.read().await;
-                let db = guard.as_ref().ok_or(qmdb::Error::<mmr::Family>::KeyNotFound)?;
+                let db = guard.as_ref().ok_or(qmdb::Error::<Family>::KeyNotFound)?;
                 let (proof, operations) = db.any
                     .historical_proof(op_count, start_loc, max_ops)
                     .await?;
@@ -459,7 +465,7 @@ impl_current_resolver!(CurrentUnorderedFixedDb, UnorderedFixedOp, FixedValue, Ar
 // Unordered Variable
 impl_current_resolver!(
     CurrentUnorderedVariableDb, UnorderedVariableOp, VariableValue, Key;
-    UnorderedVariableOp<mmr::Family, K, V>: CodecShared,
+    UnorderedVariableOp<Family, K, V>: CodecShared,
 );
 
 // Ordered Fixed
@@ -468,5 +474,5 @@ impl_current_resolver!(CurrentOrderedFixedDb, OrderedFixedOp, FixedValue, Array)
 // Ordered Variable
 impl_current_resolver!(
     CurrentOrderedVariableDb, OrderedVariableOp, VariableValue, Key;
-    OrderedVariableOp<mmr::Family, K, V>: CodecShared,
+    OrderedVariableOp<Family, K, V>: CodecShared,
 );

@@ -184,7 +184,7 @@ pub fn cur_fix_cfg(ctx: &(impl BufferPooler + ThreadPooler)) -> CurrentFixedConf
     CurrentFixedConfig {
         mmr_config: mmr_cfg(PARTITION_FIX, ctx, page_cache.clone()),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache),
-        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_FIX}"),
+        grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
     }
 }
@@ -207,7 +207,7 @@ pub fn cur_var_digest_cfg(
     CurrentVariableConfig {
         mmr_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ())),
-        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
+        grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
     }
 }
@@ -230,7 +230,7 @@ pub fn cur_var_vec_cfg(
     CurrentVariableConfig {
         mmr_config: mmr_cfg(PARTITION_VAR, ctx, page_cache.clone()),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ((0..=10000).into(), ()))),
-        grafted_mmr_metadata_partition: format!("grafted-mmr-metadata-{PARTITION_VAR}"),
+        grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
     }
 }

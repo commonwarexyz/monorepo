@@ -114,7 +114,7 @@ fn make_config(
             codec_config: ((), ()),
             page_cache,
         },
-        grafted_mmr_metadata_partition: format!("crash-grafted-mmr-metadata-{suffix}"),
+        grafted_metadata_partition: format!("crash-grafted-metadata-{suffix}"),
         translator: TwoCap,
     }
 }

@@ -408,13 +408,15 @@ impl<F: Family, D: Digest> Proof<F, D> {
         let after_end = after_start + after_peaks_count;
         let siblings = &self.digests[after_end..];
 
-        let mut acc: Option<D> = if prefix_digests == 1 {
-            Some(self.digests[0])
-        } else {
-            None
-        };
+        // Collect peak digests: fold prefix (pre-folded), range peaks (reconstructed),
+        // and after peaks (from proof). Then delegate to hasher.root() so that custom
+        // hashers (e.g. the grafting Verifier) can intercept the final fold.
+        let mut peak_digests = Vec::new();
 
-        // Reconstruct each range peak and fold into acc.
+        if prefix_digests == 1 {
+            peak_digests.push(self.digests[0]);
+        }
+
         let mut sibling_cursor = 0usize;
         let mut elements_iter = elements.iter();
         for peak in &bp.range_peaks {
@@ -434,16 +436,15 @@ impl<F: Family, D: Digest> Proof<F, D> {
             if let Some(ref mut cd) = collected {
                 cd.push((peak.pos, peak_digest));
             }
-            acc = Some(acc.map_or(peak_digest, |a| hasher.fold(&a, &peak_digest)));
+            peak_digests.push(peak_digest);
         }
 
-        // Fold after-peaks digests.
         for (i, &after_peak_pos) in bp.after_peaks.iter().enumerate() {
             let digest = self.digests[after_start + i];
             if let Some(ref mut cd) = collected {
                 cd.push((after_peak_pos, digest));
             }
-            acc = Some(acc.map_or(digest, |a| hasher.fold(&a, &digest)));
+            peak_digests.push(digest);
         }
 
         // Verify all elements were consumed.
@@ -456,11 +457,10 @@ impl<F: Family, D: Digest> Proof<F, D> {
             return Err(ReconstructionError::ExtraDigests);
         }
 
-        // Hash the leaf count into the final result.
-        Ok(acc.map_or_else(
-            || hasher.digest(&self.leaves.to_be_bytes()),
-            |peaks_acc| hasher.hash([self.leaves.to_be_bytes().as_slice(), peaks_acc.as_ref()]),
-        ))
+        // Delegate final fold to hasher.root(). For standard hashers this is equivalent
+        // to the inline fold. For custom hashers (e.g. grafting Verifier) this allows
+        // intercepting the fold to handle multi-peak chunk grafting.
+        Ok(hasher.root(self.leaves, peak_digests.iter()))
     }
 }
 
@@ -811,6 +811,7 @@ mod tests {
     use crate::merkle::{
         hasher::Standard,
         mem::Mem,
+        mmb, mmr,
         proof::{nodes_required_for_multi_proof, Blueprint, Proof},
         Family, Location, LocationRangeExt as _,
     };
@@ -1780,79 +1781,79 @@ mod tests {
 
     #[test]
     fn mmr_empty_proof() {
-        empty_proof::<crate::mmr::Family>();
+        empty_proof::<mmr::Family>();
     }
     #[test]
     fn mmr_verify_element() {
-        verify_element::<crate::mmr::Family>();
+        verify_element::<mmr::Family>();
     }
     #[test]
     fn mmr_verify_range() {
-        verify_range::<crate::mmr::Family>();
+        verify_range::<mmr::Family>();
     }
     #[test_traced]
     fn mmr_retained_nodes_provable_after_pruning() {
-        retained_nodes_provable_after_pruning::<crate::mmr::Family>();
+        retained_nodes_provable_after_pruning::<mmr::Family>();
     }
     #[test]
     fn mmr_ranges_provable_after_pruning() {
-        ranges_provable_after_pruning::<crate::mmr::Family>();
+        ranges_provable_after_pruning::<mmr::Family>();
     }
     #[test]
     fn mmr_proof_serialization() {
-        proof_serialization::<crate::mmr::Family>();
+        proof_serialization::<mmr::Family>();
     }
     #[test]
     fn mmr_multi_proof_generation_and_verify() {
-        multi_proof_generation_and_verify::<crate::mmr::Family>();
+        multi_proof_generation_and_verify::<mmr::Family>();
     }
     #[test]
     fn mmr_multi_proof_deduplication() {
-        multi_proof_deduplication::<crate::mmr::Family>();
+        multi_proof_deduplication::<mmr::Family>();
     }
     #[test]
     fn mmr_proof_leaves_malleability() {
-        proof_leaves_malleability::<crate::mmr::Family>();
+        proof_leaves_malleability::<mmr::Family>();
     }
     #[test]
     fn mmr_blueprint_errors() {
-        blueprint_errors::<crate::mmr::Family>();
+        blueprint_errors::<mmr::Family>();
     }
     #[test]
     fn mmr_single_element_proof_reconstruction() {
-        single_element_proof_reconstruction::<crate::mmr::Family>();
+        single_element_proof_reconstruction::<mmr::Family>();
     }
     #[test]
     fn mmr_range_proof_reconstruction() {
-        range_proof_reconstruction::<crate::mmr::Family>();
+        range_proof_reconstruction::<mmr::Family>();
     }
     #[test]
     fn mmr_verify_element_inclusion() {
-        verify_element_inclusion::<crate::mmr::Family>();
+        verify_element_inclusion::<mmr::Family>();
     }
     #[test]
     fn mmr_full_range() {
-        full_range::<crate::mmr::Family>();
+        full_range::<mmr::Family>();
     }
     #[test]
     fn mmr_empty_proof_verifies_empty_tree() {
-        empty_proof_verifies_empty_tree::<crate::mmr::Family>();
+        empty_proof_verifies_empty_tree::<mmr::Family>();
     }
     #[test]
     fn mmr_every_element_contributes_to_root() {
-        every_element_contributes_to_root::<crate::mmr::Family>();
+        every_element_contributes_to_root::<mmr::Family>();
     }
     #[test]
     fn mmr_multi_proof_generation_and_verify_raw() {
-        multi_proof_generation_and_verify_raw::<crate::mmr::Family>();
+        multi_proof_generation_and_verify_raw::<mmr::Family>();
     }
     #[test]
     fn mmr_tampered_proof_digests_rejected() {
-        tampered_proof_digests_rejected::<crate::mmr::Family>();
+        tampered_proof_digests_rejected::<mmr::Family>();
     }
     #[test]
     fn mmr_no_duplicate_positions() {
-        no_duplicate_positions::<crate::mmr::Family>();
+        no_duplicate_positions::<mmr::Family>();
     }
 
     // ---------------------------------------------------------------------------
@@ -1861,78 +1862,78 @@ mod tests {
 
     #[test]
     fn mmb_empty_proof() {
-        empty_proof::<crate::mmb::Family>();
+        empty_proof::<mmb::Family>();
     }
     #[test]
     fn mmb_verify_element() {
-        verify_element::<crate::mmb::Family>();
+        verify_element::<mmb::Family>();
     }
     #[test]
     fn mmb_verify_range() {
-        verify_range::<crate::mmb::Family>();
+        verify_range::<mmb::Family>();
     }
     #[test_traced]
     fn mmb_retained_nodes_provable_after_pruning() {
-        retained_nodes_provable_after_pruning::<crate::mmb::Family>();
+        retained_nodes_provable_after_pruning::<mmb::Family>();
     }
     #[test]
     fn mmb_ranges_provable_after_pruning() {
-        ranges_provable_after_pruning::<crate::mmb::Family>();
+        ranges_provable_after_pruning::<mmb::Family>();
     }
     #[test]
     fn mmb_proof_serialization() {
-        proof_serialization::<crate::mmb::Family>();
+        proof_serialization::<mmb::Family>();
     }
     #[test]
     fn mmb_multi_proof_generation_and_verify() {
-        multi_proof_generation_and_verify::<crate::mmb::Family>();
+        multi_proof_generation_and_verify::<mmb::Family>();
     }
     #[test]
     fn mmb_multi_proof_deduplication() {
-        multi_proof_deduplication::<crate::mmb::Family>();
+        multi_proof_deduplication::<mmb::Family>();
     }
     #[test]
     fn mmb_proof_leaves_malleability() {
-        proof_leaves_malleability::<crate::mmb::Family>();
+        proof_leaves_malleability::<mmb::Family>();
     }
     #[test]
     fn mmb_blueprint_errors() {
-        blueprint_errors::<crate::mmb::Family>();
+        blueprint_errors::<mmb::Family>();
     }
     #[test]
     fn mmb_single_element_proof_reconstruction() {
-        single_element_proof_reconstruction::<crate::mmb::Family>();
+        single_element_proof_reconstruction::<mmb::Family>();
     }
     #[test]
     fn mmb_range_proof_reconstruction() {
-        range_proof_reconstruction::<crate::mmb::Family>();
+        range_proof_reconstruction::<mmb::Family>();
     }
     #[test]
     fn mmb_verify_element_inclusion() {
-        verify_element_inclusion::<crate::mmb::Family>();
+        verify_element_inclusion::<mmb::Family>();
     }
     #[test]
     fn mmb_full_range() {
-        full_range::<crate::mmb::Family>();
+        full_range::<mmb::Family>();
     }
     #[test]
     fn mmb_empty_proof_verifies_empty_tree() {
-        empty_proof_verifies_empty_tree::<crate::mmb::Family>();
+        empty_proof_verifies_empty_tree::<mmb::Family>();
     }
     #[test]
     fn mmb_every_element_contributes_to_root() {
-        every_element_contributes_to_root::<crate::mmb::Family>();
+        every_element_contributes_to_root::<mmb::Family>();
     }
     #[test]
     fn mmb_multi_proof_generation_and_verify_raw() {
-        multi_proof_generation_and_verify_raw::<crate::mmb::Family>();
+        multi_proof_generation_and_verify_raw::<mmb::Family>();
     }
     #[test]
     fn mmb_tampered_proof_digests_rejected() {
-        tampered_proof_digests_rejected::<crate::mmb::Family>();
+        tampered_proof_digests_rejected::<mmb::Family>();
     }
     #[test]
     fn mmb_no_duplicate_positions() {
-        no_duplicate_positions::<crate::mmb::Family>();
+        no_duplicate_positions::<mmb::Family>();
     }
 }

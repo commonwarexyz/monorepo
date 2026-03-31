@@ -121,7 +121,7 @@ fn fuzz(data: FuzzInput) {
                 write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
                 page_cache,
             },
-            grafted_mmr_metadata_partition: "fuzz-current-grafted-mmr-metadata".into(),
+            grafted_metadata_partition: "fuzz-current-grafted-metadata".into(),
             translator: TwoCap,
         };
 
