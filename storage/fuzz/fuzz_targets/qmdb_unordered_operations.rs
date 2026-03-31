@@ -109,11 +109,9 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             };
 
             let mut db: GenericDb<F> =
-                commonware_storage::qmdb::any::init(context.clone(), cfg, None, |_, _| {}, |ctx, t| {
-                    Index::new(ctx, t)
-                })
-                .await
-                .expect("init qmdb");
+                commonware_storage::qmdb::any::init(context.clone(), cfg, None, |_, _| {})
+                    .await
+                    .expect("init qmdb");
 
             // committed_state tracks state after apply_batch. pending_expected tracks
             // uncommitted mutations that haven't been applied yet.

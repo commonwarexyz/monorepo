@@ -71,7 +71,7 @@
 //! ```
 
 use crate::{
-    index::Unordered as UnorderedIndex,
+    index::Factory as IndexFactory,
     journal::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -119,12 +119,11 @@ pub type FixedConfig<T> = Config<T, FConfig>;
 pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
 
 /// Initialize an `Any` authenticated db from the given config.
-pub async fn init<F, E, U, H, T, I, J, Cb, NewIndex>(
+pub async fn init<F, E, U, H, T, I, J, Cb>(
     context: E,
     cfg: Config<T, J::Config>,
     known_inactivity_floor: Option<Location<F>>,
     callback: Cb,
-    new_index: NewIndex,
 ) -> Result<db::Db<F, E, J, I, H, U>, crate::qmdb::Error<F>>
 where
     F: Family,
@@ -132,11 +131,10 @@ where
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
-    I: UnorderedIndex<Value = Location<F>>,
+    I: IndexFactory<T, Value = Location<F>>,
     J: Inner<E, Item = Operation<F, U>>,
     Operation<F, U>: Committable + CodecShared,
     Cb: FnMut(bool, Option<Location<F>>),
-    NewIndex: FnOnce(E, T) -> I,
 {
     let mut log = J::init::<F, H>(
         context.with_label("log"),
@@ -153,7 +151,7 @@ where
         log.sync().await?;
     }
 
-    let index = new_index(context.with_label("index"), cfg.translator);
+    let index = I::new(context.with_label("index"), cfg.translator);
     db::Db::init_from_log(index, log, known_inactivity_floor, callback).await
 }
 
@@ -2236,15 +2234,7 @@ pub(crate) mod test {
 
     async fn open_mmb_db(context: Context, suffix: &str) -> MmbVariable {
         let cfg = variable_db_config::<OneCap>(suffix, &context);
-        super::init(
-            context,
-            cfg,
-            None,
-            |_, _| {},
-            crate::index::unordered::Index::new,
-        )
-        .await
-        .unwrap()
+        super::init(context, cfg, None, |_, _| {}).await.unwrap()
     }
 
     async fn commit_writes_mmb(
