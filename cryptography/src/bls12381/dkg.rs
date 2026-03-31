@@ -305,7 +305,7 @@
 use super::primitives::group::{Private, Share};
 use crate::{
     bls12381::primitives::{
-        group::Scalar,
+        group::{Scalar, ScalarReadCfg},
         sharing::{Mode, ModeVersion, Sharing},
         variant::Variant,
     },
@@ -825,7 +825,13 @@ impl Read for DealerPrivMsg {
         buf: &mut impl bytes::Buf,
         _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self::new(Scalar::read_cfg(buf, &Default::default())?))
+        // For backwards compatibility, reject zero explicitly.
+        // Ideally, we would allow zero, because that's not an issue in theory.
+        // Honest dealers will never run into this issue.
+        Ok(Self::new(Scalar::read_cfg(
+            buf,
+            &ScalarReadCfg::RejectZero,
+        )?))
     }
 }
 
