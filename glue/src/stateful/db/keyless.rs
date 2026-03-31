@@ -11,7 +11,7 @@ use crate::stateful::db::{
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
-    mmr::Location,
+    mmr::{self, Location},
     qmdb::{
         any::VariableValue,
         keyless::{
@@ -52,7 +52,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> KeylessUnmerklei
     }
 
     /// Read a value at `loc`, falling back to committed state.
-    pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
+    pub async fn get(&self, loc: Location) -> Result<Option<V>, Error<mmr::Family>> {
         let db = self.db.read().await;
         self.batch.get(loc, &*db).await
     }
@@ -83,7 +83,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Deref
 
 impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> KeylessMerkleized<E, V, H> {
     /// Read a value at `loc`, falling back to committed state.
-    pub async fn get(&self, loc: Location) -> Result<Option<V>, Error> {
+    pub async fn get(&self, loc: Location) -> Result<Option<V>, Error<mmr::Family>> {
         let db = self.db.read().await;
         self.batch.get(loc, &*db).await
     }
@@ -93,9 +93,9 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> UnmerkleizedTrai
     for KeylessUnmerkleized<E, V, H>
 {
     type Merkleized = KeylessMerkleized<E, V, H>;
-    type Error = Error;
+    type Error = Error<mmr::Family>;
 
-    async fn merkleize(self) -> Result<Self::Merkleized, Error> {
+    async fn merkleize(self) -> Result<Self::Merkleized, Error<mmr::Family>> {
         Ok(KeylessMerkleized {
             batch: self.batch.merkleize(self.metadata),
             db: self.db,
@@ -130,11 +130,11 @@ where
 {
     type Unmerkleized = KeylessUnmerkleized<E, V, H>;
     type Merkleized = KeylessMerkleized<E, V, H>;
-    type Error = Error;
+    type Error = Error<mmr::Family>;
     type Config = Config<V::Cfg>;
     type SyncTarget = sync::Target<H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error> {
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error<mmr::Family>> {
         <Self>::init(context, config).await
     }
 
@@ -147,7 +147,7 @@ where
         }
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error> {
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<mmr::Family>> {
         let current_size = *self.last_commit_loc() + 1;
         let changeset = batch.batch.finalize_from(current_size);
         self.apply_batch(changeset).await?;
@@ -163,7 +163,10 @@ where
         }
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error> {
+    async fn rewind_to_target(
+        &mut self,
+        target: Self::SyncTarget,
+    ) -> Result<(), Error<mmr::Family>> {
         self.rewind(target.range.end()).await?;
         self.commit().await?;
 

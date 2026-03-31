@@ -20,7 +20,7 @@ use commonware_storage::{
     journal::contiguous::{
         fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Contiguous, Mutable,
     },
-    mmr::Location,
+    mmr::{self, Location},
     qmdb::{
         any::{
             operation::{Operation, Update},
@@ -50,10 +50,10 @@ pub struct CurrentUnmerkleized<E, C, I, H, U, const N: usize>
 where
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     batch: UnmerkleizedBatch<H, U, N>,
     db: CurrentDbHandle<E, C, I, H, U, N>,
@@ -66,11 +66,11 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<unordered::Update<K, V>>>
+    C: Mutable<Item = Operation<mmr::Family, unordered::Update<K, V>>>
         + Persistable<Error = commonware_storage::journal::Error>,
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
-    Operation<unordered::Update<K, V>>: Codec,
+    Operation<mmr::Family, unordered::Update<K, V>>: Codec,
 {
     /// Set commit metadata included in the next
     /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
@@ -80,7 +80,7 @@ where
     }
 
     /// Read a value by key, falling back to committed state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
+    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<mmr::Family>> {
         let db = self.db.read().await;
         self.batch.get(key, &*db).await
     }
@@ -98,10 +98,10 @@ pub struct CurrentMerkleized<E, C, I, H, U, const N: usize>
 where
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     batch: MerkleizedBatch<H::Digest, U, N>,
     db: CurrentDbHandle<E, C, I, H, U, N>,
@@ -111,10 +111,10 @@ impl<E, C, I, H, U, const N: usize> Deref for CurrentUnmerkleized<E, C, I, H, U,
 where
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     type Target = UnmerkleizedBatch<H, U, N>;
 
@@ -127,10 +127,10 @@ impl<E, C, I, H, U, const N: usize> Deref for CurrentMerkleized<E, C, I, H, U, N
 where
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     type Target = MerkleizedBatch<H::Digest, U, N>;
 
@@ -145,14 +145,14 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<ordered::Update<K, V>>>
+    C: Mutable<Item = Operation<mmr::Family, ordered::Update<K, V>>>
         + Persistable<Error = commonware_storage::journal::Error>,
     I: OrderedIndex<Value = Location> + 'static,
     H: Hasher,
-    Operation<ordered::Update<K, V>>: Codec,
+    Operation<mmr::Family, ordered::Update<K, V>>: Codec,
 {
     /// Read a value by key, falling back to committed state.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error> {
+    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<mmr::Family>> {
         let db = self.db.read().await;
         self.batch.get(key, &*db).await
     }
@@ -171,16 +171,16 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<unordered::Update<K, V>>>
+    C: Mutable<Item = Operation<mmr::Family, unordered::Update<K, V>>>
         + Persistable<Error = commonware_storage::journal::Error>,
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
-    Operation<unordered::Update<K, V>>: Codec,
+    Operation<mmr::Family, unordered::Update<K, V>>: Codec,
 {
     type Merkleized = CurrentMerkleized<E, C, I, H, unordered::Update<K, V>, N>;
-    type Error = Error;
+    type Error = Error<mmr::Family>;
 
-    async fn merkleize(self) -> Result<Self::Merkleized, Error> {
+    async fn merkleize(self) -> Result<Self::Merkleized, Error<mmr::Family>> {
         let db = self.db.read().await;
         let merkleized = self.batch.merkleize(self.metadata, &*db).await?;
         Ok(CurrentMerkleized {
@@ -197,16 +197,16 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<ordered::Update<K, V>>>
+    C: Mutable<Item = Operation<mmr::Family, ordered::Update<K, V>>>
         + Persistable<Error = commonware_storage::journal::Error>,
     I: OrderedIndex<Value = Location> + 'static,
     H: Hasher,
-    Operation<ordered::Update<K, V>>: Codec,
+    Operation<mmr::Family, ordered::Update<K, V>>: Codec,
 {
     type Merkleized = CurrentMerkleized<E, C, I, H, ordered::Update<K, V>, N>;
-    type Error = Error;
+    type Error = Error<mmr::Family>;
 
-    async fn merkleize(self) -> Result<Self::Merkleized, Error> {
+    async fn merkleize(self) -> Result<Self::Merkleized, Error<mmr::Family>> {
         let db = self.db.read().await;
         let merkleized = self.batch.merkleize(self.metadata, &*db).await?;
         Ok(CurrentMerkleized {
@@ -221,10 +221,11 @@ impl<E, C, I, H, U, const N: usize> MerkleizedTrait for CurrentMerkleized<E, C, 
 where
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Mutable<Item = Operation<U>> + Persistable<Error = commonware_storage::journal::Error>,
+    C: Mutable<Item = Operation<mmr::Family, U>>
+        + Persistable<Error = commonware_storage::journal::Error>,
     I: UnorderedIndex<Value = Location> + 'static,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
     CurrentUnmerkleized<E, C, I, H, U, N>: UnmerkleizedTrait,
 {
     type Digest = H::Digest;
@@ -251,7 +252,7 @@ where
 impl<E, K, V, H, T, const N: usize> ManagedDb<E>
     for Db<
         E,
-        FixedJournal<E, Operation<unordered::Update<K, FixedEncoding<V>>>>,
+        FixedJournal<E, Operation<mmr::Family, unordered::Update<K, FixedEncoding<V>>>>,
         UnorderedIdx<T, Location>,
         H,
         unordered::Update<K, FixedEncoding<V>>,
@@ -266,7 +267,7 @@ where
 {
     type Unmerkleized = CurrentUnmerkleized<
         E,
-        FixedJournal<E, Operation<unordered::Update<K, FixedEncoding<V>>>>,
+        FixedJournal<E, Operation<mmr::Family, unordered::Update<K, FixedEncoding<V>>>>,
         UnorderedIdx<T, Location>,
         H,
         unordered::Update<K, FixedEncoding<V>>,
@@ -274,17 +275,17 @@ where
     >;
     type Merkleized = CurrentMerkleized<
         E,
-        FixedJournal<E, Operation<unordered::Update<K, FixedEncoding<V>>>>,
+        FixedJournal<E, Operation<mmr::Family, unordered::Update<K, FixedEncoding<V>>>>,
         UnorderedIdx<T, Location>,
         H,
         unordered::Update<K, FixedEncoding<V>>,
         N,
     >;
-    type Error = Error;
+    type Error = Error<mmr::Family>;
     type Config = FixedConfig<T>;
     type SyncTarget = sync::Target<H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error> {
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error<mmr::Family>> {
         <Self>::init(context, config).await
     }
 
@@ -297,7 +298,7 @@ where
         }
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error> {
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<mmr::Family>> {
         let current_size = *self.bounds().await.end;
         let changeset = batch.batch.finalize_from(current_size);
         self.apply_batch(changeset).await?;
@@ -313,7 +314,10 @@ where
         }
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error> {
+    async fn rewind_to_target(
+        &mut self,
+        target: Self::SyncTarget,
+    ) -> Result<(), Error<mmr::Family>> {
         self.rewind(target.range.end()).await?;
         self.commit().await?;
 
@@ -338,31 +342,36 @@ mod open {
     use commonware_codec::{Codec, Read};
     use commonware_cryptography::Hasher;
     use commonware_runtime::{Clock, Metrics, Storage};
-    use commonware_storage::qmdb::{
-        any::{
-            operation::Operation,
-            unordered,
-            value::{VariableEncoding, VariableValue},
+    use commonware_storage::{
+        mmr,
+        qmdb::{
+            any::{
+                operation::Operation,
+                unordered,
+                value::{VariableEncoding, VariableValue},
+            },
+            current::{unordered::variable::Db, VariableConfig},
+            Error,
         },
-        current::{unordered::variable::Db, VariableConfig},
-        Error,
     };
     use commonware_utils::Array;
 
-    type VConfig<T, K, V> =
-        VariableConfig<T, <Operation<unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg>;
+    type VConfig<T, K, V> = VariableConfig<
+        T,
+        <Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>> as Read>::Cfg,
+    >;
 
     pub(super) async fn variable<E, K, V, H, T, const N: usize>(
         context: E,
         config: VConfig<T, K, V>,
-    ) -> Result<Db<E, K, V, H, T, N>, Error>
+    ) -> Result<Db<E, K, V, H, T, N>, Error<mmr::Family>>
     where
         E: Storage + Clock + Metrics,
         K: Array,
         V: VariableValue + 'static,
         H: Hasher,
         T: commonware_storage::translator::Translator,
-        Operation<unordered::Update<K, VariableEncoding<V>>>: Codec,
+        Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>>: Codec,
     {
         Db::init(context, config).await
     }
@@ -372,7 +381,7 @@ mod open {
 impl<E, K, V, H, T, const N: usize> ManagedDb<E>
     for Db<
         E,
-        VariableJournal<E, Operation<unordered::Update<K, VariableEncoding<V>>>>,
+        VariableJournal<E, Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>>>,
         UnorderedIdx<T, Location>,
         H,
         unordered::Update<K, VariableEncoding<V>>,
@@ -384,11 +393,11 @@ where
     V: value::VariableValue + 'static,
     H: Hasher,
     T: Translator,
-    Operation<unordered::Update<K, VariableEncoding<V>>>: Codec,
+    Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>>: Codec,
 {
     type Unmerkleized = CurrentUnmerkleized<
         E,
-        VariableJournal<E, Operation<unordered::Update<K, VariableEncoding<V>>>>,
+        VariableJournal<E, Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>>>,
         UnorderedIdx<T, Location>,
         H,
         unordered::Update<K, VariableEncoding<V>>,
@@ -396,18 +405,20 @@ where
     >;
     type Merkleized = CurrentMerkleized<
         E,
-        VariableJournal<E, Operation<unordered::Update<K, VariableEncoding<V>>>>,
+        VariableJournal<E, Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>>>,
         UnorderedIdx<T, Location>,
         H,
         unordered::Update<K, VariableEncoding<V>>,
         N,
     >;
-    type Error = Error;
-    type Config =
-        VariableConfig<T, <Operation<unordered::Update<K, VariableEncoding<V>>> as CodecRead>::Cfg>;
+    type Error = Error<mmr::Family>;
+    type Config = VariableConfig<
+        T,
+        <Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>> as CodecRead>::Cfg,
+    >;
     type SyncTarget = sync::Target<H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error> {
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error<mmr::Family>> {
         open::variable(context, config).await
     }
 
@@ -420,7 +431,7 @@ where
         }
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error> {
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<mmr::Family>> {
         let current_size = *self.bounds().await.end;
         let changeset = batch.batch.finalize_from(current_size);
         self.apply_batch(changeset).await?;
@@ -436,7 +447,10 @@ where
         }
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error> {
+    async fn rewind_to_target(
+        &mut self,
+        target: Self::SyncTarget,
+    ) -> Result<(), Error<mmr::Family>> {
         self.rewind(target.range.end()).await?;
         self.commit().await?;
 
@@ -452,7 +466,7 @@ where
 impl<E, K, V, H, T, R, const N: usize> StateSyncDb<E, R>
     for Db<
         E,
-        FixedJournal<E, Operation<unordered::Update<K, FixedEncoding<V>>>>,
+        FixedJournal<E, Operation<mmr::Family, unordered::Update<K, FixedEncoding<V>>>>,
         UnorderedIdx<T, Location>,
         H,
         unordered::Update<K, FixedEncoding<V>>,
@@ -464,7 +478,10 @@ where
     V: value::FixedValue + 'static,
     H: Hasher,
     T: Translator,
-    R: Resolver<Op = Operation<unordered::Update<K, FixedEncoding<V>>>, Digest = H::Digest>,
+    R: Resolver<
+        Op = Operation<mmr::Family, unordered::Update<K, FixedEncoding<V>>>,
+        Digest = H::Digest,
+    >,
 {
     type SyncError = sync::Error<R::Error, H::Digest>;
 
@@ -500,7 +517,7 @@ where
 impl<E, K, V, H, T, R, const N: usize> StateSyncDb<E, R>
     for Db<
         E,
-        VariableJournal<E, Operation<unordered::Update<K, VariableEncoding<V>>>>,
+        VariableJournal<E, Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>>>,
         UnorderedIdx<T, Location>,
         H,
         unordered::Update<K, VariableEncoding<V>>,
@@ -512,8 +529,11 @@ where
     V: value::VariableValue + 'static,
     H: Hasher,
     T: Translator,
-    Operation<unordered::Update<K, VariableEncoding<V>>>: Codec,
-    R: Resolver<Op = Operation<unordered::Update<K, VariableEncoding<V>>>, Digest = H::Digest>,
+    Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>>: Codec,
+    R: Resolver<
+        Op = Operation<mmr::Family, unordered::Update<K, VariableEncoding<V>>>,
+        Digest = H::Digest,
+    >,
 {
     type SyncError = sync::Error<R::Error, H::Digest>;
 

@@ -995,12 +995,12 @@ where
     }
 
     /// Inactivity floor location after this batch's floor raise.
-    pub const fn inactivity_floor(&self) -> Location {
+    pub const fn inactivity_floor(&self) -> Location<F> {
         self.new_inactivity_floor_loc
     }
 
     /// Total operation count after this batch.
-    pub const fn size(&self) -> Location {
+    pub const fn size(&self) -> Location<F> {
         Location::new(self.total_size)
     }
 }

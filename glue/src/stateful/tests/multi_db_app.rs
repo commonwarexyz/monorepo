@@ -45,7 +45,7 @@ use commonware_runtime::{
 use commonware_storage::{
     archive::immutable,
     journal::contiguous::fixed::Config as FixedLogConfig,
-    mmr::{journaled::Config as MmrJournalConfig, Location},
+    mmr::{self, journaled::Config as MmrJournalConfig, Location},
     qmdb::{
         any::{unordered::fixed, FixedConfig},
         sync::Target,
@@ -62,7 +62,7 @@ use rand::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 /// The QMDB database type used by the multi-db e2e tests.
-type Qmdb<E> = fixed::Db<E, sha256::Digest, sha256::Digest, Sha256, TwoCap>;
+type Qmdb<E> = fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap>;
 
 /// A single QMDB database behind a lock.
 type SingleDb<E> = Arc<AsyncRwLock<Qmdb<E>>>;
@@ -374,7 +374,7 @@ impl EngineDefinition for MultiDbEngine {
 
         // QMDB database configs (one per database)
         let db_config_a = FixedConfig {
-            mmr_config: MmrJournalConfig {
+            merkle_config: MmrJournalConfig {
                 journal_partition: format!("{partition_prefix}-qmdb-a-mmr-journal"),
                 metadata_partition: format!("{partition_prefix}-qmdb-a-mmr-metadata"),
                 items_per_blob: NZU64!(11),
@@ -391,7 +391,7 @@ impl EngineDefinition for MultiDbEngine {
             translator: TwoCap,
         };
         let db_config_b = FixedConfig {
-            mmr_config: MmrJournalConfig {
+            merkle_config: MmrJournalConfig {
                 journal_partition: format!("{partition_prefix}-qmdb-b-mmr-journal"),
                 metadata_partition: format!("{partition_prefix}-qmdb-b-mmr-metadata"),
                 items_per_blob: NZU64!(11),

@@ -13,6 +13,7 @@ use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
+    mmr,
     qmdb::{
         any::VariableValue,
         immutable::{
@@ -27,7 +28,7 @@ use commonware_storage::{
 use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
-type ImmutableDbHandle<E, K, V, H, T> = Arc<AsyncRwLock<Immutable<E, K, V, H, T>>>;
+type ImmutableDbHandle<E, K, V, H, T> = Arc<AsyncRwLock<Immutable<mmr::Family, E, K, V, H, T>>>;
 
 /// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
@@ -39,7 +40,7 @@ where
     H: Hasher,
     T: Translator,
 {
-    batch: UnmerkleizedBatch<H, K, V>,
+    batch: UnmerkleizedBatch<mmr::Family, H, K, V>,
     db: ImmutableDbHandle<E, K, V, H, T>,
     metadata: Option<V>,
 }
@@ -52,7 +53,7 @@ where
     H: Hasher,
     T: Translator,
 {
-    type Target = UnmerkleizedBatch<H, K, V>;
+    type Target = UnmerkleizedBatch<mmr::Family, H, K, V>;
 
     fn deref(&self) -> &Self::Target {
         &self.batch
@@ -75,7 +76,7 @@ where
     }
 
     /// Read a value by key, falling back to committed state.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error<mmr::Family>> {
         let db = self.db.read().await;
         self.batch.get(key, &*db).await
     }
@@ -97,7 +98,7 @@ where
     H: Hasher,
     T: Translator,
 {
-    batch: MerkleizedBatch<H::Digest, K, V>,
+    batch: MerkleizedBatch<mmr::Family, H::Digest, K, V>,
     db: ImmutableDbHandle<E, K, V, H, T>,
 }
 
@@ -109,7 +110,7 @@ where
     H: Hasher,
     T: Translator,
 {
-    type Target = MerkleizedBatch<H::Digest, K, V>;
+    type Target = MerkleizedBatch<mmr::Family, H::Digest, K, V>;
 
     fn deref(&self) -> &Self::Target {
         &self.batch
@@ -125,7 +126,7 @@ where
     T: Translator,
 {
     /// Read a value by key, falling back to committed state.
-    pub async fn get(&self, key: &K) -> Result<Option<V>, Error> {
+    pub async fn get(&self, key: &K) -> Result<Option<V>, Error<mmr::Family>> {
         let db = self.db.read().await;
         self.batch.get(key, &*db).await
     }
@@ -140,9 +141,9 @@ where
     T: Translator,
 {
     type Merkleized = ImmutableMerkleized<E, K, V, H, T>;
-    type Error = Error;
+    type Error = Error<mmr::Family>;
 
-    async fn merkleize(self) -> Result<Self::Merkleized, Error> {
+    async fn merkleize(self) -> Result<Self::Merkleized, Error<mmr::Family>> {
         Ok(ImmutableMerkleized {
             batch: self.batch.merkleize(self.metadata),
             db: self.db,
@@ -174,7 +175,7 @@ where
     }
 }
 
-impl<E, K, V, H, T> ManagedDb<E> for Immutable<E, K, V, H, T>
+impl<E, K, V, H, T> ManagedDb<E> for Immutable<mmr::Family, E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,
@@ -185,14 +186,14 @@ where
 {
     type Unmerkleized = ImmutableUnmerkleized<E, K, V, H, T>;
     type Merkleized = ImmutableMerkleized<E, K, V, H, T>;
-    type Error = Error;
+    type Error = Error<mmr::Family>;
     // `Operation<K, V>::Cfg == V::Cfg` (see operation.rs), but the sync
     // `Database` trait associates `Config<T, V::Cfg>`. Use the projection
     // form here and add `V: CodecRead<Cfg = ...>` so both are satisfied.
     type Config = Config<T, V::Cfg>;
     type SyncTarget = sync::Target<H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error> {
+    async fn init(context: E, config: Self::Config) -> Result<Self, Error<mmr::Family>> {
         <Self>::init(context, config).await
     }
 
@@ -205,7 +206,7 @@ where
         }
     }
 
-    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error> {
+    async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<mmr::Family>> {
         let current_size = *self.bounds().await.end;
         let changeset = batch.batch.finalize_from(current_size);
         self.apply_batch(changeset).await?;
@@ -221,7 +222,10 @@ where
         }
     }
 
-    async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error> {
+    async fn rewind_to_target(
+        &mut self,
+        target: Self::SyncTarget,
+    ) -> Result<(), Error<mmr::Family>> {
         self.rewind(target.range.end()).await?;
         self.commit().await?;
 
@@ -234,7 +238,7 @@ where
     }
 }
 
-impl<E, K, V, H, T, R> StateSyncDb<E, R> for Immutable<E, K, V, H, T>
+impl<E, K, V, H, T, R> StateSyncDb<E, R> for Immutable<mmr::Family, E, K, V, H, T>
 where
     E: Storage + Clock + Metrics,
     K: Array,

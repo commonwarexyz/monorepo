@@ -372,7 +372,7 @@ mod tests {
     use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _};
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{journaled::Config as MmrJournalConfig, Location, Proof},
+        mmr::{self, journaled::Config as MmrJournalConfig, Location, Proof},
         qmdb::any::{unordered::fixed, FixedConfig},
         translator::TwoCap,
     };
@@ -406,7 +406,14 @@ mod tests {
         async fn block(&mut self, _peer: Self::PublicKey) {}
     }
 
-    type TestDb = fixed::Db<deterministic::Context, sha256::Digest, sha256::Digest, Sha256, TwoCap>;
+    type TestDb = fixed::Db<
+        mmr::Family,
+        deterministic::Context,
+        sha256::Digest,
+        sha256::Digest,
+        Sha256,
+        TwoCap,
+    >;
     type TestOp = <Arc<AsyncRwLock<TestDb>> as SyncResolver>::Op;
 
     type TestActor =
@@ -449,7 +456,7 @@ mod tests {
     fn db_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap> {
         let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
         FixedConfig {
-            mmr_config: MmrJournalConfig {
+            merkle_config: MmrJournalConfig {
                 journal_partition: format!("{suffix}-mmr-journal"),
                 metadata_partition: format!("{suffix}-mmr-metadata"),
                 items_per_blob: NZU64!(11),

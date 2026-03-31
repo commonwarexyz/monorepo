@@ -577,7 +577,7 @@ mod tests {
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{journaled::Config as MmrJournalConfig, Location},
+        mmr::{self, journaled::Config as MmrJournalConfig, Location},
         qmdb::{any, sync::Target},
         translator::TwoCap,
     };
@@ -603,7 +603,7 @@ mod tests {
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8);
     const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 
-    type Qmdb<E> = any::unordered::fixed::Db<E, Digest, Digest, Sha256, TwoCap>;
+    type Qmdb<E> = any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap>;
     type DbSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -969,7 +969,7 @@ mod tests {
     fn qmdb_config(prefix: &str, context: &deterministic::Context) -> any::FixedConfig<TwoCap> {
         let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
         any::FixedConfig {
-            mmr_config: MmrJournalConfig {
+            merkle_config: MmrJournalConfig {
                 journal_partition: format!("{prefix}_mmr_journal"),
                 metadata_partition: format!("{prefix}_mmr_metadata"),
                 items_per_blob: NZU64!(11),

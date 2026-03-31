@@ -44,7 +44,7 @@ use commonware_runtime::{
 use commonware_storage::{
     archive::immutable,
     journal::contiguous::fixed::Config as FixedLogConfig,
-    mmr::{journaled::Config as MmrJournalConfig, Location},
+    mmr::{self, journaled::Config as MmrJournalConfig, Location},
     qmdb::{
         any::{unordered::fixed, FixedConfig},
         sync::Target,
@@ -61,7 +61,7 @@ use rand::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 /// The QMDB database type used by the single-db e2e tests.
-type Qmdb<E> = fixed::Db<E, sha256::Digest, sha256::Digest, Sha256, TwoCap>;
+type Qmdb<E> = fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap>;
 
 pub(crate) type SingleDatabaseSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
 type MarshalMailbox = MarshalMailboxOf<Standard<Block>>;
@@ -321,7 +321,7 @@ impl EngineDefinition for SingleDbEngine {
 
         // QMDB database config (created by Stateful::start)
         let db_config = FixedConfig {
-            mmr_config: MmrJournalConfig {
+            merkle_config: MmrJournalConfig {
                 journal_partition: format!("{partition_prefix}-qmdb-mmr-journal"),
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
                 items_per_blob: NZU64!(11),
