@@ -905,9 +905,14 @@ mod test {
             let (mut dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, _dialer_stream) = mocks::Channel::init();
 
+            // Even with a large application limit, the listener should bound the
+            // unauthenticated peer-key frame to the fixed public-key size.
             let mut listener_config = transport_config(listener_crypto);
             listener_config.max_message_size = 1024 * 1024;
 
+            // Advertise a frame that is one byte larger than the encoded public
+            // key and send no payload. The old behavior accepted this because it
+            // only compared against `max_message_size`.
             dialer_sink
                 .send(oversized_handshake_prefix(&peer))
                 .await
@@ -922,6 +927,9 @@ mod test {
             )
             .await;
 
+            // The listener should reject immediately on the fixed-size bound
+            // instead of waiting for more bytes or allocating for the larger
+            // application limit.
             assert!(matches!(result, Err(Error::RecvTooLarge(n)) if n == peer.encode().len() + 1));
         });
     }
@@ -936,9 +944,13 @@ mod test {
             let (dialer_sink, _listener_stream) = mocks::Channel::init();
             let (mut listener_sink, dialer_stream) = mocks::Channel::init();
 
+            // Use a large application limit to make sure this path is guarded by
+            // the fixed SynAck size rather than by post-handshake settings.
             let mut dialer_config = transport_config(dialer_crypto);
             dialer_config.max_message_size = 1024 * 1024;
 
+            // Build a valid SynAck only to derive its true encoded size for the
+            // oversized prefix we inject below.
             let (current_time, ok_timestamps) = dialer_config.time_information(&context);
             let mut listener_rng = context.clone();
             let (_, syn) = dial_start(
@@ -964,6 +976,8 @@ mod test {
             )
             .expect("mock handshake should produce a valid syn_ack");
 
+            // Send only a length prefix that claims a frame one byte larger than
+            // the fixed SynAck encoding.
             listener_sink
                 .send(oversized_handshake_prefix(&syn_ack))
                 .await
@@ -978,6 +992,8 @@ mod test {
             )
             .await;
 
+            // The dialer should reject on the fixed handshake bound before any
+            // larger application-sized receive path is considered.
             assert!(matches!(
                 result,
                 Err(Error::RecvTooLarge(n))
