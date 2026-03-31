@@ -157,8 +157,9 @@ module tests {
                     and cert_payload(c) == Some("val_b1"))),
                 assert(replica_state.get("n0").leader_proposal.get(2) == Some(proposal_a)
                     or replica_state.get("n0").leader_proposal.get(2) == Some(proposal_b)),
-                // n0 is still in the current view (waiting for timeout).
-                assert(replica_state.get("n0").view == 2),
+                // Certification succeeds (CERTIFY_ALL_TRUE) so n0 advances
+                // to view 3, but equivocation blocks the finalize vote.
+                assert(replica_state.get("n0").view == 3),
                 assert(not(sent_finalize_votes.exists(v => v.sig == "n0" and v.proposal.view == 2))),
                 unchanged_all,
             })
@@ -269,10 +270,51 @@ module tests {
             .then(on_certificate("n0", conflicting_cert_1))
             .then(on_certificate("n0", conflicting_cert_2))
             .then(all {
-                assert(replica_state.get("n0").view == 2),
+                // Certification succeeds but equivocation blocks finalize,
+                // so replica advances to view 3 via enter_view.
+                assert(replica_state.get("n0").view == 3),
                 assert(not(sent_finalize_votes.exists(v =>
                     v.sig == "n0" and v.proposal.view == 2
                 ))),
+                unchanged_all,
+            })
+            .expect(test_invariants)
+    }
+
+    // When certification fails on notarization, the replica sends a nullify
+    // vote but does NOT advance to the next view (no enter_view).
+    run certificationFailureDoesNotAdvanceViewTest = {
+        val proposal_1 = {
+            payload: "val_b0",
+            view: 1,
+            parent: GENESIS_VIEW,
+        }
+        // n0 rejects all payloads; other replicas certify normally.
+        val CERTIFY_N0_FALSE = Replicas.mapBy(r =>
+            if (r == "n0") Set("val_b0", "val_b1", "val_b2", "inv_b3").mapBy(_ => false)
+            else app::certify_always_true
+        )
+
+        initWithLeaderAndCertify(
+            Map(0 -> "n1", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
+            CERTIFY_N0_FALSE
+        )
+            .then(propose("n0", proposal_1.payload, proposal_1.parent))
+            // n1 and n2 process the leader vote, adding their votes to sent_notarize_votes.
+            .then(replica_receives_notarize_vote("n1", "val_b0", 1, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 1, GENESIS_VIEW, "n0"))
+            // n0 collects votes; the third vote forms a notarization.
+            .then(replica_receives_notarize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", 1, GENESIS_VIEW, "n2"))
+            .then(all {
+                // Certification failed: replica stays in view 1.
+                assert(replica_state.get("n0").view == 1),
+                // Nullify vote was sent.
+                assert(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == 1)),
+                // No finalize vote was sent.
+                assert(not(sent_finalize_votes.exists(v => v.sig == "n0" and v.proposal.view == 1))),
+                // Certify recorded as failed.
+                assert(replica_state.get("n0").certify.get(1) == Some(false)),
                 unchanged_all,
             })
             .expect(test_invariants)

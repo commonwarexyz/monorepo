@@ -171,6 +171,9 @@ module tests {
             .expect(test_invariants)
     }
 
+    // A notarization certificate with an invalid parent (self-referencing view 2 -> 2)
+    // still triggers certification (application-level, parent-unaware) and advances the
+    // view, but does NOT produce a finalize vote because the parent is locally invalid.
     run invalidParentNotarizationCertificateDoesNotTriggerFinalizeTest = {
         val bad_proposal = {
             payload: "val_b1",
@@ -192,7 +195,10 @@ module tests {
                 assert(not(sent_finalize_votes.exists(v =>
                     v.sig == "n3" and v.proposal == bad_proposal
                 ))),
-                assert(replica_state.get("n3").certified.get(2) == None),
+                // Certification succeeds (application-level check, independent of parent
+                // validity) but finalize is blocked by invalid parent.
+                assert(replica_state.get("n3").certified.get(2) == Some("val_b1")),
+                assert(replica_state.get("n3").view == 3),
                 unchanged_all,
             })
             .expect(test_invariants)

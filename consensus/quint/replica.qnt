@@ -1307,6 +1307,13 @@ module replica {
                 not(has_sent_finalize(id, cert_view_num))
             }
 
+            // Certification succeeds but finalize is blocked.
+            val cert_succeeds_no_finalize = and {
+                can_certify(id, cert_payload_val),
+                self.certified.get(cert_view_num) == None,
+                not(can_send_finalize),
+            }
+
             if (can_send_finalize)
                 all {
                     sent_notarize_votes' = sent_notarize_votes,
@@ -1342,6 +1349,31 @@ module replica {
                             certify: self.certify.set(cert_view_num, Some(true)),
                             certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
                             ghost_sent_votes: self.ghost_sent_votes.setBy(cert_view_num, old => old.append(FinalizeKind))
+                        }, cert_view_num + 1)
+                    }),
+                    ghost_committed_blocks' = ghost_committed_blocks,
+                }
+            else if (cert_succeeds_no_finalize)
+                all {
+                    sent_notarize_votes' = sent_notarize_votes,
+                    sent_nullify_votes' = sent_nullify_votes,
+                    sent_finalize_votes' = sent_finalize_votes,
+                    store_nullify_votes' = store_nullify_votes,
+                    store_finalize_votes' = store_finalize_votes,
+                    replica_state' = replica_state.set(id, {
+                        ...enter_view({
+                            ...observe_certificate(
+                                observe_leader_proposal(
+                                    observe_round_proposal(self, cert_prop, true),
+                                    cert_prop
+                                ),
+                                cert,
+                                is_new_cert
+                            ),
+                            advance_timeout: if (self.view == cert_view_num) self.advance_timeout.set(cert_view_num, None) else self.advance_timeout,
+                            ghost_last_seen_notarization: seen_notarization,
+                            certify: self.certify.set(cert_view_num, Some(true)),
+                            certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
                         }, cert_view_num + 1)
                     }),
                     ghost_committed_blocks' = ghost_committed_blocks,
@@ -1383,7 +1415,6 @@ module replica {
                             cert,
                             is_new_cert
                         ),
-                        advance_timeout: if (self.view == cert_view_num) self.advance_timeout.set(cert_view_num, None) else self.advance_timeout,
                         ghost_last_seen_notarization: seen_notarization
                     }),
                     ghost_committed_blocks' = ghost_committed_blocks,
