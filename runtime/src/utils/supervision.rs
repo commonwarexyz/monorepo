@@ -161,9 +161,14 @@ impl Tree {
             };
 
             if let Some(aborter) = task {
+                // Abort the task before descending so observers see the parent
+                // transition before any surviving children are visited.
                 aborter.abort();
             }
 
+            // `abort()` drained this node's child list, so each upgraded child
+            // is visited at most once even if the subtree is shared by weak
+            // pointers elsewhere.
             pending.extend(children.into_iter().filter_map(|child| child.upgrade()));
         }
     }
