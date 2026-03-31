@@ -4,7 +4,7 @@ use super::{fixed, variable};
 use crate::{
     qmdb::{
         any::{ordered::variable::Operation as VariableOperation, FixedValue, VariableValue},
-        current::{batch::BitmapRead, BitmapPrunedBits},
+        current::BitmapPrunedBits,
         operation::Key,
     },
     translator::Translator,
@@ -12,7 +12,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
-use commonware_utils::Array;
+use commonware_utils::{bitmap::Readable as _, Array};
 
 // =============================================================================
 // Fixed variant test trait implementations
