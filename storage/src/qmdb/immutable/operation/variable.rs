@@ -175,8 +175,11 @@ mod tests {
         use super::*;
         use commonware_codec::conformance::CodecConformance;
 
+        type VarKeyOp = Operation<Vec<u8>, VariableEncoding<U64>>;
+
         commonware_conformance::conformance_tests! {
-            CodecConformance<VarOp>
+            CodecConformance<VarOp>,
+            CodecConformance<VarKeyOp>
         }
     }
 }
