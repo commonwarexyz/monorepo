@@ -737,16 +737,8 @@ impl crate::ThreadPooler for Context {
 
         // If any buffer pool has thread-local caching enabled, we must periodically
         // ask Rayon workers to flush their thread-local caches.
-        if self
-            .network_buffer_pool
-            .config()
-            .thread_cache_config
-            .is_enabled()
-            || self
-                .storage_buffer_pool
-                .config()
-                .thread_cache_config
-                .is_enabled()
+        if self.network_buffer_pool.config().thread_cache_enabled()
+            || self.storage_buffer_pool.config().thread_cache_enabled()
         {
             self.spawn_rayon_buffer_pool_thread_cache_flush(&pool);
         }
