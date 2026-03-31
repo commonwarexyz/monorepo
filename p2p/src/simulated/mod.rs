@@ -62,7 +62,7 @@
 //! use commonware_p2p::{Manager, simulated::{Config, Link, Network}};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
-//! use commonware_utils::NZU32;
+//! use commonware_utils::{ordered::Set, NZU32};
 //! use std::time::Duration;
 //!
 //! // Generate peers
@@ -94,7 +94,7 @@
 //!
 //!     // Register a peer set
 //!     let mut manager = oracle.manager();
-//!     manager.track(0, ordered::Set::try_from(peers.clone()).unwrap()).await;
+//!     manager.track(0, Set::try_from(peers.clone()).unwrap()).await;
 //!
 //!     let (sender1, receiver1) = oracle.control(peers[0].clone()).register(0, quota).await.unwrap();
 //!     let (sender2, receiver2) = oracle.control(peers[1].clone()).register(0, quota).await.unwrap();
