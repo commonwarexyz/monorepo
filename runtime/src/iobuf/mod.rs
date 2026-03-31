@@ -4866,5 +4866,64 @@ mod tests {
             pooled.copy_to_slice(&mut out);
             assert_eq!(out, baseline.as_ref());
         }
+
+        // Exercise remaining_mut, chunk_mut, and advance_mut directly.
+        #[test]
+        fn test_chunk_mut_and_advance_mut() {
+            let mut b = builder(64);
+            let initial = b.remaining_mut();
+            assert!(initial >= 64);
+            let chunk = b.chunk_mut();
+            chunk[0..1].copy_from_slice(&[0xAB]);
+            unsafe { b.advance_mut(1) };
+            assert_eq!(b.remaining_mut(), initial - 1);
+            let mut r = b.finish();
+            assert_eq!(r.remaining(), 1);
+            assert_eq!(r.get_u8(), 0xAB);
+        }
+
+        // chunk_mut on a full buffer triggers grow.
+        #[test]
+        fn test_chunk_mut_triggers_grow() {
+            // Pool may round up the allocation, so fill the entire buffer.
+            let mut b = builder(1);
+            let cap = b.remaining_mut();
+            b.put_slice(&vec![0xFF; cap]); // fill the buffer completely
+            assert_eq!(b.remaining_mut(), 0);
+            let chunk = b.chunk_mut(); // must grow
+            chunk[0..1].copy_from_slice(&[0x42]);
+            unsafe { b.advance_mut(1) };
+            let mut r = b.finish();
+            assert_eq!(r.remaining(), cap + 1);
+            let prefix = r.copy_to_bytes(cap);
+            assert!(prefix.iter().all(|&b| b == 0xFF));
+            assert_eq!(r.get_u8(), 0x42);
+        }
+
+        // grow when doubled capacity >= MIN_GROW_CAPACITY (normal doubling).
+        #[test]
+        fn test_grow_normal_doubling() {
+            let mut b = builder(64);
+            let data = vec![0xAA; 65]; // 1 byte over capacity
+            b.put_slice(&data);
+            let mut r = b.finish();
+            assert_eq!(r.remaining(), 65);
+            let out = r.copy_to_bytes(65);
+            assert_eq!(&out[..], &data[..]);
+        }
+
+        // Push at offset 0 with inline trailer exercises finish branch
+        // where offset == pos (no inline prefix before push).
+        #[test]
+        fn test_push_at_start_with_trailer() {
+            let mut b = builder(64);
+            let payload = Bytes::from(vec![0xCC; 32]);
+            b.push(payload.clone());
+            b.put_u8(0x01);
+            let mut r = b.finish();
+            assert_eq!(r.remaining(), 33);
+            assert_eq!(r.copy_to_bytes(32), payload);
+            assert_eq!(r.get_u8(), 0x01);
+        }
     }
 }
