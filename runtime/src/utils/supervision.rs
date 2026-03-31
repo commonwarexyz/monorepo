@@ -26,12 +26,43 @@ pub(crate) struct Tree {
     inner: Mutex<TreeInner>,
 }
 
+/// Weak child pointers with a deferred-compaction counter.
+///
+/// `stale` tracks how many entries in `links` are known-dead. Once it reaches
+/// [`CHILD_REAP_THRESHOLD`], the next insertion compacts the list.
+#[derive(Default)]
+struct Children {
+    links: Vec<Weak<Tree>>,
+    stale: usize,
+}
+
+impl Children {
+    /// Appends a weak reference to `child`, compacting stale entries first if
+    /// the stale count has reached [`CHILD_REAP_THRESHOLD`].
+    fn push(&mut self, child: &Arc<Tree>) {
+        if self.stale >= CHILD_REAP_THRESHOLD {
+            self.links.retain(|weak| weak.strong_count() > 0);
+            self.stale = 0;
+        }
+        self.links.push(Arc::downgrade(child));
+    }
+
+    /// Records that one weak child pointer is known-dead.
+    fn mark_stale(&mut self) {
+        self.stale = self.stale.saturating_add(1);
+    }
+
+    /// Takes all weak child pointers, resetting the list and stale count.
+    fn drain(&mut self) -> Vec<Weak<Tree>> {
+        mem::take(self).links
+    }
+}
+
 struct TreeInner {
     // Mutable supervision state guarded together during child registration and
     // abort traversal. This intentionally excludes the strong parent link; see
     // `Tree::parent` above.
-    children: Vec<Weak<Tree>>,
-    stale_children: usize,
+    children: Children,
     task: Option<Aborter>,
     aborted: bool,
 }
@@ -39,21 +70,17 @@ struct TreeInner {
 impl TreeInner {
     const fn new(aborted: bool) -> Self {
         Self {
-            children: Vec::new(),
-            stale_children: 0,
+            children: Children {
+                links: Vec::new(),
+                stale: 0,
+            },
             task: None,
             aborted,
         }
     }
 
     fn child(&mut self, child: &Arc<Tree>) {
-        // Avoid scanning the entire child list on every clone. Instead, batch
-        // cleanup once enough dropped children have accumulated.
-        if self.stale_children >= CHILD_REAP_THRESHOLD {
-            self.children.retain(|weak| weak.strong_count() > 0);
-            self.stale_children = 0;
-        }
-        self.children.push(Arc::downgrade(child));
+        self.children.push(child);
     }
 
     fn register(&mut self, aborter: Aborter) -> Result<(), Aborter> {
@@ -73,7 +100,7 @@ impl TreeInner {
 
         self.aborted = true;
         let task = self.task.take();
-        let children = mem::take(&mut self.children);
+        let children = self.children.drain();
         Some((task, children))
     }
 }
@@ -99,7 +126,7 @@ impl Tree {
                     // account for the stale weak child entry before releasing
                     // `node`.
                     let mut parent_inner = parent.inner.lock();
-                    parent_inner.stale_children = parent_inner.stale_children.saturating_add(1);
+                    parent_inner.children.mark_stale();
                     drop(parent_inner);
                     pending.push(parent);
                 }
@@ -187,7 +214,7 @@ impl Drop for Tree {
         if let Some(parent) = self.parent.get_mut().take() {
             {
                 let mut parent_inner = parent.inner.lock();
-                parent_inner.stale_children = parent_inner.stale_children.saturating_add(1);
+                parent_inner.children.mark_stale();
             }
 
             // If dropping this node makes its ancestors uniquely owned as well,
@@ -342,8 +369,8 @@ mod tests {
             // Reaping is deferred until the next child arrives, so the stale
             // weak pointers should still be present here.
             let inner = root.inner.lock();
-            assert_eq!(inner.children.len(), CHILD_REAP_THRESHOLD);
-            assert_eq!(inner.stale_children, CHILD_REAP_THRESHOLD);
+            assert_eq!(inner.children.links.len(), CHILD_REAP_THRESHOLD);
+            assert_eq!(inner.children.stale, CHILD_REAP_THRESHOLD);
         }
 
         // The next child creation should trigger one batched compaction pass.
@@ -352,8 +379,8 @@ mod tests {
 
         {
             let inner = root.inner.lock();
-            assert_eq!(inner.children.len(), 1, "stale children were not reaped");
-            assert_eq!(inner.stale_children, 0, "stale child count was not reset");
+            assert_eq!(inner.children.links.len(), 1, "stale children were not reaped");
+            assert_eq!(inner.children.stale, 0, "stale child count was not reset");
         }
 
         drop(child);
@@ -382,8 +409,8 @@ mod tests {
             // Aborted children still leave stale weak pointers behind until a
             // future insert performs the batched cleanup.
             let inner = root.inner.lock();
-            assert_eq!(inner.children.len(), CHILD_REAP_THRESHOLD);
-            assert_eq!(inner.stale_children, CHILD_REAP_THRESHOLD);
+            assert_eq!(inner.children.links.len(), CHILD_REAP_THRESHOLD);
+            assert_eq!(inner.children.stale, CHILD_REAP_THRESHOLD);
         }
 
         // A fresh child should compact both normally dropped and previously
@@ -393,8 +420,8 @@ mod tests {
 
         {
             let inner = root.inner.lock();
-            assert_eq!(inner.children.len(), 1, "aborted children were not reaped");
-            assert_eq!(inner.stale_children, 0, "stale child count was not reset");
+            assert_eq!(inner.children.links.len(), 1, "aborted children were not reaped");
+            assert_eq!(inner.children.stale, 0, "stale child count was not reset");
         }
 
         drop(child);
@@ -425,8 +452,8 @@ mod tests {
             // Those stale entries are still deferred until the next child is
             // inserted under the surviving root.
             let inner = root.inner.lock();
-            assert_eq!(inner.children.len(), CHILD_REAP_THRESHOLD);
-            assert_eq!(inner.stale_children, CHILD_REAP_THRESHOLD);
+            assert_eq!(inner.children.links.len(), CHILD_REAP_THRESHOLD);
+            assert_eq!(inner.children.stale, CHILD_REAP_THRESHOLD);
         }
 
         // Creating one more child should reap the stale root entries produced
@@ -436,8 +463,8 @@ mod tests {
 
         {
             let inner = root.inner.lock();
-            assert_eq!(inner.children.len(), 1, "unique ancestors were not reaped");
-            assert_eq!(inner.stale_children, 0, "stale child count was not reset");
+            assert_eq!(inner.children.links.len(), 1, "unique ancestors were not reaped");
+            assert_eq!(inner.children.stale, 0, "stale child count was not reset");
         }
 
         drop(child);
