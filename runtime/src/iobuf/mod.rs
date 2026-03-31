@@ -2203,6 +2203,9 @@ where
 /// //            \________________________/
 /// //             slices of one allocation
 /// ```
+/// Minimum capacity when growing. Avoids degenerate doubling from tiny buffers.
+const MIN_GROW_CAPACITY: usize = 64;
+
 pub struct Builder {
     pool: BufferPool,
     // Single working buffer for all inline writes.
@@ -2225,8 +2228,10 @@ impl Builder {
     }
 
     /// Reallocates `buf` with doubled capacity, copying existing data.
+    /// Only needed when the initial capacity (from `encode_inline_size`) is
+    /// too small.
     fn grow(&mut self) {
-        let new_cap = (self.buf.capacity() * 2).max(64);
+        let new_cap = (self.buf.capacity() * 2).max(MIN_GROW_CAPACITY);
         let mut new_buf = self.pool.alloc(new_cap);
         new_buf.put_slice(self.buf.as_ref());
         self.buf = new_buf;
