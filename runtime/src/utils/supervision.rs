@@ -373,7 +373,11 @@ mod tests {
 
         {
             let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), 1, "stale children were not reaped");
+            assert_eq!(
+                inner.children.links.len(),
+                1,
+                "stale children were not reaped"
+            );
             assert_eq!(inner.children.stale, 0, "stale child count was not reset");
         }
 
@@ -414,7 +418,11 @@ mod tests {
 
         {
             let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), 1, "aborted children were not reaped");
+            assert_eq!(
+                inner.children.links.len(),
+                1,
+                "aborted children were not reaped"
+            );
             assert_eq!(inner.children.stale, 0, "stale child count was not reset");
         }
 
@@ -457,7 +465,11 @@ mod tests {
 
         {
             let inner = root.inner.lock();
-            assert_eq!(inner.children.links.len(), 1, "unique ancestors were not reaped");
+            assert_eq!(
+                inner.children.links.len(),
+                1,
+                "unique ancestors were not reaped"
+            );
             assert_eq!(inner.children.stale, 0, "stale child count was not reset");
         }
 
