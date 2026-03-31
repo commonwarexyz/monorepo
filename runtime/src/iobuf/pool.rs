@@ -142,13 +142,6 @@ pub(crate) enum BufferPoolThreadCacheConfig {
     ForParallelism(NonZeroUsize),
 }
 
-impl BufferPoolThreadCacheConfig {
-    /// Returns true if thread-local caching is enabled for this config.
-    pub const fn is_enabled(&self) -> bool {
-        matches!(self, Self::Fixed(_) | Self::ForParallelism(_))
-    }
-}
-
 /// Configuration for a buffer pool.
 #[derive(Debug, Clone)]
 pub struct BufferPoolConfig {
@@ -293,6 +286,14 @@ impl BufferPoolConfig {
         }
         self.max_per_class = NZUsize!(budget_bytes.get().div_ceil(class_bytes));
         self
+    }
+
+    /// Returns true if thread-local caching is enabled.
+    pub const fn thread_cache_enabled(&self) -> bool {
+        matches!(
+            self.thread_cache_config,
+            BufferPoolThreadCacheConfig::Fixed(_) | BufferPoolThreadCacheConfig::ForParallelism(_)
+        )
     }
 
     /// Validates the configuration, panicking on invalid values.
