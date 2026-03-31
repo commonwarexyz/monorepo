@@ -11,11 +11,11 @@ use crate::{
     merkle::Family,
     qmdb::{
         any::{value::VariableEncoding, VariableValue},
+        operation::Key,
         Error,
     },
     translator::Translator,
 };
-use crate::qmdb::operation::Key;
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{Clock, Metrics, Storage};

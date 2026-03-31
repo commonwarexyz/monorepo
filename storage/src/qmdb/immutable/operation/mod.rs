@@ -11,7 +11,10 @@ pub(crate) mod variable;
 
 use crate::{
     merkle::{Family, Location},
-    qmdb::{any::ValueEncoding, operation::Key, operation::Operation as OperationTrait},
+    qmdb::{
+        any::ValueEncoding,
+        operation::{Key, Operation as OperationTrait},
+    },
 };
 use commonware_codec::Encode;
 use commonware_utils::hex;

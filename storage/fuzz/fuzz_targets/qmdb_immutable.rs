@@ -92,6 +92,7 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
     (0..actual_size).map(|_| rng.gen()).collect()
 }
 
+#[allow(clippy::type_complexity)]
 fn db_config(
     suffix: &str,
     pooler: &impl BufferPooler,
