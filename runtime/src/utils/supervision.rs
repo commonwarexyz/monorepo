@@ -16,11 +16,22 @@ const CHILD_REAP_THRESHOLD: usize = 64;
 /// a context finishes or is aborted, the runtime drains the node and aborts all descendant
 /// tasks (leaving siblings intact).
 pub(crate) struct Tree {
+    // Keep the strong parent link outside `inner`.
+    //
+    // This link models ownership of the ancestry chain rather than mutable
+    // supervision state. `drop_ancestry` walks that ownership chain using only
+    // `Arc<Tree>` handles, so it must be able to sever each parent link without
+    // taking the `inner` lock first. Keeping `parent` separate avoids coupling
+    // `Arc` teardown to the same mutex used for child registration and abort
+    // bookkeeping.
     parent: Mutex<Option<Arc<Self>>>,
     inner: Mutex<TreeInner>,
 }
 
 struct TreeInner {
+    // Mutable supervision state guarded together during child registration and
+    // abort traversal. This intentionally excludes the strong parent link; see
+    // `Tree::parent` above.
     children: Vec<Weak<Tree>>,
     stale_children: usize,
     task: Option<Aborter>,
@@ -74,7 +85,11 @@ impl TreeInner {
 }
 
 impl Tree {
-    /// Drops a strong ancestry chain iteratively to avoid recursive `Arc` teardown.
+    /// Drops a strong ancestry chain iteratively to avoid recursive `Arc`
+    /// teardown.
+    ///
+    /// This walks `Tree::parent` directly instead of going through `inner`
+    /// because the parent link is ownership metadata, not abort state.
     fn drop_ancestry(parent: Arc<Self>) {
         let mut pending = vec![parent];
         while let Some(node) = pending.pop() {
