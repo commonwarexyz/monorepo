@@ -171,13 +171,10 @@ impl StreamTrait for Stream {
         };
 
         // Wait for the waiter to be resolved.
-        let data = match os_recv.await {
-            Ok(data) => data,
-            Err(_) => {
-                self.poisoned = true;
-                return Err(Error::Closed);
-            }
-        };
+        let data = os_recv.await.map_err(|_| {
+            self.poisoned = true;
+            Error::Closed
+        })?;
         self.buffer.extend_from_slice(&data);
 
         assert!(self.buffer.len() >= len);
