@@ -2217,7 +2217,6 @@ pub struct Builder {
 
 impl Builder {
     /// `capacity` sets the size of the pool-allocated inline buffer.
-    /// Use [`EncodeSize::encode_inline_size`] for an accurate estimate.
     /// If inline writes exceed capacity, the buffer grows via reallocation.
     pub fn new(pool: &BufferPool, capacity: NonZeroUsize) -> Self {
         Self {
@@ -2228,8 +2227,7 @@ impl Builder {
     }
 
     /// Reallocates `buf` with doubled capacity, copying existing data.
-    /// Only needed when the initial capacity (from `encode_inline_size`) is
-    /// too small.
+    /// Only called when inline writes exceed the initial capacity.
     fn grow(&mut self) {
         let new_cap = (self.buf.capacity() * 2).max(MIN_GROW_CAPACITY);
         let mut new_buf = self.pool.alloc(new_cap);
