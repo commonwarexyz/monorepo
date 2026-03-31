@@ -210,7 +210,7 @@ pub enum CqeAction {
 /// Each variant owns its completion sender, all buffers and FDs needed by the
 /// kernel, and progress cursors. The loop calls [build_sqe](Self::build_sqe)
 /// to produce the next SQE, [on_cqe](Self::on_cqe) to evaluate completions,
-/// and [finish](Self::finish) or [finish_timeout](Self::finish_timeout) to
+/// and [finish](Self::finish) or [timeout](Self::timeout) to
 /// deliver results.
 ///
 // SAFETY: `WriteBuffers::Vectored` owns both the `IoBufs` backing storage and
