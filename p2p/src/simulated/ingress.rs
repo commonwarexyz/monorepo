@@ -294,18 +294,6 @@ impl<P: PublicKey, E: Clock> Clone for Manager<P, E> {
     }
 }
 
-impl<P: PublicKey, E: Clock> Manager<P, E> {
-    /// Register peers at the given index.
-    ///
-    /// Accepts either a bare primary peer set or a [`TrackedPeers`] value.
-    pub async fn track<R>(&mut self, id: u64, peers: R)
-    where
-        R: Into<TrackedPeers<P>> + Send,
-    {
-        crate::Manager::track(self, id, peers).await;
-    }
-}
-
 impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
     type PublicKey = P;
 
@@ -352,18 +340,6 @@ impl<P: PublicKey, E: Clock> Clone for SocketManager<P, E> {
         Self {
             oracle: self.oracle.clone(),
         }
-    }
-}
-
-impl<P: PublicKey, E: Clock> SocketManager<P, E> {
-    /// Register peers at the given index.
-    ///
-    /// Accepts either a bare primary peer map or an [`AddressableTrackedPeers`] value.
-    pub async fn track<R>(&mut self, id: u64, peers: R)
-    where
-        R: Into<AddressableTrackedPeers<P>> + Send,
-    {
-        crate::AddressableManager::track(self, id, peers).await;
     }
 }
 

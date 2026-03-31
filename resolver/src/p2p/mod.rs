@@ -81,7 +81,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
-        Blocker, Provider,
+        Blocker, Manager as _, Provider,
     };
     use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
     use commonware_utils::{non_empty_vec, ordered::Set, NZU32};

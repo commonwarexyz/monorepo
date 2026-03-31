@@ -43,7 +43,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
-        Recipients, Sender as _,
+        Manager as _, Recipients, Sender as _,
     };
     use commonware_runtime::{
         count_running_tasks, deterministic, Clock, Error, IoBuf, Metrics, Quota, Runner,

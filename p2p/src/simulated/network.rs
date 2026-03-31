@@ -1336,7 +1336,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Provider, Receiver as _, Recipients, Sender as _, TrackedPeers};
+    use crate::{Manager as _, Provider, Receiver as _, Recipients, Sender as _, TrackedPeers};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{deterministic, Quota, Runner as _};
     use commonware_utils::ordered::Set;

@@ -119,22 +119,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Setters ----------
 
-    /// Track new primary and secondary peer sets for the given index.
-    ///
-    /// Returns `(deleted_peers, changed_peers)` across both updates.
-    ///
-    /// Returns `None` if the index is invalid.
-    ///
-    /// If a peer appears in both sets, the primary address is authoritative.
-    pub fn track(
-        &mut self,
-        index: u64,
-        primary: Map<C, Address>,
-        secondary: Map<C, Address>,
-    ) -> Option<(Vec<C>, Vec<C>)> {
-        self.add_tracked_sets(index, primary, secondary)
-    }
-
     /// Releases a peer.
     pub fn release(&mut self, metadata: Metadata<C>) {
         let peer = metadata.public_key();
@@ -163,8 +147,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .try_set(self.context.current().epoch_millis());
     }
 
-    /// Stores new primary and secondary peer sets for the same index.
-    fn add_tracked_sets(
+    /// Track new primary and secondary peer sets for the given index.
+    ///
+    /// Returns `(deleted_peers, changed_peers)` across both updates.
+    ///
+    /// Returns `None` if the index is invalid.
+    ///
+    /// If a peer appears in both sets, the primary address is authoritative.
+    pub fn track(
         &mut self,
         index: u64,
         primaries: Map<C, Address>,
@@ -811,7 +801,10 @@ mod tests {
             assert!(deleted.is_empty());
             assert!(changed.is_empty());
             assert_eq!(directory.latest_set_index(), Some(0));
-            assert_eq!(directory.get_set(&0).unwrap(), &[pk_1.clone()].try_into().unwrap());
+            assert_eq!(
+                directory.get_set(&0).unwrap(),
+                &[pk_1.clone()].try_into().unwrap()
+            );
             assert!(directory.eligible(&pk_1));
             assert_eq!(
                 directory.peers.get(&pk_1).unwrap().ingress(),
@@ -819,7 +812,10 @@ mod tests {
             );
             assert_eq!(directory.primary(), [pk_1.clone()].try_into().unwrap());
             assert_eq!(directory.dialable().peers, vec![pk_1.clone()]);
-            assert_eq!(directory.dial(&pk_1).unwrap().1, Ingress::Socket(primary_addr));
+            assert_eq!(
+                directory.dial(&pk_1).unwrap().1,
+                Ingress::Socket(primary_addr)
+            );
             assert!(directory.listenable().contains(&primary_addr.ip()));
             assert!(!directory.listenable().contains(&secondary_addr.ip()));
         });
@@ -868,7 +864,10 @@ mod tests {
             assert!(deleted.is_empty());
             assert_eq!(changed, vec![pk_1.clone()]);
             assert_eq!(directory.latest_set_index(), Some(1));
-            assert_eq!(directory.get_set(&1).unwrap(), &[pk_1.clone()].try_into().unwrap());
+            assert_eq!(
+                directory.get_set(&1).unwrap(),
+                &[pk_1.clone()].try_into().unwrap()
+            );
             assert_eq!(
                 directory.peers.get(&pk_1).unwrap().ingress(),
                 Some(Ingress::Socket(new_addr))

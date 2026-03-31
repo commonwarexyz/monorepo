@@ -1500,7 +1500,10 @@ mod tests {
         Committable, Digest, Sha256, Signer,
     };
     use commonware_macros::{select, test_traced};
-    use commonware_p2p::simulated::{self, Control, Link, Oracle};
+    use commonware_p2p::{
+        simulated::{self, Control, Link, Oracle},
+        Manager as _,
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Quota, Runner};
     use commonware_utils::{

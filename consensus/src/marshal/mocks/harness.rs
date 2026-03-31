@@ -33,7 +33,10 @@ use commonware_cryptography::{
     sha256::{Digest as Sha256Digest, Sha256},
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
 };
-use commonware_p2p::simulated::{self, Link, Network, Oracle};
+use commonware_p2p::{
+    simulated::{self, Link, Network, Oracle},
+    Manager as _,
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner};
 use commonware_storage::{

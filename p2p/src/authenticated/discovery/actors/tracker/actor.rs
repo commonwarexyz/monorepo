@@ -289,7 +289,7 @@ mod tests {
             },
             Mailbox,
         },
-        Ingress, Provider, TrackedPeers,
+        Ingress, Manager, Provider, TrackedPeers,
     };
     use commonware_codec::{DecodeExt, Encode};
     use commonware_cryptography::{

@@ -135,11 +135,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Setters ----------
 
-    /// Track new primary and secondary peer sets for the given index.
-    pub fn track(&mut self, index: u64, primary: OrderedSet<C>, secondary: OrderedSet<C>) -> bool {
-        self.add_tracked_sets(index, primary, secondary)
-    }
-
     /// Releases a peer.
     pub fn release(&mut self, metadata: Metadata<C>) {
         let peer = metadata.public_key();
@@ -217,8 +212,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         }
     }
 
-    /// Stores new primary and secondary peer sets for the same index.
-    fn add_tracked_sets(
+    /// Track new primary and secondary peer sets for the given index.
+    pub fn track(
         &mut self,
         index: u64,
         primaries: OrderedSet<C>,

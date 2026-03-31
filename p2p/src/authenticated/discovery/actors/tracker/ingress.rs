@@ -252,16 +252,6 @@ impl<C: PublicKey> Oracle<C> {
     pub(super) const fn new(sender: UnboundedMailbox<Message<C>>) -> Self {
         Self { sender }
     }
-
-    /// Register peers at the given index.
-    ///
-    /// Accepts either a bare primary peer set or a [`TrackedPeers`] value.
-    pub async fn track<R>(&mut self, index: u64, peers: R)
-    where
-        R: Into<TrackedPeers<C>> + Send,
-    {
-        crate::Manager::track(self, index, peers).await;
-    }
 }
 
 impl<C: PublicKey> crate::Provider for Oracle<C> {
