@@ -434,7 +434,7 @@ impl<const N: usize> arbitrary::Arbitrary<'_> for Prunable<N> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::Readable, *};
     use crate::hex;
     use bytes::BytesMut;
     use commonware_codec::Encode;
@@ -1276,6 +1276,95 @@ mod tests {
             prunable.pop();
         }
         assert!(prunable.is_chunk_aligned()); // 0 bits
+    }
+
+    #[test]
+    fn test_ones_iter_with_pruning() {
+        // 3 chunks of 32 bits each = 96 bits total.
+        let mut p = Prunable::<4>::new();
+        for _ in 0..96 {
+            p.push(false);
+        }
+        // Set bits in chunks 1 and 2 (absolute indices 40, 55, 64, 90).
+        p.set_bit(40, true);
+        p.set_bit(55, true);
+        p.set_bit(64, true);
+        p.set_bit(90, true);
+
+        // Prune first chunk (32 bits).
+        p.prune_to_bit(32);
+        assert_eq!(p.pruned_chunks(), 1);
+        assert_eq!(p.pruned_bits(), 32);
+
+        let ones: Vec<u64> = Readable::ones_iter_from(&p, p.pruned_bits()).collect();
+        assert_eq!(ones, vec![40, 55, 64, 90]);
+    }
+
+    #[test]
+    fn test_ones_iter_from_midway_with_pruning() {
+        let mut p = Prunable::<4>::new();
+        for _ in 0..96 {
+            p.push(false);
+        }
+        p.set_bit(40, true);
+        p.set_bit(55, true);
+        p.set_bit(64, true);
+        p.set_bit(90, true);
+
+        p.prune_to_bit(32);
+
+        // Start past the first set bit in the unpruned region.
+        let ones: Vec<u64> = Readable::ones_iter_from(&p, 50).collect();
+        assert_eq!(ones, vec![55, 64, 90]);
+
+        // Start past all set bits.
+        let ones: Vec<u64> = Readable::ones_iter_from(&p, 91).collect();
+        assert!(ones.is_empty());
+    }
+
+    #[test]
+    fn test_ones_iter_all_ones_with_pruning() {
+        let mut p = Prunable::<4>::new();
+        for _ in 0..96 {
+            p.push(true);
+        }
+
+        // Prune 2 chunks (64 bits).
+        p.prune_to_bit(64);
+        assert_eq!(p.pruned_chunks(), 2);
+
+        let ones: Vec<u64> = Readable::ones_iter_from(&p, p.pruned_bits()).collect();
+        let expected: Vec<u64> = (64..96).collect();
+        assert_eq!(ones, expected);
+    }
+
+    #[test]
+    fn test_ones_iter_empty_after_pruning() {
+        let mut p = Prunable::<4>::new();
+        for _ in 0..64 {
+            p.push(false);
+        }
+
+        // Prune first chunk, leaving 32 zero bits.
+        p.prune_to_bit(32);
+        assert_eq!(p.pruned_chunks(), 1);
+
+        let ones: Vec<u64> = Readable::ones_iter_from(&p, p.pruned_bits()).collect();
+        assert!(ones.is_empty());
+    }
+
+    #[test]
+    fn test_ones_iter_from_pruned_region_fast_forwards() {
+        let mut p = Prunable::<4>::new();
+        for _ in 0..64 {
+            p.push(true);
+        }
+        p.prune_to_bit(32);
+
+        // Starting in the pruned region fast-forwards past it.
+        let ones: Vec<u64> = Readable::ones_iter_from(&p, 0).collect();
+        let expected: Vec<u64> = (32..64).collect();
+        assert_eq!(ones, expected);
     }
 
     #[cfg(feature = "arbitrary")]

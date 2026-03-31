@@ -915,22 +915,29 @@ impl<const N: usize> ExactSizeIterator for Iterator<'_, N> {}
 pub trait Readable<const N: usize> {
     /// Return the number of complete (fully filled) chunks.
     fn complete_chunks(&self) -> usize;
+
     /// Return the chunk data at the given absolute chunk index.
     fn get_chunk(&self, chunk: usize) -> [u8; N];
+
     /// Return the last chunk and its size in bits.
     fn last_chunk(&self) -> ([u8; N], u64);
+
     /// Return the number of pruned chunks.
     fn pruned_chunks(&self) -> usize;
+
     /// Return the total number of bits.
     fn len(&self) -> u64;
+
     /// Returns true if the bitmap is empty.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
     /// Return the number of pruned bits (i.e. pruned chunks * bits per chunk).
     fn pruned_bits(&self) -> u64 {
         (self.pruned_chunks() as u64) * BitMap::<N>::CHUNK_SIZE_BITS
     }
+
     /// Return the value of a single bit.
     fn get_bit(&self, bit: u64) -> bool {
         let chunk = self.get_chunk(BitMap::<N>::to_chunk_index(bit));
@@ -938,6 +945,9 @@ pub trait Readable<const N: usize> {
     }
 
     /// Returns an iterator over the indices of set bits starting from `pos`.
+    ///
+    /// If `pos` falls within a pruned region, iteration starts at the first
+    /// unpruned bit instead.
     fn ones_iter_from(&self, pos: u64) -> OnesIter<'_, Self, N>
     where
         Self: Sized,
@@ -951,22 +961,29 @@ impl<const N: usize> Readable<N> for BitMap<N> {
         self.chunks_len()
             .saturating_sub(if self.is_chunk_aligned() { 0 } else { 1 })
     }
+
     fn get_chunk(&self, chunk: usize) -> [u8; N] {
         *Self::get_chunk(self, chunk)
     }
+
     fn last_chunk(&self) -> ([u8; N], u64) {
         let (c, n) = Self::last_chunk(self);
         (*c, n)
     }
+
     fn pruned_chunks(&self) -> usize {
         0
     }
+
     fn len(&self) -> u64 {
         self.len
     }
 }
 
 /// Iterator over the indices of set (1) bits in a bitmap.
+///
+/// If the starting position falls within a pruned region, iteration
+/// begins at the first unpruned bit.
 pub struct OnesIter<'a, B, const N: usize> {
     bitmap: &'a B,
     pos: u64,
@@ -978,6 +995,10 @@ impl<B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
     fn next(&mut self) -> Option<u64> {
         let len = self.bitmap.len();
         let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        let pruned_start = self.bitmap.pruned_chunks() as u64 * chunk_bits;
+        if self.pos < pruned_start {
+            self.pos = pruned_start;
+        }
         while self.pos < len {
             let chunk_idx = BitMap::<N>::to_chunk_index(self.pos);
             let chunk = self.bitmap.get_chunk(chunk_idx);
