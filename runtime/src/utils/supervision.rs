@@ -89,16 +89,29 @@ impl Tree {
     fn drop_ancestry(parent: Arc<Self>) {
         let mut pending = vec![parent];
         while let Some(node) = pending.pop() {
+            // Only continue walking upward when this loop owns the final strong
+            // reference to `node`. Child links are weak, so `strong_count == 1`
+            // means no live descendant or external handle still depends on it.
             if Arc::strong_count(&node) == 1 {
                 if let Some(parent) = node.parent.lock().take() {
-                    // `Drop` will no longer see this parent after `take()`, so
-                    // account for the stale child before releasing the node.
+                    // Move the parent `Arc` out of `node` before dropping
+                    // `node`. This leaves `node.parent = None`, so `drop(node)`
+                    // cannot recurse into the parent. The local `parent`
+                    // variable now owns that strong reference until we push it
+                    // onto `pending` for the next iteration.
+                    //
+                    // Because `Drop` will no longer observe this parent edge,
+                    // account for the stale weak child entry before releasing
+                    // `node`.
                     let mut parent_inner = parent.inner.lock();
                     parent_inner.stale_children = parent_inner.stale_children.saturating_add(1);
                     drop(parent_inner);
                     pending.push(parent);
                 }
             }
+            // If another strong owner still exists, dropping our handle only
+            // decrements that count and the remaining ancestry stays reachable
+            // through those owners.
             drop(node);
         }
     }
