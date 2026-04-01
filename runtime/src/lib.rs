@@ -262,8 +262,8 @@ stability_scope!(BETA {
         /// This method is still cooperative: it does not shut the runtime down,
         /// does not close task registration, and does not actually kill any
         /// tasks. Instead, it resolves the [signal::Signal] returned by
-        /// [`Spawner::stopped`] to [`StopReason::Requested(value)`] so tasks
-        /// can react gracefully.
+        /// [`Spawner::stopped`] to [`StopReason::Requested`] with the provided
+        /// value so tasks can react gracefully.
         ///
         /// Tasks that never call [`Spawner::stopped`] do not participate in
         /// this completion tracking. Even after this method returns, the root
