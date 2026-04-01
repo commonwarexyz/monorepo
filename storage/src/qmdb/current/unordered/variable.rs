@@ -10,10 +10,11 @@ pub use super::db::KeyValueProof;
 use crate::{
     index::unordered::Index,
     journal::contiguous::variable::Journal,
-    merkle::mmr::Location,
+    merkle::{self, Location},
     qmdb::{
         any::{unordered::variable::Operation, value::VariableEncoding, VariableValue},
         current::VariableConfig as Config,
+        Error,
     },
     translator::Translator,
     Context,
@@ -22,29 +23,35 @@ use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_utils::Array;
 
-type Error = crate::qmdb::Error<crate::mmr::Family>;
-
-pub type Db<E, K, V, H, T, const N: usize> = super::db::Db<
+pub type Db<F, E, K, V, H, T, const N: usize> = super::db::Db<
+    F,
     E,
-    Journal<E, Operation<crate::mmr::Family, K, V>>,
+    Journal<E, Operation<F, K, V>>,
     K,
     VariableEncoding<V>,
-    Index<T, Location>,
+    Index<T, Location<F>>,
     H,
     N,
 >;
 
-impl<E: Context, K: Array, V: VariableValue, H: Hasher, T: Translator, const N: usize>
-    Db<E, K, V, H, T, N>
+impl<
+        F: merkle::Graftable,
+        E: Context,
+        K: Array,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        const N: usize,
+    > Db<F, E, K, V, H, T, N>
 where
-    Operation<crate::mmr::Family, K, V>: Read,
+    Operation<F, K, V>: Read,
 {
     /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
     /// the bitmap MMR if a thread pool is provided.
     pub async fn init(
         context: E,
-        config: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
-    ) -> Result<Self, Error> {
+        config: Config<T, <Operation<F, K, V> as Read>::Cfg>,
+    ) -> Result<Self, Error<F>> {
         crate::qmdb::current::init(context, config).await
     }
 }
@@ -56,12 +63,13 @@ pub mod partitioned {
     use crate::{
         index::partitioned::unordered::Index,
         journal::contiguous::variable::Journal,
-        merkle::mmr::Location,
+        merkle::{self, Location},
         qmdb::{
             any::{
                 unordered::variable::partitioned::Operation, value::VariableEncoding, VariableValue,
             },
             current::VariableConfig as Config,
+            Error,
         },
         translator::Translator,
         Context,
@@ -70,26 +78,26 @@ pub mod partitioned {
     use commonware_cryptography::Hasher;
     use commonware_utils::Array;
 
-    type Error = crate::qmdb::Error<crate::mmr::Family>;
-
     /// A partitioned variant of [super::Db].
     ///
     /// The const generic `P` specifies the number of prefix bytes used for partitioning:
     /// - `P = 1`: 256 partitions
     /// - `P = 2`: 65,536 partitions
     /// - `P = 3`: ~16 million partitions
-    pub type Db<E, K, V, H, T, const P: usize, const N: usize> =
+    pub type Db<F, E, K, V, H, T, const P: usize, const N: usize> =
         crate::qmdb::current::unordered::db::Db<
+            F,
             E,
-            Journal<E, Operation<crate::mmr::Family, K, V>>,
+            Journal<E, Operation<F, K, V>>,
             K,
             VariableEncoding<V>,
-            Index<T, Location, P>,
+            Index<T, Location<F>, P>,
             H,
             N,
         >;
 
     impl<
+            F: merkle::Graftable,
             E: Context,
             K: Array,
             V: VariableValue,
@@ -97,16 +105,16 @@ pub mod partitioned {
             T: Translator,
             const P: usize,
             const N: usize,
-        > Db<E, K, V, H, T, P, N>
+        > Db<F, E, K, V, H, T, P, N>
     where
-        Operation<crate::mmr::Family, K, V>: Read,
+        Operation<F, K, V>: Read,
     {
         /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
         /// the bitmap MMR if a thread pool is provided.
         pub async fn init(
             context: E,
-            config: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
-        ) -> Result<Self, Error> {
+            config: Config<T, <Operation<F, K, V> as Read>::Cfg>,
+        ) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }
     }
@@ -116,6 +124,7 @@ pub mod partitioned {
 mod test {
     use super::*;
     use crate::{
+        mmr,
         qmdb::current::{tests::variable_config, unordered::tests as shared},
         translator::TwoCap,
     };
@@ -124,7 +133,7 @@ mod test {
     use commonware_runtime::deterministic;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type CurrentTest = Db<deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
+    type CurrentTest = Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, 32>;
 
     /// Return a [Db] database initialized with a variable config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
