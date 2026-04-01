@@ -275,6 +275,21 @@ where
             .await?)
     }
 
+    /// Generate and return:
+    ///  1. a proof of all operations applied to the db in the range starting at (and including)
+    ///     location `start_loc`, and ending at the first of either:
+    ///     - the last operation performed, or
+    ///     - the operation `max_ops` from the start.
+    ///  2. the operations corresponding to the leaves in this range.
+    pub async fn proof(
+        &self,
+        start_index: Location<F>,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<K, V>>), Error<F>> {
+        let op_count = self.bounds().await.end;
+        self.historical_proof(op_count, start_index, max_ops).await
+    }
+
     /// Prune operations prior to `prune_loc`. This does not affect the db's root, but it will
     /// affect retrieval of any keys that were set prior to `prune_loc`.
     ///
@@ -382,21 +397,6 @@ where
             })
             .collect();
         futures::future::try_join_all(futs).await
-    }
-
-    /// Generate and return:
-    ///  1. a proof of all operations applied to the db in the range starting at (and including)
-    ///     location `start_loc`, and ending at the first of either:
-    ///     - the last operation performed, or
-    ///     - the operation `max_ops` from the start.
-    ///  2. the operations corresponding to the leaves in this range.
-    pub async fn proof(
-        &self,
-        start_index: Location<F>,
-        max_ops: NonZeroU64,
-    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<K, V>>), Error<F>> {
-        let op_count = self.bounds().await.end;
-        self.historical_proof(op_count, start_index, max_ops).await
     }
 
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
