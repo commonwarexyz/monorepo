@@ -494,6 +494,7 @@ impl IoUringLoop {
                 self.handle_cqe(cqe);
             }
 
+            // Process due deadlines before staging new submissions so timed-out
             // requests move to cancellation promptly and free capacity sooner.
             self.advance_timeouts();
 
