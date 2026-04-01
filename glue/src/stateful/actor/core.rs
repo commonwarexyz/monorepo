@@ -494,7 +494,7 @@ where
                             .finalize(self.shared.context.as_present(), block)
                             .await
                         {
-                            info!(height = height.get(), "persisted finalized database batch");
+                            debug!(height = height.get(), "persisted finalized database batch");
                         }
                         acknowledgement.acknowledge();
                     }
