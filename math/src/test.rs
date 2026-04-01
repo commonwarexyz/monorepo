@@ -1,9 +1,10 @@
-use crate::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Ring, Space};
+use crate::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Random, Ring, Space};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use core::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
+use rand_core::CryptoRngCore;
 
 const P: u8 = 89;
 const Q: u8 = 2 * P + 1;
@@ -52,6 +53,14 @@ impl From<u8> for F {
 }
 
 impl Object for F {}
+
+impl Random for F {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
+        let mut bytes = [0u8; 16];
+        rng.fill_bytes(&mut bytes);
+        Self((u128::from_le_bytes(bytes) % u128::from(P)) as u8)
+    }
+}
 
 impl<'a> Add<&'a Self> for F {
     type Output = Self;

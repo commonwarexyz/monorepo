@@ -3,11 +3,10 @@
 //! The [Dalek crate](https://doc-internal.dalek.rs/bulletproofs/notes/inner_product_proof/index.html)
 //! was an invaluable reference when implementing and documenting this module.
 
+use crate::transcript::Transcript;
 use commonware_codec::Encode;
 use commonware_math::algebra::{CryptoGroup, Field, Random, Space};
 use commonware_parallel::Strategy;
-
-use crate::transcript::Transcript;
 
 pub struct Setup<G> {
     pub g: Vec<G>,
