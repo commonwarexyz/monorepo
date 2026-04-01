@@ -5,10 +5,13 @@ use crate::{
     Channel, Message, Recipients,
 };
 use commonware_cryptography::PublicKey;
-use commonware_macros::select;
 use commonware_runtime::{Clock, IoBufs, Quota};
 use commonware_utils::channel::mpsc::{self, error::TrySendError};
-use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    fmt::Debug,
+    time::SystemTime,
+};
 
 /// An interior sender that enforces message size limits and
 /// supports sending arbitrary bytes to a set of recipients over
@@ -88,34 +91,69 @@ where
 /// Channel to asynchronously receive messages from a channel.
 #[derive(Clone, Debug)]
 pub(crate) struct PrioritizedSender<P: PublicKey> {
-    low: mpsc::Sender<Message<P>>,
-    high: mpsc::Sender<Message<P>>,
-    primary_peers: PrimaryPeers<P>,
+    sender: mpsc::Sender<Message<P>>,
 }
 
 impl<P: PublicKey> PrioritizedSender<P> {
     pub(crate) fn try_send(&self, message: Message<P>) -> Result<(), TrySendError<Message<P>>> {
-        let sender = if self.primary_peers.contains(&message.0) {
-            &self.high
-        } else {
-            &self.low
-        };
-        sender.try_send(message)
+        self.sender.try_send(message)
     }
 }
 
 #[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
-    low: mpsc::Receiver<Message<P>>,
-    high: mpsc::Receiver<Message<P>>,
+    receiver: mpsc::Receiver<Message<P>>,
+    primary_peers: PrimaryPeers<P>,
+    buffered: BTreeMap<P, VecDeque<(u64, crate::IoBuf)>>,
+    next_sequence: u64,
 }
 
 impl<P: PublicKey> Receiver<P> {
-    pub(super) const fn new(
-        low: mpsc::Receiver<Message<P>>,
-        high: mpsc::Receiver<Message<P>>,
-    ) -> Self {
-        Self { low, high }
+    pub(super) fn new(receiver: mpsc::Receiver<Message<P>>, primary_peers: PrimaryPeers<P>) -> Self {
+        Self {
+            receiver,
+            primary_peers,
+            buffered: BTreeMap::new(),
+            next_sequence: 0,
+        }
+    }
+
+    fn buffer(&mut self, message: Message<P>) {
+        let (peer, message) = message;
+        self.buffered
+            .entry(peer)
+            .or_default()
+            .push_back((self.next_sequence, message));
+        self.next_sequence += 1;
+    }
+
+    fn head_peer(&self, primary_only: bool) -> Option<P> {
+        self.buffered
+            .iter()
+            .filter_map(|(peer, queue)| {
+                let (sequence, _) = queue.front()?;
+                let is_primary = self.primary_peers.contains(peer);
+                if primary_only && !is_primary {
+                    return None;
+                }
+                Some((*sequence, peer.clone()))
+            })
+            .min_by_key(|(sequence, _)| *sequence)
+            .map(|(_, peer)| peer)
+    }
+
+    fn pop_buffered(&mut self, peer: P) -> Message<P> {
+        let mut queue = self
+            .buffered
+            .remove(&peer)
+            .expect("selected peer must have buffered messages");
+        let (_, message) = queue
+            .pop_front()
+            .expect("selected peer must have a buffered head message");
+        if !queue.is_empty() {
+            self.buffered.insert(peer.clone(), queue);
+        }
+        (peer, message)
     }
 }
 
@@ -128,23 +166,20 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     /// This method will block until a message is received or the underlying
     /// network shuts down.
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
-        if let Ok(message) = self.high.try_recv() {
-            return Ok(message);
-        }
-        let (sender, message) = select! {
-            msg = self.high.recv() => match msg {
-                Some(msg) => msg,
-                None => self.low.recv().await.ok_or(Error::NetworkClosed)?,
-            },
-            msg = self.low.recv() => match msg {
-                Some(msg) => msg,
-                None => self.high.recv().await.ok_or(Error::NetworkClosed)?,
-            },
-        };
+        loop {
+            while let Ok(message) = self.receiver.try_recv() {
+                self.buffer(message);
+            }
 
-        // We don't check that the message is too large here because we already enforce
-        // that on the network layer.
-        Ok((sender, message))
+            if let Some(peer) = self.head_peer(true).or_else(|| self.head_peer(false)) {
+                return Ok(self.pop_buffered(peer));
+            }
+
+            let Some(message) = self.receiver.recv().await else {
+                return Err(Error::NetworkClosed);
+            };
+            self.buffer(message);
+        }
     }
 }
 
@@ -185,19 +220,14 @@ impl<P: PublicKey> Channels<P> {
         backlog: usize,
         clock: C,
     ) -> (Sender<P, C>, Receiver<P>) {
-        let (low_sender, low_receiver) = mpsc::channel(backlog);
-        let (high_sender, high_receiver) = mpsc::channel(backlog);
-        let sender = PrioritizedSender {
-            low: low_sender,
-            high: high_sender,
-            primary_peers: self.primary_peers.clone(),
-        };
+        let (receiver_tx, receiver_rx) = mpsc::channel(backlog);
+        let sender = PrioritizedSender { sender: receiver_tx };
         if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {channel}");
         }
         (
             Sender::new(channel, self.max_size, self.messenger.clone(), clock, rate),
-            Receiver::new(low_receiver, high_receiver),
+            Receiver::new(receiver_rx, self.primary_peers.clone()),
         )
     }
 
@@ -230,20 +260,52 @@ mod tests {
                 context.clone(),
             );
             let (_, sender) = channels.collect().remove(&0).unwrap();
-            let peer = ed25519::PrivateKey::from_seed(1).public_key();
+            let secondary_peer = ed25519::PrivateKey::from_seed(1).public_key();
+            let primary_peer = ed25519::PrivateKey::from_seed(2).public_key();
 
             sender
-                .try_send((peer.clone(), IoBuf::from(b"secondary")))
+                .try_send((secondary_peer, IoBuf::from(b"secondary")))
                 .unwrap();
-            primary_peers.replace(Set::try_from([peer.clone()]).unwrap());
+            primary_peers.replace(Set::try_from([primary_peer.clone()]).unwrap());
             sender
-                .try_send((peer, IoBuf::from(b"primary")))
+                .try_send((primary_peer, IoBuf::from(b"primary")))
                 .unwrap();
 
             let (_, first) = receiver.recv().await.unwrap();
             assert_eq!(first.as_ref(), b"primary");
             let (_, second) = receiver.recv().await.unwrap();
             assert_eq!(second.as_ref(), b"secondary");
+        });
+    }
+
+    #[test]
+    fn test_receiver_preserves_fifo_when_peer_priority_changes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (router_mailbox, _router_receiver) = Mailbox::<router::Message<_>>::new(10);
+            let messenger =
+                router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
+            let primary_peers = PrimaryPeers::default();
+            let mut channels = Channels::with_primary_peers(messenger, 1024, primary_peers.clone());
+            let (_sender, mut receiver) = channels.register(
+                0,
+                Quota::per_second(NZU32!(100)),
+                1,
+                context.clone(),
+            );
+            let (_, sender) = channels.collect().remove(&0).unwrap();
+            let peer = ed25519::PrivateKey::from_seed(3).public_key();
+
+            sender
+                .try_send((peer.clone(), IoBuf::from(b"first")))
+                .unwrap();
+            primary_peers.replace(Set::try_from([peer.clone()]).unwrap());
+            sender.try_send((peer, IoBuf::from(b"second"))).unwrap();
+
+            let (_, first) = receiver.recv().await.unwrap();
+            assert_eq!(first.as_ref(), b"first");
+            let (_, second) = receiver.recv().await.unwrap();
+            assert_eq!(second.as_ref(), b"second");
         });
     }
 }
