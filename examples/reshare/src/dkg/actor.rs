@@ -476,10 +476,12 @@ where
                         warn!("preverify channel closed");
                         break 'actor;
                     };
+                    // A spawned task completed and sent a result; clear inflight even if we ignore
+                    // the payload (e.g. stale epoch after overlapping completions).
+                    preverify_inflight = false;
                     if msg.epoch != epoch {
                         continue;
                     }
-                    preverify_inflight = false;
                     if msg.version == logs_version {
                         active_logs = msg.logs;
                     }
