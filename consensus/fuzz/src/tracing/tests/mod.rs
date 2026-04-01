@@ -12,7 +12,9 @@ fn fuzz_dir() -> PathBuf {
 }
 
 fn quint_traces_dir() -> PathBuf {
-    fuzz_dir().parent().unwrap().join("quint/traces")
+    let dir = fuzz_dir().parent().unwrap().join("quint/traces");
+    std::fs::create_dir_all(&dir).ok();
+    dir
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -89,8 +91,8 @@ fn run_quint_test(qnt_path: &Path) {
 
 fn run_encoder_roundtrip(hash: &str) {
     run_encoder_roundtrip_impl(
-        "simplex_ed25519_quint_twins_disrupter",
-        "simplex_ed25519_quint_twins_disrupter",
+        "simplex_ed25519_quint_byzantine",
+        "simplex_ed25519_quint_byzantine",
         hash,
     );
 }
@@ -142,7 +144,7 @@ fn test_encoder_roundtrip_449b2497101c43ad3c59f77013977e8bbb9e1340() {
 #[test]
 fn test_encoder_roundtrip_da39a3ee5e6b4b0d3255bfef95601890afd80709() {
     run_encoder_roundtrip_impl(
-        "simplex_ed25519_quint_equivocator",
+        "simplex_ed25519_quint_byzantine",
         "simplex_ed25519_quint_byzantine",
         "da39a3ee5e6b4b0d3255bfef95601890afd80709",
     );

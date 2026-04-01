@@ -13,5 +13,6 @@ module main {
         VALID_PAYLOADS = Set("val_b0", "val_b1", "val_b2"),
         INVALID_PAYLOADS = Set("inval_0", "inval_1"),
         VIEWS = 1.to(6),
+        ACTIVITY_TIMEOUT = 10,
   ) .* from "./replica"
 }

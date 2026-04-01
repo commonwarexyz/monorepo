@@ -14,7 +14,8 @@ module tests {
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3"),
         VIEWS = 1.to(6),
         VALID_PAYLOADS = Set("val_b0", "val_b1", "val_b2", "val_b3_part"),
-        INVALID_PAYLOADS = Set("inv_b3")
+        INVALID_PAYLOADS = Set("inv_b3"),
+        ACTIVITY_TIMEOUT = 10
     ).* from "../replica"
 
     pure val CERTIFY_ALL_TRUE = Replicas.mapBy(_ => app::certify_always_true)
@@ -293,7 +294,9 @@ module tests {
 
                 // n3 (the leader) receives nullify quorum -> nullification cert -> view 2.
                 // leader_nullify_trigger does not fire since n3 IS the leader; n3 sends no nullify.
-                .then(replica_receives_nullify_quorum("n3", FIRST_VIEW, Set("n0", "n1", "n2")))
+                .then(replica_receives_nullify_vote("n3", FIRST_VIEW, "n0"))
+                .then(replica_receives_nullify_vote("n3", FIRST_VIEW, "n1"))
+                .then(replica_receives_nullify_vote("n3", FIRST_VIEW, "n2"))
                 .then(all {
                     assert(replica_state.get("n3").view == 2),
                     assert(not(sent_nullify_votes.exists(v => v.sig == "n3" and v.view == FIRST_VIEW))),
@@ -350,10 +353,18 @@ module tests {
             .then(replica_receives_notarize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
             .then(replica_receives_notarize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
             // All replicas receive finalize quorum -> finalization, commit val_b0
-            .then(replica_receives_finalize_quorum("n0", "val_b0", FIRST_VIEW,  Set("n0", "n1", "n2")))
-            .then(replica_receives_finalize_quorum("n1", "val_b0", FIRST_VIEW,  Set("n0", "n1", "n2")))
-            .then(replica_receives_finalize_quorum("n2", "val_b0", FIRST_VIEW,  Set("n0", "n1", "n2")))
-            .then(replica_receives_finalize_quorum("n3", "val_b0", FIRST_VIEW,  Set("n0", "n1", "n2")))
+            .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
             .then(all {
                 assert(CORRECT.forall(id => ghost_committed_blocks.get(id).length() == 1)),
                 assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == "val_b0")),
@@ -374,10 +385,18 @@ module tests {
             .then(replica_receives_notarize_vote("n2", "val_b1", 2, FIRST_VIEW, "n2"))
             .then(replica_receives_notarize_vote("n3", "val_b1", 2, FIRST_VIEW, "n0"))
             .then(replica_receives_notarize_vote("n3", "val_b1", 2, FIRST_VIEW, "n2"))
-            .then(replica_receives_finalize_quorum_with_parent("n0", "val_b1", 2, FIRST_VIEW, Set("n0", "n1", "n2")))
-            .then(replica_receives_finalize_quorum_with_parent("n1", "val_b1", 2, FIRST_VIEW, Set("n0", "n1", "n2")))
-            .then(replica_receives_finalize_quorum_with_parent("n2", "val_b1", 2, FIRST_VIEW, Set("n0", "n1", "n2")))
-            .then(replica_receives_finalize_quorum_with_parent("n3", "val_b1", 2, FIRST_VIEW, Set("n0", "n1", "n2")))
+            .then(replica_receives_finalize_vote("n0", "val_b1", 2, FIRST_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n0", "val_b1", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n0", "val_b1", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n1", "val_b1", 2, FIRST_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n1", "val_b1", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n1", "val_b1", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n2", "val_b1", 2, FIRST_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n2", "val_b1", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n2", "val_b1", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n3", "val_b1", 2, FIRST_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n3", "val_b1", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n3", "val_b1", 2, FIRST_VIEW, "n2"))
             .then(all {
                 assert(CORRECT.forall(id => ghost_committed_blocks.get(id).length() == 2)),
                 assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == "val_b0")),
@@ -405,10 +424,14 @@ module tests {
             .then(on_timeout("n1", LeaderTimeoutKind))
             .then(on_timeout("n2", LeaderTimeoutKind))
             .then(on_timeout("n3", LeaderTimeoutKind))
-            .then(replica_receives_nullify_quorum("n0", FIRST_VIEW,  Set("n0", "n1", "n2")))
-            .then(replica_receives_nullify_quorum("n1", FIRST_VIEW,  Set("n0", "n1", "n2")))
-            .then(replica_receives_nullify_quorum("n2", FIRST_VIEW,  Set("n0", "n1", "n2")))
-            .then(replica_receives_nullify_quorum("n3", FIRST_VIEW,  Set("n0", "n1", "n2")))
+            .then(replica_receives_nullify_vote("n0", FIRST_VIEW, "n1"))
+            .then(replica_receives_nullify_vote("n0", FIRST_VIEW, "n2"))
+            .then(replica_receives_nullify_vote("n1", FIRST_VIEW, "n0"))
+            .then(replica_receives_nullify_vote("n1", FIRST_VIEW, "n2"))
+            .then(replica_receives_nullify_vote("n2", FIRST_VIEW, "n0"))
+            .then(replica_receives_nullify_vote("n2", FIRST_VIEW, "n1"))
+            .then(replica_receives_nullify_vote("n3", FIRST_VIEW, "n0"))
+            .then(replica_receives_nullify_vote("n3", FIRST_VIEW, "n1"))
             .then(all {
                 assert(CORRECT.forall(id => replica_state.get(id).view == 2)),
                 unchanged_all,
@@ -418,10 +441,14 @@ module tests {
             .then(on_timeout("n1", LeaderTimeoutKind))
             .then(on_timeout("n2", LeaderTimeoutKind))
             .then(on_timeout("n3", LeaderTimeoutKind))
-            .then(replica_receives_nullify_quorum("n0", 2, Set("n0", "n1", "n2")))
-            .then(replica_receives_nullify_quorum("n1", 2, Set("n0", "n1", "n2")))
-            .then(replica_receives_nullify_quorum("n2", 2, Set("n0", "n1", "n2")))
-            .then(replica_receives_nullify_quorum("n3", 2, Set("n0", "n1", "n2")))
+            .then(replica_receives_nullify_vote("n0", 2, "n1"))
+            .then(replica_receives_nullify_vote("n0", 2, "n2"))
+            .then(replica_receives_nullify_vote("n1", 2, "n0"))
+            .then(replica_receives_nullify_vote("n1", 2, "n2"))
+            .then(replica_receives_nullify_vote("n2", 2, "n0"))
+            .then(replica_receives_nullify_vote("n2", 2, "n1"))
+            .then(replica_receives_nullify_vote("n3", 2, "n0"))
+            .then(replica_receives_nullify_vote("n3", 2, "n1"))
             .then(all {
                 assert(CORRECT.forall(id => replica_state.get(id).view == 3)),
                 unchanged_all,
@@ -440,10 +467,18 @@ module tests {
             .then(replica_receives_notarize_vote("n2", "val_b0", 3, GENESIS_VIEW, "n1"))
             .then(replica_receives_notarize_vote("n3", "val_b0", 3, GENESIS_VIEW, "n0"))
             .then(replica_receives_notarize_vote("n3", "val_b0", 3, GENESIS_VIEW, "n1"))
-            .then(replica_receives_finalize_quorum("n0", "val_b0", 3,  Set("n0", "n1", "n2")))
-            .then(replica_receives_finalize_quorum("n1", "val_b0", 3,  Set("n0", "n1", "n2")))
-            .then(replica_receives_finalize_quorum("n2", "val_b0", 3,  Set("n0", "n1", "n2")))
-            .then(replica_receives_finalize_quorum("n3", "val_b0", 3,  Set("n0", "n1", "n2")))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 3, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 3, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 3, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", 3, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", 3, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", 3, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", 3, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", 3, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", 3, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", 3, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", 3, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", 3, GENESIS_VIEW, "n2"))
             .then(all {
                 assert(CORRECT.forall(id => ghost_committed_blocks.get(id).length() == 1)),
                 assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == "val_b0")),
@@ -483,10 +518,14 @@ module tests {
                 unchanged_all,
             })
             // Nullify quorum -> advance to view 2
-            .then(replica_receives_nullify_quorum("n0", FIRST_VIEW, Set("n0", "n1", "n2")))
-            .then(replica_receives_nullify_quorum("n1", FIRST_VIEW, Set("n0", "n1", "n2")))
-            .then(replica_receives_nullify_quorum("n2", FIRST_VIEW, Set("n0", "n1", "n2")))
-            .then(replica_receives_nullify_quorum("n3", FIRST_VIEW, Set("n0", "n1", "n2")))
+            .then(replica_receives_nullify_vote("n0", FIRST_VIEW, "n1"))
+            .then(replica_receives_nullify_vote("n0", FIRST_VIEW, "n2"))
+            .then(replica_receives_nullify_vote("n1", FIRST_VIEW, "n0"))
+            .then(replica_receives_nullify_vote("n1", FIRST_VIEW, "n2"))
+            .then(replica_receives_nullify_vote("n2", FIRST_VIEW, "n0"))
+            .then(replica_receives_nullify_vote("n2", FIRST_VIEW, "n1"))
+            .then(replica_receives_nullify_vote("n3", FIRST_VIEW, "n0"))
+            .then(replica_receives_nullify_vote("n3", FIRST_VIEW, "n1"))
             .then(all {
                 assert(CORRECT.forall(id => replica_state.get(id).view == 2)),
                 unchanged_all,
@@ -505,10 +544,18 @@ module tests {
             .then(replica_receives_notarize_vote("n2", "val_b0", 2, GENESIS_VIEW, "n2"))
             .then(replica_receives_notarize_vote("n3", "val_b0", 2, GENESIS_VIEW, "n0"))
             .then(replica_receives_notarize_vote("n3", "val_b0", 2, GENESIS_VIEW, "n2"))
-            .then(replica_receives_finalize_quorum("n0", "val_b0", 2, Set("n0", "n1", "n2")))
-            .then(replica_receives_finalize_quorum("n1", "val_b0", 2, Set("n0", "n1", "n2")))
-            .then(replica_receives_finalize_quorum("n2", "val_b0", 2, Set("n0", "n1", "n2")))
-            .then(replica_receives_finalize_quorum("n3", "val_b0", 2, Set("n0", "n1", "n2")))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 2, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 2, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 2, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", 2, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", 2, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", 2, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", 2, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", 2, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", 2, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", 2, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", 2, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", 2, GENESIS_VIEW, "n2"))
             .then(all {
                 assert(CORRECT.forall(id => ghost_committed_blocks.get(id).length() == 1)),
                 assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == "val_b0")),
@@ -549,9 +596,15 @@ module tests {
             .then(replica_receives_notarize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
             .then(replica_receives_notarize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n3"))
             // n1, n2, n3 receive finalize quorum -> finalization, commit val_b0
-            .then(replica_receives_finalize_quorum("n1", "val_b0", FIRST_VIEW, Set("n1", "n2", "n3")))
-            .then(replica_receives_finalize_quorum("n2", "val_b0", FIRST_VIEW, Set("n1", "n2", "n3")))
-            .then(replica_receives_finalize_quorum("n3", "val_b0", FIRST_VIEW, Set("n1", "n2", "n3")))
+            .then(replica_receives_finalize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n3"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n3"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n3"))
             // n0 receives finalization cert to advance to view 2
             .then(on_certificate("n0", finalization(proposal1, Set("n1", "n2", "n3"), "n1")))
             // View 2: n0 times out again (slow), n2 is leader and proposes
@@ -566,9 +619,15 @@ module tests {
             .then(replica_receives_notarize_vote("n2", "val_b1", 2, FIRST_VIEW, "n3"))
             .then(replica_receives_notarize_vote("n3", "val_b1", 2, FIRST_VIEW, "n1"))
             .then(replica_receives_notarize_vote("n3", "val_b1", 2, FIRST_VIEW, "n3"))
-            .then(replica_receives_finalize_quorum_with_parent("n1", "val_b1", 2, FIRST_VIEW, Set("n1", "n2", "n3")))
-            .then(replica_receives_finalize_quorum_with_parent("n2", "val_b1", 2, FIRST_VIEW, Set("n1", "n2", "n3")))
-            .then(replica_receives_finalize_quorum_with_parent("n3", "val_b1", 2, FIRST_VIEW, Set("n1", "n2", "n3")))
+            .then(replica_receives_finalize_vote("n1", "val_b1", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n1", "val_b1", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n1", "val_b1", 2, FIRST_VIEW, "n3"))
+            .then(replica_receives_finalize_vote("n2", "val_b1", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n2", "val_b1", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n2", "val_b1", 2, FIRST_VIEW, "n3"))
+            .then(replica_receives_finalize_vote("n3", "val_b1", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n3", "val_b1", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n3", "val_b1", 2, FIRST_VIEW, "n3"))
             .then(all {
                 // n1, n2, n3 finalized 2 payloads
                 assert(Set("n1", "n2", "n3").forall(id => ghost_committed_blocks.get(id).length() == 2)),
@@ -610,11 +669,11 @@ module tests {
 
     action replica_receives_finalize_vote(id: ReplicaId, payload: Payload, view: ViewNumber, parent: ViewNumber, src: ReplicaId): bool = {
         val p: Proposal = { payload: payload, view: view, parent: parent }
-        on_finalize(id, Set({ proposal: p, sig: src }))
+        on_finalize(id, { proposal: p, sig: src })
     }
 
     action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: ReplicaId): bool =
-        on_nullify(id, view, Set({ view: view, sig: src }))
+        on_nullify(id, { view: view, sig: src })
 
     action unchanged_all = all {
         sent_proposal' = sent_proposal,
@@ -634,22 +693,6 @@ module tests {
         lastAction' = lastAction,
     }
 
-    action replica_receives_finalize_quorum(id: ReplicaId, payload: Payload, view: ViewNumber, srcs: Set[ReplicaId]): bool = {
-        val p: Proposal = { payload: payload, view: view, parent: GENESIS_VIEW }
-        on_finalize(id, srcs.map(src => { proposal: p, sig: src }))
-    }
 
-    action replica_receives_finalize_quorum_with_parent(
-        id: ReplicaId,
-        payload: Payload,
-        view: ViewNumber,
-        parent: ViewNumber,
-        srcs: Set[ReplicaId]
-    ): bool = {
-        val p: Proposal = { payload: payload, view: view, parent: parent }
-        on_finalize(id, srcs.map(src => { proposal: p, sig: src }))
-    }
 
-    action replica_receives_nullify_quorum(id: ReplicaId, view: ViewNumber, srcs: Set[ReplicaId]): bool =
-        on_nullify(id, view, srcs.map(src => { view: view, sig: src }))
 }

@@ -14,7 +14,8 @@ module tests {
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3"),
         VIEWS = 1.to(4),
         VALID_PAYLOADS = Set("val_b0", "val_b1"),
-        INVALID_PAYLOADS = Set()
+        INVALID_PAYLOADS = Set(),
+        ACTIVITY_TIMEOUT = 10
     ).* from "../replica"
 
     pure val CERTIFY_ALL_TRUE = Replicas.mapBy(_ => app::certify_always_true)

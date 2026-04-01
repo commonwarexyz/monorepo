@@ -14,7 +14,8 @@ module tests {
         Q = 3,
         VIEWS = 1.to(6),
         VALID_PAYLOADS = Set("val_b0", "val_b1", "val_b2"),
-        INVALID_PAYLOADS = Set("inv_b3")
+        INVALID_PAYLOADS = Set("inv_b3"),
+        ACTIVITY_TIMEOUT = 10
     ).* from "../replica"
 
     pure val CERTIFY_ALL_TRUE = Replicas.mapBy(_ => app::certify_always_true)
@@ -125,19 +126,17 @@ module tests {
             .then(on_timeout("n0", LeaderTimeoutKind))
             .then(on_timeout("n1", LeaderTimeoutKind))
             .then(on_timeout("n2", LeaderTimeoutKind))
-            .then(set_timeout_state("n2", 3, false, Some(false), Some(false)))
-            .then(on_nullify("n2", FIRST_VIEW, Set(
-                { view: FIRST_VIEW, sig: "n0" },
-                { view: FIRST_VIEW, sig: "n1" },
-                { view: FIRST_VIEW, sig: "n2" }
-            )))
+            .then(on_nullify("n2", { view: FIRST_VIEW, sig: "n0" }))
+            .then(on_nullify("n2", { view: FIRST_VIEW, sig: "n1" }))
             .then(all {
                 assert(store_certificates.get("n2").exists(c =>
                     is_nullification_cert(c) and cert_view(c) == FIRST_VIEW
                 )),
                 assert(option_has(replica_state.get("n2").nullification.get(FIRST_VIEW), n => n.view == FIRST_VIEW)),
                 assert(replica_state.get("n2").broadcast_nullification.get(FIRST_VIEW) == true),
-                assert(replica_state.get("n2").view == 3),
+                assert(replica_state.get("n2").view == 2),
+                assert(replica_state.get("n2").leader_timeout.get(FIRST_VIEW) == None),
+                assert(replica_state.get("n2").certification_timeout.get(FIRST_VIEW) == None),
                 assert(replica_state.get("n2").leader_timeout.get(FIRST_VIEW) == None),
                 assert(replica_state.get("n2").certification_timeout.get(FIRST_VIEW) == None),
                 unchanged_all,
@@ -171,8 +170,9 @@ module tests {
                 unchanged_all,
             })
             // A 4th nullify vote arrives; on_nullify re-creates a cert but does not re-broadcast.
-            .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n4" }))
-            .then(on_nullify("n2", FIRST_VIEW, Set({ view: FIRST_VIEW, sig: "n4" })))
+            .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n3" }))
+            .then(on_nullify("n2", { view: FIRST_VIEW, sig: "n0" }))
+            .then(on_nullify("n2", { view: FIRST_VIEW, sig: "n1" }))
             .then(all {
                 assert(replica_state.get("n2").broadcast_nullification.get(FIRST_VIEW) == true),
                 // No second nullification cert was broadcast.
@@ -279,12 +279,11 @@ module tests {
             .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n1" }))
             .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n2" }))
             .then(send_nullify_vote({ view: FIRST_VIEW, sig: "n4" }))
-            .then(on_nullify("n3", FIRST_VIEW, Set(
-                { view: FIRST_VIEW, sig: "n0" },
-                { view: FIRST_VIEW, sig: "n1" },
-                { view: FIRST_VIEW, sig: "n2" },
-                { view: FIRST_VIEW, sig: "n4" }
-            )))
+
+            .then(on_nullify("n3", { view: FIRST_VIEW, sig: "n0" }))
+            .then(on_nullify("n3", { view: FIRST_VIEW, sig: "n1" }))
+            .then(on_nullify("n3", { view: FIRST_VIEW, sig: "n2" }))
+            .then(on_nullify("n3", { view: FIRST_VIEW, sig: "n4" }))
             .then(all {
                 assert(option_has(replica_state.get("n3").nullification.get(FIRST_VIEW), n =>
                     n.signatures.size() == Q
@@ -317,10 +316,8 @@ module tests {
             .then(on_certificate("n0", notarization_cert))
             .then(on_certificate("n1", notarization_cert))
             .then(on_certificate("n3", notarization_cert))
-            .then(on_finalize("n3", Set(
-                { proposal: proposal, sig: "n0" },
-                { proposal: proposal, sig: "n1" }
-            )))
+            .then(on_finalize("n3", { proposal: proposal, sig: "n0" }))
+            .then(on_finalize("n3", { proposal: proposal, sig: "n1" }))
             .then(all {
                 // First finalization: broadcast_finalization set and cert broadcast.
                 assert(replica_state.get("n3").broadcast_finalization.get(FIRST_VIEW) == true),
@@ -334,9 +331,7 @@ module tests {
             })
             // A 4th finalize vote arrives; on_finalize re-creates a cert but does not re-broadcast.
             .then(send_finalize_vote({ proposal: proposal, sig: "n4" }))
-            .then(on_finalize("n3", Set(
-                { proposal: proposal, sig: "n4" }
-            )))
+            .then(on_finalize("n3", { proposal: proposal, sig: "n4" }))
             .then(all {
                 assert(replica_state.get("n3").broadcast_finalization.get(FIRST_VIEW) == true),
                 // No second finalization cert was broadcast.
@@ -408,11 +403,11 @@ module tests {
 
     action replica_receives_finalize_vote(id: ReplicaId, payload: Payload, view: ViewNumber, parent: ViewNumber, src: ReplicaId): bool = {
         val p: Proposal = { payload: payload, view: view, parent: parent }
-        on_finalize(id, Set({ proposal: p, sig: src }))
+        on_finalize(id, { proposal: p, sig: src })
     }
 
     action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: ReplicaId): bool =
-        on_nullify(id, view, Set({ view: view, sig: src }))
+        on_nullify(id, { view: view, sig: src })
 
     action send_nullify_vote(vote: NullifyVote): bool = all {
         sent_proposal' = sent_proposal,

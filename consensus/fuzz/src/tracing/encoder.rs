@@ -55,22 +55,17 @@ enum VoteKind {
 }
 
 /// Intermediate action representation used during trace encoding.
-/// Vote deliveries between barriers can be reordered and merged by
-/// (receiver, kind, view, block) into a single `on_vote_*` call with
-/// a combined `Set(...)`, reducing the number of quint evaluation steps.
+/// Each vote delivery becomes an individual `on_finalize` or `on_nullify`
+/// call with a single vote argument.
 #[derive(Clone)]
 enum ActionItem {
     /// Non-reorderable action: on_notarize, send_*_vote, on_certificate.
-    /// Acts as a barrier for vote grouping.
     Barrier(String),
-    /// Vote delivery that can be merged with others sharing the same
-    /// (receiver, kind, view, block) key.
+    /// Individual vote delivery rendered as a single `on_*` call.
     VoteDelivery {
         kind: VoteKind,
         receiver: String,
-        view: u64,
-        block: String,
-        /// Individual vote constructor, e.g. `notarize(proposal_v2_val_b0, "n0")`.
+        /// Single vote record, e.g. `{ proposal: proposal_v2_val_b0, sig: "n0" }`.
         vote: String,
     },
 }
@@ -266,7 +261,8 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
     write!(out, "        VALID_PAYLOADS = Set(").unwrap();
     write!(out, "{}", all_blocks.join(", ")).unwrap();
     writeln!(out, "),").unwrap();
-    writeln!(out, "        INVALID_PAYLOADS = Set()").unwrap();
+    writeln!(out, "        INVALID_PAYLOADS = Set(),").unwrap();
+    writeln!(out, "        ACTIVITY_TIMEOUT = 10").unwrap();
     writeln!(out, "    ).* from \"../replica\"").unwrap();
     writeln!(out).unwrap();
 
@@ -316,19 +312,9 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
         &vote_blocks,
     );
 
-    // Group finalize/nullify deliveries between barriers: votes to the same
-    // (receiver, kind, view, block) are merged into a single on_* call
-    // with a combined Set, reducing quint evaluation steps.
-    let grouped = group_vote_deliveries(action_items);
-
-    // Deduplicate while preserving order
-    let mut actions = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for action in grouped {
-        if seen.insert(action.clone()) {
-            actions.push(action);
-        }
-    }
+    // Flatten vote deliveries: each finalize/nullify vote becomes its own
+    // on_finalize/on_nullify call with a single vote argument.
+    let actions = flatten_vote_deliveries(action_items);
 
     // Split actions into chunks of CHUNK_SIZE, emitting trace_part_NN actions
     const CHUNK_SIZE: usize = 25;
@@ -501,12 +487,12 @@ fn is_authentic_cert(
 /// is represented even when the trace only shows network deliveries to
 /// other replicas. Every observed vote also emits a matching `send_*_vote`
 /// action once so the global sent-vote history matches the replay.
-/// Finalize/nullify deliveries continue to use grouped `on_*` calls.
+/// Finalize/nullify deliveries emit individual `on_finalize`/`on_nullify`
+/// calls, each with a single vote argument.
 ///
 /// Returns structured `ActionItem`s: barriers (non-reorderable) and vote
-/// deliveries (groupable). The caller runs `group_vote_deliveries` to
-/// merge adjacent vote deliveries sharing the same (receiver, kind, view,
-/// block) key into single `on_vote_*` calls with combined Sets.
+/// deliveries. The caller runs `flatten_vote_deliveries` to convert them
+/// into individual quint action calls.
 fn build_actions(
     entries: &[TraceEntry],
     block_map: &[(String, String)],
@@ -602,8 +588,6 @@ fn build_actions(
                         actions.push(ActionItem::VoteDelivery {
                             kind: VoteKind::Finalize,
                             receiver: sig.clone(),
-                            view: *view,
-                            block: bn.clone(),
                             vote: format!(
                                 "{{ proposal: {}, sig: \"{}\" }}",
                                 proposal_ref(*view, &bn),
@@ -616,8 +600,6 @@ fn build_actions(
                     actions.push(ActionItem::VoteDelivery {
                         kind: VoteKind::Finalize,
                         receiver: receiver.clone(),
-                        view: *view,
-                        block: bn.clone(),
                         vote: format!(
                             "{{ proposal: {}, sig: \"{}\" }}",
                             proposal_ref(*view, &bn),
@@ -646,8 +628,6 @@ fn build_actions(
                             actions.push(ActionItem::VoteDelivery {
                                 kind: VoteKind::Nullify,
                                 receiver: sig.clone(),
-                                view: *view,
-                                block: String::new(),
                                 vote: format!("{{ view: {}, sig: \"{}\" }}", view, sig),
                             });
                         }
@@ -657,8 +637,6 @@ fn build_actions(
                     actions.push(ActionItem::VoteDelivery {
                         kind: VoteKind::Nullify,
                         receiver: receiver.clone(),
-                        view: *view,
-                        block: String::new(),
                         vote: format!("{{ view: {}, sig: \"{}\" }}", view, sig),
                     });
                 }
@@ -733,79 +711,37 @@ fn build_actions(
     actions
 }
 
-/// Merges adjacent vote deliveries that share the same (receiver, kind,
-/// view, block) key into single calls with combined Sets. Barriers act
-/// as fences: votes on opposite sides of a barrier are never merged.
-///
-/// For example, 9 individual finalize deliveries (3 signers x 3
-/// receivers) become 3 calls (one per receiver, each with 3 votes in
-/// the Set), reducing quint evaluation steps by ~3x per view.
-fn group_vote_deliveries(items: Vec<ActionItem>) -> Vec<String> {
+/// Flattens action items into individual quint calls. Each vote delivery
+/// becomes its own `on_finalize` or `on_nullify` call with a single vote.
+/// Barriers pass through unchanged.
+fn flatten_vote_deliveries(items: Vec<ActionItem>) -> Vec<String> {
     let mut result = Vec::new();
-    let mut pending: Vec<ActionItem> = Vec::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
 
     for item in items {
-        match &item {
-            ActionItem::Barrier(_) => {
-                flush_vote_group(&mut pending, &mut result);
-                if let ActionItem::Barrier(s) = item {
-                    result.push(s);
+        match item {
+            ActionItem::Barrier(s) => result.push(s),
+            ActionItem::VoteDelivery {
+                kind,
+                receiver,
+                vote,
+            } => {
+                let call = match kind {
+                    VoteKind::Finalize => {
+                        format!("on_finalize(\"{}\", {})", receiver, vote)
+                    }
+                    VoteKind::Nullify => {
+                        format!("on_nullify(\"{}\", {})", receiver, vote)
+                    }
+                };
+                // Dedup identical calls
+                if seen.insert((receiver, vote)) {
+                    result.push(call);
                 }
-            }
-            ActionItem::VoteDelivery { .. } => {
-                pending.push(item);
             }
         }
     }
-    flush_vote_group(&mut pending, &mut result);
     result
-}
-
-/// Flushes pending vote deliveries by grouping them by (receiver, kind,
-/// view, block) and rendering each group as a single `on_*` call.
-/// Preserves first-appearance order for deterministic output.
-fn flush_vote_group(pending: &mut Vec<ActionItem>, result: &mut Vec<String>) {
-    if pending.is_empty() {
-        return;
-    }
-
-    // Each entry: (receiver, kind, view, block, votes)
-    // Preserves insertion order for deterministic output.
-    let mut groups: Vec<(String, VoteKind, u64, String, Vec<String>)> = Vec::new();
-
-    for item in pending.drain(..) {
-        if let ActionItem::VoteDelivery {
-            kind,
-            receiver,
-            view,
-            block,
-            vote,
-        } = item
-        {
-            if let Some(g) = groups
-                .iter_mut()
-                .find(|g| g.0 == receiver && g.1 == kind && g.2 == view && g.3 == block)
-            {
-                // Dedup individual votes within the group
-                if !g.4.contains(&vote) {
-                    g.4.push(vote);
-                }
-            } else {
-                groups.push((receiver, kind, view, block, vec![vote]));
-            }
-        }
-    }
-
-    for (receiver, kind, view, _block, votes) in groups {
-        let vote_set = votes.join(", ");
-        let s = match kind {
-            VoteKind::Finalize => format!("on_finalize(\"{}\", Set({}))", receiver, vote_set),
-            VoteKind::Nullify => {
-                format!("on_nullify(\"{}\", {}, Set({}))", receiver, view, vote_set)
-            }
-        };
-        result.push(s);
-    }
 }
 
 /// Maps block hashes to val_b0, val_b1, ... in order of first appearance.

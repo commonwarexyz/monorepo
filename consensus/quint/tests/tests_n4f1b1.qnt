@@ -14,7 +14,8 @@ module tests {
         REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3"->"n3"),
         VIEWS = 1.to(6),
         VALID_PAYLOADS = Set("val_b0", "val_b1", "val_b2"),
-        INVALID_PAYLOADS = Set("inv_b3")
+        INVALID_PAYLOADS = Set("inv_b3"),
+        ACTIVITY_TIMEOUT = 10
     ).* from "../replica"
 
     pure val CERTIFY_ALL_TRUE = Replicas.mapBy(_ => app::certify_always_true)
@@ -553,11 +554,11 @@ module tests {
 
     action replica_receives_finalize_vote(id: ReplicaId, payload: Payload, view: ViewNumber, parent: ViewNumber, src: ReplicaId): bool = {
         val p: Proposal = { payload: payload, view: view, parent: parent }
-        on_finalize(id, Set({ proposal: p, sig: src }))
+        on_finalize(id, { proposal: p, sig: src })
     }
 
     action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: ReplicaId): bool =
-        on_nullify(id, view, Set({ view: view, sig: src }))
+        on_nullify(id, { view: view, sig: src })
 
     action unchanged_all = all {
         sent_proposal' = sent_proposal,

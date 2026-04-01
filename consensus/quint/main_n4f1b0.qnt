@@ -2,7 +2,7 @@
 
 /// A few handy small models that are good for debugging and inspection
 module main {
-    // A specification instance for n=6 and f=0
+    // A specification instance for n=4 and f=0
     import replica(
         N = 4,
         F = 1,
@@ -13,5 +13,6 @@ module main {
         VALID_PAYLOADS = Set("val_b0", "val_b1", "val_b2"),
         INVALID_PAYLOADS = Set("inval_0", "inval_1"),
         VIEWS = 1.to(6),
+        ACTIVITY_TIMEOUT = 10,
   ) .* from "./replica"
 }
