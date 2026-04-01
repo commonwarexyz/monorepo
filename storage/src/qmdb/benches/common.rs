@@ -242,7 +242,7 @@ pub fn cur_var_vec_cfg(
 
 pub fn keyless_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
-) -> KeylessConfig<VConfig<(commonware_codec::RangeCfg<usize>, ())>> {
+) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     KeylessConfig {
         merkle: mmr_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),
