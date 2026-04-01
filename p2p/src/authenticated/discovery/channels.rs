@@ -88,7 +88,7 @@ where
     }
 }
 
-/// Channel to asynchronously receive messages from a channel.
+/// Sender half of a channel whose [`Receiver`] prioritizes primary peers.
 #[derive(Clone, Debug)]
 pub(crate) struct PrioritizedSender<P: PublicKey> {
     sender: mpsc::Sender<Message<P>>,
@@ -134,23 +134,24 @@ impl<P: PublicKey> Receiver<P> {
         let (peer, message) = message;
         let sequence = self.next_sequence;
         self.next_sequence += 1;
+        if let Some(entry) = self.buffered.get_mut(&peer) {
+            entry.messages.push_back((sequence, message));
+            return;
+        }
         let is_primary = self.primary_peers.contains(&peer);
-        let entry = self.buffered.entry(peer.clone()).or_insert_with(|| BufferedPeer {
-            is_primary,
-            messages: VecDeque::new(),
-        });
-        if entry.messages.is_empty() {
-            entry.is_primary = is_primary;
-        }
-        entry.messages.push_back((sequence, message));
-        if entry.messages.len() == 1 {
-            let key = (sequence, peer);
-            if entry.is_primary {
-                self.primary_ready.insert(key);
-            } else {
-                self.secondary_ready.insert(key);
-            }
-        }
+        let ready = if is_primary {
+            &mut self.primary_ready
+        } else {
+            &mut self.secondary_ready
+        };
+        ready.insert((sequence, peer.clone()));
+        self.buffered.insert(
+            peer,
+            BufferedPeer {
+                is_primary,
+                messages: VecDeque::from([(sequence, message)]),
+            },
+        );
     }
 
     fn refresh_priorities(&mut self) {
@@ -195,18 +196,11 @@ impl<P: PublicKey> Receiver<P> {
     }
 
     fn pop_ready(&mut self, primary: bool) -> Option<Message<P>> {
-        let key = if primary {
-            self.primary_ready.iter().next().cloned()
+        let (_, peer) = if primary {
+            self.primary_ready.pop_first()
         } else {
-            self.secondary_ready.iter().next().cloned()
+            self.secondary_ready.pop_first()
         }?;
-        if primary {
-            self.primary_ready.remove(&key);
-        } else {
-            self.secondary_ready.remove(&key);
-        }
-
-        let (_, peer) = key;
         let mut state = self
             .buffered
             .remove(&peer)
