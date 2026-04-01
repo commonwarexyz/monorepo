@@ -577,7 +577,7 @@ impl IoUringLoop {
     /// If the request was marked for cancellation while sitting in the ready
     /// queue (timeout fired between requeue and staging), it is completed with
     /// a timeout error instead of issuing a follow-up SQE.
-    fn stage_request(&mut self, waiter_id: WaiterId, sq: &mut SubmissionQueue<'_>) {
+    fn stage_request(&mut self, waiter_id: WaiterId, submission_queue: &mut SubmissionQueue<'_>) {
         match self.waiters.stage(waiter_id) {
             StageOutcome::Timeout(request) => request.timeout(),
             StageOutcome::Submit(sqe) => {
@@ -586,7 +586,9 @@ impl IoUringLoop {
                 //   SQE pointers remain valid and FD numbers cannot be reused early.
                 // - SQ capacity was checked by caller.
                 unsafe {
-                    sq.push(&sqe).expect("unable to push to queue");
+                    submission_queue
+                        .push(&sqe)
+                        .expect("unable to push to queue");
                 }
             }
         }
@@ -597,12 +599,12 @@ impl IoUringLoop {
     /// Stops when all queued requests are staged or the SQ reaches capacity.
     /// Returns `true` when SQ capacity is hit and at least one ready request
     /// remains queued.
-    fn stage_ready_requests(&mut self, sq: &mut SubmissionQueue<'_>) -> bool {
-        while !sq.is_full() {
+    fn stage_ready_requests(&mut self, submission_queue: &mut SubmissionQueue<'_>) -> bool {
+        while !submission_queue.is_full() {
             let Some(waiter_id) = self.ready_queue.pop_front() else {
                 return false;
             };
-            self.stage_request(waiter_id, sq);
+            self.stage_request(waiter_id, submission_queue);
         }
 
         !self.ready_queue.is_empty()
@@ -676,9 +678,8 @@ impl IoUringLoop {
 
         let at_sq_capacity = submission_queue.is_full();
         let at_waiter_capacity = self.waiters.len() == self.cfg.size as usize;
-        let has_pending_work = !self.ready_queue.is_empty() || !self.pending_cancels.is_empty();
 
-        Some(at_sq_capacity || at_waiter_capacity || has_pending_work)
+        Some(at_sq_capacity || at_waiter_capacity)
     }
 
     /// Stage queued cancellation SQEs from `pending_cancels` in FIFO order.
@@ -686,14 +687,16 @@ impl IoUringLoop {
     /// Stops when all queued cancellations are staged or the SQ reaches
     /// capacity. Returns `true` when SQ capacity is hit and at least one
     /// cancellation remains queued.
-    fn stage_cancellations(&mut self, sq: &mut SubmissionQueue<'_>) -> bool {
-        while !sq.is_full() {
+    fn stage_cancellations(&mut self, submission_queue: &mut SubmissionQueue<'_>) -> bool {
+        while !submission_queue.is_full() {
             let Some(waiter_id) = self.pending_cancels.pop_front() else {
                 return false;
             };
-            // `pending_cancels` only contains cancel-requested waiters. If the
-            // waiter no longer has an SQE in flight, there is nothing left for
-            // the kernel to cancel.
+
+            // This waiter timed out earlier, but its queued cancel may have
+            // gone stale before we got around to staging it. If the original
+            // op CQE already retired the outstanding SQE, there is nothing
+            // left for the kernel to cancel.
             if !self.waiters.is_in_flight(waiter_id) {
                 continue;
             }
@@ -704,7 +707,9 @@ impl IoUringLoop {
 
             // SAFETY: AsyncCancel SQE uses stable user_data only.
             unsafe {
-                sq.push(&cancel).expect("unable to push cancel to queue");
+                submission_queue
+                    .push(&cancel)
+                    .expect("unable to push cancel to queue");
             }
         }
 
@@ -735,7 +740,10 @@ impl IoUringLoop {
         }
 
         match self.waiters.on_completion(user_data, cqe.result()) {
-            CompletionOutcome::Cancel => {}
+            CompletionOutcome::Cancel => {
+                // Async-cancel CQEs are handled entirely inside `Waiters` they do
+                // not directly complete or requeue a logical request here.
+            }
             CompletionOutcome::Requeue(waiter_id) => {
                 // Request needs another SQE. Add it to the ready queue.
                 self.ready_queue.push_back(waiter_id);
@@ -775,6 +783,9 @@ impl IoUringLoop {
             if self.waiters.cancel(entry.waiter_id) {
                 // Once cancel is requested, this waiter is no longer deadline-active.
                 self.timeout_wheel.remove(entry.target_tick);
+                // Only timed-out waiters with an outstanding op SQE need
+                // AsyncCancel. Waiters parked in the ready queue have no
+                // kernel op to cancel and will time out locally when restaged.
                 if self.waiters.is_in_flight(entry.waiter_id) {
                     self.pending_cancels.push_back(entry.waiter_id);
                 }
