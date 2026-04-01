@@ -907,12 +907,6 @@ where
         let mut stop_cx = task::Context::from_waker(&waker);
 
         loop {
-            // Shutdown cleanup no longer needs to wait gracefully once no
-            // tracked tasks remain.
-            if self.executor.tasks.is_empty() {
-                return false;
-            }
-
             // Return if the deadline has elapsed.
             if self.check_deadline(deadline, false) {
                 return true;
@@ -925,6 +919,18 @@ where
                 if stop.as_mut().poll(&mut stop_cx).is_ready() {
                     return false;
                 }
+            }
+
+            // Shutdown cleanup no longer needs to poll runtime tasks once none
+            // remain, but graceful shutdown must still wait for any already-
+            // issued `stopped()` handles that are held outside the runtime task
+            // set.
+            if self.executor.tasks.is_empty() {
+                if stop.is_none() {
+                    return false;
+                }
+                self.tick(false);
+                continue;
             }
 
             let mut queue = if poll_all_tasks {

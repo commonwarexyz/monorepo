@@ -2082,6 +2082,66 @@ mod tests {
         test_root_exit_signals_stopped(runner, true, Some(42));
     }
 
+    fn test_root_exit_waits_for_external_stopped_handle<R>(runner: R, should_panic: bool)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        let (signal_tx, signal_rx) = oneshot::channel();
+
+        // Run the root future on another thread so the test can keep a
+        // pre-registered `stopped()` handle alive outside the runtime task set
+        // while `start()` remains blocked in shutdown.
+        let thread = std::thread::spawn(move || {
+            runner.start(|context| async move {
+                assert!(
+                    signal_tx.send(context.stopped()).is_ok(),
+                    "root should send external stopped handle",
+                );
+                if should_panic {
+                    panic!("root panic");
+                }
+            });
+        });
+
+        let mut signal = signal_rx
+            .blocking_recv()
+            .expect("root should publish an external stopped handle");
+
+        // The handle should resolve once root shutdown begins, but the runtime
+        // must remain blocked until the externally-held signal is dropped.
+        let reason = futures::executor::block_on(async { (&mut signal).await.unwrap() });
+        assert_eq!(reason, StopReason::Shutdown);
+        assert!(
+            !thread.is_finished(),
+            "root shutdown should wait for external stopped handles",
+        );
+
+        drop(signal);
+        let result = thread.join();
+        if should_panic {
+            assert!(result.is_err(), "root should have panicked");
+        } else {
+            result.unwrap();
+        }
+    }
+
+    fn test_root_completion_waits_for_external_stopped_handle<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        test_root_exit_waits_for_external_stopped_handle(runner, false);
+    }
+
+    fn test_root_panic_waits_for_external_stopped_handle_before_unwind<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        test_root_exit_waits_for_external_stopped_handle(runner, true);
+    }
+
     fn test_spawn_dedicated<R: Runner>(runner: R)
     where
         R::Context: Spawner,
@@ -3790,6 +3850,18 @@ mod tests {
     }
 
     #[test]
+    fn test_deterministic_root_completion_waits_for_external_stopped_handle() {
+        let executor = deterministic::Runner::default();
+        test_root_completion_waits_for_external_stopped_handle(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_panic_waits_for_external_stopped_handle_before_unwind() {
+        let executor = deterministic::Runner::default();
+        test_root_panic_waits_for_external_stopped_handle_before_unwind(executor);
+    }
+
+    #[test]
     fn test_deterministic_spawn_dedicated() {
         let executor = deterministic::Runner::default();
         test_spawn_dedicated(executor);
@@ -4215,6 +4287,18 @@ mod tests {
     fn test_tokio_root_panic_joins_existing_stop_before_unwind() {
         let executor = tokio::Runner::default();
         test_root_panic_joins_existing_stop_before_unwind(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_completion_waits_for_external_stopped_handle() {
+        let executor = tokio::Runner::default();
+        test_root_completion_waits_for_external_stopped_handle(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_panic_waits_for_external_stopped_handle_before_unwind() {
+        let executor = tokio::Runner::default();
+        test_root_panic_waits_for_external_stopped_handle_before_unwind(executor);
     }
 
     #[test]

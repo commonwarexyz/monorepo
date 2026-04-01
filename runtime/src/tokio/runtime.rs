@@ -683,16 +683,18 @@ impl crate::Runner for Runner {
 
         // Give graceful stop handlers a chance to run before shutdown closes
         // task registration and aborts the remaining tasks.
-        if !executor.tasks.is_idle() {
-            match remaining_shutdown_budget() {
-                Some(timeout) => {
-                    runtime.block_on(async {
-                        let _ = tokio::time::timeout(timeout, stop).await;
-                    });
-                }
-                None => {
-                    let _ = runtime.block_on(stop);
-                }
+        //
+        // This wait must happen even when no tracked tasks remain because
+        // pre-registered `stopped()` handles can still be held outside the
+        // runtime task set.
+        match remaining_shutdown_budget() {
+            Some(timeout) => {
+                runtime.block_on(async {
+                    let _ = tokio::time::timeout(timeout, stop).await;
+                });
+            }
+            None => {
+                let _ = runtime.block_on(stop);
             }
         }
 
