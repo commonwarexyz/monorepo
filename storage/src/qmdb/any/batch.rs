@@ -280,8 +280,10 @@ where
     /// Gather the existing-key locations for all keys in `mutations`.
     ///
     /// For each mutation key, checks the base diff first (returning the
-    /// uncommitted location for Active entries, skipping Deleted entries), then
-    /// falls back to the base DB snapshot.
+    /// uncommitted location for Active entries, skipping Deleted entries).
+    /// For Active entries, also scans the snapshot bucket for collision
+    /// siblings (excluding the key's own stale committed location). Keys
+    /// not in the base diff fall back to the base DB snapshot.
     fn gather_existing_locations<E, C, I>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
@@ -299,20 +301,29 @@ where
             }
         } else {
             for key in mutations.keys() {
-                if let Some(entry) = self.base_diff.get(key) {
-                    if let Some(loc) = entry.loc() {
-                        locations.push(loc);
+                match self.base_diff.get(key) {
+                    Some(DiffEntry::Deleted { .. }) => {
+                        // Stale; handled via extract_parent_deleted_creates.
                     }
-                    // For Deleted entries, the snapshot location is stale and
-                    // must not be included (the key is handled via
-                    // extract_parent_deleted_creates). For Active entries, fall
-                    // through to the snapshot lookup so that collision siblings
-                    // sharing the same translated-key bucket are discovered.
-                    if matches!(entry, DiffEntry::Deleted { .. }) {
-                        continue;
+                    Some(DiffEntry::Active {
+                        loc, base_old_loc, ..
+                    }) => {
+                        // Push the parent's uncommitted location, then scan
+                        // the snapshot bucket for collision siblings (excluding
+                        // this key's own stale committed location).
+                        let stale = *base_old_loc;
+                        locations.push(*loc);
+                        locations.extend(
+                            db.snapshot
+                                .get(key)
+                                .copied()
+                                .filter(move |loc| Some(*loc) != stale),
+                        );
+                    }
+                    None => {
+                        locations.extend(db.snapshot.get(key).copied());
                     }
                 }
-                locations.extend(db.snapshot.get(key).copied());
             }
         }
         locations.sort();
