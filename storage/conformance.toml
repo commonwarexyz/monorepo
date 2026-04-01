@@ -138,13 +138,17 @@ hash = "f5456580eb69727a23bfb0281e33f467acc0c91273efebd334d3e82c9770ae76"
 n_cases = 65536
 hash = "a3fbb5f749fa5b73a684e9f0bebd8973c456e5ee43a0a3db75a99aa550dee302"
 
-["commonware_storage::qmdb::immutable::operation::tests::conformance::CodecConformance<Operation<U64,U64>>"]
+["commonware_storage::qmdb::immutable::operation::fixed::tests::conformance::CodecConformance<FixedOp>"]
 n_cases = 65536
-hash = "fdca5df62d243b28676ee15034663694cd219d5ef80749079126b0ed73effe0d"
+hash = "4f75cdf8952431729e7a3dfad38a8d5bfbb92bf6b54b1ca180a66745aed618d5"
 
-["commonware_storage::qmdb::immutable::operation::tests::conformance::CodecConformance<Operation<Vec<u8>,U64>>"]
+["commonware_storage::qmdb::immutable::operation::variable::tests::conformance::CodecConformance<VarKeyOp>"]
 n_cases = 65536
 hash = "cce5f888e506282f861e0e49e176b26c65f92e457f0c5f5353fc9b7196f07478"
+
+["commonware_storage::qmdb::immutable::operation::variable::tests::conformance::CodecConformance<VarOp>"]
+n_cases = 65536
+hash = "fdca5df62d243b28676ee15034663694cd219d5ef80749079126b0ed73effe0d"
 
 ["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<U64>>"]
 n_cases = 65536

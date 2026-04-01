@@ -9,7 +9,7 @@ use commonware_storage::{
     merkle::{hasher::Standard, mmb, mmr, Family as MerkleFamily, Location},
     mmr::journaled::Config as MerkleConfig,
     qmdb::{
-        immutable::{Config, Immutable},
+        immutable::{variable::Db as Immutable, Config},
         verify_proof,
     },
     translator::TwoCap,
@@ -92,10 +92,11 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
     (0..actual_size).map(|_| rng.gen()).collect()
 }
 
+#[allow(clippy::type_complexity)]
 fn db_config(
     suffix: &str,
     pooler: &impl BufferPooler,
-) -> Config<TwoCap, ((), (RangeCfg<usize>, ()))> {
+) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))>> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle_config: MerkleConfig {

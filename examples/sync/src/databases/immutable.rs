@@ -5,7 +5,10 @@ use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    mmr::{self, journaled::Config as MmrConfig, Location, Proof},
+    merkle::{
+        journaled::Config as MmrConfig,
+        mmr::{self, Location, Proof},
+    },
     qmdb::{
         self,
         immutable::{self, Config},
@@ -16,13 +19,13 @@ use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
 /// Database type alias.
-pub type Database<E> = immutable::Immutable<mmr::Family, E, Key, Value, Hasher, Translator>;
+pub type Database<E> = immutable::variable::Db<mmr::Family, E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = immutable::Operation<Key, Value>;
+pub type Operation = immutable::variable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ((), ())> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator, VConfig<((), ())>> {
     let page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
         context,
         NZU16!(2048),

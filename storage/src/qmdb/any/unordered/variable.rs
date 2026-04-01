@@ -660,7 +660,7 @@ pub(crate) mod test {
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/2787
     #[allow(dead_code, clippy::manual_async_fn)]
     fn issue_2787_regression(
-        db: &crate::qmdb::immutable::Immutable<
+        db: &crate::qmdb::immutable::variable::Db<
             mmr::Family,
             deterministic::Context,
             Digest,
