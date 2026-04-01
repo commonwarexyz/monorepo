@@ -77,7 +77,7 @@ cfg_if::cfg_if! {
 }
 
 pub use super::proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
-use crate::merkle;
+use crate::merkle::{self, Family as _, Graftable};
 pub use crate::merkle::{hasher, Readable};
 pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 
@@ -96,7 +96,7 @@ pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 pub type Error = merkle::Error<Family>;
 
 /// Marker type for the MMR family.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Family;
 
 impl merkle::Family for Family {
@@ -172,6 +172,10 @@ impl merkle::Family for Family {
         1..=count
     }
 
+    fn pos_to_height(pos: Position) -> u32 {
+        iterator::pos_to_height(pos)
+    }
+
     fn is_valid_size(size: Position) -> bool {
         let size = *size;
         if size == 0 {
@@ -205,6 +209,53 @@ impl merkle::Family for Family {
             node_pos -= two_h;
         }
         true
+    }
+}
+
+impl Graftable for Family {
+    fn chunk_peaks(
+        size: Position,
+        chunk_idx: u64,
+        grafting_height: u32,
+    ) -> impl Iterator<Item = (Position, u32)> {
+        let chunk_end_loc = Location::new((chunk_idx + 1) << grafting_height);
+        let chunk_end_pos = Position::try_from(chunk_end_loc).expect("chunk_peaks: chunk overflow");
+        assert!(
+            chunk_end_pos <= size,
+            "chunk's leaf range exceeds the structure's leaf count"
+        );
+
+        // In an MMR, every aligned chunk of 2^h leaves has exactly one subtree root at height h.
+        let first_leaf_loc = Location::new(chunk_idx << grafting_height);
+        let first_leaf_pos =
+            Position::try_from(first_leaf_loc).expect("chunk_peaks: chunk overflow");
+        let root_pos = Position::new(*first_leaf_pos + (1u64 << (grafting_height + 1)) - 2);
+
+        core::iter::once((root_pos, grafting_height))
+    }
+
+    fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
+        let leaf_pos = Self::location_to_position(leaf_start);
+        let shift = 1u64
+            .checked_shl(height + 1)
+            .expect("height excessively large");
+
+        leaf_pos
+            .checked_add(shift)
+            .and_then(|v| v.checked_sub(2))
+            .expect("position overflow")
+    }
+
+    fn leftmost_leaf(pos: Position, height: u32) -> Location {
+        let shift = 1u64
+            .checked_shl(height + 1)
+            .expect("height excessively large");
+        let leftmost_pos = pos
+            .checked_add(2)
+            .and_then(|v| v.checked_sub(shift))
+            .expect("position underflow or overflow");
+
+        Self::position_to_location(leftmost_pos).expect("leftmost descendant must be a leaf")
     }
 }
 
@@ -626,5 +677,130 @@ mod tests {
             Location::read(&mut encoded.as_ref()),
             Err(commonware_codec::Error::Invalid("Location", _))
         ));
+    }
+
+    #[test]
+    fn test_pos_to_height() {
+        // Verify pos_to_height for every node by tracking positions as they are appended. Each step
+        // appends a leaf (height 0) then parents with heights from parent_heights.
+        let mut next_pos = 0u64;
+        for leaf_idx in 0u64..500 {
+            let loc = Location::new(leaf_idx);
+            // The leaf itself.
+            assert_eq!(
+                Family::pos_to_height(Position::new(next_pos)),
+                0,
+                "leaf at pos {next_pos} (loc {leaf_idx}) should be height 0"
+            );
+            next_pos += 1;
+
+            // Parents created when this leaf is appended.
+            for h in Family::parent_heights(loc) {
+                assert_eq!(
+                    Family::pos_to_height(Position::new(next_pos)),
+                    h,
+                    "parent at pos {next_pos} (born at loc {leaf_idx}) should be height {h}"
+                );
+                next_pos += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn test_chunk_peaks() {
+        let hasher = StandardHasher::<Sha256>::new();
+        let mut mmr = mem::Mmr::new(&hasher);
+        let digest = [1u8; 32];
+
+        // Build an MMR with 200 leaves.
+        for _ in 0..200 {
+            let changeset = mmr
+                .new_batch()
+                .add(&hasher, &digest)
+                .merkleize(&hasher)
+                .finalize();
+            mmr.apply(changeset).unwrap();
+        }
+        let size = mmr.size();
+
+        for grafting_height in 1..6 {
+            let chunk_size = 1u64 << grafting_height;
+            let num_chunks = 200 / chunk_size;
+
+            for chunk_idx in 0..num_chunks {
+                let peaks: Vec<_> = Family::chunk_peaks(size, chunk_idx, grafting_height).collect();
+
+                // MMR always returns exactly one peak at the grafting height.
+                assert_eq!(
+                    peaks.len(),
+                    1,
+                    "MMR chunk_peaks should return 1 item (gh={grafting_height}, chunk={chunk_idx})"
+                );
+                assert_eq!(
+                    peaks[0].1, grafting_height,
+                    "peak should be at grafting height"
+                );
+
+                // The peak should be retrievable from the MMR.
+                assert!(
+                    mmr.get_node(peaks[0].0).is_some(),
+                    "chunk peak not in MMR at pos {}",
+                    peaks[0].0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_subtree_root_position() {
+        // Verify subtree_root_position produces actual node positions by checking every node in a
+        // growing MMR.
+        let mut next_pos = 0u64;
+        for leaf_idx in 0u64..500 {
+            let leaf_pos = Family::subtree_root_position(Location::new(leaf_idx), 0);
+            assert_eq!(
+                *leaf_pos, next_pos,
+                "height-0 subtree_root_position mismatch at leaf {leaf_idx}"
+            );
+            next_pos += 1;
+
+            // For each parent created at this step, verify subtree_root_position matches the actual
+            // position. In an MMR, a height-h parent covers 2^h leaves ending at leaf_idx, so its
+            // leftmost leaf = leaf_idx + 1 - 2^h.
+            for h in Family::parent_heights(Location::new(leaf_idx)) {
+                let leftmost = leaf_idx + 1 - (1u64 << h);
+                let pos = Family::subtree_root_position(Location::new(leftmost), h);
+                assert_eq!(
+                    *pos, next_pos,
+                    "height-{h} subtree_root_position mismatch at leaf {leaf_idx}"
+                );
+                next_pos += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn test_leftmost_leaf() {
+        // Verify leftmost_leaf is consistent with subtree_root_position:
+        // `subtree_root_position(leftmost_leaf(pos, h), h) == pos`.
+        let hasher = StandardHasher::<Sha256>::new();
+        let mut mmr = mem::Mmr::new(&hasher);
+        let digest = [1u8; 32];
+        for _ in 0..200 {
+            let changeset = mmr
+                .new_batch()
+                .add(&hasher, &digest)
+                .merkleize(&hasher)
+                .finalize();
+            mmr.apply(changeset).unwrap();
+        }
+        for (peak_pos, peak_height) in Family::peaks(mmr.size()) {
+            let ll = Family::leftmost_leaf(peak_pos, peak_height);
+            let roundtrip = Family::subtree_root_position(ll, peak_height);
+            assert_eq!(
+                roundtrip, peak_pos,
+                "roundtrip failed for pos={peak_pos} height={peak_height}"
+            );
+        }
     }
 }

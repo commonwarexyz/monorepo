@@ -124,8 +124,11 @@ cfg_if::cfg_if! {
     }
 }
 
-use crate::merkle;
 pub use crate::merkle::Readable;
+use crate::{
+    merkle,
+    merkle::{Family as _, Graftable},
+};
 pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
 
 /// MMB-specific type alias for `merkle::proof::Proof`.
@@ -143,7 +146,7 @@ pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 pub type Error = merkle::Error<Family>;
 
 /// Marker type for the MMB family.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Family;
 
 impl merkle::Family for Family {
@@ -205,11 +208,167 @@ impl merkle::Family for Family {
         };
         height.into_iter()
     }
+
+    fn pos_to_height(pos: Position) -> u32 {
+        // If position_to_location succeeds, it's a leaf (height 0).
+        if Self::position_to_location(pos).is_some() {
+            return 0;
+        }
+
+        // Parent node: its birth leaf is at position pos - 1.
+        let birth = Self::position_to_location(Position::new(*pos - 1))
+            .expect("position is neither leaf nor parent");
+
+        // Height from the merge schedule: h = trailing_ones(birth + 1) + 1.
+        (*birth + 1).trailing_ones() + 1
+    }
+}
+
+impl Graftable for Family {
+    fn leftmost_leaf(pos: Position, height: u32) -> Location {
+        if height == 0 {
+            return Self::position_to_location(pos).expect("height-0 node must be a leaf");
+        }
+
+        // Recover birth leaf from position, then compute leftmost via the closed-form: `leftmost =
+        // birth - (3·2^(h-1) - 2)`.
+        let prev_pos = pos.checked_sub(1).expect("position underflow");
+        let birth =
+            Self::position_to_location(prev_pos).expect("position is neither leaf nor parent");
+
+        let term = 3u64
+            .checked_shl(height - 1)
+            .and_then(|v| v.checked_sub(2))
+            .expect("height excessively large");
+
+        birth.checked_sub(term).expect("location underflow")
+    }
+
+    fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
+        if height == 0 {
+            return Self::location_to_position(leaf_start);
+        }
+
+        // birth_leaf = leaf_start + 3·2^(h-1) - 2 (derived by substituting last_leaf = leaf_start +
+        // 2^h - 1 into birth_leaf = last_leaf + 2^(h-1) - 1)
+        let offset = 3u64
+            .checked_shl(height - 1)
+            .and_then(|v| v.checked_sub(2))
+            .expect("height excessively large");
+        let birth_leaf = leaf_start.checked_add(offset).expect("location overflow");
+
+        let birth_pos = Self::location_to_position(birth_leaf);
+        birth_pos.checked_add(1).expect("position overflow")
+    }
+
+    fn chunk_peaks(
+        size: Position,
+        chunk_idx: u64,
+        grafting_height: u32,
+    ) -> impl Iterator<Item = (Position, u32)> {
+        let chunk_size = 1u64 << grafting_height;
+        let chunk_start = chunk_idx * chunk_size;
+        let chunk_end = chunk_start + chunk_size;
+
+        let n = *Location::try_from(size).expect("chunk_peaks: invalid size");
+        assert!(
+            chunk_end <= n,
+            "chunk's leaf range exceeds the structure's leaf count"
+        );
+
+        // --- Find the first peak whose leaf range contains chunk_start ---
+        //
+        // An MMB with N leaves has p = ilog2(N+1) peaks. Let M = N+1. Peak k (0 = oldest) has
+        // height h_k = (p-1-k) + bit(M, p-1-k) and covers 2^{h_k} leaves. The cumulative leaf count
+        // after k peaks is:
+        //
+        //   S(k) = sum_{j=0}^{k-1} 2^{h_j}
+        //
+        // Substituting x = p - k (peaks remaining), this simplifies to:
+        //
+        //   S(k) = M - 2^x - (M mod 2^x)
+        //
+        // We want the first peak containing chunk_start, i.e. the largest k where S(k) <=
+        // chunk_start. Rearranging:
+        //
+        //   M - chunk_start <= 2^x + (M mod 2^x)
+        //
+        // Since the RHS grows with x, we find the smallest qualifying x via ilog2 of the LHS, with
+        // at most one correction step.
+        let m = n + 1;
+        let p = m.ilog2(); // number of peaks
+
+        let diff = m - chunk_start;
+        let maybe_x = diff.ilog2();
+        let x_power = 1u64 << maybe_x;
+        let x = if diff <= x_power + (m & (x_power - 1)) {
+            maybe_x
+        } else {
+            maybe_x + 1
+        };
+        let lo = p - x;
+
+        // --- Lazily iterate the covering peaks ---
+        //
+        // Starting from peak lo, walk peaks rightward until we pass the chunk. Each peak either
+        // fits within the chunk (height <= gh) or entirely contains it (height > gh). Partial
+        // overlaps are impossible because both peak starts and chunk boundaries are multiples of
+        // their respective sizes (powers of two in non-increasing order).
+        //
+        // Node positions are computed using the birth-leaf formula: any MMB node at height h
+        // covering leaves [s, s + 2^h) was born at leaf (s + 2^h - 1) + (2^(h-1) - 1), giving:
+        // `position = location_to_position(birth_leaf) + 1`. For h = 0, the node is a bare leaf at
+        // `location_to_position(s)`.
+        let initial_cursor = m - (1u64 << x) - (m & ((1u64 << x) - 1));
+        let mut leaf_cursor = initial_cursor;
+
+        (lo..p).map_while(move |k| {
+            let i = p - 1 - k;
+            let height = i as u64 + ((m >> i) & 1);
+            let peak_leaves = 1u64 << height;
+            let peak_start = leaf_cursor;
+            let peak_end = peak_start + peak_leaves;
+            leaf_cursor = peak_end;
+
+            if peak_start >= chunk_end {
+                return None;
+            }
+
+            let (pos, h) = if height <= grafting_height as u64 {
+                // Peak fits entirely within the chunk.
+                let last_leaf = peak_end - 1;
+                if height == 0 {
+                    (Self::location_to_position(Location::new(last_leaf)), 0)
+                } else {
+                    let birth = last_leaf + (1u64 << (height - 1)) - 1;
+                    let pos = Position::new(
+                        Self::location_to_position(Location::new(birth)).as_u64() + 1,
+                    );
+                    (pos, height as u32)
+                }
+            } else if grafting_height == 0 {
+                // Chunk is a single leaf.
+                (Self::location_to_position(Location::new(chunk_start)), 0)
+            } else {
+                // Peak entirely contains the chunk. Compute the height-gh sub-node via the
+                // birth-leaf formula.
+                let chunk_last_leaf = chunk_end - 1;
+                let birth = chunk_last_leaf + (1u64 << (grafting_height - 1)) - 1;
+                let pos =
+                    Position::new(Self::location_to_position(Location::new(birth)).as_u64() + 1);
+                (pos, grafting_height)
+            };
+
+            Some((pos, h))
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Location;
+    use super::*;
+    use crate::mmb::mem::Mmb;
+    use commonware_cryptography::Sha256;
 
     /// Verify the MMB merge schedule via `Family::parent_heights`.
     #[test]
@@ -237,6 +396,189 @@ mod tests {
             let loc = Location::new(i as u64);
             let height: Option<u32> = crate::merkle::Family::parent_heights(loc).next();
             assert_eq!(height, *expected, "mismatch at loc={i}");
+        }
+    }
+
+    #[test]
+    fn test_pos_to_height() {
+        // Verify pos_to_height for every node by tracking positions as they are appended. Each step
+        // appends a leaf (height 0) and optionally a parent (height from parent_heights).
+        let mut next_pos = 0u64;
+        for leaf_idx in 0u64..500 {
+            let loc = Location::new(leaf_idx);
+            // The leaf itself.
+            assert_eq!(
+                Family::pos_to_height(Position::new(next_pos)),
+                0,
+                "leaf at pos {next_pos} (loc {leaf_idx}) should be height 0"
+            );
+            next_pos += 1;
+
+            // Optional parent (MMB creates at most one parent per leaf).
+            if let Some(h) = Family::parent_heights(loc).next() {
+                assert_eq!(
+                    Family::pos_to_height(Position::new(next_pos)),
+                    h,
+                    "parent at pos {next_pos} (born at loc {leaf_idx}) should be height {h}"
+                );
+                next_pos += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn test_leftmost_leaf() {
+        // Verify leftmost_leaf is consistent with subtree_root_position:
+        // subtree_root_position(leftmost_leaf(pos, h), h) == pos.
+        let hasher = StandardHasher::<Sha256>::new();
+        let mut mmb = Mmb::new(&hasher);
+        let digest = [1u8; 32];
+        for _ in 0..200 {
+            let changeset = mmb
+                .new_batch()
+                .add(&hasher, &digest)
+                .merkleize(&hasher)
+                .finalize();
+            mmb.apply(changeset).unwrap();
+        }
+        for (peak_pos, peak_height) in Family::peaks(mmb.size()) {
+            let ll = Family::leftmost_leaf(peak_pos, peak_height);
+            let roundtrip = Family::subtree_root_position(ll, peak_height);
+            assert_eq!(
+                roundtrip, peak_pos,
+                "roundtrip failed for pos={peak_pos} height={peak_height}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_subtree_root_position_virtual_roundtrip() {
+        // Verify the round-trip for subtree positions that may not correspond to any physical node
+        // in the MMB. For example, in the 8-leaf MMB with grafting height 2, chunk 1 (leaves [4,8))
+        // has no single height-2 node, but subtree_root_position still produces a deterministic
+        // position that round-trips through leftmost_leaf.
+        for height in 0u32..10 {
+            let chunk_size = 1u64 << height;
+            for chunk_idx in 0u64..200 {
+                let leaf_start = Location::new(chunk_idx * chunk_size);
+                let pos = Family::subtree_root_position(leaf_start, height);
+                let roundtrip = Family::leftmost_leaf(pos, height);
+                assert_eq!(
+                    roundtrip, leaf_start,
+                    "virtual roundtrip failed: leaf_start={leaf_start}, height={height}, pos={pos}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_chunk_peaks() {
+        let hasher = StandardHasher::<Sha256>::new();
+        let mut mmb = Mmb::new(&hasher);
+        let digest = [1u8; 32];
+
+        // Build an MMB with 200 leaves.
+        for _ in 0..200 {
+            let changeset = mmb
+                .new_batch()
+                .add(&hasher, &digest)
+                .merkleize(&hasher)
+                .finalize();
+            mmb.apply(changeset).unwrap();
+        }
+        let size = mmb.size();
+
+        for grafting_height in 1..6 {
+            let chunk_size = 1u64 << grafting_height;
+            let num_chunks = 200 / chunk_size;
+
+            for chunk_idx in 0..num_chunks {
+                let chunk_start = chunk_idx * chunk_size;
+                let peaks: Vec<_> = Family::chunk_peaks(size, chunk_idx, grafting_height).collect();
+
+                // Verify the peaks partition the chunk's leaf range.
+                assert!(
+                    !peaks.is_empty(),
+                    "chunk must have at least one covering peak"
+                );
+
+                let mut covered = 0u64;
+                for &(pos, h) in &peaks {
+                    // Each peak should be retrievable from the MMB.
+                    assert!(
+                        mmb.get_node(pos).is_some(),
+                        "chunk peak not in MMB at pos {pos} (gh={grafting_height}, chunk={chunk_idx})"
+                    );
+
+                    // Height should be at most grafting_height.
+                    assert!(
+                        h <= grafting_height,
+                        "peak height {h} > grafting_height {grafting_height}"
+                    );
+
+                    // Verify this peak covers the expected leaf range.
+                    let peak_leaves = 1u64 << h;
+                    let expected_start = chunk_start + covered;
+                    let leaf_loc = Location::new(expected_start);
+                    let leaf_pos = Family::location_to_position(leaf_loc);
+
+                    // The peak should be an ancestor of its first leaf. We can verify
+                    // by checking that descending from the peak reaches this leaf.
+                    if h > 0 {
+                        let mut p = pos;
+                        let mut ph = h;
+                        while ph > 0 {
+                            let (left, _) = Family::children(p, ph);
+                            p = left;
+                            ph -= 1;
+                        }
+                        assert_eq!(
+                            p, leaf_pos,
+                            "peak's leftmost leaf mismatch (gh={grafting_height}, chunk={chunk_idx})"
+                        );
+                    } else {
+                        assert_eq!(pos, leaf_pos, "height-0 peak should be the leaf itself");
+                    }
+
+                    covered += peak_leaves;
+                }
+
+                assert_eq!(
+                    covered, chunk_size,
+                    "peaks don't partition chunk (gh={grafting_height}, chunk={chunk_idx})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_subtree_root_position() {
+        // Verify subtree_root_position matches actual node positions by walking
+        // through a growing MMB.
+        let mut next_pos = 0u64;
+        for leaf_idx in 0u64..500 {
+            let loc = Location::new(leaf_idx);
+
+            // Height 0: the leaf itself.
+            let pos = Family::subtree_root_position(loc, 0);
+            assert_eq!(
+                *pos, next_pos,
+                "height-0 subtree_root_position mismatch at leaf {leaf_idx}"
+            );
+            next_pos += 1;
+
+            // Optional parent at this step.
+            if let Some(h) = Family::parent_heights(loc).next() {
+                // The parent covers 2^h leaves. Its leftmost leaf is
+                // birth_leaf - (3*2^(h-1) - 2) = leaf_idx - (3*2^(h-1) - 2).
+                let leftmost = leaf_idx + 2 - 3 * (1u64 << (h - 1));
+                let pos = Family::subtree_root_position(Location::new(leftmost), h);
+                assert_eq!(
+                    *pos, next_pos,
+                    "height-{h} subtree_root_position mismatch at leaf {leaf_idx}"
+                );
+                next_pos += 1;
+            }
         }
     }
 }
