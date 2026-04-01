@@ -84,7 +84,7 @@ impl WriteBuffers {
 /// Each variant owns its completion sender, all buffers and FDs needed by the
 /// kernel, and progress cursors. The loop calls [build_sqe](Self::build_sqe)
 /// to produce the next SQE, [on_cqe](Self::on_cqe) to evaluate completions,
-/// and [finish](Self::finish) or [timeout](Self::timeout) to
+/// and [complete](Self::complete) or [timeout](Self::timeout) to
 /// deliver results.
 ///
 // SAFETY: `WriteBuffers::Vectored` owns both the `IoBufs` backing storage and
@@ -193,10 +193,10 @@ impl Request {
 ///
 /// `CqeResult::from_raw` collapses the raw io_uring result space into the small
 /// set of cases the per-request state machines care about:
-/// - `EAGAIN`, `EWOULDBLOCK`, and `EINTR` become [`CqeResult::Retryable`]
-/// - `ECANCELED` becomes [`CqeResult::TimeoutCancel`] only when the waiter was
+/// - `EAGAIN`, `EWOULDBLOCK`, and `EINTR` become [`CqeResult::Retry`]
+/// - `ECANCELED` becomes [`CqeResult::Cancelled`] only when the waiter was
 ///   already in [`WaiterState::CancelRequested`]
-/// - other negative results stay as [`CqeResult::HardError`]
+/// - other negative results stay as [`CqeResult::Error`]
 /// - zero stays distinct because some request kinds treat it differently from
 ///   a hard error
 /// - positive results carry their byte or item count as [`CqeResult::Positive`]
