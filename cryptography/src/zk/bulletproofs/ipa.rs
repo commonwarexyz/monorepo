@@ -31,6 +31,15 @@ pub struct Proof<F, G> {
     b_final: F,
 }
 
+fn sample_challenge<F: Field + Random>(transcript: &Transcript) -> F {
+    let mut noise = transcript.noise(b"challenge");
+    let mut challenge = F::zero();
+    while challenge == F::zero() {
+        challenge = F::random(&mut noise);
+    }
+    challenge
+}
+
 pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     transcript: &mut Transcript,
     statement: &Statement<F, G>,
@@ -65,7 +74,7 @@ pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
         l_r_coms.push((l.clone(), r.clone()));
         transcript.commit(l.encode());
         transcript.commit(r.encode());
-        let mut u = F::random(transcript.noise(b"challenge"));
+        let mut u = sample_challenge::<F>(transcript);
         let mut u_inv = u.inv();
 
         for (a_lo_i, a_hi_i) in a_lo.iter_mut().zip(a_hi.iter_mut()) {
@@ -87,8 +96,8 @@ pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
         g.truncate(half_len);
 
         for (h_lo_i, h_hi_i) in h_lo.iter_mut().zip(h_hi.iter_mut()) {
-            *h_lo_i *= &u_inv;
-            *h_lo_i += &(h_hi_i.clone() * &u);
+            *h_lo_i *= &u;
+            *h_lo_i += &(h_hi_i.clone() * &u_inv);
         }
         h.truncate(half_len);
 
@@ -137,7 +146,7 @@ pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
         };
         transcript.commit(l.encode());
         transcript.commit(r.encode());
-        let mut u = F::random(transcript.noise(b"challenge"));
+        let mut u = sample_challenge::<F>(transcript);
         let mut u_inv = u.inv();
 
         for (g_lo_i, g_hi_i) in g_lo.iter_mut().zip(g_hi.iter_mut()) {
@@ -147,8 +156,8 @@ pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
         g.truncate(half_len);
 
         for (h_lo_i, h_hi_i) in h_lo.iter_mut().zip(h_hi.iter_mut()) {
-            *h_lo_i *= &u_inv;
-            *h_lo_i += &(h_hi_i.clone() * &u);
+            *h_lo_i *= &u;
+            *h_lo_i += &(h_hi_i.clone() * &u_inv);
         }
         h.truncate(half_len);
 
@@ -169,4 +178,82 @@ pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
         + &(h_final * &proof.b_final)
         + &(statement.setup.product_generator.clone() * &(proof.a_final * &proof.b_final));
     expected_product == product
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_invariants::minifuzz;
+    use commonware_math::test::{F, G};
+    use commonware_parallel::Sequential;
+
+    const MAX_VECTOR_LG: u8 = 5;
+    const MAX_VECTOR_LEN: usize = 1 << MAX_VECTOR_LG;
+    const NUM_GENERATORS: usize = 2 * MAX_VECTOR_LEN + 1;
+    const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_IPA_MINIFUZZ";
+
+    #[derive(Debug)]
+    struct Plan {
+        a: Vec<F>,
+        b: Vec<F>,
+    }
+
+    impl<'a> Arbitrary<'a> for Plan {
+        fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+            let lg_len = u.int_in_range(0..=MAX_VECTOR_LG)?;
+            let len = 1usize << lg_len;
+            let a = (0..len)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<Vec<_>>>()?;
+            let b = (0..len)
+                .map(|_| u.arbitrary())
+                .collect::<arbitrary::Result<Vec<_>>>()?;
+            Ok(Self { a, b })
+        }
+    }
+
+    impl Plan {
+        fn run(self, generators: &[G]) -> arbitrary::Result<()> {
+            let strategy = Sequential;
+            let len = self.a.len();
+
+            let setup = Setup {
+                g: generators[..len].to_vec(),
+                h: generators[len..2 * len].to_vec(),
+                product_generator: generators[2 * MAX_VECTOR_LEN],
+            };
+            let commitment =
+                G::msm(&setup.g, &self.a, &strategy) + &G::msm(&setup.h, &self.b, &strategy);
+            let product = F::msm(&self.a, &self.b, &strategy);
+            let statement = Statement {
+                setup,
+                commitment,
+                product,
+            };
+            let witness = Witness {
+                a: self.a,
+                b: self.b,
+            };
+
+            let mut prover_transcript = Transcript::new(NAMESPACE);
+            let proof = prove(&mut prover_transcript, &statement, witness, &strategy);
+            let mut verifier_transcript = Transcript::new(NAMESPACE);
+            assert!(verify(
+                &mut verifier_transcript,
+                &statement,
+                proof,
+                &strategy,
+            ));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_honest_prover_convince_honest_verifier() {
+        let generators = (1..=NUM_GENERATORS)
+            .map(|i| G::generator() * &F::from(i as u8))
+            .collect::<Vec<_>>();
+        minifuzz::test(move |u| u.arbitrary::<Plan>()?.run(&generators));
+    }
 }
