@@ -303,7 +303,14 @@ where
                     if let Some(loc) = entry.loc() {
                         locations.push(loc);
                     }
-                    continue;
+                    // For Deleted entries, the snapshot location is stale and
+                    // must not be included (the key is handled via
+                    // extract_parent_deleted_creates). For Active entries, fall
+                    // through to the snapshot lookup so that collision siblings
+                    // sharing the same translated-key bucket are discovered.
+                    if matches!(entry, DiffEntry::Deleted { .. }) {
+                        continue;
+                    }
                 }
                 locations.extend(db.snapshot.get(key).copied());
             }
