@@ -132,7 +132,6 @@ module tests {
                 assert(store_certificates.get("n2").exists(c =>
                     is_nullification_cert(c) and cert_view(c) == FIRST_VIEW
                 )),
-                assert(option_has(replica_state.get("n2").nullification.get(FIRST_VIEW), n => n.view == FIRST_VIEW)),
                 assert(replica_state.get("n2").broadcast_nullification.get(FIRST_VIEW) == true),
                 assert(replica_state.get("n2").view == 2),
                 assert(replica_state.get("n2").leader_timeout.get(FIRST_VIEW) == None),
@@ -159,7 +158,6 @@ module tests {
                 assert(store_certificates.get("n2").exists(c =>
                     is_nullification_cert(c) and cert_view(c) == FIRST_VIEW
                 )),
-                assert(option_has(replica_state.get("n2").nullification.get(FIRST_VIEW), n => n.view == FIRST_VIEW)),
                 // First nullification: broadcast_nullification set and cert broadcast.
                 assert(replica_state.get("n2").broadcast_nullification.get(FIRST_VIEW) == true),
                 assert(replica_state.get("n2").leader_timeout.get(FIRST_VIEW) == None),
@@ -259,8 +257,10 @@ module tests {
                         and cert_view(c) == FIRST_VIEW
                         and cert_signatures(c) == Set("n0", "n1", "n2", "n4")
                 ))),
-                assert(option_has(replica_state.get("n3").notarization.get(FIRST_VIEW), n =>
-                    n.signatures == Set("n0", "n1", "n2")
+                assert(store_certificates.get("n3").exists(c =>
+                    is_notarization_cert(c)
+                        and cert_view(c) == FIRST_VIEW
+                        and cert_signatures(c) == Set("n0", "n1", "n2")
                 )),
                 assert(store_certificates.get("n3").filter(c =>
                     is_notarization_cert(c) and cert_view(c) == FIRST_VIEW
@@ -285,8 +285,10 @@ module tests {
             .then(on_nullify("n3", { view: FIRST_VIEW, sig: "n2" }))
             .then(on_nullify("n3", { view: FIRST_VIEW, sig: "n4" }))
             .then(all {
-                assert(option_has(replica_state.get("n3").nullification.get(FIRST_VIEW), n =>
-                    n.signatures.size() == Q
+                assert(store_certificates.get("n3").exists(c =>
+                    is_nullification_cert(c)
+                        and cert_view(c) == FIRST_VIEW
+                        and cert_signatures(c).size() == Q
                 )),
                 unchanged_all,
             })
@@ -324,8 +326,10 @@ module tests {
                 assert(sent_certificates.filter(c =>
                     is_finalization_cert(c) and cert_view(c) == FIRST_VIEW
                 ).size() == 1),
-                assert(option_has(replica_state.get("n3").finalization.get(FIRST_VIEW), f =>
-                    f.signatures.size() == Q
+                assert(store_certificates.get("n3").exists(c =>
+                    is_finalization_cert(c)
+                        and cert_view(c) == FIRST_VIEW
+                        and cert_signatures(c).size() == Q
                 )),
                 unchanged_all,
             })
@@ -370,8 +374,10 @@ module tests {
                 assert(store_certificates.get("n3").filter(c =>
                     is_notarization_cert(c) and cert_view(c) == FIRST_VIEW
                 ).size() == 1),
-                assert(option_has(replica_state.get("n3").notarization.get(FIRST_VIEW), n =>
-                    n.signatures == Set("n0", "n1", "n3")
+                assert(store_certificates.get("n3").exists(c =>
+                    is_notarization_cert(c)
+                        and cert_view(c) == FIRST_VIEW
+                        and cert_signatures(c) == Set("n0", "n1", "n3")
                 )),
                 unchanged_all,
             })
@@ -388,7 +394,6 @@ module tests {
         store_nullify_votes' = store_nullify_votes,
         store_finalize_votes' = store_finalize_votes,
         store_certificates' = store_certificates,
-        ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state,
@@ -419,7 +424,6 @@ module tests {
         store_nullify_votes' = store_nullify_votes,
         store_finalize_votes' = store_finalize_votes,
         store_certificates' = store_certificates,
-        ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state,
@@ -437,7 +441,6 @@ module tests {
         store_nullify_votes' = store_nullify_votes,
         store_finalize_votes' = store_finalize_votes,
         store_certificates' = store_certificates,
-        ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state,
@@ -455,7 +458,6 @@ module tests {
         store_nullify_votes' = store_nullify_votes,
         store_finalize_votes' = store_finalize_votes,
         store_certificates' = store_certificates,
-        ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state,
@@ -479,7 +481,6 @@ module tests {
         store_nullify_votes' = store_nullify_votes,
         store_finalize_votes' = store_finalize_votes,
         store_certificates' = store_certificates,
-        ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state.set(id, {
@@ -504,7 +505,6 @@ module tests {
         store_nullify_votes' = store_nullify_votes,
         store_finalize_votes' = store_finalize_votes,
         store_certificates' = store_certificates,
-        ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state,

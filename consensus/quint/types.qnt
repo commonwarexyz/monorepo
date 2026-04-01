@@ -188,22 +188,12 @@ module types {
         certification_timeout: ViewNumber -> Option[bool],
         // not in the original spec, the latest view that this replica has seen notarization votes for
         ghost_last_seen_notarization: ViewNumber,
-        // sequence if the sent votes
-        ghost_sent_votes: ViewNumber -> List[Kind],
         // not in the original spec, the last view this replica has finalized
         last_finalized: ViewNumber,
         // not in the original spec, whether this replica has sent a proposal
         propose_sent: bool,
         // round proposal currently remembered for each view
         proposal: ViewNumber -> Option[Proposal],
-        // first timeout reason observed for each view
-        timeout_reason: ViewNumber -> Option[TimeoutReason],
-        // notarization certificates constructed by this replica per view
-        notarization: ViewNumber -> Option[NotarizationCert],
-        // nullification certificates constructed by this replica per view
-        nullification: ViewNumber -> Option[NullificationCert],
-        // finalization certificates constructed by this replica per view
-        finalization: ViewNumber -> Option[FinalizationCert],
         // leader proposal learned for each view from leader vote/proposal or recovered certificates
         leader_proposal: ViewNumber -> Option[Proposal],
         // once a conflicting leader proposal is observed for a view, keep that fact forever

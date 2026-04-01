@@ -1206,6 +1206,7 @@ fn write_snapshot_expectations(
 }
 
 fn write_reporter_helpers(out: &mut String) {
+    // replica_has_notarization
     writeln!(
         out,
         "    def replica_has_notarization(id: ReplicaId, view: ViewNumber): bool = {{"
@@ -1213,44 +1214,43 @@ fn write_reporter_helpers(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        "        is_some(replica_state.get(id).notarization.get(view))"
+        "        store_certificates.get(id).exists(c => is_notarization_cert(c) and cert_view(c) == view)"
     )
     .unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // replica_notarization_payload
     writeln!(out, "    def replica_notarization_payload(id: ReplicaId, view: ViewNumber): Option[Payload] = {{").unwrap();
     writeln!(
         out,
-        "        match (replica_state.get(id).notarization.get(view)) {{"
+        "        store_certificates.get(id).fold(None, (acc, c) =>"
     )
     .unwrap();
-    writeln!(
-        out,
-        "            | Some(cert) => Some(cert.proposal.payload)"
-    )
-    .unwrap();
-    writeln!(out, "            | None => None").unwrap();
-    writeln!(out, "        }}").unwrap();
+    writeln!(out, "            match c {{").unwrap();
+    writeln!(out, "                | Notarization(nc) => if (nc.proposal.view == view) Some(nc.proposal.payload) else acc").unwrap();
+    writeln!(out, "                | _ => acc").unwrap();
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "        )").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // replica_notarization_signature_count
     writeln!(out, "    def replica_notarization_signature_count(id: ReplicaId, view: ViewNumber): Option[int] = {{").unwrap();
     writeln!(
         out,
-        "        match (replica_state.get(id).notarization.get(view)) {{"
+        "        store_certificates.get(id).fold(None, (acc, c) =>"
     )
     .unwrap();
-    writeln!(
-        out,
-        "            | Some(cert) => Some(cert.signatures.size())"
-    )
-    .unwrap();
-    writeln!(out, "            | None => None").unwrap();
-    writeln!(out, "        }}").unwrap();
+    writeln!(out, "            match c {{").unwrap();
+    writeln!(out, "                | Notarization(nc) => if (nc.proposal.view == view) Some(nc.signatures.size()) else acc").unwrap();
+    writeln!(out, "                | _ => acc").unwrap();
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "        )").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // replica_has_nullification
     writeln!(
         out,
         "    def replica_has_nullification(id: ReplicaId, view: ViewNumber): bool = {{"
@@ -1258,28 +1258,28 @@ fn write_reporter_helpers(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        "        is_some(replica_state.get(id).nullification.get(view))"
+        "        store_certificates.get(id).exists(c => is_nullification_cert(c) and cert_view(c) == view)"
     )
     .unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // replica_nullification_signature_count
     writeln!(out, "    def replica_nullification_signature_count(id: ReplicaId, view: ViewNumber): Option[int] = {{").unwrap();
     writeln!(
         out,
-        "        match (replica_state.get(id).nullification.get(view)) {{"
+        "        store_certificates.get(id).fold(None, (acc, c) =>"
     )
     .unwrap();
-    writeln!(
-        out,
-        "            | Some(cert) => Some(cert.signatures.size())"
-    )
-    .unwrap();
-    writeln!(out, "            | None => None").unwrap();
-    writeln!(out, "        }}").unwrap();
+    writeln!(out, "            match c {{").unwrap();
+    writeln!(out, "                | Nullification(nc) => if (nc.view == view) Some(nc.signatures.size()) else acc").unwrap();
+    writeln!(out, "                | _ => acc").unwrap();
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "        )").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // replica_has_finalization
     writeln!(
         out,
         "    def replica_has_finalization(id: ReplicaId, view: ViewNumber): bool = {{"
@@ -1287,44 +1287,43 @@ fn write_reporter_helpers(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        "        is_some(replica_state.get(id).finalization.get(view))"
+        "        store_certificates.get(id).exists(c => is_finalization_cert(c) and cert_view(c) == view)"
     )
     .unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // replica_finalization_payload
     writeln!(out, "    def replica_finalization_payload(id: ReplicaId, view: ViewNumber): Option[Payload] = {{").unwrap();
     writeln!(
         out,
-        "        match (replica_state.get(id).finalization.get(view)) {{"
+        "        store_certificates.get(id).fold(None, (acc, c) =>"
     )
     .unwrap();
-    writeln!(
-        out,
-        "            | Some(cert) => Some(cert.proposal.payload)"
-    )
-    .unwrap();
-    writeln!(out, "            | None => None").unwrap();
-    writeln!(out, "        }}").unwrap();
+    writeln!(out, "            match c {{").unwrap();
+    writeln!(out, "                | Finalization(fc) => if (fc.proposal.view == view) Some(fc.proposal.payload) else acc").unwrap();
+    writeln!(out, "                | _ => acc").unwrap();
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "        )").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // replica_finalization_signature_count
     writeln!(out, "    def replica_finalization_signature_count(id: ReplicaId, view: ViewNumber): Option[int] = {{").unwrap();
     writeln!(
         out,
-        "        match (replica_state.get(id).finalization.get(view)) {{"
+        "        store_certificates.get(id).fold(None, (acc, c) =>"
     )
     .unwrap();
-    writeln!(
-        out,
-        "            | Some(cert) => Some(cert.signatures.size())"
-    )
-    .unwrap();
-    writeln!(out, "            | None => None").unwrap();
-    writeln!(out, "        }}").unwrap();
+    writeln!(out, "            match c {{").unwrap();
+    writeln!(out, "                | Finalization(fc) => if (fc.proposal.view == view) Some(fc.signatures.size()) else acc").unwrap();
+    writeln!(out, "                | _ => acc").unwrap();
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "        )").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // replica_observed_notarize_signers (unchanged - uses vote stores)
     writeln!(out, "    def replica_observed_notarize_signers(id: ReplicaId, view: ViewNumber): Set[Signature] = {{").unwrap();
     writeln!(out, "        val stored = store_notarize_votes.get(id).filter(v => v.proposal.view == view).map(v => v.sig)").unwrap();
     writeln!(out, "        val local = sent_notarize_votes.filter(v => and {{ v.sig == sig_of(id), v.proposal.view == view }}).map(v => v.sig)").unwrap();
@@ -1332,6 +1331,7 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // replica_observed_nullify_signers (unchanged - uses vote stores)
     writeln!(out, "    def replica_observed_nullify_signers(id: ReplicaId, view: ViewNumber): Set[Signature] = {{").unwrap();
     writeln!(out, "        val stored = store_nullify_votes.get(id).filter(v => v.view == view).map(v => v.sig)").unwrap();
     writeln!(out, "        val local = sent_nullify_votes.filter(v => and {{ v.sig == sig_of(id), v.view == view }}).map(v => v.sig)").unwrap();
@@ -1339,6 +1339,7 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // replica_observed_finalize_signers (unchanged - uses vote stores)
     writeln!(out, "    def replica_observed_finalize_signers(id: ReplicaId, view: ViewNumber): Set[Signature] = {{").unwrap();
     writeln!(out, "        val stored = store_finalize_votes.get(id).filter(v => v.proposal.view == view).map(v => v.sig)").unwrap();
     writeln!(out, "        val local = sent_finalize_votes.filter(v => and {{ v.sig == sig_of(id), v.proposal.view == view }}).map(v => v.sig)").unwrap();
@@ -1346,6 +1347,7 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // replica_is_certified
     writeln!(
         out,
         "    def replica_is_certified(id: ReplicaId, view: ViewNumber): bool = {{"
@@ -1359,14 +1361,22 @@ fn write_reporter_helpers(out: &mut String) {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
+    // replica_max_finalized_view
     writeln!(
         out,
         "    def replica_max_finalized_view(id: ReplicaId): ViewNumber = {{"
     )
     .unwrap();
-    writeln!(out, "        VIEWS.fold(GENESIS_VIEW, (acc, view) => {{").unwrap();
-    writeln!(out, "            if (and {{ is_some(replica_state.get(id).finalization.get(view)), view > acc }}) view else acc").unwrap();
-    writeln!(out, "        }})").unwrap();
+    writeln!(
+        out,
+        "        store_certificates.get(id).fold(GENESIS_VIEW, (acc, c) =>"
+    )
+    .unwrap();
+    writeln!(out, "            match c {{").unwrap();
+    writeln!(out, "                | Finalization(fc) => if (fc.proposal.view > acc) fc.proposal.view else acc").unwrap();
+    writeln!(out, "                | _ => acc").unwrap();
+    writeln!(out, "            }}").unwrap();
+    writeln!(out, "        )").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 }
@@ -1382,7 +1392,6 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
     writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
     writeln!(out, "        store_certificates' = store_certificates,").unwrap();
-    writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
     writeln!(
         out,
         "        ghost_committed_blocks' = ghost_committed_blocks,"
@@ -1413,7 +1422,6 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
     writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
     writeln!(out, "        store_certificates' = store_certificates,").unwrap();
-    writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
     writeln!(
         out,
         "        ghost_committed_blocks' = ghost_committed_blocks,"
@@ -1444,7 +1452,6 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
     writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
     writeln!(out, "        store_certificates' = store_certificates,").unwrap();
-    writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
     writeln!(
         out,
         "        ghost_committed_blocks' = ghost_committed_blocks,"
@@ -1475,7 +1482,6 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
     writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
     writeln!(out, "        store_certificates' = store_certificates,").unwrap();
-    writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
     writeln!(
         out,
         "        ghost_committed_blocks' = ghost_committed_blocks,"
@@ -1548,7 +1554,6 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
     writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
     writeln!(out, "        store_certificates' = store_certificates,").unwrap();
-    writeln!(out, "        ghost_proposal' = ghost_proposal,").unwrap();
     writeln!(
         out,
         "        ghost_committed_blocks' = ghost_committed_blocks,"

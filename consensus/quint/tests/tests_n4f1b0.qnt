@@ -64,7 +64,9 @@ module tests {
             .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n2"))
             .then(all {
                 assert(store_certificates.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b0"))),
-                assert(option_has(replica_state.get("n0").notarization.get(FIRST_VIEW), n => n.proposal == proposal)),
+                assert(store_certificates.get("n0").exists(c =>
+                    is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_proposal(c) == Some(proposal)
+                )),
                 assert(sent_finalize_votes.exists(v => v.sig == "n0" and v.proposal.view == FIRST_VIEW and v.proposal.payload == "val_b0")),
                 assert(sent_finalize_votes.exists(v => v.sig == "n1" and v.proposal.view == FIRST_VIEW and v.proposal.payload == "val_b0")),
                 assert(sent_finalize_votes.exists(v => v.sig == "n2" and v.proposal.view == FIRST_VIEW and v.proposal.payload == "val_b0")),
@@ -80,7 +82,9 @@ module tests {
             .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW,  "n2"))
             .then(all {
                 assert(store_certificates.get("n0").exists(c => cert_kind(c) == FinalizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b0"))),
-                assert(option_has(replica_state.get("n0").finalization.get(FIRST_VIEW), f => f.proposal == proposal)),
+                assert(store_certificates.get("n0").exists(c =>
+                    is_finalization_cert(c) and cert_view(c) == FIRST_VIEW and cert_proposal(c) == Some(proposal)
+                )),
                 assert(replica_state.get("n0").last_finalized == FIRST_VIEW),
                 assert(ghost_committed_blocks.get("n0").length() == 1),
                 assert(ghost_committed_blocks.get("n0")[0] == "val_b0"),
@@ -218,7 +222,6 @@ module tests {
             .then(replica_receives_nullify_vote("n0", FIRST_VIEW, "n2"))
             .then(all {
                 assert(store_certificates.get("n0").exists(c => cert_kind(c) == NullificationKind and cert_view(c) == FIRST_VIEW)),
-                assert(option_has(replica_state.get("n0").nullification.get(FIRST_VIEW), n => n.view == FIRST_VIEW)),
                 assert(replica_state.get("n0").view == 2),
                 unchanged_all,
             })
@@ -648,7 +651,6 @@ module tests {
         store_nullify_votes' = store_nullify_votes,
         store_finalize_votes' = store_finalize_votes,
         store_certificates' = store_certificates,
-        ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state,
@@ -689,11 +691,15 @@ module tests {
             .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
             // n0 receives n2 (3rd, aggregation, cert formed with {n0, n1, n2})
             .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
-            // n0 receives n3 (4th, aggregation, remember_certificate keeps first cert)
+            // n0 receives n3 (4th, aggregation, store keeps first cert)
             .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n3"))
             .then(all {
-                assert(option_has(replica_state.get("n0").notarization.get(FIRST_VIEW), n => n.proposal == proposal)),
-                assert(option_has(replica_state.get("n0").notarization.get(FIRST_VIEW), n => n.signatures.size() == Q)),
+                assert(store_certificates.get("n0").exists(c =>
+                    is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_proposal(c) == Some(proposal)
+                )),
+                assert(store_certificates.get("n0").exists(c =>
+                    is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_signatures(c).size() == Q
+                )),
                 unchanged_all,
             })
     }
@@ -723,9 +729,44 @@ module tests {
             // n2 receives n0's vote (4th, aggregation — first cert formed with all 4 votes)
             .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
             .then(all {
-                assert(option_has(replica_state.get("n2").notarization.get(FIRST_VIEW), n => n.proposal == proposal)),
+                assert(store_certificates.get("n2").exists(c =>
+                    is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_proposal(c) == Some(proposal)
+                )),
                 // BUG: cert has 4 signatures instead of Q=3
-                assert(option_has(replica_state.get("n2").notarization.get(FIRST_VIEW), n => n.signatures.size() == Q)),
+                assert(store_certificates.get("n2").exists(c =>
+                    is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_signatures(c).size() == Q
+                )),
+                unchanged_all,
+            })
+    }
+
+    // Leader (n2) != self (n3). Two aggregation votes arrive before the
+    // leader's vote. The proposal branch adds both the leader vote and
+    // own vote, so cert must still have exactly Q signatures.
+    run notarizationCertHasQSignaturesLeaderDifferentTest = {
+        val proposal = {
+            payload: "val_b0",
+            view: FIRST_VIEW,
+            parent: GENESIS_VIEW,
+        }
+
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n2", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
+            CERTIFY_ALL_TRUE
+        )
+            // n3 receives n0's vote (1st, aggregation, no cert)
+            .then(replica_receives_notarize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            // n3 receives n1's vote (2nd, aggregation, no cert)
+            .then(replica_receives_notarize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            // n3 receives n2's leader vote (proposal branch: adds leader + own = 4 votes total)
+            .then(replica_receives_notarize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(all {
+                assert(store_certificates.get("n3").exists(c =>
+                    is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_proposal(c) == Some(proposal)
+                )),
+                assert(store_certificates.get("n3").exists(c =>
+                    is_notarization_cert(c) and cert_view(c) == FIRST_VIEW and cert_signatures(c).size() == Q
+                )),
                 unchanged_all,
             })
     }
@@ -740,7 +781,6 @@ module tests {
         store_nullify_votes' = store_nullify_votes,
         store_finalize_votes' = store_finalize_votes,
         store_certificates' = store_certificates,
-        ghost_proposal' = ghost_proposal,
         ghost_committed_blocks' = ghost_committed_blocks,
         leader' = leader,
         replica_state' = replica_state,

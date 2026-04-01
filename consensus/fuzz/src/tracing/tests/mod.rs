@@ -186,3 +186,13 @@ fn test_encoder_roundtrip_b12ca0d39b9286468f2ce0d791750bda4b6d3f37() {
 fn test_encoder_roundtrip_7340e23239ef037c7208177fc9b4c39d05d48eb1() {
     run_encoder_roundtrip_json("7340e23239ef037c7208177fc9b4c39d05d48eb1");
 }
+
+#[test]
+fn test_encoder_roundtrip_35d8bbc9bac04cc106d4c9e32f8f4c0985186069() {
+    run_encoder_roundtrip_json("35d8bbc9bac04cc106d4c9e32f8f4c0985186069");
+}
+
+#[test]
+fn test_encoder_roundtrip_c72bd2b1346cedb1e287ab6c217fd1c9b1837068() {
+    run_encoder_roundtrip_json("c72bd2b1346cedb1e287ab6c217fd1c9b1837068");
+}
