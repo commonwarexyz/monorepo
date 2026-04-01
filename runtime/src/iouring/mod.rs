@@ -619,29 +619,29 @@ impl IoUringLoop {
     /// producer channel disconnected.
     fn fill_submission_queue(&mut self, ring: &mut IoUring) -> Option<bool> {
         let mut drained = 0u64;
-        let mut sq = ring.submission();
+        let mut submission_queue = ring.submission();
         let mut wheel_aligned = self.timeout_wheel.next_deadline().is_some();
 
         // Reinstall wake poll only when a prior wake CQE indicated multishot
         // termination. Otherwise keep the existing poll registration.
         if std::mem::take(&mut self.wake_rearm_needed) {
-            self.waker.reinstall(&mut sq);
+            self.waker.reinstall(&mut submission_queue);
         }
 
         // Stage pending cancel SQEs first so timed-out requests are canceled promptly.
-        if self.stage_cancellations(&mut sq) {
+        if self.stage_cancellations(&mut submission_queue) {
             // If cancels alone filled the SQ, submit them first.
             return Some(true);
         }
 
         // Requeued work already owns waiter capacity, so restage it before
         // admitting fresh channel requests.
-        if self.stage_ready_requests(&mut sq) {
+        if self.stage_ready_requests(&mut submission_queue) {
             return Some(true);
         }
 
         // Remaining SQ capacity can now be used to admit new requests.
-        while !sq.is_full() {
+        while !submission_queue.is_full() {
             // Active waiter capacity is bounded by `cfg.size`.
             if self.waiters.len() == self.cfg.size as usize {
                 break;
@@ -667,14 +667,14 @@ impl IoUringLoop {
             }
 
             if let Some(waiter_id) = self.admit_request(request) {
-                self.stage_request(waiter_id, &mut sq);
+                self.stage_request(waiter_id, &mut submission_queue);
             }
         }
 
         // Track which submitted sequence has been consumed.
         self.processed_seq = self.processed_seq.wrapping_add(drained) & SUBMISSION_SEQ_MASK;
 
-        let at_sq_capacity = sq.is_full();
+        let at_sq_capacity = submission_queue.is_full();
         let at_waiter_capacity = self.waiters.len() == self.cfg.size as usize;
         let has_pending_work = !self.ready_queue.is_empty() || !self.pending_cancels.is_empty();
 
