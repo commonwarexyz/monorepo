@@ -80,7 +80,9 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
 
         loop {
             // Listen to recovered certificates
-            let (_, certificate) = certificate_receiver.recv().await.unwrap();
+            let Ok((_, certificate)) = certificate_receiver.recv().await else {
+                break;
+            };
 
             // Parse certificate
             let (view, parent, certificate) = match Certificate::<S, H::Digest>::decode_cfg(
@@ -151,14 +153,17 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
 
             // Notarize proposal A and send it to victim only
             let notarize_a = Notarize::<S, _>::sign(&self.scheme, proposal_a).expect("sign failed");
-            vote_sender
+            if vote_sender
                 .send(
                     Recipients::One(victim.clone()),
                     Vote::Notarize(notarize_a).encode(),
                     true,
                 )
                 .await
-                .expect("send failed");
+                .is_err()
+            {
+                break;
+            }
 
             // Notarize proposal B and send it to everyone else
             let notarize_b = Notarize::<S, _>::sign(&self.scheme, proposal_b).expect("sign failed");
@@ -172,14 +177,17 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: ElectorConfig<S>, H: Has
                 })
                 .map(|(_, key)| key.clone())
                 .collect();
-            vote_sender
+            if vote_sender
                 .send(
                     Recipients::Some(non_victims),
                     Vote::Notarize(notarize_b).encode(),
                     true,
                 )
                 .await
-                .expect("send failed");
+                .is_err()
+            {
+                break;
+            }
         }
     }
 }

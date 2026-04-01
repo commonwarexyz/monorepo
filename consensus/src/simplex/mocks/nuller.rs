@@ -57,13 +57,17 @@ where
                     // Nullify
                     let n = Nullify::sign(&self.scheme, notarize.round()).unwrap();
                     let msg = Vote::<S, H::Digest>::Nullify(n).encode();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
+                    if sender.send(Recipients::All, msg, true).await.is_err() {
+                        break;
+                    }
 
                     // Finalize digest
                     let proposal = notarize.proposal;
                     let f = Finalize::<S, _>::sign(&self.scheme, proposal).unwrap();
                     let msg = Vote::Finalize(f).encode();
-                    sender.send(Recipients::All, msg, true).await.unwrap();
+                    if sender.send(Recipients::All, msg, true).await.is_err() {
+                        break;
+                    }
                 }
                 _ => continue,
             }
