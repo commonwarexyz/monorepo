@@ -24,6 +24,12 @@
 //! - Bootstrap then transitions to processing mode via
 //!   [`ApplicationMailbox::sync_complete`] at marshal's processed anchor.
 //!
+//! If the marshal's processed block is missing from its archive (the node
+//! crashed after state sync raised the floor, but the local marshal had
+//! not yet finalized the block at that height), bootstrap suspends until
+//! the marshal backfills the block through its normal consensus flow.
+//! Once the block arrives, reconciliation proceeds as normal.
+//!
 //! ## Fresh start (`sync_done = false`, [`Mode::MarshalSync`])
 //!
 //! No sync target was provided. Databases are initialized, the genesis block
@@ -77,6 +83,8 @@ use commonware_storage::metadata::{Config as MetadataConfig, Metadata};
 use commonware_utils::{channel::ring, sequence::U64};
 use prometheus_client::metrics::gauge::Gauge;
 use rand::Rng;
+use std::time::Duration;
+use tracing::warn;
 
 /// Durable metadata key for "state sync completed".
 const SYNC_DONE_KEY: U64 = U64::new(0);
@@ -225,9 +233,38 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
 
         let genesis = application.genesis().await;
         let databases = A::Databases::init(context.clone(), db_config).await;
-        let db_targets = databases.committed_targets().await;
+
+        // After a crash following state sync, the block at the floor height
+        // may not yet be in the marshal's archive: `set_floor` advanced
+        // `processed_height`, but the local marshal had not finalized that
+        // block through its own consensus flow before the crash. If the
+        // block is missing, hint the marshal to fetch it from the network,
+        // then poll until it arrives.
         let (processed_anchor, processed_targets) =
-            processed_anchor_targets::<E, A, S, V>(&marshal, &genesis).await;
+            match processed_anchor_targets::<E, A, S, V>(&marshal, &genesis).await {
+                Some(result) => result,
+                None => {
+                    let processed_height = marshal
+                        .get_processed_height()
+                        .await
+                        .expect("state sync bootstrap must fetch marshal processed height");
+                    warn!(
+                        height = processed_height.get(),
+                        "processed block not yet in marshal archive, hinting fetch",
+                    );
+                    marshal.hint_finalized(processed_height, None).await;
+                    loop {
+                        context.sleep(Duration::from_millis(500)).await;
+                        if let Some(result) =
+                            processed_anchor_targets::<E, A, S, V>(&marshal, &genesis).await
+                        {
+                            break result;
+                        }
+                    }
+                }
+            };
+
+        let db_targets = databases.committed_targets().await;
         if db_targets != processed_targets {
             databases.rewind_to_targets(processed_targets.clone()).await;
             let rewound_targets = databases.committed_targets().await;
@@ -316,14 +353,20 @@ pub(super) async fn bootstrap<E, A, S, V, R>(
 
 /// Load marshal's current processed anchor and derived sync targets.
 ///
+/// Returns `None` when the marshal's processed height is non-zero but the
+/// block is missing from the archive. This can happen after a crash
+/// following state sync: [`MarshalMailbox::set_floor`] advances the
+/// marshal's processed height, but the block at the floor may not yet
+/// have been finalized by the local marshal (it was only available to
+/// the bootstrapper that seeded the sync).
+///
 /// # Panics
 ///
 /// - Marshal does not return its processed height.
-/// - Marshal does not have the block at its own processed height.
 async fn processed_anchor_targets<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
     genesis: &A::Block,
-) -> (Anchor<BlockDigest<A, E>>, SyncTargets<A, E>)
+) -> Option<(Anchor<BlockDigest<A, E>>, SyncTargets<A, E>)>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -335,31 +378,25 @@ where
         .await
         .expect("state sync bootstrap must fetch marshal processed height");
     if processed_height.is_zero() {
-        return (
+        return Some((
             Anchor {
                 height: Height::zero(),
                 digest: genesis.digest(),
             },
             A::sync_targets(genesis),
-        );
+        ));
     }
 
     let block = marshal
         .get_block(Identifier::Height(processed_height))
         .await
-        .map(V::into_inner)
-        .unwrap_or_else(|| {
-            panic!(
-                "state sync bootstrap missing processed block at height {}",
-                processed_height.get()
-            )
-        });
+        .map(V::into_inner)?;
 
-    (
+    Some((
         Anchor {
             height: processed_height,
             digest: block.digest(),
         },
         A::sync_targets(&block),
-    )
+    ))
 }

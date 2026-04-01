@@ -67,8 +67,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     HintFinalized {
         /// The height of the finalization to fetch.
         height: Height,
-        /// Target peers to fetch from. Added to any existing targets for this height.
-        targets: NonEmptyVec<S::PublicKey>,
+        /// Target peers to fetch from. Added to any existing targets for this
+        /// height. When `None`, the resolver may ask any peer.
+        targets: Option<NonEmptyVec<S::PublicKey>>,
     },
     /// A request to subscribe to a block by its digest.
     SubscribeByDigest {
@@ -214,10 +215,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// This method will request the finalization from the network via the resolver
     /// if it is not available locally.
     ///
-    /// Targets are required because this is typically called when a peer claims to be
-    /// ahead. By targeting only those peers, we limit who we ask. If a target returns
-    /// invalid data, they will be blocked by the resolver. If targets don't respond
-    /// or return "no data", they effectively rate-limit themselves.
+    /// When `targets` is `Some`, only those peers are tried. This is useful when
+    /// a specific peer claims to be ahead. If a target returns invalid data, it
+    /// will be blocked by the resolver.
+    ///
+    /// When `targets` is `None`, the resolver may ask any peer.
     ///
     /// Calling this multiple times for the same height with different targets will
     /// add to the target set if there is an ongoing fetch, allowing more peers to be tried.
@@ -228,7 +230,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// The height must be covered by both the epocher and the provider. If the
     /// epocher cannot map the height to an epoch, or the provider cannot supply
     /// a scheme for that epoch, the hint is silently dropped.
-    pub async fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
+    pub async fn hint_finalized(&self, height: Height, targets: Option<NonEmptyVec<S::PublicKey>>) {
         self.sender
             .send_lossy(Message::HintFinalized { height, targets })
             .await;

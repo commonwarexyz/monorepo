@@ -3281,7 +3281,10 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
         // Validator 1: hint that block 5 is finalized, targeting validator 0
         handle1
             .mailbox
-            .hint_finalized(Height::new(5), NonEmptyVec::new(participants[0].clone()))
+            .hint_finalized(
+                Height::new(5),
+                Some(NonEmptyVec::new(participants[0].clone())),
+            )
             .await;
 
         // Wait for the fetch to complete
