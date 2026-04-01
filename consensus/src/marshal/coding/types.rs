@@ -686,6 +686,34 @@ mod test {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_shard_encode_with_pool_matches_encode() {
+        use bytes::Buf;
+        use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool = context.network_buffer_pool();
+
+            const CONFIG: CodingConfig = CodingConfig {
+                minimum_shards: NZU16!(1),
+                extra_shards: NZU16!(2),
+            };
+
+            let (commitment, shards) =
+                RS::encode(&CONFIG, b"pool encoding test".as_slice(), &Sequential).unwrap();
+            let commitment =
+                Commitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
+            let shard = RShard::new(commitment, 0, shards.into_iter().next().unwrap());
+
+            let encoded = shard.encode();
+            let mut encoded_pool = shard.encode_with_pool(pool);
+            let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
+            encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
+            assert_eq!(encoded_pool_bytes, encoded.as_ref());
+        });
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;

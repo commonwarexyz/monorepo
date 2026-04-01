@@ -206,6 +206,47 @@ mod tests {
         assert_eq!(original, decoded);
     }
 
+    #[test]
+    fn test_message_encode_with_pool_matches_encode() {
+        use bytes::Buf;
+        use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool = context.network_buffer_pool();
+
+            let msg = Message {
+                id: 42,
+                payload: Payload::<MockKey>::Response(Bytes::from("hello world")),
+            };
+
+            let encoded = msg.encode();
+            let mut encoded_pool = msg.encode_with_pool(pool);
+            let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
+            encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
+            assert_eq!(encoded_pool_bytes, encoded.as_ref());
+        });
+    }
+
+    #[test]
+    fn test_payload_response_encode_with_pool_matches_encode() {
+        use bytes::Buf;
+        use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool = context.network_buffer_pool();
+
+            let payload = Payload::<MockKey>::Response(Bytes::from("response data"));
+
+            let encoded = payload.encode();
+            let mut encoded_pool = payload.encode_with_pool(pool);
+            let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
+            encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
+            assert_eq!(encoded_pool_bytes, encoded.as_ref());
+        });
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;

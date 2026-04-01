@@ -47,7 +47,8 @@ pub trait Write {
     fn write(&self, buf: &mut impl BufMut);
 
     /// Writes to a [BufsMut], allowing zero-copy for [Bytes] fields via
-    /// [`BufsMut::push`]. Defaults to [Write::write].
+    /// [`BufsMut::push`]. Must encode to the same format as [Write::write].
+    /// Defaults to [Write::write].
     fn write_bufs(&self, buf: &mut impl BufsMut) {
         self.write(buf);
     }

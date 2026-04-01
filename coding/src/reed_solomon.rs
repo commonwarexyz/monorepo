@@ -1072,6 +1072,28 @@ mod tests {
         .is_err())
     }
 
+    #[test]
+    fn test_chunk_encode_with_pool_matches_encode() {
+        use bytes::Buf;
+        use commonware_codec::Encode;
+        use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pool = context.network_buffer_pool();
+
+            let data = b"pool encoding test";
+            let (_root, chunks) = encode::<Sha256, _>(5, 3, data.as_slice(), &STRATEGY).unwrap();
+            let chunk = &chunks[0];
+
+            let encoded = chunk.encode();
+            let mut encoded_pool = chunk.encode_with_pool(pool);
+            let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
+            encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
+            assert_eq!(encoded_pool_bytes, encoded.as_ref());
+        });
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
