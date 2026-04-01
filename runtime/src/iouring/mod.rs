@@ -451,7 +451,6 @@ impl IoUringLoop {
     /// a timeout error instead of issuing a follow-up SQE.
     fn stage_request(&mut self, waiter_id: WaiterId, sq: &mut SubmissionQueue<'_>) {
         match self.waiters.stage(waiter_id) {
-            StageOutcome::Ignore => {}
             StageOutcome::Timeout(request) => request.timeout(),
             StageOutcome::Submit(sqe) => {
                 // SAFETY:
@@ -608,7 +607,7 @@ impl IoUringLoop {
         }
 
         match self.waiters.on_completion(user_data, cqe.result()) {
-            CompletionOutcome::Ignore => {}
+            CompletionOutcome::Cancel => {}
             CompletionOutcome::Requeue(waiter_id) => {
                 // Request needs another SQE. Add it to the ready queue.
                 self.ready_queue.push_back(waiter_id);
@@ -1138,15 +1137,17 @@ mod tests {
     }
 
     #[test]
-    fn test_stage_request_ignores_stale_ready_queue_entry() {
-        // Verify stale ready-queue ids are ignored if the slot was already
-        // removed and reused before the requeue entry is revisited.
+    fn test_stage_request_panics_on_stale_ready_queue_entry() {
+        // A stale ready-queue id should be treated as an internal logic error:
+        // once a waiter is queued for restaging, no production path should
+        // remove and reuse that slot before the queue entry is revisited.
         let cfg = Config::default();
         let mut registry = Registry::default();
         let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
         let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
 
-        // Create and remove one waiter so the ready queue can later point at a stale generation.
+        // Create and complete one waiter so the ready queue can later point at
+        // a stale generation.
         let (sock_left, _sock_right) = UnixStream::pair().unwrap();
         // SAFETY: sock_left is a valid fd that we own.
         let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
@@ -1158,10 +1159,14 @@ mod tests {
             })),
             None,
         );
-        let _ = iouring
-            .waiters
-            .remove(stale)
-            .expect("missing original waiter");
+        assert!(matches!(
+            iouring.waiters.stage(stale),
+            StageOutcome::Submit(_)
+        ));
+        match iouring.waiters.on_completion(stale.user_data(), 0) {
+            CompletionOutcome::Complete { request, .. } => request.finish(),
+            _ => panic!("sync waiter should complete immediately"),
+        }
 
         // Reuse the same slot with a new generation to prove `stage_request`
         // matches on the full waiter id, not just the slot index.
@@ -1179,13 +1184,11 @@ mod tests {
         assert_eq!(reused.index(), stale.index());
         assert_ne!(reused, stale);
 
-        {
+        let stale_ready = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut sq = ring.submission();
             iouring.stage_request(stale, &mut sq);
-        }
-
-        // The stale entry should be ignored without disturbing the live waiter.
-        assert_eq!(ring.submission().len(), 0);
+        }));
+        assert!(stale_ready.is_err());
         assert!(!iouring.waiters.is_in_flight(reused));
     }
 
@@ -1300,7 +1303,7 @@ mod tests {
             iouring
                 .waiters
                 .on_completion(slot_index.cancel_user_data(), -libc::ECANCELED),
-            CompletionOutcome::Ignore
+            CompletionOutcome::Cancel
         ));
 
         let (_, result) = futures::executor::block_on(rx).expect("missing completion");
@@ -1380,7 +1383,7 @@ mod tests {
             iouring
                 .waiters
                 .on_completion(waiter_id.cancel_user_data(), -libc::ECANCELED),
-            CompletionOutcome::Ignore
+            CompletionOutcome::Cancel
         ));
 
         let (_buf, result) = futures::executor::block_on(rx).expect("missing completion");
@@ -2000,7 +2003,7 @@ mod tests {
 
         // Ready-queue staging should retire the waiter locally and leave the SQ untouched.
         assert!(!at_capacity);
-        assert!(iouring.waiters.remove(waiter_id).is_none());
+        assert!(iouring.waiters.is_empty());
         assert_eq!(ring.submission().len(), 0);
         let result = rx.await.expect("missing timeout completion");
         assert!(matches!(result, Err(crate::Error::Timeout)));

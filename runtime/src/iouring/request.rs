@@ -199,14 +199,6 @@ const fn classify_result(result: i32, state: WaiterState) -> RawResult {
     }
 }
 
-/// Action the loop takes after evaluating a CQE against a request.
-pub enum CqeAction {
-    /// Request is terminal. Remove from waiter table and deliver result.
-    Complete,
-    /// Request needs another SQE. Enqueue in the ready queue.
-    Requeue,
-}
-
 /// In-flight request state machine stored in the waiter table.
 ///
 /// Each variant owns its completion sender, all buffers and FDs needed by the
@@ -302,9 +294,9 @@ impl ActiveRequest {
 
     /// Evaluate a CQE result against this request's progress and state.
     ///
-    /// Returns [CqeAction::Complete] when the request reached a terminal
-    /// state, or [CqeAction::Requeue] when another SQE is needed.
-    pub fn on_cqe(&mut self, state: WaiterState, result: i32) -> CqeAction {
+    /// Returns `true` when the request reached a terminal state, or `false`
+    /// when another SQE is needed.
+    pub fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
         match self {
             Self::Send(s) => s.on_cqe(state, result),
             Self::Recv(r) => r.on_cqe(state, result),
@@ -403,34 +395,34 @@ impl ActiveSend {
 
     /// Classify one send CQE and decide whether the logical request completes
     /// or needs another SQE.
-    fn on_cqe(&mut self, state: WaiterState, result: i32) -> CqeAction {
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
         match classify_result(result, state) {
             RawResult::Retryable if matches!(state, WaiterState::CancelRequested) => {
                 self.result = Some(Err(Error::Timeout));
-                CqeAction::Complete
+                true
             }
-            RawResult::Retryable => CqeAction::Requeue,
+            RawResult::Retryable => false,
             RawResult::TimeoutCancel => {
                 self.result = Some(Err(Error::Timeout));
-                CqeAction::Complete
+                true
             }
             RawResult::HardError(_) | RawResult::Zero => {
                 self.result = Some(Err(Error::SendFailed));
-                CqeAction::Complete
+                true
             }
             RawResult::Positive(n) => {
                 self.write.advance(n);
                 if self.write.is_complete() {
                     self.result = Some(Ok(()));
-                    CqeAction::Complete
+                    true
                 } else if matches!(state, WaiterState::CancelRequested) {
                     // Any send error after partial progress means some prefix
                     // of the frame may already be on the wire. Callers must
                     // drop the connection rather than retrying on this sink.
                     self.result = Some(Err(Error::Timeout));
-                    CqeAction::Complete
+                    true
                 } else {
-                    CqeAction::Requeue
+                    false
                 }
             }
         }
@@ -486,20 +478,20 @@ impl ActiveRecv {
 
     /// Classify one recv CQE and decide whether the logical request completes
     /// or needs another SQE.
-    fn on_cqe(&mut self, state: WaiterState, result: i32) -> CqeAction {
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
         match classify_result(result, state) {
             RawResult::Retryable if matches!(state, WaiterState::CancelRequested) => {
                 self.result = Some(Err(Error::Timeout));
-                CqeAction::Complete
+                true
             }
-            RawResult::Retryable => CqeAction::Requeue,
+            RawResult::Retryable => false,
             RawResult::TimeoutCancel => {
                 self.result = Some(Err(Error::Timeout));
-                CqeAction::Complete
+                true
             }
             RawResult::HardError(_) | RawResult::Zero => {
                 self.result = Some(Err(Error::RecvFailed));
-                CqeAction::Complete
+                true
             }
             RawResult::Positive(n) => {
                 let remaining = self.len - self.offset;
@@ -510,12 +502,12 @@ impl ActiveRecv {
                 self.offset += n;
                 if !self.exact || self.offset >= self.len {
                     self.result = Some(Ok(self.offset));
-                    CqeAction::Complete
+                    true
                 } else if matches!(state, WaiterState::CancelRequested) {
                     self.result = Some(Err(Error::Timeout));
-                    CqeAction::Complete
+                    true
                 } else {
-                    CqeAction::Requeue
+                    false
                 }
             }
         }
@@ -572,16 +564,16 @@ impl ActiveReadAt {
 
     /// Classify one read CQE and decide whether the logical request completes
     /// or needs another SQE.
-    fn on_cqe(&mut self, state: WaiterState, result: i32) -> CqeAction {
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
         match classify_result(result, state) {
-            RawResult::Retryable => CqeAction::Requeue,
+            RawResult::Retryable => false,
             RawResult::TimeoutCancel | RawResult::HardError(_) => {
                 self.result = Some(Err(Error::ReadFailed));
-                CqeAction::Complete
+                true
             }
             RawResult::Zero => {
                 self.result = Some(Err(Error::BlobInsufficientLength));
-                CqeAction::Complete
+                true
             }
             RawResult::Positive(n) => {
                 let remaining = self.len - self.read;
@@ -592,9 +584,9 @@ impl ActiveReadAt {
                 self.read += n;
                 if self.read >= self.len {
                     self.result = Some(Ok(()));
-                    CqeAction::Complete
+                    true
                 } else {
-                    CqeAction::Requeue
+                    false
                 }
             }
         }
@@ -665,12 +657,12 @@ impl ActiveWriteAt {
 
     /// Classify one write CQE and decide whether the logical request completes
     /// or needs another SQE.
-    fn on_cqe(&mut self, state: WaiterState, result: i32) -> CqeAction {
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
         match classify_result(result, state) {
-            RawResult::Retryable => CqeAction::Requeue,
+            RawResult::Retryable => false,
             RawResult::TimeoutCancel | RawResult::HardError(_) | RawResult::Zero => {
                 self.result = Some(Err(Error::WriteFailed));
-                CqeAction::Complete
+                true
             }
             RawResult::Positive(n) => {
                 if let WriteBuffers::Single { cursor, .. } = &self.write {
@@ -689,9 +681,9 @@ impl ActiveWriteAt {
                 }
                 if self.write.is_complete() {
                     self.result = Some(Ok(()));
-                    CqeAction::Complete
+                    true
                 } else {
-                    CqeAction::Requeue
+                    false
                 }
             }
         }
@@ -724,20 +716,20 @@ impl ActiveSync {
 
     /// Classify one fsync CQE and decide whether the logical request completes
     /// or needs another SQE.
-    fn on_cqe(&mut self, state: WaiterState, result: i32) -> CqeAction {
+    fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
         match classify_result(result, state) {
-            RawResult::Retryable => CqeAction::Requeue,
+            RawResult::Retryable => false,
             RawResult::TimeoutCancel => {
                 self.result = Some(Err(std::io::Error::from_raw_os_error(libc::ECANCELED)));
-                CqeAction::Complete
+                true
             }
             RawResult::HardError(code) => {
                 self.result = Some(Err(std::io::Error::from_raw_os_error(-code)));
-                CqeAction::Complete
+                true
             }
             RawResult::Zero | RawResult::Positive(_) => {
                 self.result = Some(Ok(()));
-                CqeAction::Complete
+                true
             }
         }
     }
@@ -765,6 +757,14 @@ mod tests {
     type RecvRx = oneshot::Receiver<(IoBufMut, Result<usize, Error>)>;
     type ReadRx = oneshot::Receiver<(IoBufMut, Result<(), Error>)>;
     type SyncRx = oneshot::Receiver<std::io::Result<()>>;
+
+    fn assert_requeue(completed: bool) {
+        assert!(!completed);
+    }
+
+    fn assert_complete(completed: bool) {
+        assert!(completed);
+    }
 
     fn active_state() -> WaiterState {
         WaiterState::Active { target_tick: None }
@@ -933,21 +933,12 @@ mod tests {
 
         // Retryable CQEs should simply requeue while the request is still active.
         let (mut request, _rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert!(matches!(
-            request.on_cqe(active_state(), -libc::EAGAIN),
-            CqeAction::Requeue
-        ));
+        assert_requeue(request.on_cqe(active_state(), -libc::EAGAIN));
 
         // Partial progress followed by a retry after timeout should resolve to timeout.
         let (mut request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert!(matches!(
-            request.on_cqe(active_state(), 2),
-            CqeAction::Requeue
-        ));
-        assert!(matches!(
-            request.on_cqe(WaiterState::CancelRequested, -libc::EAGAIN),
-            CqeAction::Complete
-        ));
+        assert_requeue(request.on_cqe(active_state(), 2));
+        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::EAGAIN));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing send result"),
@@ -956,14 +947,8 @@ mod tests {
 
         // Partial progress after timeout must also resolve to timeout rather than requeueing.
         let (mut request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert!(matches!(
-            request.on_cqe(active_state(), 2),
-            CqeAction::Requeue
-        ));
-        assert!(matches!(
-            request.on_cqe(WaiterState::CancelRequested, 1),
-            CqeAction::Complete
-        ));
+        assert_requeue(request.on_cqe(active_state(), 2));
+        assert_complete(request.on_cqe(WaiterState::CancelRequested, 1));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing partial-timeout result"),
@@ -972,10 +957,7 @@ mod tests {
 
         // A canceled send that comes back as ECANCELED should also resolve to timeout.
         let (mut request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert!(matches!(
-            request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing timeout-cancel result"),
@@ -987,14 +969,8 @@ mod tests {
         vectored.append(IoBuf::from(b"abc"));
         vectored.append(IoBuf::from(b"de"));
         let (mut request, rx) = make_send_request(vectored);
-        assert!(matches!(
-            request.on_cqe(active_state(), 3),
-            CqeAction::Requeue
-        ));
-        assert!(matches!(
-            request.on_cqe(active_state(), 2),
-            CqeAction::Complete
-        ));
+        assert_requeue(request.on_cqe(active_state(), 3));
+        assert_complete(request.on_cqe(active_state(), 2));
         request.finish();
         block_on(rx)
             .expect("missing send completion")
@@ -1002,10 +978,7 @@ mod tests {
 
         // Zero-byte and hard-error CQEs should both surface as send failures.
         let (mut request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert!(matches!(
-            request.on_cqe(active_state(), 0),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(active_state(), 0));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing zero-result completion"),
@@ -1013,10 +986,7 @@ mod tests {
         ));
 
         let (mut request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert!(matches!(
-            request.on_cqe(active_state(), -libc::EIO),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(active_state(), -libc::EIO));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing hard-error completion"),
@@ -1025,10 +995,7 @@ mod tests {
 
         // A fully successful CQE still wins even if timeout was already requested.
         let (mut request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert!(matches!(
-            request.on_cqe(WaiterState::CancelRequested, 5),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(WaiterState::CancelRequested, 5));
         request.finish();
         block_on(rx)
             .expect("missing send completion")
@@ -1041,17 +1008,11 @@ mod tests {
 
         // Retryable CQEs should requeue while the recv is still active.
         let (mut request, _rx) = make_recv_request(5, 0, true);
-        assert!(matches!(
-            request.on_cqe(active_state(), -libc::EAGAIN),
-            CqeAction::Requeue
-        ));
+        assert_requeue(request.on_cqe(active_state(), -libc::EAGAIN));
 
         // Non-exact recv should complete as soon as any positive byte count arrives.
         let (mut request, rx) = make_recv_request(5, 0, false);
-        assert!(matches!(
-            request.on_cqe(active_state(), 3),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(active_state(), 3));
         request.finish();
         let (_buf, result) = block_on(rx).expect("missing recv completion");
         assert_eq!(result.expect("recv should complete successfully"), 3);
@@ -1059,43 +1020,28 @@ mod tests {
         // Exact recv should requeue after partial progress, but timeout wins if the follow-up CQE
         // arrives after cancellation was requested.
         let (mut request, rx) = make_recv_request(5, 0, true);
-        assert!(matches!(
-            request.on_cqe(active_state(), 3),
-            CqeAction::Requeue
-        ));
-        assert!(matches!(
-            request.on_cqe(WaiterState::CancelRequested, 1),
-            CqeAction::Complete
-        ));
+        assert_requeue(request.on_cqe(active_state(), 3));
+        assert_complete(request.on_cqe(WaiterState::CancelRequested, 1));
         request.finish();
         let (_buf, result) = block_on(rx).expect("missing timeout completion");
         assert!(matches!(result, Err(Error::Timeout)));
 
         // Retryable and ECANCELED completions after timeout should both resolve to timeout.
         let (mut request, rx) = make_recv_request(5, 0, true);
-        assert!(matches!(
-            request.on_cqe(WaiterState::CancelRequested, -libc::EINTR),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::EINTR));
         request.finish();
         let (_buf, result) = block_on(rx).expect("missing retryable completion");
         assert!(matches!(result, Err(Error::Timeout)));
 
         let (mut request, rx) = make_recv_request(5, 0, true);
-        assert!(matches!(
-            request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
         request.finish();
         let (_buf, result) = block_on(rx).expect("missing timeout-cancel completion");
         assert!(matches!(result, Err(Error::Timeout)));
 
         // A fully successful CQE still wins after timeout was requested.
         let (mut request, rx) = make_recv_request(5, 0, true);
-        assert!(matches!(
-            request.on_cqe(WaiterState::CancelRequested, 5),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(WaiterState::CancelRequested, 5));
         request.finish();
         let (_buf, result) = block_on(rx).expect("missing successful completion");
         assert_eq!(result.expect("recv should complete successfully"), 5);
@@ -1110,19 +1056,13 @@ mod tests {
 
         // Zero-byte and hard-error CQEs should both surface as recv failures.
         let (mut request, rx) = make_recv_request(5, 0, true);
-        assert!(matches!(
-            request.on_cqe(active_state(), 0),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(active_state(), 0));
         request.finish();
         let (_buf, result) = block_on(rx).expect("missing zero completion");
         assert!(matches!(result, Err(Error::RecvFailed)));
 
         let (mut request, rx) = make_recv_request(5, 0, true);
-        assert!(matches!(
-            request.on_cqe(active_state(), -libc::EIO),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(active_state(), -libc::EIO));
         request.finish();
         let (_buf, result) = block_on(rx).expect("missing error completion");
         assert!(matches!(result, Err(Error::RecvFailed)));
@@ -1134,50 +1074,32 @@ mod tests {
 
         // Retryable CQEs should requeue the positioned read.
         let (mut request, _rx) = make_read_request(5);
-        assert!(matches!(
-            request.on_cqe(active_state(), -libc::EAGAIN),
-            CqeAction::Requeue
-        ));
+        assert_requeue(request.on_cqe(active_state(), -libc::EAGAIN));
 
         // Partial reads should requeue until the full logical length is satisfied.
         let (mut request, rx) = make_read_request(5);
-        assert!(matches!(
-            request.on_cqe(active_state(), 2),
-            CqeAction::Requeue
-        ));
-        assert!(matches!(
-            request.on_cqe(active_state(), 3),
-            CqeAction::Complete
-        ));
+        assert_requeue(request.on_cqe(active_state(), 2));
+        assert_complete(request.on_cqe(active_state(), 3));
         request.finish();
         let (_buf, result) = block_on(rx).expect("missing read completion");
         result.expect("read should complete successfully");
 
         // EOF and hard-error CQEs should map to the storage read error surface.
         let (mut request, rx) = make_read_request(5);
-        assert!(matches!(
-            request.on_cqe(active_state(), 0),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(active_state(), 0));
         request.finish();
         let (_buf, result) = block_on(rx).expect("missing eof completion");
         assert!(matches!(result, Err(Error::BlobInsufficientLength)));
 
         let (mut request, rx) = make_read_request(5);
-        assert!(matches!(
-            request.on_cqe(active_state(), -libc::EIO),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(active_state(), -libc::EIO));
         request.finish();
         let (_buf, result) = block_on(rx).expect("missing read failure");
         assert!(matches!(result, Err(Error::ReadFailed)));
 
         // Timeout cancellation should also surface as a read failure.
         let (mut request, rx) = make_read_request(5);
-        assert!(matches!(
-            request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
         request.finish();
         let (_buf, result) = block_on(rx).expect("missing timeout-cancel failure");
         assert!(matches!(result, Err(Error::ReadFailed)));
@@ -1189,21 +1111,12 @@ mod tests {
 
         // Retryable CQEs should requeue the positioned write.
         let (mut request, _rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert!(matches!(
-            request.on_cqe(active_state(), -libc::EAGAIN),
-            CqeAction::Requeue
-        ));
+        assert_requeue(request.on_cqe(active_state(), -libc::EAGAIN));
 
         // Single-buffer writes should track partial progress until complete.
         let (mut request, rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert!(matches!(
-            request.on_cqe(active_state(), 2),
-            CqeAction::Requeue
-        ));
-        assert!(matches!(
-            request.on_cqe(active_state(), 3),
-            CqeAction::Complete
-        ));
+        assert_requeue(request.on_cqe(active_state(), 2));
+        assert_complete(request.on_cqe(active_state(), 3));
         request.finish();
         block_on(rx)
             .expect("missing write completion")
@@ -1214,14 +1127,8 @@ mod tests {
         vectored.append(IoBuf::from(b"abc"));
         vectored.append(IoBuf::from(b"de"));
         let (mut request, rx) = make_write_request(vectored);
-        assert!(matches!(
-            request.on_cqe(active_state(), 4),
-            CqeAction::Requeue
-        ));
-        assert!(matches!(
-            request.on_cqe(active_state(), 1),
-            CqeAction::Complete
-        ));
+        assert_requeue(request.on_cqe(active_state(), 4));
+        assert_complete(request.on_cqe(active_state(), 1));
         request.finish();
         block_on(rx)
             .expect("missing vectored write completion")
@@ -1229,10 +1136,7 @@ mod tests {
 
         // Zero-byte and hard-error CQEs should surface as write failures.
         let (mut request, rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert!(matches!(
-            request.on_cqe(active_state(), 0),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(active_state(), 0));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing zero-result write"),
@@ -1240,10 +1144,7 @@ mod tests {
         ));
 
         let (mut request, rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert!(matches!(
-            request.on_cqe(active_state(), -libc::EIO),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(active_state(), -libc::EIO));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing write failure"),
@@ -1252,10 +1153,7 @@ mod tests {
 
         // Timeout cancellation should also surface as a write failure.
         let (mut request, rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert!(matches!(
-            request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing timeout-cancel write failure"),
@@ -1269,17 +1167,11 @@ mod tests {
 
         // Retryable CQEs should requeue the fsync request.
         let (mut request, _rx) = make_sync_request();
-        assert!(matches!(
-            request.on_cqe(active_state(), -libc::EINTR),
-            CqeAction::Requeue
-        ));
+        assert_requeue(request.on_cqe(active_state(), -libc::EINTR));
 
         // Timeout cancellation should preserve the kernel ECANCELED surface for sync callers.
         let (mut request, rx) = make_sync_request();
-        assert!(matches!(
-            request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
         request.finish();
         let err = block_on(rx)
             .expect("missing timeout cancel result")
@@ -1288,10 +1180,7 @@ mod tests {
 
         // Hard errors should round-trip as std::io::Error values.
         let (mut request, rx) = make_sync_request();
-        assert!(matches!(
-            request.on_cqe(active_state(), -libc::EIO),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(active_state(), -libc::EIO));
         request.finish();
         let err = block_on(rx)
             .expect("missing hard error result")
@@ -1300,20 +1189,14 @@ mod tests {
 
         // Both zero and positive CQE results should count as sync success.
         let (mut request, rx) = make_sync_request();
-        assert!(matches!(
-            request.on_cqe(active_state(), 0),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(active_state(), 0));
         request.finish();
         block_on(rx)
             .expect("missing zero-result completion")
             .expect("sync should succeed on zero");
 
         let (mut request, rx) = make_sync_request();
-        assert!(matches!(
-            request.on_cqe(active_state(), 1),
-            CqeAction::Complete
-        ));
+        assert_complete(request.on_cqe(active_state(), 1));
         request.finish();
         block_on(rx)
             .expect("missing positive-result completion")
