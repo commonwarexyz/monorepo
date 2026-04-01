@@ -2350,6 +2350,7 @@ mod tests {
     use super::*;
     use bytes::{Bytes, BytesMut};
     use commonware_codec::{types::lazy::Lazy, Decode, Encode, RangeCfg};
+    use core::ops::{Range, RangeFrom, RangeInclusive, RangeToInclusive};
     use std::collections::{BTreeMap, HashMap};
 
     fn test_pool() -> BufferPool {
@@ -4702,6 +4703,22 @@ mod tests {
     fn test_lazy_encode_with_pool_matches_encode() {
         let value = Lazy::new(Bytes::from(vec![0x44; 200]));
         assert_encode_with_pool_matches_encode(&value);
+    }
+
+    #[test]
+    fn test_range_encode_with_pool_matches_encode() {
+        let range: Range<Bytes> = Bytes::from(vec![0x10; 32])..Bytes::from(vec![0x20; 48]);
+        assert_encode_with_pool_matches_encode(&range);
+
+        let inclusive: RangeInclusive<Bytes> =
+            Bytes::from(vec![0x30; 16])..=Bytes::from(vec![0x40; 24]);
+        assert_encode_with_pool_matches_encode(&inclusive);
+
+        let from: RangeFrom<IoBuf> = IoBuf::from(vec![0x50; 40])..;
+        assert_encode_with_pool_matches_encode(&from);
+
+        let to_inclusive: RangeToInclusive<IoBuf> = ..=IoBuf::from(vec![0x60; 56]);
+        assert_encode_with_pool_matches_encode(&to_inclusive);
     }
 
     #[cfg(feature = "arbitrary")]
