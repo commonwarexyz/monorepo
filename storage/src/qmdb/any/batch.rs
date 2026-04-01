@@ -288,6 +288,7 @@ where
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
         db: &Db<F, E, C, I, H, U>,
+        include_active_collision_siblings: bool,
     ) -> Vec<Location<F>>
     where
         E: Context,
@@ -311,14 +312,15 @@ where
                         // Push the parent's uncommitted location, then scan
                         // the snapshot bucket for collision siblings (excluding
                         // this key's own stale committed location).
-                        let stale = *base_old_loc;
                         locations.push(*loc);
-                        locations.extend(
-                            db.snapshot
-                                .get(key)
-                                .copied()
-                                .filter(move |loc| Some(*loc) != stale),
-                        );
+                        if include_active_collision_siblings {
+                            locations.extend(
+                                db.snapshot
+                                    .get(key)
+                                    .copied()
+                                    .filter(move |loc| Some(*loc) != *base_old_loc),
+                            );
+                        }
                     }
                     None => {
                         locations.extend(db.snapshot.get(key).copied());
@@ -607,7 +609,7 @@ where
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O, parallelized).
-        let locations = m.gather_existing_locations(&mutations, db);
+        let locations = m.gather_existing_locations(&mutations, db, false);
         let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
         let results = try_join_all(futures).await?;
 
@@ -745,7 +747,7 @@ where
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O).
-        let locations = m.gather_existing_locations(&mutations, db);
+        let locations = m.gather_existing_locations(&mutations, db, true);
 
         // Read and unwrap Update operations (snapshot only references Updates).
         let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
