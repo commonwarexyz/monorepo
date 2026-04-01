@@ -141,6 +141,16 @@ pub enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> UnboundedMailbox<Message<C>> {
+    pub(crate) async fn subscribe(&mut self) -> PeerSetSubscription<C> {
+        self.0
+            .request(|responder| Message::Subscribe { responder })
+            .await
+            .unwrap_or_else(|| {
+                let (_, receiver) = mpsc::unbounded_channel();
+                receiver
+            })
+    }
+
     /// Send a `Connect` message to the tracker and receive the greeting info.
     ///
     /// Returns `Some(info)` if the peer is eligible, `None` if the channel was

@@ -11,7 +11,7 @@ use crate::{
     Channel,
 };
 use commonware_cryptography::Signer;
-use commonware_macros::select;
+use commonware_macros::{select, select_loop};
 use commonware_runtime::{
     spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota,
     Resolver, Spawner,
@@ -83,7 +83,11 @@ impl<
                 mailbox_size: cfg.mailbox_size,
             },
         );
-        let channels = Channels::new(messenger, cfg.max_message_size);
+        let channels = Channels::with_primary_peers(
+            messenger,
+            cfg.max_message_size,
+            crate::authenticated::primary::PrimaryPeers::default(),
+        );
 
         (
             Self {
@@ -142,6 +146,23 @@ impl<
     async fn run(self) {
         // Start tracker
         let mut tracker_task = self.tracker.start();
+        let mut primary_sync_task = self.context.with_label("primary_sync").spawn({
+            let mut tracker = self.tracker_mailbox.clone();
+            let primary_peers = self.channels.primary_peers();
+            move |context| async move {
+                let mut subscription = tracker.subscribe().await;
+                select_loop! {
+                    context,
+                    on_stopped => {},
+                    msg = subscription.recv() => {
+                        match msg {
+                            Some((_id, _new, all)) => primary_peers.replace(all),
+                            None => panic!("tracker primary peer subscription closed unexpectedly"),
+                        }
+                    },
+                }
+            }
+        });
 
         // Start router
         let mut router_task = self.router.start(self.channels);
@@ -209,6 +230,9 @@ impl<
             },
             tracker = &mut tracker_task => {
                 panic!("tracker exited unexpectedly: {tracker:?}");
+            },
+            primary_sync = &mut primary_sync_task => {
+                panic!("primary sync exited unexpectedly: {primary_sync:?}");
             },
             router = &mut router_task => {
                 panic!("router exited unexpectedly: {router:?}");

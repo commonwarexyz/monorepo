@@ -113,6 +113,16 @@ pub enum Message<C: PublicKey> {
 }
 
 impl<C: PublicKey> UnboundedMailbox<Message<C>> {
+    pub(crate) async fn subscribe(&mut self) -> PeerSetSubscription<C> {
+        self.0
+            .request(|responder| Message::Subscribe { responder })
+            .await
+            .unwrap_or_else(|| {
+                let (_, receiver) = mpsc::unbounded_channel();
+                receiver
+            })
+    }
+
     /// Send a `Connect` message to the tracker.
     pub fn connect(&mut self, public_key: C, peer: Mailbox<peer::Message>) {
         self.0.send_lossy(Message::Connect { public_key, peer });

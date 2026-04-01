@@ -1,11 +1,13 @@
 use super::{actors::Messenger, Error};
 use crate::{
+    authenticated::primary::PrimaryPeers,
     utils::limited::{CheckedSender, LimitedSender},
     Channel, Message, Recipients,
 };
 use commonware_cryptography::PublicKey;
+use commonware_macros::select;
 use commonware_runtime::{Clock, IoBufs, Quota};
-use commonware_utils::channel::mpsc;
+use commonware_utils::channel::mpsc::{self, error::TrySendError};
 use std::{collections::BTreeMap, fmt::Debug, time::SystemTime};
 
 /// An interior sender that enforces message size limits and
@@ -84,14 +86,36 @@ where
 }
 
 /// Channel to asynchronously receive messages from a channel.
+#[derive(Clone, Debug)]
+pub(crate) struct PrioritizedSender<P: PublicKey> {
+    low: mpsc::Sender<Message<P>>,
+    high: mpsc::Sender<Message<P>>,
+    primary_peers: PrimaryPeers<P>,
+}
+
+impl<P: PublicKey> PrioritizedSender<P> {
+    pub(crate) fn try_send(&self, message: Message<P>) -> Result<(), TrySendError<Message<P>>> {
+        let sender = if self.primary_peers.contains(&message.0) {
+            &self.high
+        } else {
+            &self.low
+        };
+        sender.try_send(message)
+    }
+}
+
 #[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
-    receiver: mpsc::Receiver<Message<P>>,
+    low: mpsc::Receiver<Message<P>>,
+    high: mpsc::Receiver<Message<P>>,
 }
 
 impl<P: PublicKey> Receiver<P> {
-    pub(super) const fn new(receiver: mpsc::Receiver<Message<P>>) -> Self {
-        Self { receiver }
+    pub(super) const fn new(
+        low: mpsc::Receiver<Message<P>>,
+        high: mpsc::Receiver<Message<P>>,
+    ) -> Self {
+        Self { low, high }
     }
 }
 
@@ -104,7 +128,19 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     /// This method will block until a message is received or the underlying
     /// network shuts down.
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
-        let (sender, message) = self.receiver.recv().await.ok_or(Error::NetworkClosed)?;
+        if let Ok(message) = self.high.try_recv() {
+            return Ok(message);
+        }
+        let (sender, message) = select! {
+            msg = self.high.recv() => match msg {
+                Some(msg) => msg,
+                None => self.low.recv().await.ok_or(Error::NetworkClosed)?,
+            },
+            msg = self.low.recv() => match msg {
+                Some(msg) => msg,
+                None => self.high.recv().await.ok_or(Error::NetworkClosed)?,
+            },
+        };
 
         // We don't check that the message is too large here because we already enforce
         // that on the network layer.
@@ -116,16 +152,30 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 pub struct Channels<P: PublicKey> {
     messenger: Messenger<P>,
     max_size: u32,
-    receivers: BTreeMap<Channel, (Quota, mpsc::Sender<Message<P>>)>,
+    primary_peers: PrimaryPeers<P>,
+    receivers: BTreeMap<Channel, (Quota, PrioritizedSender<P>)>,
 }
 
 impl<P: PublicKey> Channels<P> {
-    pub const fn new(messenger: Messenger<P>, max_size: u32) -> Self {
+    pub fn new(messenger: Messenger<P>, max_size: u32) -> Self {
+        Self::with_primary_peers(messenger, max_size, PrimaryPeers::default())
+    }
+
+    pub(super) const fn with_primary_peers(
+        messenger: Messenger<P>,
+        max_size: u32,
+        primary_peers: PrimaryPeers<P>,
+    ) -> Self {
         Self {
             messenger,
             max_size,
+            primary_peers,
             receivers: BTreeMap::new(),
         }
+    }
+
+    pub(super) fn primary_peers(&self) -> PrimaryPeers<P> {
+        self.primary_peers.clone()
     }
 
     pub fn register<C: Clock>(
@@ -135,17 +185,65 @@ impl<P: PublicKey> Channels<P> {
         backlog: usize,
         clock: C,
     ) -> (Sender<P, C>, Receiver<P>) {
-        let (sender, receiver) = mpsc::channel(backlog);
+        let (low_sender, low_receiver) = mpsc::channel(backlog);
+        let (high_sender, high_receiver) = mpsc::channel(backlog);
+        let sender = PrioritizedSender {
+            low: low_sender,
+            high: high_sender,
+            primary_peers: self.primary_peers.clone(),
+        };
         if self.receivers.insert(channel, (rate, sender)).is_some() {
             panic!("duplicate channel registration: {channel}");
         }
         (
             Sender::new(channel, self.max_size, self.messenger.clone(), clock, rate),
-            Receiver::new(receiver),
+            Receiver::new(low_receiver, high_receiver),
         )
     }
 
-    pub fn collect(self) -> BTreeMap<u64, (Quota, mpsc::Sender<Message<P>>)> {
+    pub(crate) fn collect(self) -> BTreeMap<u64, (Quota, PrioritizedSender<P>)> {
         self.receivers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{authenticated::{discovery::actors::router, Mailbox}, Receiver as _};
+    use commonware_cryptography::{ed25519, Signer as _};
+    use commonware_runtime::{deterministic, BufferPooler, IoBuf, Quota, Runner};
+    use commonware_utils::{ordered::Set, NZU32};
+
+    #[test]
+    fn test_receiver_prioritizes_live_primary_peers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (router_mailbox, _router_receiver) = Mailbox::<router::Message<_>>::new(10);
+            let messenger =
+                router::Messenger::new(context.network_buffer_pool().clone(), router_mailbox);
+            let primary_peers = PrimaryPeers::default();
+            let mut channels = Channels::with_primary_peers(messenger, 1024, primary_peers.clone());
+            let (_sender, mut receiver) = channels.register(
+                0,
+                Quota::per_second(NZU32!(100)),
+                1,
+                context.clone(),
+            );
+            let (_, sender) = channels.collect().remove(&0).unwrap();
+            let peer = ed25519::PrivateKey::from_seed(1).public_key();
+
+            sender
+                .try_send((peer.clone(), IoBuf::from(b"secondary")))
+                .unwrap();
+            primary_peers.replace(Set::try_from([peer.clone()]).unwrap());
+            sender
+                .try_send((peer, IoBuf::from(b"primary")))
+                .unwrap();
+
+            let (_, first) = receiver.recv().await.unwrap();
+            assert_eq!(first.as_ref(), b"primary");
+            let (_, second) = receiver.recv().await.unwrap();
+            assert_eq!(second.as_ref(), b"secondary");
+        });
     }
 }
