@@ -154,7 +154,7 @@ mod request;
 mod timeout;
 use timeout::{Tick, TimeoutWheel};
 mod waiter;
-use waiter::{CompletionOutcome, StageAction, WaiterId, Waiters};
+use waiter::{CompletionOutcome, StageOutcome, WaiterId, Waiters};
 mod waker;
 use waker::{Waker, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
 
@@ -451,9 +451,9 @@ impl IoUringLoop {
     /// a timeout error instead of issuing a follow-up SQE.
     fn stage_request(&mut self, waiter_id: WaiterId, sq: &mut SubmissionQueue<'_>) {
         match self.waiters.stage(waiter_id) {
-            StageAction::Ignore => {}
-            StageAction::Timeout(request) => request.timeout(),
-            StageAction::Submit(sqe) => {
+            StageOutcome::Ignore => {}
+            StageOutcome::Timeout(request) => request.timeout(),
+            StageOutcome::Submit(sqe) => {
                 // SAFETY:
                 // - All resources are stored in `self.waiters` until CQE processing, so
                 //   SQE pointers remain valid and FD numbers cannot be reused early.
@@ -929,7 +929,7 @@ mod tests {
             let waiter_id = iouring.waiters.insert(request, None);
             assert!(matches!(
                 iouring.waiters.stage(waiter_id),
-                StageAction::Submit(_)
+                StageOutcome::Submit(_)
             ));
             assert!(
                 iouring.waiters.cancel(waiter_id),
@@ -1019,7 +1019,7 @@ mod tests {
         assert_eq!(ring.submission().len(), 0);
         assert!(matches!(
             iouring.waiters.stage(waiter_id),
-            StageAction::Timeout(_)
+            StageOutcome::Timeout(_)
         ));
     }
 
@@ -1214,7 +1214,7 @@ mod tests {
         // Simulate completion after the waiter had an op staged.
         assert!(matches!(
             iouring.waiters.stage(old_slot),
-            StageAction::Submit(_)
+            StageOutcome::Submit(_)
         ));
         if let CompletionOutcome::Complete {
             request,
@@ -1238,7 +1238,7 @@ mod tests {
         assert_eq!(slot_index.index(), old_slot.index());
         assert!(matches!(
             iouring.waiters.stage(slot_index),
-            StageAction::Submit(_)
+            StageOutcome::Submit(_)
         ));
         iouring.timeout_wheel.schedule(slot_index, 3);
 
@@ -1278,7 +1278,7 @@ mod tests {
         let slot_index = iouring.waiters.insert(req, Some(2));
         assert!(matches!(
             iouring.waiters.stage(slot_index),
-            StageAction::Submit(_)
+            StageOutcome::Submit(_)
         ));
         assert!(
             iouring.waiters.cancel(slot_index),
@@ -1345,7 +1345,7 @@ mod tests {
         let waiter_id = iouring.waiters.insert(req, Some(1));
         assert!(matches!(
             iouring.waiters.stage(waiter_id),
-            StageAction::Submit(_)
+            StageOutcome::Submit(_)
         ));
         iouring.timeout_wheel.schedule(waiter_id, 1);
 
@@ -1910,7 +1910,7 @@ mod tests {
         let waiter_id = iouring.waiters.insert(request, Some(1));
         assert!(matches!(
             iouring.waiters.stage(waiter_id),
-            StageAction::Submit(_)
+            StageOutcome::Submit(_)
         ));
         iouring.timeout_wheel.schedule(waiter_id, 1);
 
@@ -1929,7 +1929,7 @@ mod tests {
         assert!(iouring.pending_cancels.is_empty());
         assert!(matches!(
             iouring.waiters.stage(waiter_id),
-            StageAction::Timeout(_)
+            StageOutcome::Timeout(_)
         ));
     }
 

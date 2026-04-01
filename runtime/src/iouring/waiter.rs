@@ -126,8 +126,8 @@ struct Waiter {
     request: ActiveRequest,
 }
 
-/// Action produced when staging the next SQE for a waiter.
-pub enum StageAction {
+/// Outcome produced when staging the next SQE for a waiter.
+pub enum StageOutcome {
     /// The waiter id is stale or no longer present.
     Ignore,
     /// The waiter was canceled while parked in the ready queue and should
@@ -137,7 +137,7 @@ pub enum StageAction {
     Submit(SqueueEntry),
 }
 
-/// Action produced when handling an operation CQE for a waiter.
+/// Outcome produced when handling an operation CQE for a waiter.
 #[allow(clippy::large_enum_variant)]
 pub enum CompletionOutcome {
     /// The CQE was stale, referred to a cancel SQE, or otherwise requires no
@@ -247,17 +247,17 @@ impl Waiters {
     /// If the waiter timed out while parked in the ready queue, this removes it
     /// from the table and returns the request for local timeout completion.
     ///
-    /// When this returns [`StageAction::Submit`], the waiter is marked as
+    /// When this returns [`StageOutcome::Submit`], the waiter is marked as
     /// having an operation SQE outstanding immediately. In this implementation,
     /// the caller pushes the SQE right away and treats push failure as fatal.
-    pub fn stage(&mut self, waiter_id: WaiterId) -> StageAction {
+    pub fn stage(&mut self, waiter_id: WaiterId) -> StageOutcome {
         let index = waiter_id.index() as usize;
         let should_timeout_locally = {
             let Some(slot) = self.entries.get_mut(index).and_then(Option::as_mut) else {
-                return StageAction::Ignore;
+                return StageOutcome::Ignore;
             };
             if slot.id != waiter_id {
-                return StageAction::Ignore;
+                return StageOutcome::Ignore;
             }
             matches!(slot.state, WaiterState::CancelRequested)
         };
@@ -266,7 +266,7 @@ impl Waiters {
             let request = self
                 .remove(waiter_id)
                 .expect("cancelled waiter missing from table");
-            return StageAction::Timeout(request);
+            return StageOutcome::Timeout(request);
         }
 
         let sqe = self
@@ -279,7 +279,7 @@ impl Waiters {
                 slot.request.build_sqe(waiter_id)
             });
 
-        sqe.map_or_else(|| StageAction::Ignore, StageAction::Submit)
+        sqe.map_or_else(|| StageOutcome::Ignore, StageOutcome::Submit)
     }
 
     /// Process one CQE for a waiter.
@@ -520,14 +520,14 @@ mod tests {
 
     #[test]
     fn test_waiters_track_in_flight_state() {
-        // Verify `stage_sqe` tracks a staged operation and that the bit is
+        // Verify `stage` tracks a staged operation and that the bit is
         // cleared again when the matching op CQE is processed.
         let mut waiters = Waiters::new(1);
         let (req, _rx) = make_sync_request();
         let waiter_id = waiters.insert(req, Some(4));
 
         assert!(!waiters.is_in_flight(waiter_id));
-        assert!(matches!(waiters.stage(waiter_id), StageAction::Submit(_)));
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
         assert!(waiters.is_in_flight(waiter_id));
 
         assert!(matches!(
@@ -550,9 +550,9 @@ mod tests {
         let active_id = waiters.insert(req1, Some(2));
         assert_ne!(active_id, stale_id);
 
-        assert!(matches!(waiters.stage(stale_id), StageAction::Ignore));
+        assert!(matches!(waiters.stage(stale_id), StageOutcome::Ignore));
         assert!(!waiters.is_in_flight(stale_id));
-        assert!(matches!(waiters.stage(active_id), StageAction::Submit(_)));
+        assert!(matches!(waiters.stage(active_id), StageOutcome::Submit(_)));
         assert!(waiters.is_in_flight(active_id));
     }
 
@@ -563,11 +563,11 @@ mod tests {
         let mut waiters = Waiters::new(1);
         let out_of_range = WaiterId::new(7, 0);
         assert!(!waiters.cancel(out_of_range));
-        assert!(matches!(waiters.stage(out_of_range), StageAction::Ignore));
+        assert!(matches!(waiters.stage(out_of_range), StageOutcome::Ignore));
 
         let empty_slot = WaiterId::new(0, 0);
         assert!(!waiters.cancel(empty_slot));
-        assert!(matches!(waiters.stage(empty_slot), StageAction::Ignore));
+        assert!(matches!(waiters.stage(empty_slot), StageOutcome::Ignore));
     }
 
     #[test]
@@ -580,7 +580,7 @@ mod tests {
         // First build a waiter that still has an operation SQE outstanding.
         let (active_req, _active_rx) = make_sync_request();
         let active = waiters.insert(active_req, Some(2));
-        assert!(matches!(waiters.stage(active), StageAction::Submit(_)));
+        assert!(matches!(waiters.stage(active), StageOutcome::Submit(_)));
         assert!(waiters.cancel(active));
         assert!(waiters.is_in_flight(active));
         let active_state = waiter_state(&waiters, active).expect("active waiter missing");
@@ -603,7 +603,7 @@ mod tests {
             let mut waiters = Waiters::new(1);
             let (req, _rx) = make_sync_request();
             let waiter_id = waiters.insert(req, Some(2));
-            assert!(matches!(waiters.stage(waiter_id), StageAction::Submit(_)));
+            assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
             assert!(waiters.cancel(waiter_id));
 
             assert!(matches!(
@@ -622,7 +622,7 @@ mod tests {
         let mut waiters = Waiters::new(1);
         let (req, _rx) = make_sync_request();
         let waiter_id = waiters.insert(req, Some(2));
-        assert!(matches!(waiters.stage(waiter_id), StageAction::Submit(_)));
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
         assert!(waiters.cancel(waiter_id));
 
         assert!(matches!(
@@ -640,7 +640,7 @@ mod tests {
         let mut waiters = Waiters::new(1);
         let (req, _rx) = make_sync_request();
         let waiter_id = waiters.insert(req, Some(2));
-        assert!(matches!(waiters.stage(waiter_id), StageAction::Submit(_)));
+        assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
         assert!(waiters.cancel(waiter_id));
 
         let result = catch_unwind(AssertUnwindSafe(|| {
