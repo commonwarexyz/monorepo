@@ -8,7 +8,7 @@ use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBufs, Quota};
 use commonware_utils::channel::mpsc::{self, error::TrySendError};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::Debug,
     time::SystemTime,
 };
@@ -101,59 +101,130 @@ impl<P: PublicKey> PrioritizedSender<P> {
 }
 
 #[derive(Debug)]
+struct BufferedPeer {
+    is_primary: bool,
+    messages: VecDeque<(u64, crate::IoBuf)>,
+}
+
+#[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
     receiver: mpsc::Receiver<Message<P>>,
     primary_peers: PrimaryPeers<P>,
-    buffered: BTreeMap<P, VecDeque<(u64, crate::IoBuf)>>,
+    buffered: BTreeMap<P, BufferedPeer>,
+    primary_ready: BTreeSet<(u64, P)>,
+    secondary_ready: BTreeSet<(u64, P)>,
     next_sequence: u64,
+    primary_generation: u64,
 }
 
 impl<P: PublicKey> Receiver<P> {
     pub(super) fn new(receiver: mpsc::Receiver<Message<P>>, primary_peers: PrimaryPeers<P>) -> Self {
         Self {
             receiver,
+            primary_generation: primary_peers.generation(),
             primary_peers,
             buffered: BTreeMap::new(),
+            primary_ready: BTreeSet::new(),
+            secondary_ready: BTreeSet::new(),
             next_sequence: 0,
         }
     }
 
     fn buffer(&mut self, message: Message<P>) {
         let (peer, message) = message;
-        self.buffered
-            .entry(peer)
-            .or_default()
-            .push_back((self.next_sequence, message));
+        let sequence = self.next_sequence;
         self.next_sequence += 1;
+        let is_primary = self.primary_peers.contains(&peer);
+        let entry = self.buffered.entry(peer.clone()).or_insert_with(|| BufferedPeer {
+            is_primary,
+            messages: VecDeque::new(),
+        });
+        if entry.messages.is_empty() {
+            entry.is_primary = is_primary;
+        }
+        entry.messages.push_back((sequence, message));
+        if entry.messages.len() == 1 {
+            let key = (sequence, peer);
+            if entry.is_primary {
+                self.primary_ready.insert(key);
+            } else {
+                self.secondary_ready.insert(key);
+            }
+        }
     }
 
-    fn head_peer(&self, primary_only: bool) -> Option<P> {
-        self.buffered
-            .iter()
-            .filter_map(|(peer, queue)| {
-                let (sequence, _) = queue.front()?;
+    fn refresh_priorities(&mut self) {
+        let generation = self.primary_peers.generation();
+        if generation == self.primary_generation {
+            return;
+        }
+        self.primary_generation = generation;
+
+        let updates: Vec<_> = self
+            .buffered
+            .iter_mut()
+            .filter_map(|(peer, state)| {
                 let is_primary = self.primary_peers.contains(peer);
-                if primary_only && !is_primary {
+                if is_primary == state.is_primary {
                     return None;
                 }
-                Some((*sequence, peer.clone()))
+                let sequence = state
+                    .messages
+                    .front()
+                    .expect("buffered peers must have a head message")
+                    .0;
+                let previous = state.is_primary;
+                state.is_primary = is_primary;
+                Some((sequence, peer.clone(), previous, is_primary))
             })
-            .min_by_key(|(sequence, _)| *sequence)
-            .map(|(_, peer)| peer)
+            .collect();
+
+        for (sequence, peer, previous, is_primary) in updates {
+            let key = (sequence, peer.clone());
+            if previous {
+                self.primary_ready.remove(&key);
+            } else {
+                self.secondary_ready.remove(&key);
+            }
+            if is_primary {
+                self.primary_ready.insert(key);
+            } else {
+                self.secondary_ready.insert(key);
+            }
+        }
     }
 
-    fn pop_buffered(&mut self, peer: P) -> Message<P> {
-        let mut queue = self
+    fn pop_ready(&mut self, primary: bool) -> Option<Message<P>> {
+        let key = if primary {
+            self.primary_ready.iter().next().cloned()
+        } else {
+            self.secondary_ready.iter().next().cloned()
+        }?;
+        if primary {
+            self.primary_ready.remove(&key);
+        } else {
+            self.secondary_ready.remove(&key);
+        }
+
+        let (_, peer) = key;
+        let mut state = self
             .buffered
             .remove(&peer)
             .expect("selected peer must have buffered messages");
-        let (_, message) = queue
+        let (_, message) = state
+            .messages
             .pop_front()
             .expect("selected peer must have a buffered head message");
-        if !queue.is_empty() {
-            self.buffered.insert(peer.clone(), queue);
+        if let Some((sequence, _)) = state.messages.front() {
+            let key = (*sequence, peer.clone());
+            if state.is_primary {
+                self.primary_ready.insert(key);
+            } else {
+                self.secondary_ready.insert(key);
+            }
+            self.buffered.insert(peer.clone(), state);
         }
-        (peer, message)
+        Some((peer, message))
     }
 }
 
@@ -171,8 +242,10 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
                 self.buffer(message);
             }
 
-            if let Some(peer) = self.head_peer(true).or_else(|| self.head_peer(false)) {
-                return Ok(self.pop_buffered(peer));
+            self.refresh_priorities();
+
+            if let Some(message) = self.pop_ready(true).or_else(|| self.pop_ready(false)) {
+                return Ok(message);
             }
 
             let Some(message) = self.receiver.recv().await else {
@@ -256,7 +329,7 @@ mod tests {
             let (_sender, mut receiver) = channels.register(
                 0,
                 Quota::per_second(NZU32!(100)),
-                1,
+                2,
                 context.clone(),
             );
             let (_, sender) = channels.collect().remove(&0).unwrap();
@@ -290,7 +363,7 @@ mod tests {
             let (_sender, mut receiver) = channels.register(
                 0,
                 Quota::per_second(NZU32!(100)),
-                1,
+                2,
                 context.clone(),
             );
             let (_, sender) = channels.collect().remove(&0).unwrap();

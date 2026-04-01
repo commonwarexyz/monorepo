@@ -34,7 +34,10 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -43,21 +46,35 @@ use tracing::{debug, error, trace, warn};
 type Task<P> = (Channel, P, Recipients<P>, IoBuf, oneshot::Sender<Vec<P>>);
 
 #[derive(Clone, Debug)]
-struct PrimaryPeers<P: PublicKey>(Arc<RwLock<Set<P>>>);
+struct PrimaryPeers<P: PublicKey>(Arc<PrimaryPeersInner<P>>);
+
+#[derive(Debug)]
+struct PrimaryPeersInner<P: PublicKey> {
+    generation: AtomicU64,
+    peers: RwLock<Set<P>>,
+}
 
 impl<P: PublicKey> Default for PrimaryPeers<P> {
     fn default() -> Self {
-        Self(Arc::new(RwLock::new(Set::default())))
+        Self(Arc::new(PrimaryPeersInner {
+            generation: AtomicU64::new(0),
+            peers: RwLock::new(Set::default()),
+        }))
     }
 }
 
 impl<P: PublicKey> PrimaryPeers<P> {
     fn contains(&self, peer: &P) -> bool {
-        self.0.read().position(peer).is_some()
+        self.0.peers.read().position(peer).is_some()
+    }
+
+    fn generation(&self) -> u64 {
+        self.0.generation.load(Ordering::Acquire)
     }
 
     fn replace(&self, peers: Set<P>) {
-        *self.0.write() = peers;
+        *self.0.peers.write() = peers;
+        self.0.generation.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -1096,11 +1113,20 @@ impl<P: PublicKey> PrioritizedSender<P> {
 
 /// Implementation of a [crate::Receiver] for the simulated network.
 #[derive(Debug)]
+struct BufferedPeer {
+    is_primary: bool,
+    messages: VecDeque<(u64, IoBuf)>,
+}
+
+#[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
     receiver: mpsc::UnboundedReceiver<Message<P>>,
     primary_peers: PrimaryPeers<P>,
-    buffered: BTreeMap<P, VecDeque<(u64, IoBuf)>>,
+    buffered: BTreeMap<P, BufferedPeer>,
+    primary_ready: BTreeSet<(u64, P)>,
+    secondary_ready: BTreeSet<(u64, P)>,
     next_sequence: u64,
+    primary_generation: u64,
 }
 
 impl<P: PublicKey> crate::Receiver for Receiver<P> {
@@ -1119,8 +1145,11 @@ impl<P: PublicKey> Receiver<P> {
     ) -> Self {
         Self {
             receiver,
+            primary_generation: primary_peers.generation(),
             primary_peers,
             buffered: BTreeMap::new(),
+            primary_ready: BTreeSet::new(),
+            secondary_ready: BTreeSet::new(),
             next_sequence: 0,
         }
     }
@@ -1131,40 +1160,99 @@ impl<P: PublicKey> Receiver<P> {
 
     fn buffer(&mut self, message: Message<P>) {
         let (peer, message) = message;
-        self.buffered
-            .entry(peer)
-            .or_default()
-            .push_back((self.next_sequence, message));
+        let sequence = self.next_sequence;
         self.next_sequence += 1;
+        let is_primary = self.primary_peers.contains(&peer);
+        let entry = self.buffered.entry(peer.clone()).or_insert_with(|| BufferedPeer {
+            is_primary,
+            messages: VecDeque::new(),
+        });
+        if entry.messages.is_empty() {
+            entry.is_primary = is_primary;
+        }
+        entry.messages.push_back((sequence, message));
+        if entry.messages.len() == 1 {
+            let key = (sequence, peer);
+            if entry.is_primary {
+                self.primary_ready.insert(key);
+            } else {
+                self.secondary_ready.insert(key);
+            }
+        }
     }
 
-    fn head_peer(&self, primary_only: bool) -> Option<P> {
-        self.buffered
-            .iter()
-            .filter_map(|(peer, queue)| {
-                let (sequence, _) = queue.front()?;
+    fn refresh_priorities(&mut self) {
+        let generation = self.primary_peers.generation();
+        if generation == self.primary_generation {
+            return;
+        }
+        self.primary_generation = generation;
+
+        let updates: Vec<_> = self
+            .buffered
+            .iter_mut()
+            .filter_map(|(peer, state)| {
                 let is_primary = self.primary_peers.contains(peer);
-                if primary_only && !is_primary {
+                if is_primary == state.is_primary {
                     return None;
                 }
-                Some((*sequence, peer.clone()))
+                let sequence = state
+                    .messages
+                    .front()
+                    .expect("buffered peers must have a head message")
+                    .0;
+                let previous = state.is_primary;
+                state.is_primary = is_primary;
+                Some((sequence, peer.clone(), previous, is_primary))
             })
-            .min_by_key(|(sequence, _)| *sequence)
-            .map(|(_, peer)| peer)
+            .collect();
+
+        for (sequence, peer, previous, is_primary) in updates {
+            let key = (sequence, peer.clone());
+            if previous {
+                self.primary_ready.remove(&key);
+            } else {
+                self.secondary_ready.remove(&key);
+            }
+            if is_primary {
+                self.primary_ready.insert(key);
+            } else {
+                self.secondary_ready.insert(key);
+            }
+        }
     }
 
-    fn pop_buffered(&mut self, peer: P) -> Message<P> {
-        let mut queue = self
+    fn pop_ready(&mut self, primary: bool) -> Option<Message<P>> {
+        let key = if primary {
+            self.primary_ready.iter().next().cloned()
+        } else {
+            self.secondary_ready.iter().next().cloned()
+        }?;
+        if primary {
+            self.primary_ready.remove(&key);
+        } else {
+            self.secondary_ready.remove(&key);
+        }
+
+        let (_, peer) = key;
+        let mut state = self
             .buffered
             .remove(&peer)
             .expect("selected peer must have buffered messages");
-        let (_, message) = queue
+        let (_, message) = state
+            .messages
             .pop_front()
             .expect("selected peer must have a buffered head message");
-        if !queue.is_empty() {
-            self.buffered.insert(peer.clone(), queue);
+        if let Some((sequence, _)) = state.messages.front() {
+            let key = (*sequence, peer.clone());
+            if state.is_primary {
+                self.primary_ready.insert(key);
+            } else {
+                self.secondary_ready.insert(key);
+            }
+            self.buffered.insert(peer.clone(), state);
         }
-        (peer, message)
+        Some((peer, message))
     }
 
     async fn recv_inner(&mut self) -> Result<Message<P>, Error> {
@@ -1173,8 +1261,10 @@ impl<P: PublicKey> Receiver<P> {
                 self.buffer(message);
             }
 
-            if let Some(peer) = self.head_peer(true).or_else(|| self.head_peer(false)) {
-                return Ok(self.pop_buffered(peer));
+            self.refresh_priorities();
+
+            if let Some(message) = self.pop_ready(true).or_else(|| self.pop_ready(false)) {
+                return Ok(message);
             }
 
             let Some(message) = self.receiver.recv().await else {
