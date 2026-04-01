@@ -4,8 +4,8 @@
 //! variants (fixed-value, variable-value) and the keyless variant.
 
 use crate::common::{
-    gen_random_kv, keyless_cfg, make_fixed_value, make_var_value, with_fixed_value_db,
-    with_var_value_db, Digest, KeylessDb, FIXED_VALUE_VARIANTS, VAR_VALUE_VARIANTS,
+    gen_random_kv, make_fixed_value, make_var_value, open_keyless_db, with_fixed_value_db,
+    with_var_value_db, Digest, FIXED_VALUE_VARIANTS, VAR_VALUE_VARIANTS,
 };
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -128,8 +128,7 @@ fn bench_keyless_generate(c: &mut Criterion) {
                     for _ in 0..iters {
                         let start = Instant::now();
 
-                        let cfg = keyless_cfg(&ctx);
-                        let mut db = KeylessDb::init(ctx.clone(), cfg).await.unwrap();
+                        let mut db = open_keyless_db(ctx.clone()).await;
                         let mut rng = StdRng::seed_from_u64(42);
                         let mut batch = db.new_batch();
                         for _ in 0u64..operations {
