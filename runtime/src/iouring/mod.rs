@@ -645,12 +645,8 @@ impl IoUringLoop {
         // Stage operations until the channel is empty, waiter capacity is hit,
         // or the SQ is full. Waiter capacity is bounded by `cfg.size`.
         while self.waiters.len() < self.cfg.size as usize && !submission_queue.is_full() {
-            // Active waiter capacity is bounded by `cfg.size`.
-            if self.waiters.len() == self.cfg.size as usize {
-                break;
-            }
-
-            // Try to drain one request from the channel.
+            // Try to drain one operation from the channel. If the channel is empty, we're
+            // done for now.
             let request = match self.receiver.try_recv() {
                 Ok(request) => request,
                 Err(TryRecvError::Disconnected) => return None,
