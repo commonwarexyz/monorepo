@@ -3,26 +3,25 @@
 use super::Keyless;
 use crate::{
     journal::authenticated,
-    merkle::mmr::{self, Location, Position},
-    qmdb::{any::VariableValue, keyless::operation::Operation},
+    merkle::{Family, Location, Position},
+    qmdb::{any::VariableValue, keyless::operation::Operation, Error},
     Context,
 };
 use commonware_cryptography::{Digest, Hasher};
 use std::sync::Arc;
 
-type Error = crate::qmdb::Error<mmr::Family>;
-
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
 ///
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces an owned [`MerkleizedBatch`].
-pub struct UnmerkleizedBatch<H, V>
+pub struct UnmerkleizedBatch<F, H, V>
 where
+    F: Family,
     V: VariableValue,
     H: Hasher,
 {
-    /// Authenticated journal batch for computing the speculative MMR root.
-    journal_batch: authenticated::UnmerkleizedBatch<mmr::Family, H, Operation<V>>,
+    /// Authenticated journal batch for computing the speculative Merkle root.
+    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<V>>,
 
     /// Pending appends.
     appends: Vec<V>,
@@ -40,9 +39,9 @@ where
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
-pub struct MerkleizedBatch<D: Digest, V: VariableValue> {
-    /// Journal batch (MMR state + accumulated operation segments).
-    journal_batch: authenticated::MerkleizedBatch<mmr::Family, D, Operation<V>>,
+pub struct MerkleizedBatch<F: Family, D: Digest, V: VariableValue> {
+    /// Journal batch (Merkle state + accumulated operation segments).
+    journal_batch: authenticated::MerkleizedBatch<F, D, Operation<V>>,
 
     /// Total operation count after this batch.
     total_size: u64,
@@ -52,9 +51,9 @@ pub struct MerkleizedBatch<D: Digest, V: VariableValue> {
 }
 
 /// An owned changeset that can be applied to the database.
-pub struct Changeset<D: Digest, V: VariableValue> {
-    /// The finalized authenticated journal batch (MMR changeset + item chain).
-    pub(super) journal_finalized: authenticated::Changeset<mmr::Family, D, Operation<V>>,
+pub struct Changeset<F: Family, D: Digest, V: VariableValue> {
+    /// The finalized authenticated journal batch (Merkle changeset + item chain).
+    pub(super) journal_finalized: authenticated::Changeset<F, D, Operation<V>>,
 
     /// Total operation count after this batch.
     pub(super) total_size: u64,
@@ -63,13 +62,14 @@ pub struct Changeset<D: Digest, V: VariableValue> {
     pub(super) db_size: u64,
 }
 
-impl<H, V> UnmerkleizedBatch<H, V>
+impl<F, H, V> UnmerkleizedBatch<F, H, V>
 where
+    F: Family,
     V: VariableValue,
     H: Hasher,
 {
     /// Create a batch from a committed DB (no parent chain).
-    pub(super) fn new<E>(keyless: &Keyless<E, V, H>, journal_size: u64) -> Self
+    pub(super) fn new<E>(keyless: &Keyless<F, E, V, H>, journal_size: u64) -> Self
     where
         E: Context,
     {
@@ -83,7 +83,7 @@ where
     }
 
     /// The location that the next appended value will be placed at.
-    pub const fn size(&self) -> Location {
+    pub const fn size(&self) -> Location<F> {
         Location::new(self.base_size + self.appends.len() as u64)
     }
 
@@ -96,7 +96,11 @@ where
     /// Read a value at `loc`.
     ///
     /// Reads from pending appends, parent chain, or base DB.
-    pub async fn get<E>(&self, loc: Location, db: &Keyless<E, V, H>) -> Result<Option<V>, Error>
+    pub async fn get<E>(
+        &self,
+        loc: Location<F>,
+        db: &Keyless<F, E, V, H>,
+    ) -> Result<Option<V>, Error<F>>
     where
         E: Context,
     {
@@ -125,7 +129,7 @@ where
     }
 
     /// Resolve appends into operations, merkleize, and return a [`MerkleizedBatch`].
-    pub fn merkleize(self, metadata: Option<V>) -> MerkleizedBatch<H::Digest, V> {
+    pub fn merkleize(self, metadata: Option<V>) -> MerkleizedBatch<F, H::Digest, V> {
         let base = self.base_size;
 
         // Build operations: one Append per value, then Commit.
@@ -152,14 +156,18 @@ where
     }
 }
 
-impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
+impl<F: Family, D: Digest, V: VariableValue> MerkleizedBatch<F, D, V> {
     /// Return the speculative root.
     pub fn root(&self) -> D {
         self.journal_batch.root()
     }
 
     /// Read a value at `loc`.
-    pub async fn get<E, H>(&self, loc: Location, db: &Keyless<E, V, H>) -> Result<Option<V>, Error>
+    pub async fn get<E, H>(
+        &self,
+        loc: Location<F>,
+        db: &Keyless<F, E, V, H>,
+    ) -> Result<Option<V>, Error<F>>
     where
         E: Context,
         H: Hasher<Digest = D>,
@@ -184,7 +192,7 @@ impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
     }
 
     /// Create a new speculative batch of operations with this batch as its parent.
-    pub fn new_batch<H>(&self) -> UnmerkleizedBatch<H, V>
+    pub fn new_batch<H>(&self) -> UnmerkleizedBatch<F, H, V>
     where
         H: Hasher<Digest = D>,
     {
@@ -198,7 +206,7 @@ impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
     }
 
     /// Consume this batch, producing an owned [`Changeset`].
-    pub fn finalize(self) -> Changeset<D, V> {
+    pub fn finalize(self) -> Changeset<F, D, V> {
         Changeset {
             journal_finalized: self.journal_batch.finalize(),
             total_size: self.total_size,
@@ -215,31 +223,32 @@ impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
     /// # Panics
     ///
     /// Panics if `current_db_size` is less than the DB size when this batch was created.
-    pub fn finalize_from(self, current_db_size: u64) -> Changeset<D, V> {
+    pub fn finalize_from(self, current_db_size: u64) -> Changeset<F, D, V> {
         assert!(
             current_db_size >= self.db_size,
             "current_db_size ({current_db_size}) < batch db_size ({})",
             self.db_size
         );
         let items_to_skip = current_db_size - self.db_size;
-        let mmr_base =
-            Position::try_from(Location::new(current_db_size)).expect("valid leaf count");
+        let merkle_base =
+            Position::try_from(Location::<F>::new(current_db_size)).expect("valid leaf count");
         Changeset {
-            journal_finalized: self.journal_batch.finalize_from(mmr_base, items_to_skip),
+            journal_finalized: self.journal_batch.finalize_from(merkle_base, items_to_skip),
             total_size: self.total_size,
             db_size: current_db_size,
         }
     }
 }
 
-impl<E, V, H> Keyless<E, V, H>
+impl<F, E, V, H> Keyless<F, E, V, H>
 where
+    F: Family,
     E: Context,
     V: VariableValue,
     H: Hasher,
 {
     /// Create an initial [`MerkleizedBatch`] from the committed DB state.
-    pub fn to_batch(&self) -> MerkleizedBatch<H::Digest, V> {
+    pub fn to_batch(&self) -> MerkleizedBatch<F, H::Digest, V> {
         let journal_size = *self.last_commit_loc + 1;
         MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),

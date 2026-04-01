@@ -61,7 +61,7 @@ pub type CurOVarVecDb = OCVariable<Context, Digest, Vec<u8>, Sha256, EightCap, C
 
 // -- Keyless --
 
-pub type KeylessDb = Keyless<Context, Vec<u8>, Sha256>;
+pub type KeylessDb = Keyless<Family, Context, Vec<u8>, Sha256>;
 
 // -- Variant enums --
 
@@ -240,7 +240,7 @@ pub fn keyless_cfg(
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ())> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     KeylessConfig {
-        mmr: mmr_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),
+        merkle: mmr_cfg(PARTITION_KEYLESS, ctx, page_cache.clone()),
         log: var_log_cfg(PARTITION_KEYLESS, page_cache, ((0..=10000).into(), ())),
     }
 }
