@@ -5,5 +5,5 @@ module automaton {
     const CERTIFY_DOMAIN: Set[Payload]
 
     // Default certification policy: always certify notarized payloads.
-    pure val certify_always_true: Payload -> bool = CERTIFY_DOMAIN.mapBy(_ => true)
+    pure val certify_always_true: Set[Payload] = CERTIFY_DOMAIN
 }

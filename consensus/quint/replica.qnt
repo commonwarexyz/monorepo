@@ -61,7 +61,7 @@ module replica {
     // sequence of finalized payloads observed by each correct replica
     var ghost_committed_blocks: ReplicaId -> List[Payload]
     // Replica-local deterministic certification policy from the application.
-    var certify_policy: ReplicaId -> (Payload -> bool)
+    var certify_policy: ReplicaId -> Set[Payload]
     // The last action taken (for IST assume_state).
     var lastAction: str
 
@@ -471,7 +471,7 @@ module replica {
 
     // Certification is deterministic and may depend on replica id.
     def can_certify(id: ReplicaId, payload: Payload): bool = {
-        certify_policy.get(id).get(payload)
+        certify_policy.get(id).contains(payload)
     }
 
     // Enter a new view, unless it is older than the current view or outside modeled bounds.
@@ -721,14 +721,13 @@ module replica {
     }
 
     action initWithLeader(l: ViewNumber -> ReplicaId): bool = {
-        val default_payload_policy = AllPayloads.mapBy(_ => true)
-        val default_certify_policy = Replicas.mapBy(_ => default_payload_policy)
+        val default_certify_policy = Replicas.mapBy(_ => AllPayloads)
         initWithLeaderAndCertify(l, default_certify_policy)
     }
 
     action initWithLeaderAndCertify(
         l: ViewNumber -> ReplicaId,
-        certify: ReplicaId -> (Payload -> bool)
+        certify: ReplicaId -> Set[Payload]
     ): bool = {
         all {
             replica_state' = CORRECT.mapBy(id => {

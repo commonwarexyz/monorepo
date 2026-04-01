@@ -291,14 +291,14 @@ module tests {
             parent: GENESIS_VIEW,
         }
         // n0 rejects all payloads; other replicas certify normally.
-        val CERTIFY_N0_FALSE = Replicas.mapBy(r =>
-            if (r == "n0") Set("val_b0", "val_b1", "val_b2", "inv_b3").mapBy(_ => false)
+        val CERTIFY_NO_FALSE = Replicas.mapBy(r =>
+            if (r == "n0") Set()
             else app::certify_always_true
         )
 
         initWithLeaderAndCertify(
             Map(0 -> "n1", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
-            CERTIFY_N0_FALSE
+            CERTIFY_NO_FALSE
         )
             .then(propose("n0", proposal_1.payload, proposal_1.parent))
             // n1 and n2 process the leader vote, adding their votes to sent_notarize_votes.

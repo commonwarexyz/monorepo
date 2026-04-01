@@ -267,13 +267,18 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
     writeln!(out).unwrap();
 
     // Certify policy: derive from block hash using Certifier::Sometimes logic
-    writeln!(out, "    pure val CERTIFY_POLICY = Map(").unwrap();
-    writeln!(out, "        GENESIS_PAYLOAD -> true,").unwrap();
+    let mut certifiable_payloads: Vec<String> = vec!["GENESIS_PAYLOAD".to_string()];
     for (hash, name) in &block_map {
-        let certifiable = is_certifiable(hash);
-        writeln!(out, "        \"{}\" -> {},", name, certifiable).unwrap();
+        if is_certifiable(hash) {
+            certifiable_payloads.push(format!("\"{}\"", name));
+        }
     }
-    writeln!(out, "    )").unwrap();
+    writeln!(
+        out,
+        "    pure val CERTIFY_POLICY = Set({})",
+        certifiable_payloads.join(", ")
+    )
+    .unwrap();
     writeln!(
         out,
         "    pure val CERTIFY_CUSTOM = Replicas.mapBy(_ => CERTIFY_POLICY)"

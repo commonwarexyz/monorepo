@@ -19,13 +19,7 @@ module tests {
     ).* from "../replica"
 
     pure val CERTIFY_ALL_TRUE = Replicas.mapBy(_ => app::certify_always_true)
-    pure val CERTIFY_FAIL_INV_B3_BLOCK = Map(
-        GENESIS_PAYLOAD -> true,
-        "val_b0" -> true,
-        "val_b1" -> true,
-        "val_b2" -> true,
-        "val_b3_part" -> false
-    )
+    pure val CERTIFY_FAIL_INV_B3_BLOCK = Set(GENESIS_PAYLOAD, "val_b0", "val_b1", "val_b2")
     pure val CERTIFY_FAIL_INV_B3 = Replicas.mapBy(_ => CERTIFY_FAIL_INV_B3_BLOCK)
 
     run initTest = {
