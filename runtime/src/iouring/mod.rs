@@ -1096,6 +1096,47 @@ mod tests {
     }
 
     #[test]
+    fn test_fill_submission_queue_returns_true_when_fresh_staging_fills_sq() {
+        // Verify newly submitted work can fill the SQ before waiter capacity is exhausted.
+        let cfg = Config {
+            size: 8,
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Leave wake rearm enabled so it consumes one SQE up front. The fresh
+        // request staging loop should then stop because the SQ fills first,
+        // while waiter capacity still has room left.
+        futures::executor::block_on(async {
+            for _ in 0..cfg.size as usize {
+                let (sock_left, _sock_right) =
+                    UnixStream::pair().expect("failed to create unix socket pair");
+                // SAFETY: sock_left is a valid fd that we own.
+                let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+                let (tx, _rx) = oneshot::channel();
+                submitter
+                    .enqueue(Request::Sync(SyncRequest {
+                        file: Arc::new(file),
+                        result: None,
+                        sender: tx,
+                    }))
+                    .await
+                    .expect("failed to enqueue request");
+            }
+        });
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+
+        assert!(at_capacity);
+        assert!(ring.submission().is_full());
+        assert!(iouring.waiters.len() < cfg.size as usize);
+    }
+
+    #[test]
     fn test_fill_submission_queue_skips_cancel_for_ready_queue_timeout() {
         // Verify pending cancel entries are discarded once the waiter no longer
         // has an operation SQE in flight.
@@ -1176,6 +1217,42 @@ mod tests {
 
         let result = rx.await.expect("missing timeout completion");
         assert!(matches!(result, Err(crate::Error::Timeout)));
+    }
+
+    #[test]
+    fn test_handle_recv_panics_on_invalid_buffer_bounds() {
+        // Verify the public recv helper rejects impossible offset/len shapes
+        // before it can enqueue a malformed request.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (handle, io_loop) = IoUringLoop::new(cfg, &mut registry);
+        drop(io_loop);
+
+        let offset_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (left, _right) = UnixStream::pair().unwrap();
+            let _ = futures::executor::block_on(handle.recv(
+                Arc::new(left.into()),
+                IoBufMut::with_capacity(4),
+                5,
+                4,
+                true,
+                Instant::now() + Duration::from_secs(1),
+            ));
+        }));
+        assert!(offset_panic.is_err());
+
+        let capacity_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (left, _right) = UnixStream::pair().unwrap();
+            let _ = futures::executor::block_on(handle.recv(
+                Arc::new(left.into()),
+                IoBufMut::with_capacity(4),
+                0,
+                5,
+                true,
+                Instant::now() + Duration::from_secs(1),
+            ));
+        }));
+        assert!(capacity_panic.is_err());
     }
 
     #[tokio::test]

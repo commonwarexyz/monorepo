@@ -839,6 +839,8 @@ mod tests {
         let mut sink = Sink::new(Arc::new(left.into()), submitter, Duration::from_secs(1));
 
         sink.send(IoBufs::default()).await.unwrap();
+        sink.send(IoBuf::default()).await.unwrap();
+        sink.send(Vec::<u8>::new()).await.unwrap();
     }
 
     #[tokio::test]
@@ -897,6 +899,31 @@ mod tests {
         });
 
         // Dialing the listener covers the client-side option setters.
+        let (_sink, _stream) = network.dial(addr).await.unwrap();
+        accepter.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_disabled_socket_options_cover_accept_and_dial_paths() {
+        // Verify both dial and accept also cover the "do not touch socket options" branches.
+        let network = Network::start(
+            Config {
+                tcp_nodelay: None,
+                zero_linger: false,
+                ..Default::default()
+            },
+            &mut Registry::default(),
+            test_pool(),
+        )
+        .expect("Failed to start io_uring");
+
+        let mut listener = network.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let accepter = tokio::spawn(async move {
+            let (_addr, _sink, _stream) = listener.accept().await.unwrap();
+        });
+
         let (_sink, _stream) = network.dial(addr).await.unwrap();
         accepter.await.unwrap();
     }

@@ -762,6 +762,20 @@ mod tests {
             let _ = request.build_sqe(WaiterId::new(0, 0));
         });
         assert!(read_oversized.is_err());
+
+        let read_overread = std::panic::catch_unwind(|| {
+            let mut request = Request::ReadAt(ReadAtRequest {
+                file: make_file_fd(),
+                offset: 0,
+                len: 4,
+                read: 5,
+                buf: IoBufMut::with_capacity(8),
+                result: None,
+                sender: oneshot::channel().0,
+            });
+            let _ = request.build_sqe(WaiterId::new(0, 0));
+        });
+        assert!(read_overread.is_err());
     }
 
     #[test]

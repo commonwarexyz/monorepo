@@ -358,7 +358,7 @@ mod tests {
     use super::{Header, *};
     use crate::{
         storage::tests::run_storage_tests, utils::thread, Blob as _, BufferPool, BufferPoolConfig,
-        IoBufMut, Storage as _,
+        IoBuf, IoBufMut, Storage as _,
     };
     use std::{
         env,
@@ -523,10 +523,14 @@ mod tests {
         std::fs::write(&bad_magic_path, vec![0u8; Header::SIZE]).unwrap();
 
         // Opening should fail with corrupt error
-        let result = storage.open("partition", b"bad_magic").await;
-        assert!(
-            matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
-        );
+        let err = storage
+            .open("partition", b"bad_magic")
+            .await
+            .err()
+            .expect("bad magic should fail");
+        assert!(err
+            .to_string()
+            .starts_with("blob corrupt: partition/6261645f6d61676963 reason: invalid magic"));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -568,8 +572,8 @@ mod tests {
 
         // The wrapper should surface this as an insufficient-length error instead
         // of silently returning a short buffer.
-        let result = blob.read_at(0, 5).await;
-        assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+        let err = blob.read_at(0, 5).await.unwrap_err();
+        assert_eq!(err.to_string(), "blob insufficient length");
 
         drop(blob);
         let _ = std::fs::remove_dir_all(&storage_directory);
@@ -606,8 +610,14 @@ mod tests {
 
         // Zero-length operations should succeed immediately and preserve the empty blob.
         blob.write_at(0, IoBufs::default()).await.unwrap();
+        blob.write_at(0, IoBuf::default()).await.unwrap();
+        blob.write_at(0, Vec::<u8>::new()).await.unwrap();
         let empty = blob.read_at(0, 0).await.unwrap();
         assert!(empty.is_empty());
+        let _ = blob
+            .read_at_buf(0, 0, IoBufsMut::from(IoBufMut::with_capacity(8)))
+            .await
+            .unwrap();
 
         drop(blob);
         let _ = std::fs::remove_dir_all(&storage_directory);
@@ -623,8 +633,8 @@ mod tests {
         std::fs::create_dir_all(partition.join("nested")).unwrap();
 
         // The wrapper should treat the partition as corrupt rather than silently skipping it.
-        let result = storage.scan("partition").await;
-        assert!(matches!(result, Err(Error::PartitionCorrupt(name)) if name == "partition"));
+        let err = storage.scan("partition").await.unwrap_err();
+        assert_eq!(err.to_string(), "partition corrupt: partition");
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -635,21 +645,17 @@ mod tests {
         let (storage, storage_directory) = create_test_storage();
 
         // Removing a missing partition should fail before any blob-specific path logic runs.
-        let missing_partition = storage.remove("missing", None).await;
-        assert!(matches!(
-            missing_partition,
-            Err(Error::PartitionMissing(name)) if name == "missing"
-        ));
+        let err = storage.remove("missing", None).await.unwrap_err();
+        assert_eq!(err.to_string(), "partition missing: missing");
 
         // Once the partition exists, removing an absent blob should surface the
         // more specific `BlobMissing` error instead.
         std::fs::create_dir_all(storage_directory.join("partition")).unwrap();
-        let missing_blob = storage.remove("partition", Some(b"missing")).await;
-        assert!(matches!(
-            missing_blob,
-            Err(Error::BlobMissing(partition, blob))
-            if partition == "partition" && blob == hex(b"missing")
-        ));
+        let err = storage
+            .remove("partition", Some(b"missing"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "blob missing: partition/6d697373696e67");
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -684,11 +690,8 @@ mod tests {
         // Create a file whose name is valid UTF-8 but not valid hex.
         std::fs::write(partition.join("not-hex"), []).unwrap();
 
-        let scanned = storage.scan("partition").await;
-        assert!(matches!(
-            scanned,
-            Err(Error::PartitionCorrupt(name)) if name == "partition"
-        ));
+        let err = storage.scan("partition").await.unwrap_err();
+        assert_eq!(err.to_string(), "partition corrupt: partition");
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -714,11 +717,12 @@ mod tests {
             pool,
         );
 
-        let opened = storage.open("partition", b"blob").await;
-        assert!(matches!(
-            opened,
-            Err(Error::PartitionCreationFailed(name)) if name == "partition"
-        ));
+        let err = storage
+            .open("partition", b"blob")
+            .await
+            .err()
+            .expect("invalid storage root should fail");
+        assert_eq!(err.to_string(), "partition creation failed: partition");
 
         let _ = std::fs::remove_file(&storage_root);
         let _ = std::fs::remove_dir_all(&storage_directory);
@@ -747,12 +751,14 @@ mod tests {
             pool,
         );
 
-        let opened = storage.open("partition", b"blob").await;
-        assert!(matches!(
-            opened,
-            Err(Error::BlobOpenFailed(partition, name, _))
-            if partition == "partition" && name == blob_name
-        ));
+        let err = storage
+            .open("partition", b"blob")
+            .await
+            .err()
+            .expect("opening a directory as a blob should fail");
+        assert!(err
+            .to_string()
+            .starts_with(&format!("blob open failed: partition/{blob_name} error:")));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -765,18 +771,21 @@ mod tests {
 
         // Each operation adds the runtime header size internally, so using the
         // maximum logical offset must fail before any request is submitted.
-        assert!(matches!(
-            blob.read_at(u64::MAX, 1).await,
-            Err(Error::OffsetOverflow)
-        ));
-        assert!(matches!(
-            blob.write_at(u64::MAX, b"x".to_vec()).await,
-            Err(Error::OffsetOverflow)
-        ));
-        assert!(matches!(
-            blob.resize(u64::MAX).await,
-            Err(Error::OffsetOverflow)
-        ));
+        assert_eq!(
+            blob.read_at(u64::MAX, 1).await.unwrap_err().to_string(),
+            "offset overflow"
+        );
+        assert_eq!(
+            blob.write_at(u64::MAX, b"x".to_vec())
+                .await
+                .unwrap_err()
+                .to_string(),
+            "offset overflow"
+        );
+        assert_eq!(
+            blob.resize(u64::MAX).await.unwrap_err().to_string(),
+            "offset overflow"
+        );
 
         drop(blob);
         let _ = std::fs::remove_dir_all(&storage_directory);
@@ -802,11 +811,17 @@ mod tests {
 
         // Read and write should fail through their wrapper-specific error enums
         // when the submission channel has already been disconnected.
-        assert!(matches!(blob.read_at(0, 1).await, Err(Error::ReadFailed)));
-        assert!(matches!(
-            blob.write_at(0, b"x".to_vec()).await,
-            Err(Error::WriteFailed)
-        ));
+        assert_eq!(
+            blob.read_at(0, 1).await.unwrap_err().to_string(),
+            "read failed"
+        );
+        assert_eq!(
+            blob.write_at(0, b"x".to_vec())
+                .await
+                .unwrap_err()
+                .to_string(),
+            "write failed"
+        );
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -818,11 +833,10 @@ mod tests {
         let missing = storage_directory.join("missing");
 
         let err = sync_dir(&missing).expect_err("missing directory should fail");
-        assert!(matches!(
-            err,
-            Error::BlobOpenFailed(path, kind, _)
-            if path == missing.to_string_lossy() && kind == "directory"
-        ));
+        assert!(err.to_string().starts_with(&format!(
+            "blob open failed: {}/directory error:",
+            missing.to_string_lossy()
+        )));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -849,13 +863,13 @@ mod tests {
             .sync()
             .await
             .expect_err("sync should fail without a loop");
-        assert!(matches!(
-            err,
-            Error::BlobSyncFailed(partition, name, inner)
-            if partition == "partition"
-                && name == hex(b"blob")
-                && inner.to_string() == "failed to send work"
-        ));
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "blob sync failed: partition/{} error: failed to send work",
+                hex(b"blob")
+            )
+        );
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -882,12 +896,10 @@ mod tests {
             .resize(0)
             .await
             .expect_err("resize should fail on a socket fd");
-        assert!(matches!(
-            err,
-            Error::BlobResizeFailed(partition, name, _)
-            if partition == "partition"
-                && name == hex(b"blob")
-        ));
+        assert!(err.to_string().starts_with(&format!(
+            "blob resize failed: partition/{} error:",
+            hex(b"blob")
+        )));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
@@ -914,13 +926,18 @@ mod tests {
             .sync()
             .await
             .expect_err("sync should fail on a socket fd");
-        assert!(matches!(
-            err,
-            Error::BlobSyncFailed(partition, name, inner)
-            if partition == "partition"
-                && name == hex(b"blob")
-                && inner.raw_os_error().is_some()
-        ));
+        let message = err.to_string();
+        assert!(message.starts_with(&format!(
+            "blob sync failed: partition/{} error:",
+            hex(b"blob")
+        )));
+        assert_ne!(
+            message,
+            format!(
+                "blob sync failed: partition/{} error: failed to send work",
+                hex(b"blob")
+            )
+        );
 
         drop(blob);
         drop(submitter);
