@@ -11,7 +11,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadableable};
+use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::{collections::BTreeMap, num::NonZeroU64};
@@ -218,7 +218,7 @@ impl<F: merkle::Graftable, D: Digest> RangeProof<F, D> {
     /// Create a new range proof for the provided `range` of operations.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<F, Digest = D>, const N: usize>(
         hasher: &mut H,
-        status: &impl BitmapReadableable<N>,
+        status: &impl BitmapReadable<N>,
         storage: &S,
         range: Range<Location<F>>,
         ops_root: D,
@@ -310,7 +310,7 @@ impl<F: merkle::Graftable, D: Digest> RangeProof<F, D> {
         const N: usize,
     >(
         hasher: &mut H,
-        status: &impl BitmapReadableable<N>,
+        status: &impl BitmapReadable<N>,
         storage: &S,
         log: &C,
         start_loc: Location<F>,
@@ -533,7 +533,7 @@ impl<F: merkle::Graftable, D: Digest, const N: usize> OperationProof<F, D, N> {
     /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
     pub async fn new<H: CHasher<Digest = D>, S: Storage<F, Digest = D>>(
         hasher: &mut H,
-        status: &impl BitmapReadableable<N>,
+        status: &impl BitmapReadable<N>,
         storage: &S,
         loc: Location<F>,
         ops_root: D,

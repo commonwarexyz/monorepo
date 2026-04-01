@@ -496,15 +496,12 @@ where
             (self.status.pruned_chunks() as u64).to_be_bytes().to_vec(),
         );
 
-        // Write the grafted tree pinned nodes. These are the ops-space peaks covering the
-        // pruned portion of the bitmap.
-        let pruned_ops = (self.status.pruned_chunks() as u64)
-            .checked_mul(BitMap::<N>::CHUNK_SIZE_BITS)
-            .ok_or_else(|| Error::<F>::DataCorrupted("pruned ops leaves overflow"))?;
-        let ops_size = Position::<F>::try_from(Location::<F>::new(pruned_ops))?;
-        let grafting_height = grafting::height::<N>();
-        for (i, (ops_pos, _)) in F::peaks(ops_size).enumerate() {
-            let grafted_pos = grafting::ops_to_grafted_pos::<F>(ops_pos, grafting_height);
+        // Write the grafted tree pinned nodes using the grafted-tree pin layout directly.
+        let pruned_chunks = Location::<F>::new(self.status.pruned_chunks() as u64);
+        for (i, grafted_pos) in F::nodes_to_pin(pruned_chunks, pruned_chunks)
+            .into_iter()
+            .enumerate()
+        {
             let digest = self.grafted_tree.get_node(grafted_pos).ok_or(
                 crate::qmdb::Error::<F>::DataCorrupted("missing grafted pinned node"),
             )?;

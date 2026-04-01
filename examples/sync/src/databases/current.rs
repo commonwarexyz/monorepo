@@ -36,7 +36,8 @@ use tracing::error;
 const CHUNK_SIZE: usize = sha256::Digest::SIZE;
 
 /// Database type alias.
-pub type Database<E> = current::unordered::fixed::Db<E, Key, Value, Hasher, Translator, CHUNK_SIZE>;
+pub type Database<E> =
+    current::unordered::fixed::Db<mmr::Family, E, Key, Value, Hasher, Translator, CHUNK_SIZE>;
 
 /// Operation type alias. Same as the `any` operation type.
 pub type Operation = FixedOperation<mmr::Family, Key, Value>;
