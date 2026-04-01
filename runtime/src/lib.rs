@@ -2013,16 +2013,16 @@ mod tests {
                 // runtime shutdown begins.
                 task_started_rx.await.unwrap();
                 if let Some(kill) = explicit_stop_value {
-                    // Start graceful stopping without waiting for it to finish.
-                    // Root teardown should later join this same graceful
-                    // future instead of starting a separate stop
-                    // sequence.
-                    let stop = context.clone().stop(kill, None);
-                    pin_mut!(stop);
-                    assert!(
-                        stop.as_mut().now_or_never().is_none(),
-                        "stop should stay pending until graceful cleanup completes",
-                    );
+                    // Start graceful stopping from a sibling task and wait only
+                    // until the explicit stop request becomes visible. The
+                    // actual stop future remains pending in the sibling task,
+                    // so root teardown must still join that in-flight graceful
+                    // stop instead of starting a separate shutdown sequence.
+                    context.clone().spawn(move |context| async move {
+                        let _ = context.stop(kill, None).await;
+                    });
+                    let reason = context.stopped().await.unwrap();
+                    assert_eq!(reason, StopReason::Requested(kill));
                 }
                 if should_panic {
                     panic!("root panic");
