@@ -16,7 +16,7 @@
 use crate::{CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
-use commonware_runtime::{IoBuf, IoBufs};
+use commonware_runtime::IoBufs;
 use std::{cmp, fmt::Debug, time::SystemTime};
 use thiserror::Error;
 
@@ -368,7 +368,7 @@ fn extend_unique<P: PublicKey>(target: &mut Vec<P>, source: Vec<P>) {
 mod tests {
     use super::*;
     use commonware_cryptography::{ed25519, Signer as _};
-    use commonware_runtime::{deterministic, IoBufs, Runner as _};
+    use commonware_runtime::{deterministic, IoBuf, IoBufs, Runner as _};
     use commonware_utils::channel::mpsc;
     use std::{
         io,
