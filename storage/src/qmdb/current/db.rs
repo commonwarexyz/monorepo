@@ -127,19 +127,7 @@ where
     pub async fn bounds(&self) -> std::ops::Range<Location<F>> {
         self.any.bounds().await
     }
-}
 
-// Verification helpers.
-impl<F, E, C, I, H, U, const N: usize> Db<F, E, C, I, H, U, N>
-where
-    F: merkle::Graftable,
-    E: Context,
-    U: Update,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    Operation<F, U>: Codec,
-{
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
     /// in the log with the provided `root`, having the activity status described by `chunks`.
     pub fn verify_range_proof(
