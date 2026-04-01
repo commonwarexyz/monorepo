@@ -2185,15 +2185,16 @@ where
     written
 }
 
-/// Minimum capacity when growing. Avoids degenerate doubling from tiny buffers.
-const MIN_GROW_CAPACITY: usize = 64;
-
 /// Assembles [`IoBufs`] from a mix of inline writes and zero-copy pieces.
 ///
 /// All inline writes go into a single pool-backed buffer. [`BufsMut::push`]
 /// records boundaries without flushing. [`Builder::finish`] freezes the buffer
 /// once and uses [`IoBuf::slice`] to carve it into pieces at the recorded
 /// boundaries, interleaved with the pushed [`Bytes`].
+///
+/// The inline buffer has a fixed capacity set at construction and will not
+/// grow. Callers must ensure the capacity accounts for all inline
+/// (non-pushed) bytes that will be written. Exceeding it will panic.
 ///
 /// ```text
 /// builder.put_u16(99);                        // inline
@@ -2207,7 +2208,6 @@ const MIN_GROW_CAPACITY: usize = 64;
 /// //             slices of one allocation
 /// ```
 pub struct Builder {
-    pool: BufferPool,
     // Single working buffer for all inline writes.
     buf: IoBufMut,
     // Each entry is (offset_in_buf, pushed_bytes) recording where a push
@@ -2216,23 +2216,16 @@ pub struct Builder {
 }
 
 impl Builder {
-    /// `capacity` sets the size of the pool-allocated inline buffer.
-    /// If inline writes exceed capacity, the buffer grows via reallocation.
+    /// Creates a new builder with a fixed-capacity inline buffer.
+    ///
+    /// `capacity` is the minimum number of inline bytes the buffer can hold.
+    /// The pool may round up to a larger size class. Writing more inline
+    /// bytes than the allocated capacity will panic.
     pub fn new(pool: &BufferPool, capacity: NonZeroUsize) -> Self {
         Self {
-            pool: pool.clone(),
             buf: pool.alloc(capacity.get()),
             pushes: Vec::new(),
         }
-    }
-
-    /// Reallocates `buf` with doubled capacity, copying existing data.
-    /// Only called when inline writes exceed the initial capacity.
-    fn grow(&mut self) {
-        let new_cap = (self.buf.capacity() * 2).max(MIN_GROW_CAPACITY);
-        let mut new_buf = self.pool.alloc(new_cap);
-        new_buf.put_slice(self.buf.as_ref());
-        self.buf = new_buf;
     }
 
     /// Freezes the inline buffer and assembles [`IoBufs`] by slicing at
@@ -2262,11 +2255,10 @@ impl Builder {
     }
 }
 
-// SAFETY: All methods delegate to `self.buf`, a pool-backed `IoBufMut` with a
-// sound `BufMut` implementation. `put_slice`, `put`, and `chunk_mut` are
-// overridden to grow the buffer on exhaustion. The default `put_slice`/`put`
-// assert `remaining_mut() >= src.len()` which would panic; our overrides
-// handle overflow by growing instead.
+// SAFETY: All methods delegate directly to `self.buf`, a pool-backed
+// `IoBufMut` with a sound `BufMut` implementation. The inline buffer has
+// fixed capacity; writes that exceed it will panic via the underlying
+// `IoBufMut` implementation.
 unsafe impl BufMut for Builder {
     #[inline]
     fn remaining_mut(&self) -> usize {
@@ -2280,36 +2272,7 @@ unsafe impl BufMut for Builder {
 
     #[inline]
     fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
-        if self.buf.remaining_mut() == 0 {
-            self.grow();
-        }
         self.buf.chunk_mut()
-    }
-
-    fn put_slice(&mut self, mut src: &[u8]) {
-        while !src.is_empty() {
-            if self.buf.remaining_mut() == 0 {
-                self.grow();
-            }
-            let n = src.len().min(self.buf.remaining_mut());
-            self.buf.put_slice(&src[..n]);
-            src = &src[n..];
-        }
-    }
-
-    fn put<T: Buf>(&mut self, mut src: T)
-    where
-        Self: Sized,
-    {
-        while src.has_remaining() {
-            if self.buf.remaining_mut() == 0 {
-                self.grow();
-            }
-            let chunk = src.chunk();
-            let n = chunk.len().min(self.buf.remaining_mut());
-            self.buf.put_slice(&chunk[..n]);
-            src.advance(n);
-        }
     }
 }
 
@@ -2351,8 +2314,9 @@ pub trait EncodeExt: EncodeSize + Write {
     ///
     /// # Panics
     ///
-    /// Panics if [`EncodeSize::encode_size`] does not match the number of
-    /// bytes written by [`Write::write_bufs`].
+    /// Panics if [`EncodeSize::encode_inline_size`] underreports the number
+    /// of inline bytes written by [`Write::write_bufs`], or if
+    /// [`EncodeSize::encode_size`] does not match the total bytes written.
     fn encode_with_pool(&self, pool: &BufferPool) -> IoBufs {
         let len = self.encode_size();
         let capacity = NonZeroUsize::new(self.encode_inline_size()).unwrap_or(NonZeroUsize::MIN);
@@ -4767,18 +4731,14 @@ mod tests {
             assert_eq!(bufs.remaining(), 0);
         }
 
-        // Inline writes exceeding capacity trigger grow.
+        // Inline writes exceeding capacity panic.
         #[test]
-        fn test_inline_overflow() {
-            let mut b = builder(4);
-            b.put_u32(1);
-            b.put_u32(2); // exceeds 4-byte capacity
-            b.put_u32(3);
-            let mut r = b.finish();
-            assert_eq!(r.remaining(), 12);
-            assert_eq!(r.get_u32(), 1);
-            assert_eq!(r.get_u32(), 2);
-            assert_eq!(r.get_u32(), 3);
+        #[should_panic]
+        fn test_inline_overflow_panics() {
+            let mut b = builder(1);
+            let cap = b.remaining_mut();
+            b.put_slice(&vec![0xFF; cap]);
+            b.put_u8(1); // exceeds capacity
         }
 
         // Pushing empty Bytes is a no-op.
@@ -4805,27 +4765,23 @@ mod tests {
             assert_eq!(r.copy_to_bytes(200), c);
         }
 
-        // put() with source larger than capacity.
+        // put() exceeding capacity panics.
         #[test]
-        fn test_put_exceeding_capacity() {
-            let mut b = builder(4);
-            let src = Bytes::from(vec![0xAB; 100]);
-            b.put(src.clone());
-            let mut r = b.finish();
-            assert_eq!(r.remaining(), 100);
-            assert_eq!(r.copy_to_bytes(100), src);
+        #[should_panic]
+        fn test_put_exceeding_capacity_panics() {
+            let mut b = builder(1);
+            let cap = b.remaining_mut();
+            let src = Bytes::from(vec![0xAB; cap + 1]);
+            b.put(src);
         }
 
-        // Single put_slice call larger than capacity, triggering grow.
+        // put_slice() exceeding capacity panics.
         #[test]
-        fn test_put_slice_exceeding_capacity() {
-            let mut b = builder(4);
-            let data = vec![0xFE; 50];
-            b.put_slice(&data);
-            let mut r = b.finish();
-            assert_eq!(r.remaining(), 50);
-            let out = r.copy_to_bytes(50);
-            assert_eq!(&out[..], &data[..]);
+        #[should_panic]
+        fn test_put_slice_exceeding_capacity_panics() {
+            let mut b = builder(1);
+            let cap = b.remaining_mut();
+            b.put_slice(&vec![0xFE; cap + 1]);
         }
 
         // Simulates a multi-field struct: [u16 | Bytes (via push) | u32].
@@ -4883,35 +4839,15 @@ mod tests {
             assert_eq!(r.get_u8(), 0xAB);
         }
 
-        // chunk_mut on a full buffer triggers grow.
+        // Writing past a full buffer panics (fixed capacity).
         #[test]
-        fn test_chunk_mut_triggers_grow() {
-            // Pool may round up the allocation, so fill the entire buffer.
+        #[should_panic]
+        fn test_write_past_full_panics() {
             let mut b = builder(1);
             let cap = b.remaining_mut();
             b.put_slice(&vec![0xFF; cap]); // fill the buffer completely
             assert_eq!(b.remaining_mut(), 0);
-            let chunk = b.chunk_mut(); // must grow
-            chunk[0..1].copy_from_slice(&[0x42]);
-            // SAFETY: We just wrote 1 byte into chunk_mut above.
-            unsafe { b.advance_mut(1) };
-            let mut r = b.finish();
-            assert_eq!(r.remaining(), cap + 1);
-            let prefix = r.copy_to_bytes(cap);
-            assert!(prefix.iter().all(|&b| b == 0xFF));
-            assert_eq!(r.get_u8(), 0x42);
-        }
-
-        // grow when doubled capacity >= MIN_GROW_CAPACITY (normal doubling).
-        #[test]
-        fn test_grow_normal_doubling() {
-            let mut b = builder(64);
-            let data = vec![0xAA; 65]; // 1 byte over capacity
-            b.put_slice(&data);
-            let mut r = b.finish();
-            assert_eq!(r.remaining(), 65);
-            let out = r.copy_to_bytes(65);
-            assert_eq!(&out[..], &data[..]);
+            b.put_u8(0x42); // panics
         }
 
         // Push at offset 0 with inline trailer exercises finish branch
