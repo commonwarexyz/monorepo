@@ -24,12 +24,12 @@ use commonware_storage::{
 use commonware_utils::{non_empty_range, sync::AsyncRwLock};
 use std::{ops::Deref, sync::Arc};
 
-type KeylessDbHandle<E, V, H> = Arc<AsyncRwLock<Keyless<E, V, H>>>;
+type KeylessDbHandle<E, V, H> = Arc<AsyncRwLock<Keyless<mmr::Family, E, V, H>>>;
 
 /// Wraps a keyless [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
 pub struct KeylessUnmerkleized<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
-    batch: UnmerkleizedBatch<H, V>,
+    batch: UnmerkleizedBatch<mmr::Family, H, V>,
     db: KeylessDbHandle<E, V, H>,
     metadata: Option<V>,
 }
@@ -37,7 +37,7 @@ pub struct KeylessUnmerkleized<E: Storage + Clock + Metrics, V: VariableValue, H
 impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Deref
     for KeylessUnmerkleized<E, V, H>
 {
-    type Target = UnmerkleizedBatch<H, V>;
+    type Target = UnmerkleizedBatch<mmr::Family, H, V>;
 
     fn deref(&self) -> &Self::Target {
         &self.batch
@@ -67,14 +67,14 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> KeylessUnmerklei
 /// Wraps a keyless [`MerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Merkleized`](super::Merkleized) trait.
 pub struct KeylessMerkleized<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> {
-    batch: MerkleizedBatch<H::Digest, V>,
+    batch: MerkleizedBatch<mmr::Family, H::Digest, V>,
     db: KeylessDbHandle<E, V, H>,
 }
 
 impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> Deref
     for KeylessMerkleized<E, V, H>
 {
-    type Target = MerkleizedBatch<H::Digest, V>;
+    type Target = MerkleizedBatch<mmr::Family, H::Digest, V>;
 
     fn deref(&self) -> &Self::Target {
         &self.batch
@@ -122,7 +122,7 @@ impl<E: Storage + Clock + Metrics, V: VariableValue, H: Hasher> MerkleizedTrait
     }
 }
 
-impl<E, V, H> ManagedDb<E> for Keyless<E, V, H>
+impl<E, V, H> ManagedDb<E> for Keyless<mmr::Family, E, V, H>
 where
     E: Storage + Clock + Metrics,
     V: VariableValue + 'static,
