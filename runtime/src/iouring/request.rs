@@ -151,7 +151,7 @@ impl Request {
     }
 
     /// Deliver the stored result to the caller via its oneshot sender.
-    pub fn finish(self) {
+    pub fn complete(self) {
         match self {
             Self::Send(s) => s.finish(),
             Self::Recv(r) => r.finish(),
@@ -790,7 +790,7 @@ mod tests {
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::EAGAIN));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing send result"),
             Err(Error::Timeout)
@@ -807,7 +807,7 @@ mod tests {
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
         assert!(request.on_cqe(WaiterState::CancelRequested, 1));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing partial-timeout result"),
             Err(Error::Timeout)
@@ -823,7 +823,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing timeout-cancel result"),
             Err(Error::Timeout)
@@ -843,7 +843,7 @@ mod tests {
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 3));
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 2));
-        request.finish();
+        request.complete();
         block_on(rx)
             .expect("missing send completion")
             .expect("send should complete successfully");
@@ -858,7 +858,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing zero-result completion"),
             Err(Error::SendFailed)
@@ -873,7 +873,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing hard-error completion"),
             Err(Error::SendFailed)
@@ -889,7 +889,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, 5));
-        request.finish();
+        request.complete();
         block_on(rx)
             .expect("missing send completion")
             .expect("send should complete successfully");
@@ -926,7 +926,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        request.finish();
+        request.complete();
         let (_buf, read) = block_on(rx)
             .expect("missing recv completion")
             .expect("recv should complete successfully");
@@ -947,7 +947,7 @@ mod tests {
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 3));
         assert!(request.on_cqe(WaiterState::CancelRequested, 1));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing timeout completion"),
             Err((_, Error::Timeout))
@@ -966,7 +966,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::EINTR));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing retryable completion"),
             Err((_, Error::Timeout))
@@ -984,7 +984,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing timeout-cancel completion"),
             Err((_, Error::Timeout))
@@ -1003,7 +1003,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, 5));
-        request.finish();
+        request.complete();
         let (_buf, read) = block_on(rx)
             .expect("missing successful completion")
             .expect("recv should complete successfully");
@@ -1040,7 +1040,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing zero completion"),
             Err((_, Error::RecvFailed))
@@ -1058,7 +1058,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing error completion"),
             Err((_, Error::RecvFailed))
@@ -1095,7 +1095,7 @@ mod tests {
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        request.finish();
+        request.complete();
         block_on(rx)
             .expect("missing read completion")
             .expect("read should complete successfully");
@@ -1112,7 +1112,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing eof completion"),
             Err((_, Error::BlobInsufficientLength))
@@ -1129,7 +1129,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing read failure"),
             Err((_, Error::ReadFailed))
@@ -1147,7 +1147,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing timeout-cancel failure"),
             Err((_, Error::ReadFailed))
@@ -1182,7 +1182,7 @@ mod tests {
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 3));
-        request.finish();
+        request.complete();
         block_on(rx)
             .expect("missing write completion")
             .expect("write should complete successfully");
@@ -1202,7 +1202,7 @@ mod tests {
         });
         assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 4));
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 1));
-        request.finish();
+        request.complete();
         block_on(rx)
             .expect("missing vectored write completion")
             .expect("vectored write should complete successfully");
@@ -1218,7 +1218,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing zero-result write"),
             Err(Error::WriteFailed)
@@ -1234,7 +1234,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing write failure"),
             Err(Error::WriteFailed)
@@ -1251,7 +1251,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing timeout-cancel write failure"),
             Err(Error::WriteFailed)
@@ -1279,7 +1279,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
-        request.finish();
+        request.complete();
         let err = block_on(rx)
             .expect("missing timeout cancel result")
             .expect_err("expected timeout cancel error");
@@ -1293,7 +1293,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
-        request.finish();
+        request.complete();
         let err = block_on(rx)
             .expect("missing hard error result")
             .expect_err("expected hard error");
@@ -1307,7 +1307,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
-        request.finish();
+        request.complete();
         block_on(rx)
             .expect("missing zero-result completion")
             .expect("sync should succeed on zero");
@@ -1319,7 +1319,7 @@ mod tests {
             sender: tx,
         });
         assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 1));
-        request.finish();
+        request.complete();
         block_on(rx)
             .expect("missing positive-result completion")
             .expect("sync should succeed on positive");
@@ -1352,7 +1352,7 @@ mod tests {
             result: None,
             sender: tx,
         });
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing send fallback"),
             Err(Error::SendFailed)
@@ -1369,7 +1369,7 @@ mod tests {
             result: None,
             sender: tx,
         });
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing recv fallback"),
             Err((_, Error::RecvFailed))
@@ -1386,7 +1386,7 @@ mod tests {
             result: None,
             sender: tx,
         });
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing read fallback"),
             Err((_, Error::ReadFailed))
@@ -1401,7 +1401,7 @@ mod tests {
             result: None,
             sender: tx,
         });
-        request.finish();
+        request.complete();
         assert!(matches!(
             block_on(rx).expect("missing write fallback"),
             Err(Error::WriteFailed)
@@ -1415,7 +1415,7 @@ mod tests {
             result: None,
             sender: tx,
         });
-        request.finish();
+        request.complete();
         block_on(rx)
             .expect("missing sync fallback")
             .expect("sync fallback should be success");

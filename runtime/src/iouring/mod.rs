@@ -747,7 +747,7 @@ impl IoUringLoop {
                 if let Some(tick) = target_tick {
                     self.timeout_wheel.remove(tick);
                 }
-                request.finish();
+                request.complete();
             }
         }
     }
@@ -1258,7 +1258,7 @@ mod tests {
             StageOutcome::Submit(_)
         ));
         match iouring.waiters.on_completion(stale.user_data(), 0) {
-            CompletionOutcome::Complete { request, .. } => request.finish(),
+            CompletionOutcome::Complete { request, .. } => request.complete(),
             _ => panic!("sync waiter should complete immediately"),
         }
 
@@ -1321,7 +1321,7 @@ mod tests {
         } = iouring.waiters.on_completion(old_slot.user_data(), 0)
         {
             iouring.timeout_wheel.remove(tick);
-            request.finish();
+            request.complete();
         }
 
         // Reuse the same slot for a new waiter with a later timeout.
@@ -1393,7 +1393,7 @@ mod tests {
         if let CompletionOutcome::Complete { request, .. } =
             iouring.waiters.on_completion(slot_index.user_data(), 5)
         {
-            request.finish();
+            request.complete();
         }
 
         // Late cancel CQE should be ignored.
@@ -1474,7 +1474,7 @@ mod tests {
             CompletionOutcome::Complete {
                 request,
                 target_tick: None,
-            } => request.finish(),
+            } => request.complete(),
             _ => panic!("missing timeout completion from op CQE"),
         }
 
