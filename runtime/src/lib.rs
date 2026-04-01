@@ -1982,7 +1982,7 @@ mod tests {
         R::Context: Spawner + Send + 'static,
     {
         let (task_started_tx, task_started_rx) = oneshot::channel();
-        let (shutdown_seen_tx, shutdown_seen_rx) = oneshot::channel();
+        let (root_exit_tx, root_exit_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
 
         // Run the root future on another thread so the test can observe the
@@ -2001,7 +2001,6 @@ mod tests {
                     let expected =
                         explicit_stop_value.map_or(StopReason::Shutdown, StopReason::Requested);
                     assert_eq!(reason, expected);
-                    shutdown_seen_tx.send(()).unwrap();
 
                     // Hold shutdown open until the test confirms the root is
                     // still blocked in graceful cleanup.
@@ -2024,18 +2023,19 @@ mod tests {
                     let reason = context.stopped().await.unwrap();
                     assert_eq!(reason, StopReason::Requested(kill));
                 }
+                root_exit_tx.send(()).unwrap();
                 if should_panic {
                     panic!("root panic");
                 }
             });
         });
 
-        // The child should observe the shared shutdown reason as soon as the
-        // root exits, but `start()` must remain blocked until the child
-        // finishes its graceful cleanup.
-        shutdown_seen_rx
+        // Once the root is ready to return or resume unwinding, `start()`
+        // should still remain blocked until the already-open stop signal is
+        // released by the child task above.
+        root_exit_rx
             .blocking_recv()
-            .expect("root shutdown should signal stopped listeners");
+            .expect("root should reach exit after graceful stop is requested");
         assert!(
             !thread.is_finished(),
             "root shutdown should wait for graceful stopped cleanup",
