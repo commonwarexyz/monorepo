@@ -158,7 +158,7 @@ impl WriteBuffers {
 }
 
 /// Refresh the iovec scratch from the current `IoBufs` state.
-fn refresh_iovecs(bufs: &IoBufs, iovecs: &mut Box<[libc::iovec]>) -> usize {
+fn refresh_iovecs(bufs: &IoBufs, iovecs: &mut Box<[libc::iovec]>) -> u32 {
     let max_iovecs = bufs.chunk_count().min(iovecs.len());
     // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
     let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
@@ -168,6 +168,8 @@ fn refresh_iovecs(bufs: &IoBufs, iovecs: &mut Box<[libc::iovec]>) -> usize {
         )
     };
     bufs.chunks_vectored(io_slices)
+        .try_into()
+        .expect("iovecs_len exceeds u32")
 }
 
 /// Classified raw CQE result code.
@@ -380,14 +382,21 @@ impl ActiveSend {
                 // SAFETY: buf is an IoBuf with stable memory. cursor <= buf.len().
                 let ptr = unsafe { buf.as_ptr().add(*cursor) };
                 let remaining = buf.len() - *cursor;
-                opcode::Send::new(fd, ptr, remaining as u32).build()
+                opcode::Send::new(
+                    fd,
+                    ptr,
+                    remaining
+                        .try_into()
+                        .expect("single-buffer SQE length exceeds u32"),
+                )
+                .build()
             }
             WriteBuffers::Vectored { bufs, iovecs } => {
                 let iovecs_len = refresh_iovecs(bufs, iovecs);
                 // `Writev` is sufficient here because network sends only need
                 // ordered byte delivery; this layer does not need sendmsg
                 // ancillary data or zerocopy completion management.
-                opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len as _).build()
+                opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len).build()
             }
         }
     }
@@ -465,7 +474,14 @@ impl ActiveRecv {
         // offset <= len <= capacity.
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.offset) };
         let remaining = self.len - self.offset;
-        opcode::Recv::new(fd, ptr, remaining as u32).build()
+        opcode::Recv::new(
+            fd,
+            ptr,
+            remaining
+                .try_into()
+                .expect("single-buffer SQE length exceeds u32"),
+        )
+        .build()
     }
 
     /// Classify one recv CQE and decide whether the logical request completes
@@ -486,6 +502,11 @@ impl ActiveRecv {
                 CqeAction::Complete
             }
             RawResult::Positive(n) => {
+                let remaining = self.len - self.offset;
+                assert!(
+                    n <= remaining,
+                    "recv CQE exceeds requested length: n={n} remaining={remaining}"
+                );
                 self.offset += n;
                 if !self.exact || self.offset >= self.len {
                     self.result = Some(Ok(self.offset));
@@ -538,9 +559,15 @@ impl ActiveReadAt {
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.read) };
         let remaining = self.len - self.read;
         let offset = self.offset + self.read as u64;
-        opcode::Read::new(fd, ptr, remaining as u32)
-            .offset(offset as _)
-            .build()
+        opcode::Read::new(
+            fd,
+            ptr,
+            remaining
+                .try_into()
+                .expect("single-buffer SQE length exceeds u32"),
+        )
+        .offset(offset)
+        .build()
     }
 
     /// Classify one read CQE and decide whether the logical request completes
@@ -617,14 +644,20 @@ impl ActiveWriteAt {
                 // SAFETY: buf is an IoBuf with stable memory. cursor <= buf.len().
                 let ptr = unsafe { buf.as_ptr().add(*cursor) };
                 let remaining = buf.len() - *cursor;
-                opcode::Write::new(fd, ptr, remaining as u32)
-                    .offset(offset as _)
-                    .build()
+                opcode::Write::new(
+                    fd,
+                    ptr,
+                    remaining
+                        .try_into()
+                        .expect("single-buffer SQE length exceeds u32"),
+                )
+                .offset(offset)
+                .build()
             }
             WriteBuffers::Vectored { bufs, iovecs } => {
                 let iovecs_len = refresh_iovecs(bufs, iovecs);
-                opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len as _)
-                    .offset(offset as _)
+                opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len)
+                    .offset(offset)
                     .build()
             }
         }
@@ -720,9 +753,12 @@ mod tests {
     use super::*;
     use commonware_utils::channel::oneshot;
     use futures::executor::block_on;
-    use std::os::{
-        fd::{FromRawFd, IntoRawFd},
-        unix::net::UnixStream,
+    use std::{
+        os::{
+            fd::{FromRawFd, IntoRawFd},
+            unix::net::UnixStream,
+        },
+        panic::{catch_unwind, AssertUnwindSafe},
     };
 
     type SendRx = oneshot::Receiver<Result<(), Error>>;
@@ -1063,6 +1099,14 @@ mod tests {
         request.finish();
         let (_buf, result) = block_on(rx).expect("missing successful completion");
         assert_eq!(result.expect("recv should complete successfully"), 5);
+
+        // A kernel completion larger than the requested remaining length must
+        // trip the local invariant before it can corrupt buffer state.
+        let (mut request, _rx) = make_recv_request(5, 0, true);
+        let overflow = catch_unwind(AssertUnwindSafe(|| {
+            let _ = request.on_cqe(active_state(), 6);
+        }));
+        assert!(overflow.is_err());
 
         // Zero-byte and hard-error CQEs should both surface as recv failures.
         let (mut request, rx) = make_recv_request(5, 0, true);

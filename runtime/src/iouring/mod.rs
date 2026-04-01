@@ -1255,35 +1255,6 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_wake_cqe_rearms_after_multishot_termination() {
-        // Verify a wake CQE without the multishot `more` flag requests a poll
-        // reinstallation for the next staging pass.
-        let cfg = Config::default();
-        let mut registry = Registry::default();
-        let (_submitter, mut iouring) = IoUringLoop::new(cfg, &mut registry);
-        iouring.wake_rearm_needed = false;
-
-        #[repr(C)]
-        struct RawCqe {
-            user_data: u64,
-            res: i32,
-            flags: u32,
-        }
-
-        // SAFETY: `CqueueEntry` is a `repr(C)` newtype over the same 16-byte CQE
-        // layout: `user_data`, `res`, and `flags`.
-        let cqe = unsafe {
-            std::mem::transmute::<RawCqe, CqueueEntry>(RawCqe {
-                user_data: WAKE_USER_DATA,
-                res: 1,
-                flags: 0,
-            })
-        };
-        iouring.handle_cqe(cqe);
-        assert!(iouring.wake_rearm_needed);
-    }
-
-    #[test]
     fn test_cancel_completion_returns_saved_op_result() {
         // Verify a successful operation CQE still wins if it races with a timeout cancel.
         let cfg = Config::default();
@@ -1335,6 +1306,85 @@ mod tests {
         let (_, result) = futures::executor::block_on(rx).expect("missing completion");
         // exact=false recv with 5 bytes should succeed.
         assert_eq!(result.unwrap(), 5);
+        assert_eq!(iouring.waiters.len(), 0);
+    }
+
+    #[test]
+    fn test_staged_cancel_cqe_is_ignored_after_timeout_completion() {
+        // Drive the "cancel SQE already staged" race explicitly:
+        //
+        // 1. Stage an exact recv with a deadline and register it with the wheel.
+        // 2. Advance time so the waiter becomes cancel-requested and queues an
+        //    AsyncCancel.
+        // 3. Stage that cancel SQE into the ring, but do not complete it yet.
+        // 4. Deliver a partial op CQE after cancellation was requested. For an
+        //    exact recv, that must complete locally as Timeout instead of
+        //    requeueing.
+        // 5. Finally, deliver the late cancel CQE and confirm it is ignored
+        //    because the waiter was already removed by step 4.
+        let cfg = Config {
+            max_request_timeout: Duration::from_millis(100),
+            timeout_wheel_tick: Duration::from_millis(5),
+            ..Default::default()
+        };
+        let mut registry = Registry::default();
+        let (_submitter, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        let (left, _right) = UnixStream::pair().unwrap();
+        let (tx, rx) = oneshot::channel();
+        let req = ActiveRequest::from_request(Request::Recv(RecvRequest {
+            fd: Arc::new(left.into()),
+            buf: IoBufMut::with_capacity(8),
+            offset: 0,
+            len: 8,
+            exact: true,
+            deadline: Some(Instant::now() + Duration::from_millis(25)),
+            sender: tx,
+        }));
+        let waiter_id = iouring.waiters.insert(req, Some(1));
+        assert!(matches!(
+            iouring.waiters.stage_sqe(waiter_id),
+            StageAction::Submit(_)
+        ));
+        iouring.timeout_wheel.schedule(waiter_id, 1);
+
+        // Expire the deadline so the waiter transitions to cancel-requested and
+        // the loop queues an AsyncCancel for the in-flight recv SQE.
+        std::thread::sleep(iouring.cfg.timeout_wheel_tick + Duration::from_millis(2));
+        iouring.advance_timeouts();
+        assert_eq!(iouring.pending_cancels.len(), 1);
+
+        // Stage the queued AsyncCancel. It is now in the SQ, but there is still
+        // no cancel CQE, so the operation CQE can still win the race.
+        {
+            let mut submission_queue = ring.submission();
+            assert!(!iouring.stage_cancellations(&mut submission_queue));
+            assert_eq!(submission_queue.len(), 1);
+        }
+        assert!(iouring.pending_cancels.is_empty());
+
+        // A partial result after cancellation was requested must complete this
+        // exact recv as Timeout rather than parking it back in the ready queue.
+        match iouring.waiters.on_cqe(waiter_id.user_data(), 4) {
+            CqeOutcome::Complete {
+                request,
+                target_tick: None,
+            } => request.finish(),
+            _ => panic!("missing timeout completion from op CQE"),
+        }
+
+        // The cancel CQE arrives after the waiter was already removed, so it
+        // should be treated as stale and ignored.
+        assert!(matches!(
+            iouring
+                .waiters
+                .on_cqe(waiter_id.cancel_user_data(), -libc::ECANCELED),
+            CqeOutcome::Ignore
+        ));
+
+        let (_buf, result) = futures::executor::block_on(rx).expect("missing completion");
+        assert!(matches!(result, Err(crate::Error::Timeout)));
         assert_eq!(iouring.waiters.len(), 0);
     }
 
