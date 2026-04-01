@@ -4,13 +4,13 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
+    journal::contiguous::variable::Config as VConfig,
     merkle::{hasher::Standard, journaled::Config as MerkleConfig, mmb, mmr, Family, Location},
     qmdb::{
         keyless::variable::{self, Config, Db as Keyless},
         verify_proof,
     },
 };
-use commonware_storage::journal::contiguous::variable::Config as VConfig;
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
