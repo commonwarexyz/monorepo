@@ -642,8 +642,9 @@ impl IoUringLoop {
             return Some(true);
         }
 
-        // Remaining SQ capacity can now be used to admit new requests.
-        while !submission_queue.is_full() {
+        // Stage operations until the channel is empty, waiter capacity is hit,
+        // or the SQ is full. Waiter capacity is bounded by `cfg.size`.
+        while self.waiters.len() < self.cfg.size as usize && !submission_queue.is_full() {
             // Active waiter capacity is bounded by `cfg.size`.
             if self.waiters.len() == self.cfg.size as usize {
                 break;
@@ -678,7 +679,6 @@ impl IoUringLoop {
 
         let at_sq_capacity = submission_queue.is_full();
         let at_waiter_capacity = self.waiters.len() == self.cfg.size as usize;
-
         Some(at_sq_capacity || at_waiter_capacity)
     }
 
