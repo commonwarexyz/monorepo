@@ -154,7 +154,7 @@ mod request;
 mod timeout;
 use timeout::{Tick, TimeoutWheel};
 mod waiter;
-use waiter::{CqeOutcome, StageAction, WaiterId, Waiters};
+use waiter::{CompletionOutcome, StageAction, WaiterId, Waiters};
 mod waker;
 use waker::{Waker, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
 
@@ -450,7 +450,7 @@ impl IoUringLoop {
     /// queue (timeout fired between requeue and staging), it is completed with
     /// a timeout error instead of issuing a follow-up SQE.
     fn stage_request(&mut self, waiter_id: WaiterId, sq: &mut SubmissionQueue<'_>) {
-        match self.waiters.stage_sqe(waiter_id) {
+        match self.waiters.stage(waiter_id) {
             StageAction::Ignore => {}
             StageAction::Timeout(request) => request.timeout(),
             StageAction::Submit(sqe) => {
@@ -607,13 +607,13 @@ impl IoUringLoop {
             return;
         }
 
-        match self.waiters.on_cqe(user_data, cqe.result()) {
-            CqeOutcome::Ignore => {}
-            CqeOutcome::Requeue(waiter_id) => {
+        match self.waiters.on_completion(user_data, cqe.result()) {
+            CompletionOutcome::Ignore => {}
+            CompletionOutcome::Requeue(waiter_id) => {
                 // Request needs another SQE. Add it to the ready queue.
                 self.ready_queue.push_back(waiter_id);
             }
-            CqeOutcome::Complete {
+            CompletionOutcome::Complete {
                 request,
                 target_tick,
             } => {
@@ -928,7 +928,7 @@ mod tests {
             }));
             let waiter_id = iouring.waiters.insert(request, None);
             assert!(matches!(
-                iouring.waiters.stage_sqe(waiter_id),
+                iouring.waiters.stage(waiter_id),
                 StageAction::Submit(_)
             ));
             assert!(
@@ -1018,7 +1018,7 @@ mod tests {
         assert!(iouring.pending_cancels.is_empty());
         assert_eq!(ring.submission().len(), 0);
         assert!(matches!(
-            iouring.waiters.stage_sqe(waiter_id),
+            iouring.waiters.stage(waiter_id),
             StageAction::Timeout(_)
         ));
     }
@@ -1213,13 +1213,13 @@ mod tests {
         iouring.timeout_wheel.schedule(old_slot, 1);
         // Simulate completion after the waiter had an op staged.
         assert!(matches!(
-            iouring.waiters.stage_sqe(old_slot),
+            iouring.waiters.stage(old_slot),
             StageAction::Submit(_)
         ));
-        if let CqeOutcome::Complete {
+        if let CompletionOutcome::Complete {
             request,
             target_tick: Some(tick),
-        } = iouring.waiters.on_cqe(old_slot.user_data(), 0)
+        } = iouring.waiters.on_completion(old_slot.user_data(), 0)
         {
             iouring.timeout_wheel.remove(tick);
             request.finish();
@@ -1237,7 +1237,7 @@ mod tests {
         let slot_index = iouring.waiters.insert(req, Some(3));
         assert_eq!(slot_index.index(), old_slot.index());
         assert!(matches!(
-            iouring.waiters.stage_sqe(slot_index),
+            iouring.waiters.stage(slot_index),
             StageAction::Submit(_)
         ));
         iouring.timeout_wheel.schedule(slot_index, 3);
@@ -1277,7 +1277,7 @@ mod tests {
         }));
         let slot_index = iouring.waiters.insert(req, Some(2));
         assert!(matches!(
-            iouring.waiters.stage_sqe(slot_index),
+            iouring.waiters.stage(slot_index),
             StageAction::Submit(_)
         ));
         assert!(
@@ -1289,8 +1289,8 @@ mod tests {
 
         // Simulate op CQE arriving with positive result (5 bytes read).
         // Even though cancel was requested, a complete positive result wins.
-        if let CqeOutcome::Complete { request, .. } =
-            iouring.waiters.on_cqe(slot_index.user_data(), 5)
+        if let CompletionOutcome::Complete { request, .. } =
+            iouring.waiters.on_completion(slot_index.user_data(), 5)
         {
             request.finish();
         }
@@ -1299,8 +1299,8 @@ mod tests {
         assert!(matches!(
             iouring
                 .waiters
-                .on_cqe(slot_index.cancel_user_data(), -libc::ECANCELED),
-            CqeOutcome::Ignore
+                .on_completion(slot_index.cancel_user_data(), -libc::ECANCELED),
+            CompletionOutcome::Ignore
         ));
 
         let (_, result) = futures::executor::block_on(rx).expect("missing completion");
@@ -1344,7 +1344,7 @@ mod tests {
         }));
         let waiter_id = iouring.waiters.insert(req, Some(1));
         assert!(matches!(
-            iouring.waiters.stage_sqe(waiter_id),
+            iouring.waiters.stage(waiter_id),
             StageAction::Submit(_)
         ));
         iouring.timeout_wheel.schedule(waiter_id, 1);
@@ -1366,8 +1366,8 @@ mod tests {
 
         // A partial result after cancellation was requested must complete this
         // exact recv as Timeout rather than parking it back in the ready queue.
-        match iouring.waiters.on_cqe(waiter_id.user_data(), 4) {
-            CqeOutcome::Complete {
+        match iouring.waiters.on_completion(waiter_id.user_data(), 4) {
+            CompletionOutcome::Complete {
                 request,
                 target_tick: None,
             } => request.finish(),
@@ -1379,8 +1379,8 @@ mod tests {
         assert!(matches!(
             iouring
                 .waiters
-                .on_cqe(waiter_id.cancel_user_data(), -libc::ECANCELED),
-            CqeOutcome::Ignore
+                .on_completion(waiter_id.cancel_user_data(), -libc::ECANCELED),
+            CompletionOutcome::Ignore
         ));
 
         let (_buf, result) = futures::executor::block_on(rx).expect("missing completion");
@@ -1909,15 +1909,15 @@ mod tests {
         }));
         let waiter_id = iouring.waiters.insert(request, Some(1));
         assert!(matches!(
-            iouring.waiters.stage_sqe(waiter_id),
+            iouring.waiters.stage(waiter_id),
             StageAction::Submit(_)
         ));
         iouring.timeout_wheel.schedule(waiter_id, 1);
 
         // Simulate a short recv CQE so the logical request requeues itself but
         // no longer has a kernel op outstanding.
-        let waiter_id = match iouring.waiters.on_cqe(waiter_id.user_data(), 4) {
-            CqeOutcome::Requeue(waiter_id) => waiter_id,
+        let waiter_id = match iouring.waiters.on_completion(waiter_id.user_data(), 4) {
+            CompletionOutcome::Requeue(waiter_id) => waiter_id,
             _ => panic!("missing partial recv completion"),
         };
         iouring.ready_queue.push_back(waiter_id);
@@ -1928,7 +1928,7 @@ mod tests {
         // Timeout should mark the waiter canceled locally without staging `AsyncCancel`.
         assert!(iouring.pending_cancels.is_empty());
         assert!(matches!(
-            iouring.waiters.stage_sqe(waiter_id),
+            iouring.waiters.stage(waiter_id),
             StageAction::Timeout(_)
         ));
     }
