@@ -89,6 +89,30 @@ fn run_quint_test(qnt_path: &Path) {
     );
 }
 
+/// Runs the encoder roundtrip from a pre-generated JSON fixture (no fuzz target needed).
+fn run_encoder_roundtrip_json(hash: &str) {
+    let json_path = fixtures_dir().join(hash);
+    assert!(
+        json_path.exists(),
+        "JSON fixture not found: {}",
+        json_path.display()
+    );
+
+    let json = std::fs::read_to_string(&json_path).expect("failed to read trace JSON");
+    let qnt = encode_trace(&json);
+
+    let qnt_path = quint_traces_dir().join(format!("trace_{hash}_encoder_test.qnt"));
+    std::fs::write(&qnt_path, &qnt).expect("failed to write .qnt file");
+
+    let result = std::panic::catch_unwind(|| run_quint_test(&qnt_path));
+
+    let _ = std::fs::remove_file(&qnt_path);
+
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
 fn run_encoder_roundtrip(hash: &str) {
     run_encoder_roundtrip_impl(
         "simplex_ed25519_quint_byzantine",
@@ -156,4 +180,9 @@ fn test_encoder_roundtrip_b12ca0d39b9286468f2ce0d791750bda4b6d3f37() {
         "simplex_ed25519_quint_byzantine",
         "b12ca0d39b9286468f2ce0d791750bda4b6d3f37",
     );
+}
+
+#[test]
+fn test_encoder_roundtrip_7340e23239ef037c7208177fc9b4c39d05d48eb1() {
+    run_encoder_roundtrip_json("7340e23239ef037c7208177fc9b4c39d05d48eb1");
 }

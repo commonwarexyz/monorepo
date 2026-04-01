@@ -1200,7 +1200,7 @@ pub fn run_quint_twins_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
             reporter_states,
         };
 
-        persist_trace_if_selected("simplex_ed25519_quint", &hash_hex, &trace_data, false);
+        persist_trace_if_selected("simplex_ed25519_quint_twins", &hash_hex, &trace_data, false);
     });
 }
 

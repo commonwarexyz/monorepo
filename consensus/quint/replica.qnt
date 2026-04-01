@@ -967,49 +967,75 @@ module replica {
         } else if (can_process_as_proposal) {
             // Proposal processing: validate the leader's proposal and vote
             val notarize_ok = is_some(construct_notarize(self, view, proposal, payload_ok and parent_ok))
+            val new_store_notarize_p = if (notarize_ok)
+                store_notarize.union(Set(vote, { proposal: proposal, sig: sig_of(id) }))
+              else
+                store_notarize
+            val proposal_self = if (notarize_ok) {
+                    ...mark_vote_broadcast(
+                        observe_leader_proposal(
+                            observe_round_proposal(self, proposal, false),
+                            proposal
+                        ),
+                        self.view,
+                        NotarizeKind
+                    ),
+                    leader_timeout: self.leader_timeout.set(self.view, None),
+                    ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
+                } else
+                    observe_leader_proposal(
+                        observe_round_proposal(timer.next_self, proposal, false),
+                        proposal
+                    )
+            // After storing votes, check if a notarization cert can be formed
+            val maybe_not_cert_p = if (notarize_ok) create_notarization(id, proposal, new_store_notarize_p) else None
+            val can_cert_p = can_certify(id, proposal.payload)
+            val should_broadcast_not_p = not(proposal_self.broadcast_notarization.get(view))
+            val effect_p = match maybe_not_cert_p {
+                | Some(cert) => notarize_effect(proposal_self, id, cert, can_cert_p,
+                    sent_nullify_votes, sent_finalize_votes,
+                    store_nullify_votes.get(id), store_finalize_votes.get(id))
+                | None => {
+                    next_self: proposal_self,
+                    next_sent_nullify: sent_nullify_votes,
+                    next_sent_finalize: sent_finalize_votes,
+                    next_stored_nullify: store_nullify_votes.get(id),
+                    next_stored_finalize: store_finalize_votes.get(id),
+                }
+            }
             all {
                 sent_notarize_votes' = if (notarize_ok)
                     sent_notarize_votes.union(Set({ proposal: proposal, sig: sig_of(id) }))
                   else
                     sent_notarize_votes,
-                sent_nullify_votes' = if (notarize_ok) sent_nullify_votes else timer.next_sent_nullify,
-                sent_finalize_votes' = sent_finalize_votes,
-                store_notarize_votes' = if (notarize_ok)
-                    store_notarize_votes.set(id, store_notarize.union(Set(vote, { proposal: proposal, sig: sig_of(id) })))
-                  else
-                    store_notarize_votes,
+                sent_nullify_votes' = if (notarize_ok) effect_p.next_sent_nullify else timer.next_sent_nullify,
+                sent_finalize_votes' = effect_p.next_sent_finalize,
+                store_notarize_votes' = store_notarize_votes.set(id, new_store_notarize_p),
                 store_nullify_votes' = if (notarize_ok)
-                    store_nullify_votes
+                    store_nullify_votes.set(id, effect_p.next_stored_nullify)
                   else
                     store_nullify_votes.set(id, timer.next_stored_nullify),
-                store_finalize_votes' = store_finalize_votes,
-                replica_state' = replica_state.set(id,
-                    if (notarize_ok) {
-                        ...mark_vote_broadcast(
-                            observe_leader_proposal(
-                                observe_round_proposal(self, proposal, false),
-                                proposal
-                            ),
-                            self.view,
-                            NotarizeKind
-                        ),
-                        leader_timeout: self.leader_timeout.set(self.view, None),
-                        ghost_sent_votes: self.ghost_sent_votes.setBy(self.view, old => old.append(NotarizeKind))
-                    } else
-                        observe_leader_proposal(
-                            observe_round_proposal(timer.next_self, proposal, false),
-                            proposal
-                        )
-                ),
+                store_finalize_votes' = store_finalize_votes.set(id, effect_p.next_stored_finalize),
+                store_certificates' = match maybe_not_cert_p {
+                    | Some(cert) =>
+                        store_certificates.setBy(id, old => old.union(Set(Notarization(cert))))
+                    | None => store_certificates
+                },
+                sent_certificates' = match maybe_not_cert_p {
+                    | Some(cert) => if (should_broadcast_not_p)
+                        sent_certificates.union(Set(Notarization(cert)))
+                      else
+                        sent_certificates
+                    | None => sent_certificates
+                },
+                replica_state' = replica_state.set(id, effect_p.next_self),
 
                 ghost_proposal' = ghost_proposal.setBy(id, old => old.union(Set(proposal))),
+                ghost_committed_blocks' = ghost_committed_blocks,
 
                 // unchanged
                 sent_proposal' = sent_proposal,
-                sent_certificates' = sent_certificates,
-                store_certificates' = store_certificates,
                 leader' = leader,
-                ghost_committed_blocks' = ghost_committed_blocks,
                 certify_policy' = certify_policy,
                 lastAction' = "on_notarize"
             }

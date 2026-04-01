@@ -669,6 +669,67 @@ module tests {
     action replica_receives_nullify_vote(id: ReplicaId, view: ViewNumber, src: ReplicaId): bool =
         on_nullify(id, { view: view, sig: src })
 
+    // Leader vote arrives first: cert is formed on the 3rd vote with exactly
+    // Q=3 signatures. The 4th vote does not change the stored cert.
+    run notarizationCertHasQSignaturesLeaderFirstTest = {
+        val proposal = {
+            payload: "val_b0",
+            view: FIRST_VIEW,
+            parent: GENESIS_VIEW,
+        }
+
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
+            CERTIFY_ALL_TRUE
+        )
+            // n0 proposes
+            // n0 processes its own leader vote (proposal branch, stores vote)
+            .then(send_proposal("n0", proposal))
+            // n0 receives n1 (2nd, aggregation, no cert yet)
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            // n0 receives n2 (3rd, aggregation, cert formed with {n0, n1, n2})
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            // n0 receives n3 (4th, aggregation, remember_certificate keeps first cert)
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n3"))
+            .then(all {
+                assert(option_has(replica_state.get("n0").notarization.get(FIRST_VIEW), n => n.proposal == proposal)),
+                assert(option_has(replica_state.get("n0").notarization.get(FIRST_VIEW), n => n.signatures.size() == Q)),
+                unchanged_all,
+            })
+    }
+
+    // create_notarization uses all matching votes instead of exactly Q.
+    // Leader vote arrives 3rd (proposal branch — no cert formed). The first
+    // cert is formed on the 4th vote with all 4 signatures instead of Q=3.
+    run notarizationCertHasQSignaturesLeaderLateTest = {
+        val proposal = {
+            payload: "val_b0",
+            view: FIRST_VIEW,
+            parent: GENESIS_VIEW,
+        }
+
+        initWithLeaderAndCertify(
+            Map(0 -> "n2", 1 -> "n2", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
+            CERTIFY_ALL_TRUE
+        )
+            // n2 proposes
+            .then(send_proposal("n2", proposal))
+            // n2 receives n1's vote (1st, aggregation, no cert)
+            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            // n2 receives n3's vote (2nd, aggregation, no cert)
+            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n3"))
+            // n2 receives its own leader vote (3rd, proposal branch — stores vote, no cert formed)
+            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            // n2 receives n0's vote (4th, aggregation — first cert formed with all 4 votes)
+            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(all {
+                assert(option_has(replica_state.get("n2").notarization.get(FIRST_VIEW), n => n.proposal == proposal)),
+                // BUG: cert has 4 signatures instead of Q=3
+                assert(option_has(replica_state.get("n2").notarization.get(FIRST_VIEW), n => n.signatures.size() == Q)),
+                unchanged_all,
+            })
+    }
+
     action unchanged_all = all {
         sent_proposal' = sent_proposal,
         sent_notarize_votes' = sent_notarize_votes,
