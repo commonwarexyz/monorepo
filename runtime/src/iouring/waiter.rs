@@ -5,7 +5,7 @@
 //! requests are still tracked and whether each currently has an operation SQE
 //! outstanding.
 
-use super::{request::ActiveRequest, Tick, UserData};
+use super::{request::Request, Tick, UserData};
 use io_uring::squeue::Entry as SqueueEntry;
 use tracing::warn;
 
@@ -120,14 +120,14 @@ struct Waiter {
     /// Whether the logical request currently has an operation SQE in flight.
     in_flight: bool,
     /// The active request state machine.
-    request: ActiveRequest,
+    request: Request,
 }
 
 /// Outcome produced when staging the next SQE for a waiter.
 pub enum StageOutcome {
     /// The waiter was canceled while parked in the ready queue and should
     /// complete locally with timeout rather than issuing another SQE.
-    Timeout(ActiveRequest),
+    Timeout(Request),
     /// The waiter is still active and produced an SQE for submission.
     Submit(SqueueEntry),
 }
@@ -143,7 +143,7 @@ pub enum CompletionOutcome {
     /// The logical request completed and was removed from the waiter table.
     Complete {
         /// The completed request, ready to deliver its cached result.
-        request: ActiveRequest,
+        request: Request,
         /// Active deadline tracking to remove from the timeout wheel, when
         /// completion happened before cancellation was requested.
         target_tick: Option<Tick>,
@@ -195,7 +195,7 @@ impl Waiters {
     /// Insert a request and return its assigned id.
     ///
     /// Panics if no free slot is available.
-    pub fn insert(&mut self, request: ActiveRequest, target_tick: Option<Tick>) -> WaiterId {
+    pub fn insert(&mut self, request: Request, target_tick: Option<Tick>) -> WaiterId {
         let id = self
             .free
             .pop()
@@ -217,7 +217,7 @@ impl Waiters {
     /// Panics if `index` is out of bounds or the slot is empty. Callers must
     /// already have validated that the slot still belongs to the expected
     /// waiter.
-    fn take(&mut self, index: usize) -> ActiveRequest {
+    fn take(&mut self, index: usize) -> Request {
         let slot = self.entries[index].take().expect("tracked waiter missing");
         self.free.push(slot.id.next_generation());
         self.len -= 1;
@@ -354,7 +354,7 @@ impl Waiters {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::request::{ActiveRequest, Request, SyncRequest};
+    use crate::iouring::request::{Request, SyncRequest};
     use commonware_utils::channel::oneshot;
     use std::{
         os::fd::{FromRawFd, IntoRawFd},
@@ -364,16 +364,17 @@ mod tests {
 
     /// Build a `Sync` request backed by a socket fd so waiter tests can
     /// exercise slot lifecycle without touching the filesystem.
-    fn make_sync_request() -> (ActiveRequest, oneshot::Receiver<std::io::Result<()>>) {
+    fn make_sync_request() -> (Request, oneshot::Receiver<std::io::Result<()>>) {
         let (sock_left, _sock_right) =
             std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
         // SAFETY: sock_left is a valid fd that we own.
         let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
         let (tx, rx) = oneshot::channel();
-        let request = ActiveRequest::from_request(Request::Sync(SyncRequest {
+        let request = Request::Sync(SyncRequest {
             file: Arc::new(file),
+            result: None,
             sender: tx,
-        }));
+        });
         (request, rx)
     }
 
@@ -383,7 +384,7 @@ mod tests {
         (slot.id == waiter_id).then_some(slot.state)
     }
 
-    fn remove_waiter(waiters: &mut Waiters, waiter_id: WaiterId) -> ActiveRequest {
+    fn remove_waiter(waiters: &mut Waiters, waiter_id: WaiterId) -> Request {
         let index = waiter_id.index() as usize;
         let slot = waiters
             .entries

@@ -3,11 +3,9 @@
 //!
 //! ## Architecture
 //!
-//! Network operations are sent as high-level [Request][crate::iouring::IoUringRequest]s via a
-//! [commonware_utils::channel::mpsc] channel to a dedicated io_uring event loop running in a
-//! separate thread. Operation results are returned via typed [commonware_utils::channel::oneshot]
-//! channels. This implementation uses two separate io_uring instances: one for send operations and
-//! one for receive operations.
+//! Network operations are submitted through an io_uring [Handle][crate::iouring::Handle] to a
+//! dedicated event loop running in a separate thread. This implementation uses two separate
+//! io_uring instances: one for send operations and one for receive operations.
 //!
 //! ## Memory Safety
 //!
@@ -24,10 +22,9 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use crate::{
-    iouring::{self, IoUringRequest, RecvRequest, SendRequest},
+    iouring::{self},
     utils, Buf, BufferPool, Error, IoBufMut, IoBufs,
 };
-use commonware_utils::channel::oneshot;
 use prometheus_client::registry::Registry;
 use std::{
     net::SocketAddr,
@@ -94,9 +91,9 @@ pub struct Network {
     /// Whether to set `SO_LINGER` to zero on the socket.
     zero_linger: bool,
     /// Used to submit send operations to the send io_uring event loop.
-    send_submitter: iouring::Submitter,
+    send_handle: iouring::Handle,
     /// Used to submit recv operations to the recv io_uring event loop.
-    recv_submitter: iouring::Submitter,
+    recv_handle: iouring::Handle,
     /// Timeout budget applied to each send/recv call.
     read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
@@ -131,21 +128,21 @@ impl Network {
 
         // Create an io_uring instance to handle send operations.
         let sender_registry = registry.sub_registry_with_prefix("iouring_sender");
-        let (send_submitter, send_loop) =
+        let (send_handle, send_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config.clone(), sender_registry);
         utils::thread::spawn(cfg.thread_stack_size, move || send_loop.run());
 
         // Create an io_uring instance to handle receive operations.
         let receiver_registry = registry.sub_registry_with_prefix("iouring_receiver");
-        let (recv_submitter, recv_loop) =
+        let (recv_handle, recv_loop) =
             iouring::IoUringLoop::new(cfg.iouring_config, receiver_registry);
         utils::thread::spawn(cfg.thread_stack_size, move || recv_loop.run());
 
         Ok(Self {
             tcp_nodelay: cfg.tcp_nodelay,
             zero_linger: cfg.zero_linger,
-            send_submitter,
-            recv_submitter,
+            send_handle,
+            recv_handle,
             read_write_timeout: cfg.read_write_timeout,
             read_buffer_size: cfg.read_buffer_size,
             pool,
@@ -164,8 +161,8 @@ impl crate::Network for Network {
             tcp_nodelay: self.tcp_nodelay,
             zero_linger: self.zero_linger,
             inner: listener,
-            send_submitter: self.send_submitter.clone(),
-            recv_submitter: self.recv_submitter.clone(),
+            send_handle: self.send_handle.clone(),
+            recv_handle: self.recv_handle.clone(),
             read_write_timeout: self.read_write_timeout,
             read_buffer_size: self.read_buffer_size,
             pool: self.pool.clone(),
@@ -206,12 +203,12 @@ impl crate::Network for Network {
         Ok((
             Sink::new(
                 fd.clone(),
-                self.send_submitter.clone(),
+                self.send_handle.clone(),
                 self.read_write_timeout,
             ),
             Stream::new(
                 fd,
-                self.recv_submitter.clone(),
+                self.recv_handle.clone(),
                 self.read_write_timeout,
                 self.read_buffer_size,
                 self.pool.clone(),
@@ -229,9 +226,9 @@ pub struct Listener {
     zero_linger: bool,
     inner: TcpListener,
     /// Used to submit send operations to the send io_uring event loop.
-    send_submitter: iouring::Submitter,
+    send_handle: iouring::Handle,
     /// Used to submit recv operations to the recv io_uring event loop.
-    recv_submitter: iouring::Submitter,
+    recv_handle: iouring::Handle,
     /// Timeout budget applied to each send/recv call.
     read_write_timeout: Duration,
     /// Size of the read buffer for batching network reads.
@@ -279,12 +276,12 @@ impl crate::Listener for Listener {
             remote_addr,
             Sink::new(
                 fd.clone(),
-                self.send_submitter.clone(),
+                self.send_handle.clone(),
                 self.read_write_timeout,
             ),
             Stream::new(
                 fd,
-                self.recv_submitter.clone(),
+                self.recv_handle.clone(),
                 self.read_write_timeout,
                 self.read_buffer_size,
                 self.pool.clone(),
@@ -301,17 +298,17 @@ impl crate::Listener for Listener {
 pub struct Sink {
     fd: Arc<OwnedFd>,
     /// Used to submit send operations to the io_uring event loop.
-    submitter: iouring::Submitter,
+    handle: iouring::Handle,
     /// Timeout budget for a top-level send call.
     timeout: Duration,
 }
 
 impl Sink {
     /// Construct a sink that submits logical send requests through one io_uring loop.
-    const fn new(fd: Arc<OwnedFd>, submitter: iouring::Submitter, timeout: Duration) -> Self {
+    const fn new(fd: Arc<OwnedFd>, handle: iouring::Handle, timeout: Duration) -> Self {
         Self {
             fd,
-            submitter,
+            handle,
             timeout,
         }
     }
@@ -324,20 +321,9 @@ impl crate::Sink for Sink {
             return Ok(());
         }
 
-        let deadline = Instant::now() + self.timeout;
-        let (tx, rx) = oneshot::channel();
-
-        self.submitter
-            .send(IoUringRequest::Send(SendRequest {
-                fd: self.fd.clone(),
-                bufs,
-                deadline: Some(deadline),
-                sender: tx,
-            }))
+        self.handle
+            .send(self.fd.clone(), bufs, Instant::now() + self.timeout)
             .await
-            .map_err(|_| Error::SendFailed)?;
-
-        rx.await.map_err(|_| Error::SendFailed)?
     }
 }
 
@@ -348,7 +334,7 @@ impl crate::Sink for Sink {
 pub struct Stream {
     fd: Arc<OwnedFd>,
     /// Used to submit recv operations to the io_uring event loop.
-    submitter: iouring::Submitter,
+    handle: iouring::Handle,
     /// Timeout budget for a top-level recv call.
     timeout: Duration,
     /// Internal read buffer.
@@ -365,14 +351,14 @@ impl Stream {
     /// Construct a stream with an optional internal read buffer.
     fn new(
         fd: Arc<OwnedFd>,
-        submitter: iouring::Submitter,
+        handle: iouring::Handle,
         timeout: Duration,
         buffer_capacity: usize,
         pool: BufferPool,
     ) -> Self {
         Self {
             fd,
-            submitter,
+            handle,
             timeout,
             buffer: IoBufMut::with_capacity(buffer_capacity),
             buffer_pos: 0,
@@ -395,41 +381,21 @@ impl Stream {
         len: usize,
         exact: bool,
         deadline: Instant,
-    ) -> (IoBufMut, Result<usize, Error>) {
-        let (tx, rx) = oneshot::channel();
-
-        if self
-            .submitter
-            .send(IoUringRequest::Recv(RecvRequest {
-                fd: self.fd.clone(),
-                buf: buffer,
-                // The request appends into an already-partially-filled
-                // destination buffer, so `offset` is the current write cursor
-                // and `len` is the final target bound for this logical recv.
+    ) -> Result<(IoBufMut, usize), (IoBufMut, Error)> {
+        self.handle
+            .recv(
+                self.fd.clone(),
+                buffer,
                 offset,
-                len: offset + len,
+                offset + len,
                 exact,
-                deadline: Some(deadline),
-                sender: tx,
-            }))
+                deadline,
+            )
             .await
-            .is_err()
-        {
-            // Channel closed - io_uring thread died, buffer is lost
-            return (IoBufMut::default(), Err(Error::RecvFailed));
-        }
-
-        match rx.await {
-            Ok((buf, result)) => {
+            .map(|(buf, total)| {
                 // Translate the total-bytes-received into bytes-read-in-this-call.
-                let result = result.map(|total| total - offset);
-                (buf, result)
-            }
-            Err(_) => {
-                // Channel closed - io_uring thread died, buffer is lost
-                (IoBufMut::default(), Err(Error::RecvFailed))
-            }
-        }
+                (buf, total - offset)
+            })
     }
 
     /// Fills the internal buffer by reading from the socket via io_uring.
@@ -440,9 +406,16 @@ impl Stream {
         let buffer = std::mem::take(&mut self.buffer);
         let len = buffer.capacity();
 
-        let (buffer, result) = self.submit_recv(buffer, 0, len, false, deadline).await;
-        self.buffer = buffer;
-        self.buffer_len = result?;
+        self.buffer_len = match self.submit_recv(buffer, 0, len, false, deadline).await {
+            Ok((buffer, read)) => {
+                self.buffer = buffer;
+                read
+            }
+            Err((buffer, err)) => {
+                self.buffer = buffer;
+                return Err(err);
+            }
+        };
         // SAFETY: The kernel has written exactly `buffer_len` bytes into the buffer.
         unsafe { self.buffer.set_len(self.buffer_len) };
         Ok(self.buffer_len)
@@ -476,11 +449,16 @@ impl crate::Stream for Stream {
             let buffer_capacity = self.buffer.capacity();
             if buffer_capacity == 0 || remaining >= buffer_capacity {
                 // Direct recv into the result buffer with exact=true.
-                let (returned_buf, result) = self
+                match self
                     .submit_recv(owned_buf, bytes_received, remaining, true, deadline)
-                    .await;
-                owned_buf = returned_buf;
-                bytes_received += result?;
+                    .await
+                {
+                    Ok((buf, read)) => {
+                        owned_buf = buf;
+                        bytes_received += read;
+                    }
+                    Err((_, err)) => return Err(err),
+                }
             } else {
                 // Fill internal buffer, then loop will copy
                 self.fill_buffer(deadline).await?;
@@ -802,14 +780,15 @@ mod tests {
         // three more bytes from the socket.
         let writer = tokio::task::spawn_blocking(move || right.write_all(b"abc"));
         let buffer = IoBufMut::with_capacity(5);
-        let (_buffer, result) = stream
+        let result = stream
             .submit_recv(buffer, 2, 3, true, Instant::now() + Duration::from_secs(1))
             .await;
 
         // The wrapper should report only the bytes read by this invocation,
         // not the cumulative total tracked inside the request state.
         writer.await.unwrap().unwrap();
-        assert_eq!(result.unwrap(), 3);
+        let (_buffer, read) = result.expect("submit_recv should succeed");
+        assert_eq!(read, 3);
 
         drop(stream);
         handle.join().unwrap();
@@ -854,7 +833,7 @@ mod tests {
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
         drop(io_loop);
 
-        // Construct a sink whose submitter would fail immediately if the wrapper
+        // Construct a sink whose handle would fail immediately if the wrapper
         // tried to hand work to the loop.
         let (left, _right) = UnixStream::pair().unwrap();
         let mut sink = Sink::new(Arc::new(left.into()), submitter, Duration::from_secs(1));
@@ -928,7 +907,7 @@ mod tests {
         let mut registry = Registry::default();
         let (submitter, io_loop) =
             iouring::IoUringLoop::new(iouring::Config::default(), &mut registry);
-        let recv_submitter = submitter.clone();
+        let recv_handle = submitter.clone();
         drop(io_loop);
 
         // Send should fail locally once the submission channel has been
@@ -945,7 +924,7 @@ mod tests {
         let (recv_left, _recv_right) = UnixStream::pair().unwrap();
         let mut stream = Stream::new(
             Arc::new(recv_left.into()),
-            recv_submitter,
+            recv_handle,
             Duration::from_secs(1),
             0,
             test_pool(),

@@ -4,7 +4,7 @@
 //! subsystem and receiving their results. The design centers around a single event loop that
 //! manages the submission queue (SQ) and completion queue (CQ) of an io_uring instance.
 //!
-//! Work is submitted via [Submitter], which pushes [Request]s into an MPSC queue and signals
+//! Work is submitted via [Handle], which pushes [Request]s into an MPSC queue and signals
 //! an internal `eventfd` wake source. The event loop blocks in `io_uring_enter` and is woken by:
 //! - normal CQE progress in the ring
 //! - `eventfd` readiness when new work is queued or all submitters are dropped
@@ -24,7 +24,7 @@
 //!
 //! The core of this implementation is [IoUringLoop::run], which blocks its calling thread while
 //! operating an event loop that:
-//! 1. Drains logical requests from a bounded MPSC channel fed by [Submitter]
+//! 1. Drains logical requests from a bounded MPSC channel fed by [Handle]
 //! 2. Admits requests into the waiter table and submits their first SQE
 //! 3. Processes io_uring completion queue entries (CQEs), including internal wake CQEs
 //! 4. Handles partial progress and retryable errors by requeuing requests
@@ -34,11 +34,11 @@
 //!
 //! ```text
 //! Data path:
-//!   Client task -> Submitter -> bounded MPSC -> IoUringLoop -> SQE -> io_uring
+//!   Client task -> Handle -> bounded MPSC -> IoUringLoop -> SQE -> io_uring
 //!   Client task <- typed oneshot <- IoUringLoop <- CQE <- io_uring
 //!
 //! Wake path:
-//!   Submitter --write(eventfd)--> wake_fd --POLLIN CQE (WAKE_USER_DATA)--> IoUringLoop
+//!   Handle --write(eventfd)--> wake_fd --POLLIN CQE (WAKE_USER_DATA)--> IoUringLoop
 //!
 //! Loop behavior:
 //!   1) Drain CQEs.
@@ -52,7 +52,7 @@
 //!
 //! Each admitted request is assigned a waiter id that serves as the `user_data` field in its
 //! SQEs. The event loop maintains a flat `Waiters` store where each slot maps to an
-//! [ActiveRequest] that owns all resources (buffers, FDs, progress state, completion sender)
+//! [Request] that owns all resources (buffers, FDs, progress state, completion sender)
 //! needed for the request's lifetime.
 //!
 //! ## Timeout Handling
@@ -85,7 +85,7 @@
 //!
 //! To avoid submission latency while the loop is blocked in `submit_and_wait`, the loop maintains
 //! a multishot `PollAdd` on an internal `eventfd`.
-//! - [Submitter::send] increments an atomic submission sequence
+//! - [Handle::enqueue] increments an atomic submission sequence
 //! - Wake CQEs drain `eventfd` readiness and re-install poll when `IORING_CQE_F_MORE` is not set
 //! - The loop uses an arm-and-recheck sleep handshake (`submitted_seq` vs `processed_seq`)
 //! - Submitters ring `eventfd` only while sleep intent is armed
@@ -134,7 +134,11 @@
 //! - If cancellation is disabled, callers must guarantee that in-flight requests never depend on
 //!   later queued requests, otherwise the loop can deadlock.
 
-use commonware_utils::channel::mpsc::{self, error::TryRecvError};
+use crate::{Error, IoBufMut, IoBufs};
+use commonware_utils::channel::{
+    mpsc::{self, error::TryRecvError},
+    oneshot,
+};
 use io_uring::{
     cqueue::Entry as CqueueEntry,
     opcode::AsyncCancel,
@@ -143,9 +147,11 @@ use io_uring::{
     IoUring,
 };
 use prometheus_client::{metrics::gauge::Gauge, registry::Registry};
-use request::{ActiveRequest, Request};
+use request::{ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest, WriteAtRequest};
 use std::{
     collections::VecDeque,
+    fs::File,
+    os::fd::OwnedFd,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -160,12 +166,6 @@ use waker::{Waker, SUBMISSION_SEQ_MASK, WAKE_USER_DATA};
 
 /// Packed `io_uring` `user_data` value.
 type UserData = u64;
-
-pub use request::Request as IoUringRequest;
-#[cfg(feature = "iouring-storage")]
-pub use request::{ReadAtRequest, SyncRequest, WriteAtRequest};
-#[cfg(feature = "iouring-network")]
-pub use request::{RecvRequest, SendRequest};
 
 /// Tracks io_uring metrics.
 #[derive(Debug)]
@@ -244,12 +244,12 @@ impl Default for Config {
     }
 }
 
-struct SubmitterInner {
+struct HandleInner {
     sender: Option<mpsc::Sender<Request>>,
     waker: Waker,
 }
 
-impl Drop for SubmitterInner {
+impl Drop for HandleInner {
     fn drop(&mut self) {
         // Disconnect first, then wake. This avoids a race where the loop
         // handles a wake CQE before channel closure becomes observable.
@@ -264,20 +264,20 @@ impl Drop for SubmitterInner {
 
 /// Handle for submitting requests to an [IoUringLoop].
 #[derive(Clone)]
-pub struct Submitter {
-    inner: Arc<SubmitterInner>,
+pub struct Handle {
+    inner: Arc<HandleInner>,
 }
 
-impl Submitter {
-    /// Submit a request to the io_uring loop.
+impl Handle {
+    /// Enqueue a request for the io_uring loop.
     ///
     /// On success, this publishes one submission and conditionally rings the loop's
     /// `eventfd` wake source if sleep intent is armed.
-    pub async fn send(&self, request: Request) -> Result<(), mpsc::error::SendError<Request>> {
+    async fn enqueue(&self, request: Request) -> Result<(), mpsc::error::SendError<Request>> {
         self.inner
             .sender
             .as_ref()
-            .expect("submitter sender is only taken on drop")
+            .expect("handle sender is only taken on drop")
             .send(request)
             .await?;
 
@@ -285,6 +285,135 @@ impl Submitter {
         self.inner.waker.publish();
 
         Ok(())
+    }
+
+    /// Submit a logical send request and wait for its completion.
+    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
+    pub async fn send(
+        &self,
+        fd: Arc<OwnedFd>,
+        bufs: IoBufs,
+        deadline: Instant,
+    ) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.enqueue(Request::Send(SendRequest {
+            fd,
+            write: bufs.into(),
+            deadline: Some(deadline),
+            result: None,
+            sender: tx,
+        }))
+        .await
+        .map_err(|_| Error::SendFailed)?;
+        rx.await.map_err(|_| Error::SendFailed)?
+    }
+
+    /// Submit a logical recv request and wait for its completion.
+    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
+    pub async fn recv(
+        &self,
+        fd: Arc<OwnedFd>,
+        buf: IoBufMut,
+        offset: usize,
+        len: usize,
+        exact: bool,
+        deadline: Instant,
+    ) -> Result<(IoBufMut, usize), (IoBufMut, Error)> {
+        assert!(
+            offset <= len && len <= buf.capacity(),
+            "recv invariant violated: need offset <= len <= capacity"
+        );
+        let (tx, rx) = oneshot::channel();
+        let request = Request::Recv(RecvRequest {
+            fd,
+            buf,
+            offset,
+            len,
+            exact,
+            deadline: Some(deadline),
+            result: None,
+            sender: tx,
+        });
+        if let Err(err) = self.enqueue(request).await {
+            let Request::Recv(request) = err.0 else {
+                unreachable!("recv enqueue returned wrong request variant");
+            };
+            return Err((request.buf, Error::RecvFailed));
+        }
+
+        rx.await.unwrap_or_else(|_| {
+            // Once the request is admitted, ownership of `buf` moves into the
+            // loop. If the loop dies before replying, there is no owned buffer
+            // left to recover here, so return an empty placeholder.
+            Err((IoBufMut::default(), Error::RecvFailed))
+        })
+    }
+
+    /// Submit a logical positioned read request and wait for its completion.
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    pub async fn read_at(
+        &self,
+        file: Arc<File>,
+        offset: u64,
+        len: usize,
+        buf: IoBufMut,
+    ) -> Result<IoBufMut, (IoBufMut, Error)> {
+        assert!(len <= buf.capacity(), "read_at len exceeds buffer capacity");
+        let (tx, rx) = oneshot::channel();
+        let request = Request::ReadAt(ReadAtRequest {
+            file,
+            offset,
+            len,
+            read: 0,
+            buf,
+            result: None,
+            sender: tx,
+        });
+        if let Err(err) = self.enqueue(request).await {
+            let Request::ReadAt(request) = err.0 else {
+                unreachable!("read_at enqueue returned wrong request variant");
+            };
+            return Err((request.buf, Error::ReadFailed));
+        }
+
+        rx.await.unwrap_or_else(|_| {
+            // Once the request is admitted, ownership of `buf` moves into the
+            // loop. If the loop dies before replying, there is no owned buffer
+            // left to recover here, so return an empty placeholder.
+            Err((IoBufMut::default(), Error::ReadFailed))
+        })
+    }
+
+    /// Submit a logical positioned write request and wait for its completion.
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    pub async fn write_at(&self, file: Arc<File>, offset: u64, bufs: IoBufs) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.enqueue(Request::WriteAt(WriteAtRequest {
+            file,
+            offset,
+            written: 0,
+            write: bufs.into(),
+            result: None,
+            sender: tx,
+        }))
+        .await
+        .map_err(|_| Error::WriteFailed)?;
+        rx.await.map_err(|_| Error::WriteFailed)?
+    }
+
+    /// Submit a logical fsync request and wait for its completion.
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    pub async fn sync(&self, file: Arc<File>) -> std::io::Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.enqueue(Request::Sync(SyncRequest {
+            file,
+            result: None,
+            sender: tx,
+        }))
+        .await
+        .map_err(|_| std::io::Error::other("failed to send work"))?;
+        rx.await
+            .map_err(|_| std::io::Error::other("failed to read result"))?
     }
 }
 
@@ -306,7 +435,7 @@ impl IoUringLoop {
     /// Create a new io_uring loop and submit handle.
     ///
     /// The loop allocates its own metrics, request channel, and internal `eventfd` wake source.
-    pub(crate) fn new(mut cfg: Config, registry: &mut Registry) -> (Submitter, Self) {
+    pub(crate) fn new(mut cfg: Config, registry: &mut Registry) -> (Handle, Self) {
         assert!(
             !cfg.max_request_timeout.is_zero(),
             "max_request_timeout must be non-zero for timeout wheel"
@@ -330,15 +459,15 @@ impl IoUringLoop {
         );
         let waiters = Waiters::new(size);
 
-        let submitter = Submitter {
-            inner: Arc::new(SubmitterInner {
+        let handle = Handle {
+            inner: Arc::new(HandleInner {
                 sender: Some(sender),
                 waker: waker.clone(),
             }),
         };
 
         (
-            submitter,
+            handle,
             Self {
                 cfg,
                 metrics,
@@ -424,19 +553,18 @@ impl IoUringLoop {
     /// immediately with a timeout error).
     fn admit_request(&mut self, request: Request) -> Option<WaiterId> {
         let deadline = request.deadline();
-        let active = ActiveRequest::from_request(request);
         let target_tick = match deadline {
             Some(deadline) => match self.timeout_wheel.target_tick(deadline) {
                 Some(target_tick) => Some(target_tick),
                 None => {
-                    active.timeout();
+                    request.timeout();
                     return None;
                 }
             },
             None => None,
         };
 
-        let waiter_id = self.waiters.insert(active, target_tick);
+        let waiter_id = self.waiters.insert(request, target_tick);
         if let Some(target_tick) = target_tick {
             self.timeout_wheel.schedule(waiter_id, target_tick);
         }
@@ -821,6 +949,7 @@ mod tests {
     use super::*;
     use crate::{IoBuf, IoBufMut};
     use commonware_utils::channel::oneshot::{self, error::RecvError};
+    use futures::future::{join, join_all};
     use prometheus_client::registry::Registry;
     use request::{RecvRequest, SendRequest, SyncRequest};
     use std::{
@@ -921,10 +1050,11 @@ mod tests {
             // SAFETY: sock_left is a valid fd that we own.
             let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
             let (tx, _rx) = oneshot::channel();
-            let request = ActiveRequest::from_request(Request::Sync(SyncRequest {
+            let request = Request::Sync(SyncRequest {
                 file: Arc::new(file),
+                result: None,
                 sender: tx,
-            }));
+            });
             let waiter_id = iouring.waiters.insert(request, None);
             assert!(matches!(
                 iouring.waiters.stage(waiter_id),
@@ -965,10 +1095,11 @@ mod tests {
             // SAFETY: sock_left is a valid fd that we own.
             let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
             let (tx, _rx) = oneshot::channel();
-            let request = ActiveRequest::from_request(Request::Sync(SyncRequest {
+            let request = Request::Sync(SyncRequest {
                 file: Arc::new(file),
+                result: None,
                 sender: tx,
-            }));
+            });
             let waiter_id = iouring.waiters.insert(request, None);
             iouring.ready_queue.push_back(waiter_id);
         }
@@ -1000,10 +1131,11 @@ mod tests {
         // SAFETY: sock_left is a valid fd that we own.
         let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
         let (tx, _rx) = oneshot::channel();
-        let request = ActiveRequest::from_request(Request::Sync(SyncRequest {
+        let request = Request::Sync(SyncRequest {
             file: Arc::new(file),
+            result: None,
             sender: tx,
-        }));
+        });
         let waiter_id = iouring.waiters.insert(request, None);
         assert!(iouring.waiters.cancel(waiter_id));
         iouring.pending_cancels.push_back(waiter_id);
@@ -1039,11 +1171,12 @@ mod tests {
             .unwrap_or_else(Instant::now);
 
         submitter
-            .send(Request::Send(SendRequest {
+            .enqueue(Request::Send(SendRequest {
                 // SAFETY: pair() returns valid fds; we own the left end.
                 fd: Arc::new(UnixStream::pair().unwrap().0.into()),
-                bufs: crate::IoBufs::from(IoBuf::from(b"hello")),
+                write: IoBufs::from(IoBuf::from(b"hello")).into(),
                 deadline: Some(past_deadline),
+                result: None,
                 sender: tx,
             }))
             .await
@@ -1084,49 +1217,34 @@ mod tests {
         // Write a byte so the recv completes immediately.
         (&right1).write_all(&[42]).unwrap();
 
-        let (tx1, rx1) = oneshot::channel();
-        submitter
-            .send(Request::Recv(RecvRequest {
-                fd: Arc::new(left1.into()),
-                buf: IoBufMut::with_capacity(1),
-                offset: 0,
-                len: 1,
-                exact: false,
-                deadline: Some(Instant::now() + Duration::from_millis(200)),
-                sender: tx1,
-            }))
+        let (_buf1, read1) = submitter
+            .recv(
+                Arc::new(left1.into()),
+                IoBufMut::with_capacity(1),
+                0,
+                1,
+                false,
+                Instant::now() + Duration::from_millis(200),
+            )
             .await
-            .expect("failed to submit first request");
-
-        let (_buf1, result1) = tokio::time::timeout(Duration::from_secs(2), rx1)
-            .await
-            .expect("first completion timed out")
-            .expect("missing first completion");
-        assert!(result1.is_ok());
+            .expect("first recv should succeed");
+        assert!(read1 > 0);
 
         // Second request reuses the slot and blocks until timeout.
         let (left2, _right2) = UnixStream::pair().expect("failed to create unix stream pair");
-        let (tx2, rx2) = oneshot::channel();
-        submitter
-            .send(Request::Recv(RecvRequest {
-                fd: Arc::new(left2.into()),
-                buf: IoBufMut::with_capacity(8),
-                offset: 0,
-                len: 8,
-                exact: false,
-                deadline: Some(Instant::now() + Duration::from_millis(80)),
-                sender: tx2,
-            }))
-            .await
-            .expect("failed to submit second request");
-
         let start = Instant::now();
-        let (_buf2, result2) = tokio::time::timeout(Duration::from_secs(2), rx2)
-            .await
-            .expect("second completion timed out")
-            .expect("missing second completion");
+        let result2 = submitter
+            .recv(
+                Arc::new(left2.into()),
+                IoBufMut::with_capacity(8),
+                0,
+                8,
+                false,
+                Instant::now() + Duration::from_millis(80),
+            )
+            .await;
         let elapsed = start.elapsed();
-        assert!(matches!(result2, Err(crate::Error::Timeout)));
+        assert!(matches!(result2, Err((_, crate::Error::Timeout))));
         assert!(
             elapsed >= Duration::from_millis(50),
             "timeout fired too early after slot reuse: {elapsed:?}"
@@ -1153,10 +1271,11 @@ mod tests {
         let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
         let (tx, _rx) = oneshot::channel();
         let stale = iouring.waiters.insert(
-            ActiveRequest::from_request(Request::Sync(SyncRequest {
+            Request::Sync(SyncRequest {
                 file: Arc::new(file),
+                result: None,
                 sender: tx,
-            })),
+            }),
             None,
         );
         assert!(matches!(
@@ -1175,10 +1294,11 @@ mod tests {
         let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
         let (tx, _rx) = oneshot::channel();
         let reused = iouring.waiters.insert(
-            ActiveRequest::from_request(Request::Sync(SyncRequest {
+            Request::Sync(SyncRequest {
                 file: Arc::new(file),
+                result: None,
                 sender: tx,
-            })),
+            }),
             None,
         );
         assert_eq!(reused.index(), stale.index());
@@ -1208,10 +1328,11 @@ mod tests {
         // SAFETY: sock_left is a valid fd that we own.
         let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
         let (old_tx, _old_rx) = oneshot::channel();
-        let old_req = ActiveRequest::from_request(Request::Sync(SyncRequest {
+        let old_req = Request::Sync(SyncRequest {
             file: Arc::new(file),
+            result: None,
             sender: old_tx,
-        }));
+        });
         let old_slot = iouring.waiters.insert(old_req, Some(1));
         iouring.timeout_wheel.schedule(old_slot, 1);
         // Simulate completion after the waiter had an op staged.
@@ -1233,10 +1354,11 @@ mod tests {
         // SAFETY: sock_left2 is a valid fd that we own.
         let file2 = unsafe { std::fs::File::from_raw_fd(sock_left2.into_raw_fd()) };
         let (tx, _rx) = oneshot::channel();
-        let req = ActiveRequest::from_request(Request::Sync(SyncRequest {
+        let req = Request::Sync(SyncRequest {
             file: Arc::new(file2),
+            result: None,
             sender: tx,
-        }));
+        });
         let slot_index = iouring.waiters.insert(req, Some(3));
         assert_eq!(slot_index.index(), old_slot.index());
         assert!(matches!(
@@ -1269,15 +1391,16 @@ mod tests {
         (&right).write_all(b"hello").unwrap();
 
         let (tx, rx) = oneshot::channel();
-        let req = ActiveRequest::from_request(Request::Recv(RecvRequest {
+        let req = Request::Recv(RecvRequest {
             fd: Arc::new(left.into()),
             buf: IoBufMut::with_capacity(5),
             offset: 0,
             len: 5,
             exact: false,
             deadline: Some(Instant::now() + Duration::from_secs(1)),
+            result: None,
             sender: tx,
-        }));
+        });
         let slot_index = iouring.waiters.insert(req, Some(2));
         assert!(matches!(
             iouring.waiters.stage(slot_index),
@@ -1306,9 +1429,11 @@ mod tests {
             CompletionOutcome::Cancel
         ));
 
-        let (_, result) = futures::executor::block_on(rx).expect("missing completion");
+        let (_, result) = futures::executor::block_on(rx)
+            .expect("missing completion")
+            .expect("recv should succeed");
         // exact=false recv with 5 bytes should succeed.
-        assert_eq!(result.unwrap(), 5);
+        assert_eq!(result, 5);
         assert_eq!(iouring.waiters.len(), 0);
     }
 
@@ -1336,15 +1461,16 @@ mod tests {
 
         let (left, _right) = UnixStream::pair().unwrap();
         let (tx, rx) = oneshot::channel();
-        let req = ActiveRequest::from_request(Request::Recv(RecvRequest {
+        let req = Request::Recv(RecvRequest {
             fd: Arc::new(left.into()),
             buf: IoBufMut::with_capacity(8),
             offset: 0,
             len: 8,
             exact: true,
             deadline: Some(Instant::now() + Duration::from_millis(25)),
+            result: None,
             sender: tx,
-        }));
+        });
         let waiter_id = iouring.waiters.insert(req, Some(1));
         assert!(matches!(
             iouring.waiters.stage(waiter_id),
@@ -1386,8 +1512,10 @@ mod tests {
             CompletionOutcome::Cancel
         ));
 
-        let (_buf, result) = futures::executor::block_on(rx).expect("missing completion");
-        assert!(matches!(result, Err(crate::Error::Timeout)));
+        assert!(matches!(
+            futures::executor::block_on(rx).expect("missing completion"),
+            Err((_, crate::Error::Timeout))
+        ));
         assert_eq!(iouring.waiters.len(), 0);
     }
 
@@ -1404,41 +1532,29 @@ mod tests {
             let (left_pipe, right_pipe) = UnixStream::pair().unwrap();
 
             // Submit a recv.
-            let (recv_tx, recv_rx) = oneshot::channel();
-            submitter
-                .send(Request::Recv(RecvRequest {
-                    fd: Arc::new(left_pipe.into()),
-                    buf: IoBufMut::with_capacity(5),
-                    offset: 0,
-                    len: 5,
-                    exact: false,
-                    deadline: None,
-                    sender: recv_tx,
-                }))
-                .await
-                .expect("failed to send recv");
-
-            // Submit a send that satisfies the recv.
-            let (send_tx, send_rx) = oneshot::channel();
-            submitter
-                .send(Request::Send(SendRequest {
-                    fd: Arc::new(right_pipe.into()),
-                    bufs: crate::IoBufs::from(IoBuf::from(b"hello")),
-                    deadline: None,
-                    sender: send_tx,
-                }))
-                .await
-                .expect("failed to send send");
+            let recv = submitter.recv(
+                Arc::new(left_pipe.into()),
+                IoBufMut::with_capacity(5),
+                0,
+                5,
+                false,
+                Instant::now() + Duration::from_secs(5),
+            );
+            let send = submitter.send(
+                Arc::new(right_pipe.into()),
+                IoBufs::from(IoBuf::from(b"hello")),
+                Instant::now() + Duration::from_secs(5),
+            );
 
             let timeout = tokio::time::timeout(Duration::from_secs(2), async {
+                let (recv_result, send_result) = join(recv, send).await;
                 if should_succeed {
-                    let (_, recv_result) = recv_rx.await.expect("missing recv result");
-                    assert!(recv_result.unwrap() > 0);
-                    let send_result = send_rx.await.expect("missing send result");
-                    assert!(send_result.is_ok());
+                    let (_, read) = recv_result.expect("recv should succeed");
+                    assert!(read > 0);
+                    send_result.expect("send should succeed");
                 } else {
-                    let _ = recv_rx.await;
-                    let _ = send_rx.await;
+                    let _ = recv_result;
+                    let _ = send_result;
                 }
             });
             assert!(
@@ -1464,22 +1580,20 @@ mod tests {
 
         // Submit a recv that will time out (because we don't write to the pipe).
         let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
-        let (tx, rx) = oneshot::channel();
-        submitter
-            .send(Request::Recv(RecvRequest {
-                fd: Arc::new(pipe_left.into()),
-                buf: IoBufMut::with_capacity(8),
-                offset: 0,
-                len: 8,
-                exact: false,
-                deadline: Some(Instant::now() + Duration::from_secs(1)),
-                sender: tx,
-            }))
-            .await
-            .expect("failed to send request");
 
-        let (_, result) = rx.await.expect("failed to receive result");
-        assert!(matches!(result, Err(crate::Error::Timeout)));
+        assert!(matches!(
+            submitter
+                .recv(
+                    Arc::new(pipe_left.into()),
+                    IoBufMut::with_capacity(8),
+                    0,
+                    8,
+                    false,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await,
+            Err((_, crate::Error::Timeout))
+        ));
 
         drop(submitter);
         handle.join().unwrap();
@@ -1502,8 +1616,9 @@ mod tests {
         let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
         let (tx, rx) = oneshot::channel();
         submitter
-            .send(Request::Sync(SyncRequest {
+            .enqueue(Request::Sync(SyncRequest {
                 file: Arc::new(file),
+                result: None,
                 sender: tx,
             }))
             .await
@@ -1534,13 +1649,14 @@ mod tests {
         let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
         let (tx, rx) = oneshot::channel();
         submitter
-            .send(Request::Recv(RecvRequest {
+            .enqueue(Request::Recv(RecvRequest {
                 fd: Arc::new(pipe_left.into()),
                 buf: IoBufMut::with_capacity(8),
                 offset: 0,
                 len: 8,
                 exact: false,
                 deadline: Some(Instant::now() + Duration::from_millis(50)),
+                result: None,
                 sender: tx,
             }))
             .await
@@ -1548,11 +1664,13 @@ mod tests {
 
         drop(submitter);
 
-        let (_, result) = tokio::time::timeout(Duration::from_secs(2), rx)
+        let result = tokio::time::timeout(Duration::from_secs(2), rx)
             .await
-            .expect("deadline completion timed out")
-            .expect("missing deadline completion");
-        assert!(matches!(result, Err(crate::Error::Timeout)));
+            .expect("deadline completion timed out");
+        assert!(matches!(
+            result.expect("missing deadline completion"),
+            Err((_, crate::Error::Timeout))
+        ));
         handle.join().unwrap();
     }
 
@@ -1571,13 +1689,14 @@ mod tests {
         let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
         let (tx, rx) = oneshot::channel();
         submitter
-            .send(Request::Recv(RecvRequest {
+            .enqueue(Request::Recv(RecvRequest {
                 fd: Arc::new(pipe_left.into()),
                 buf: IoBufMut::with_capacity(8),
                 offset: 0,
                 len: 8,
                 exact: false,
                 deadline: None,
+                result: None,
                 sender: tx,
             }))
             .await
@@ -1613,13 +1732,14 @@ mod tests {
         let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
         let (tx, rx) = oneshot::channel();
         submitter
-            .send(Request::Recv(RecvRequest {
+            .enqueue(Request::Recv(RecvRequest {
                 fd: Arc::new(pipe_left.into()),
                 buf: IoBufMut::with_capacity(8),
                 offset: 0,
                 len: 8,
                 exact: false,
                 deadline: Some(Instant::now() + Duration::from_millis(50)),
+                result: None,
                 sender: tx,
             }))
             .await
@@ -1627,11 +1747,13 @@ mod tests {
 
         drop(submitter);
 
-        let (_, result) = tokio::time::timeout(Duration::from_secs(2), rx)
+        let result = tokio::time::timeout(Duration::from_secs(2), rx)
             .await
-            .expect("deadline completion timed out")
-            .expect("missing deadline completion");
-        assert!(matches!(result, Err(crate::Error::Timeout)));
+            .expect("deadline completion timed out");
+        assert!(matches!(
+            result.expect("missing deadline completion"),
+            Err((_, crate::Error::Timeout))
+        ));
         handle.join().unwrap();
     }
 
@@ -1652,13 +1774,14 @@ mod tests {
         let (pipe_left, _pipe_right) = UnixStream::pair().unwrap();
         let (tx, rx) = oneshot::channel();
         submitter
-            .send(Request::Recv(RecvRequest {
+            .enqueue(Request::Recv(RecvRequest {
                 fd: Arc::new(pipe_left.into()),
                 buf: IoBufMut::with_capacity(8),
                 offset: 0,
                 len: 8,
                 exact: false,
                 deadline: Some(Instant::now() + Duration::from_millis(500)),
+                result: None,
                 sender: tx,
             }))
             .await
@@ -1697,34 +1820,34 @@ mod tests {
         let total = 64usize;
         let deadline = Instant::now() + Duration::from_millis(50);
         let mut peers = Vec::with_capacity(total);
-        let mut rxs = Vec::with_capacity(total);
+        let mut recvs = Vec::with_capacity(total);
         for _ in 0..total {
             let (left, right) = UnixStream::pair().unwrap();
             peers.push(right);
-            let (tx, rx) = oneshot::channel();
-            submitter
-                .send(Request::Recv(RecvRequest {
-                    fd: Arc::new(left.into()),
-                    buf: IoBufMut::with_capacity(8),
-                    offset: 0,
-                    len: 8,
-                    exact: false,
-                    deadline: Some(deadline),
-                    sender: tx,
-                }))
-                .await
-                .unwrap();
-            rxs.push(rx);
+            recvs.push({
+                let submitter = submitter.clone();
+                async move {
+                    submitter
+                        .recv(
+                            Arc::new(left.into()),
+                            IoBufMut::with_capacity(8),
+                            0,
+                            8,
+                            false,
+                            deadline,
+                        )
+                        .await
+                }
+            });
         }
 
         // All requests should complete with timeout rather than getting stuck
         // behind waiter capacity.
-        for rx in rxs {
-            let (_, result) = tokio::time::timeout(Duration::from_secs(2), rx)
-                .await
-                .expect("deadline completion timed out")
-                .expect("missing deadline completion");
-            assert!(matches!(result, Err(crate::Error::Timeout)));
+        for result in tokio::time::timeout(Duration::from_secs(2), join_all(recvs))
+            .await
+            .expect("deadline completion timed out")
+        {
+            assert!(matches!(result, Err((_, crate::Error::Timeout))));
         }
 
         drop(peers);
@@ -1747,30 +1870,27 @@ mod tests {
         right.set_nonblocking(true).unwrap();
 
         let total = 100;
-        let (tx, rx) = oneshot::channel();
-        submitter
-            .send(Request::Recv(RecvRequest {
-                fd: Arc::new(left.into()),
-                buf: IoBufMut::with_capacity(total),
-                offset: 0,
-                len: total,
-                exact: true,
-                deadline: None,
-                sender: tx,
-            }))
-            .await
-            .unwrap();
+        let recv = submitter.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(total),
+            0,
+            total,
+            true,
+            Instant::now() + Duration::from_secs(5),
+        );
 
         // Write data in two chunks so the recv must make partial progress.
-        (&right).write_all(&[1u8; 40]).unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        (&right).write_all(&[2u8; 60]).unwrap();
+        let writer = async {
+            (&right).write_all(&[1u8; 40]).unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            (&right).write_all(&[2u8; 60]).unwrap();
+        };
 
-        let (_, result) = tokio::time::timeout(Duration::from_secs(5), rx)
+        let (recv_result, ()) = tokio::time::timeout(Duration::from_secs(5), join(recv, writer))
             .await
-            .expect("recv timed out")
-            .expect("missing completion");
-        assert_eq!(result.unwrap(), total);
+            .expect("recv timed out");
+        let (_, result) = recv_result.expect("recv should succeed");
+        assert_eq!(result, total);
 
         drop(submitter);
         handle.join().unwrap();
@@ -1800,13 +1920,14 @@ mod tests {
         // Submit an exact recv large enough that the first short write cannot
         // complete it. After the first CQE, the request must requeue itself.
         submitter
-            .send(Request::Recv(RecvRequest {
+            .enqueue(Request::Recv(RecvRequest {
                 fd: Arc::new(left.into()),
                 buf: IoBufMut::with_capacity(total),
                 offset: 0,
                 len: total,
                 exact: true,
                 deadline: None,
+                result: None,
                 sender: tx,
             }))
             .await
@@ -1832,8 +1953,9 @@ mod tests {
         let (_, result) = tokio::time::timeout(Duration::from_secs(2), rx)
             .await
             .expect("shutdown recv timed out")
-            .expect("missing shutdown recv completion");
-        assert_eq!(result.unwrap(), total);
+            .expect("missing shutdown recv completion")
+            .expect("recv should succeed during shutdown");
+        assert_eq!(result, total);
 
         handle.join().unwrap();
     }
@@ -1856,30 +1978,26 @@ mod tests {
         let (left, right) = UnixStream::pair().unwrap();
 
         // Submit an exact recv for 100 bytes with a short deadline.
-        let (tx, rx) = oneshot::channel();
-        submitter
-            .send(Request::Recv(RecvRequest {
-                fd: Arc::new(left.into()),
-                buf: IoBufMut::with_capacity(100),
-                offset: 0,
-                len: 100,
-                exact: true,
-                deadline: Some(Instant::now() + Duration::from_millis(80)),
-                sender: tx,
-            }))
-            .await
-            .unwrap();
+        let recv = submitter.recv(
+            Arc::new(left.into()),
+            IoBufMut::with_capacity(100),
+            0,
+            100,
+            true,
+            Instant::now() + Duration::from_millis(80),
+        );
 
         // Write partial data so the recv makes progress and gets requeued,
         // then let the deadline expire before sending the rest.
-        (&right).write_all(&[1u8; 10]).unwrap();
+        let writer = async {
+            (&right).write_all(&[1u8; 10]).unwrap();
+        };
 
-        let (_, result) = tokio::time::timeout(Duration::from_secs(5), rx)
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), join(recv, writer))
             .await
-            .expect("recv should not hang")
-            .expect("missing completion");
+            .expect("recv should not hang");
         assert!(
-            matches!(result, Err(crate::Error::Timeout)),
+            matches!(result, Err((_, crate::Error::Timeout))),
             "expected timeout, got {result:?}"
         );
 
@@ -1901,15 +2019,16 @@ mod tests {
 
         let (left, _right) = UnixStream::pair().unwrap();
         let (tx, _rx) = oneshot::channel();
-        let request = ActiveRequest::from_request(Request::Recv(RecvRequest {
+        let request = Request::Recv(RecvRequest {
             fd: Arc::new(left.into()),
             buf: IoBufMut::with_capacity(8),
             offset: 0,
             len: 8,
             exact: true,
             deadline: Some(Instant::now() + Duration::from_millis(25)),
+            result: None,
             sender: tx,
-        }));
+        });
         let waiter_id = iouring.waiters.insert(request, Some(1));
         assert!(matches!(
             iouring.waiters.stage(waiter_id),
@@ -1953,12 +2072,13 @@ mod tests {
         // remains in the ready queue.
         let (tx, rx) = oneshot::channel();
         let waiter_id = iouring.waiters.insert(
-            ActiveRequest::from_request(Request::Send(SendRequest {
+            Request::Send(SendRequest {
                 fd: Arc::new(UnixStream::pair().unwrap().0.into()),
-                bufs: crate::IoBufs::from(IoBuf::from(b"hello")),
+                write: IoBufs::from(IoBuf::from(b"hello")).into(),
                 deadline: Some(Instant::now() + Duration::from_secs(1)),
+                result: None,
                 sender: tx,
-            })),
+            }),
             Some(1),
         );
         assert!(iouring.waiters.cancel(waiter_id));
@@ -1987,12 +2107,13 @@ mod tests {
 
         // Insert a canceled waiter whose next transition should be a local timeout completion.
         let (tx, rx) = oneshot::channel();
-        let request = ActiveRequest::from_request(Request::Send(SendRequest {
+        let request = Request::Send(SendRequest {
             fd: Arc::new(UnixStream::pair().unwrap().0.into()),
-            bufs: crate::IoBufs::from(IoBuf::from(b"hello")),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: Some(Instant::now() + Duration::from_secs(1)),
+            result: None,
             sender: tx,
-        }));
+        });
         let waiter_id = iouring.waiters.insert(request, Some(1));
         assert!(iouring.waiters.cancel(waiter_id));
         iouring.ready_queue.push_back(waiter_id);
@@ -2025,48 +2146,33 @@ mod tests {
         // the test proves that submissions and completions still work with the
         // SINGLE_ISSUER ring configuration enabled.
         let (sock_left, sock_right) = UnixStream::pair().unwrap();
-        let (recv_tx, recv_rx) = oneshot::channel();
-
         // Queue the recv first so the send has a real consumer and we exercise
         // the normal cross-request wake/completion path.
-        sender
-            .send(Request::Recv(RecvRequest {
-                fd: Arc::new(sock_left.into()),
-                buf: IoBufMut::with_capacity(5),
-                offset: 0,
-                len: 5,
-                exact: true,
-                deadline: None,
-                sender: recv_tx,
-            }))
-            .await
-            .unwrap();
-
-        let (send_tx, send_rx) = oneshot::channel();
-        sender
-            .send(Request::Send(SendRequest {
-                fd: Arc::new(sock_right.into()),
-                bufs: crate::IoBufs::from(IoBuf::from(b"hello")),
-                deadline: None,
-                sender: send_tx,
-            }))
-            .await
-            .unwrap();
+        let recv = sender.recv(
+            Arc::new(sock_left.into()),
+            IoBufMut::with_capacity(5),
+            0,
+            5,
+            true,
+            Instant::now() + Duration::from_secs(5),
+        );
+        let send = sender.send(
+            Arc::new(sock_right.into()),
+            IoBufs::from(IoBuf::from(b"hello")),
+            Instant::now() + Duration::from_secs(5),
+        );
 
         // The recv must observe the full payload, which shows that the request
         // made it through submission, wakeup, and completion successfully.
-        let (_, recv_result) = tokio::time::timeout(Duration::from_secs(2), recv_rx)
-            .await
-            .expect("recv timed out")
-            .expect("missing recv completion");
-        assert_eq!(recv_result.unwrap(), 5);
+        let (recv_result, send_result) =
+            tokio::time::timeout(Duration::from_secs(2), join(recv, send))
+                .await
+                .expect("recv/send timed out");
+        let (_, read) = recv_result.expect("recv should succeed");
+        assert_eq!(read, 5);
 
         // The paired send must also complete cleanly.
-        let send_result = tokio::time::timeout(Duration::from_secs(2), send_rx)
-            .await
-            .expect("send timed out")
-            .expect("missing send completion");
-        assert!(send_result.is_ok());
+        send_result.expect("send should succeed");
 
         drop(sender);
         uring_thread.join().unwrap();

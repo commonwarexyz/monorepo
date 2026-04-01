@@ -1,9 +1,9 @@
-//! Request types and active state machines for the io_uring loop.
+//! Request types and state machines for the io_uring loop.
 //!
-//! Callers submit a [Request] to the loop via [super::Submitter]. The loop
-//! converts it into an [ActiveRequest] that owns all resources (buffers, FDs,
-//! progress cursors, completion sender) needed to build follow-up SQEs and
-//! deliver a typed result.
+//! Callers submit logical operations through [super::Handle]. The handle
+//! constructs a [Request] that owns all resources (buffers, FDs, progress
+//! cursors, completion sender) needed to build follow-up SQEs and deliver a
+//! typed result.
 
 use super::waiter::{WaiterId, WaiterState};
 use crate::{Buf, Error, IoBuf, IoBufMut, IoBufs};
@@ -20,90 +20,11 @@ use std::{
 /// per-write kernel setup overhead.
 const IOVEC_BATCH_SIZE: usize = 32;
 
-/// High-level request submitted by callers to the io_uring loop.
-pub enum Request {
-    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
-    Send(SendRequest),
-    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
-    Recv(RecvRequest),
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
-    ReadAt(ReadAtRequest),
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
-    WriteAt(WriteAtRequest),
-    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
-    Sync(SyncRequest),
-}
-
-impl Request {
-    /// Return the deadline for this request, if any.
-    pub const fn deadline(&self) -> Option<Instant> {
-        match self {
-            Self::Send(r) => r.deadline,
-            Self::Recv(r) => r.deadline,
-            Self::ReadAt(_) | Self::WriteAt(_) | Self::Sync(_) => None,
-        }
-    }
-
-    /// Return whether this request carries a deadline.
-    pub const fn has_deadline(&self) -> bool {
-        self.deadline().is_some()
-    }
-}
-
-/// Network send request. Completes when all bytes are written.
-pub struct SendRequest {
-    pub fd: Arc<OwnedFd>,
-    pub bufs: IoBufs,
-    pub deadline: Option<Instant>,
-    pub sender: oneshot::Sender<Result<(), Error>>,
-}
-
-/// Network receive request. When `exact` is false, any positive byte count
-/// completes successfully. When `exact` is true, exactly `len - offset`
-/// additional bytes must be received.
-pub struct RecvRequest {
-    pub fd: Arc<OwnedFd>,
-    pub buf: IoBufMut,
-    /// Byte offset into `buf` where the next recv should write.
-    pub offset: usize,
-    /// Total target length tracked by the active request.
-    ///
-    /// This request fills `buf[offset..len]` and may requeue until `offset`
-    /// reaches `len`.
-    pub len: usize,
-    pub exact: bool,
-    pub deadline: Option<Instant>,
-    pub sender: oneshot::Sender<(IoBufMut, Result<usize, Error>)>,
-}
-
-/// Storage read request. Completes when exactly `len` bytes are read.
-pub struct ReadAtRequest {
-    pub file: Arc<File>,
-    pub offset: u64,
-    pub len: usize,
-    pub buf: IoBufMut,
-    pub sender: oneshot::Sender<(IoBufMut, Result<(), Error>)>,
-}
-
-/// Storage write request. Completes when all bytes are written.
-pub struct WriteAtRequest {
-    pub file: Arc<File>,
-    pub offset: u64,
-    pub bufs: IoBufs,
-    pub sender: oneshot::Sender<Result<(), Error>>,
-}
-
-/// Storage fsync request.
-pub struct SyncRequest {
-    pub file: Arc<File>,
-    pub sender: oneshot::Sender<std::io::Result<()>>,
-}
-
-/// Normalized write buffer for [ActiveSend] and [ActiveWriteAt].
+/// Normalized write buffer for [SendRequest] and [WriteAtRequest].
 ///
 /// Single-buffer writes track a byte cursor. Vectored writes track progress
 /// via [IoBufs::advance] and reuse a pre-allocated iovec scratch buffer.
-enum WriteBuffers {
+pub(super) enum WriteBuffers {
     Single {
         buf: IoBuf,
         cursor: usize,
@@ -114,10 +35,10 @@ enum WriteBuffers {
     },
 }
 
-impl WriteBuffers {
+impl From<IoBufs> for WriteBuffers {
     /// Normalize caller-provided buffers into either a single-buffer fast path
     /// or a vectored representation with reusable iovec scratch space.
-    fn new(bufs: IoBufs) -> Self {
+    fn from(bufs: IoBufs) -> Self {
         match bufs.try_into_single() {
             Ok(buf) => Self::Single { buf, cursor: 0 },
             Err(bufs) => {
@@ -134,7 +55,9 @@ impl WriteBuffers {
             }
         }
     }
+}
 
+impl WriteBuffers {
     /// Return the remaining number of bytes that still need to be written.
     fn remaining_len(&self) -> usize {
         match self {
@@ -214,70 +137,34 @@ const fn classify_result(result: i32, state: WaiterState) -> RawResult {
 // `build_sqe` refreshes them from the co-owned `IoBufs` immediately before the
 // kernel can observe them, and the backing buffers remain owned by the same
 // waiter slot for the request lifetime.
-unsafe impl Send for ActiveRequest {}
+unsafe impl Send for Request {}
 
-pub enum ActiveRequest {
-    Send(ActiveSend),
-    Recv(ActiveRecv),
-    ReadAt(ActiveReadAt),
-    WriteAt(ActiveWriteAt),
-    Sync(ActiveSync),
+pub(super) enum Request {
+    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
+    Send(SendRequest),
+    #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
+    Recv(RecvRequest),
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    ReadAt(ReadAtRequest),
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    WriteAt(WriteAtRequest),
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    Sync(SyncRequest),
 }
 
-impl ActiveRequest {
-    /// Convert a caller-submitted [Request] into an active state machine.
-    pub fn from_request(request: Request) -> Self {
-        match request {
-            Request::Send(r) => Self::Send(ActiveSend {
-                fd: r.fd,
-                write: WriteBuffers::new(r.bufs),
-                result: None,
-                sender: r.sender,
-            }),
-            Request::Recv(r) => {
-                assert!(
-                    r.offset <= r.len && r.len <= r.buf.capacity(),
-                    "recv invariant violated: need offset <= len <= capacity"
-                );
-                Self::Recv(ActiveRecv {
-                    fd: r.fd,
-                    buf: r.buf,
-                    offset: r.offset,
-                    len: r.len,
-                    exact: r.exact,
-                    result: None,
-                    sender: r.sender,
-                })
-            }
-            Request::ReadAt(r) => {
-                assert!(
-                    r.len <= r.buf.capacity(),
-                    "read_at len exceeds buffer capacity"
-                );
-                Self::ReadAt(ActiveReadAt {
-                    file: r.file,
-                    offset: r.offset,
-                    len: r.len,
-                    read: 0,
-                    buf: r.buf,
-                    result: None,
-                    sender: r.sender,
-                })
-            }
-            Request::WriteAt(r) => Self::WriteAt(ActiveWriteAt {
-                file: r.file,
-                offset: r.offset,
-                written: 0,
-                write: WriteBuffers::new(r.bufs),
-                result: None,
-                sender: r.sender,
-            }),
-            Request::Sync(r) => Self::Sync(ActiveSync {
-                file: r.file,
-                result: None,
-                sender: r.sender,
-            }),
+impl Request {
+    /// Return the deadline for this request, if any.
+    pub const fn deadline(&self) -> Option<Instant> {
+        match self {
+            Self::Send(r) => r.deadline,
+            Self::Recv(r) => r.deadline,
+            Self::ReadAt(_) | Self::WriteAt(_) | Self::Sync(_) => None,
         }
+    }
+
+    /// Return whether this request carries a deadline.
+    pub const fn has_deadline(&self) -> bool {
+        self.deadline().is_some()
     }
 
     /// Build the next SQE for this request, tagged with `waiter_id`.
@@ -325,10 +212,10 @@ impl ActiveRequest {
                 let _ = s.sender.send(Err(Error::Timeout));
             }
             Self::Recv(r) => {
-                let _ = r.sender.send((r.buf, Err(Error::Timeout)));
+                let _ = r.sender.send(Err((r.buf, Error::Timeout)));
             }
             Self::ReadAt(r) => {
-                let _ = r.sender.send((r.buf, Err(Error::Timeout)));
+                let _ = r.sender.send(Err((r.buf, Error::Timeout)));
             }
             Self::WriteAt(w) => {
                 let _ = w.sender.send(Err(Error::Timeout));
@@ -347,19 +234,21 @@ fn sync_timeout_error() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::TimedOut, "request timed out")
 }
 
-/// Active state for a logical network send request.
-pub struct ActiveSend {
+/// Logical network send request and its in-loop state.
+pub(super) struct SendRequest {
     /// Socket used by the current send SQE.
-    fd: Arc<OwnedFd>,
+    pub(super) fd: Arc<OwnedFd>,
     /// Write cursor and buffers that still need to be sent.
-    write: WriteBuffers,
+    pub(super) write: WriteBuffers,
+    /// Absolute deadline for the whole logical request.
+    pub(super) deadline: Option<Instant>,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
-    result: Option<Result<(), Error>>,
+    pub(super) result: Option<Result<(), Error>>,
     /// Completion channel for the top-level caller.
-    sender: oneshot::Sender<Result<(), Error>>,
+    pub(super) sender: oneshot::Sender<Result<(), Error>>,
 }
 
-impl ActiveSend {
+impl SendRequest {
     /// Build the next socket send SQE for the remaining bytes.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.fd.as_raw_fd());
@@ -436,25 +325,27 @@ impl ActiveSend {
     }
 }
 
-/// Active state for a logical network recv request.
-pub struct ActiveRecv {
+/// Logical network recv request and its in-loop state.
+pub(super) struct RecvRequest {
     /// Socket used by the current recv SQE.
-    fd: Arc<OwnedFd>,
+    pub(super) fd: Arc<OwnedFd>,
     /// Destination buffer owned by the request.
-    buf: IoBufMut,
+    pub(super) buf: IoBufMut,
     /// Byte offset into `buf` where the next recv should write.
-    offset: usize,
+    pub(super) offset: usize,
     /// Total recv target, including any existing filled prefix before `offset`.
-    len: usize,
+    pub(super) len: usize,
     /// Whether the recv must fill the full target before succeeding.
-    exact: bool,
+    pub(super) exact: bool,
+    /// Absolute deadline for the whole logical request.
+    pub(super) deadline: Option<Instant>,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
-    result: Option<Result<usize, Error>>,
+    pub(super) result: Option<Result<usize, Error>>,
     /// Completion channel for the top-level caller.
-    sender: oneshot::Sender<(IoBufMut, Result<usize, Error>)>,
+    pub(super) sender: oneshot::Sender<Result<(IoBufMut, usize), (IoBufMut, Error)>>,
 }
 
-impl ActiveRecv {
+impl RecvRequest {
     /// Build the next socket recv SQE for the unread suffix of the target.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.fd.as_raw_fd());
@@ -515,31 +406,33 @@ impl ActiveRecv {
 
     /// Deliver the cached recv result and owned buffer to the caller.
     fn finish(self) {
-        let _ = self
-            .sender
-            .send((self.buf, self.result.unwrap_or(Err(Error::RecvFailed))));
+        let result = match self.result.unwrap_or(Err(Error::RecvFailed)) {
+            Ok(read) => Ok((self.buf, read)),
+            Err(err) => Err((self.buf, err)),
+        };
+        let _ = self.sender.send(result);
     }
 }
 
-/// Active state for a logical positioned file read request.
-pub struct ActiveReadAt {
+/// Logical positioned file read request and its in-loop state.
+pub(super) struct ReadAtRequest {
     /// File used by the current read SQE.
-    file: Arc<File>,
+    pub(super) file: Arc<File>,
     /// Starting file offset for the logical read.
-    offset: u64,
+    pub(super) offset: u64,
     /// Total number of bytes requested.
-    len: usize,
+    pub(super) len: usize,
     /// Bytes already read into `buf`.
-    read: usize,
+    pub(super) read: usize,
     /// Destination buffer owned by the request.
-    buf: IoBufMut,
+    pub(super) buf: IoBufMut,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
-    result: Option<Result<(), Error>>,
+    pub(super) result: Option<Result<(), Error>>,
     /// Completion channel for the top-level caller.
-    sender: oneshot::Sender<(IoBufMut, Result<(), Error>)>,
+    pub(super) sender: oneshot::Sender<Result<IoBufMut, (IoBufMut, Error)>>,
 }
 
-impl ActiveReadAt {
+impl ReadAtRequest {
     /// Build the next positioned read SQE for the unread suffix of the target.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.file.as_raw_fd());
@@ -594,29 +487,31 @@ impl ActiveReadAt {
 
     /// Deliver the cached read result and owned buffer to the caller.
     fn finish(self) {
-        let _ = self
-            .sender
-            .send((self.buf, self.result.unwrap_or(Err(Error::ReadFailed))));
+        let result = match self.result.unwrap_or(Err(Error::ReadFailed)) {
+            Ok(()) => Ok(self.buf),
+            Err(err) => Err((self.buf, err)),
+        };
+        let _ = self.sender.send(result);
     }
 }
 
-/// Active state for a logical positioned file write request.
-pub struct ActiveWriteAt {
+/// Logical positioned file write request and its in-loop state.
+pub(super) struct WriteAtRequest {
     /// File used by the current write SQE.
-    file: Arc<File>,
+    pub(super) file: Arc<File>,
     /// Starting file offset for the logical write.
-    offset: u64,
+    pub(super) offset: u64,
     /// Bytes already written successfully.
-    written: usize,
+    pub(super) written: usize,
     /// Write cursor and buffers that still need to be written.
-    write: WriteBuffers,
+    pub(super) write: WriteBuffers,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
-    result: Option<Result<(), Error>>,
+    pub(super) result: Option<Result<(), Error>>,
     /// Completion channel for the top-level caller.
-    sender: oneshot::Sender<Result<(), Error>>,
+    pub(super) sender: oneshot::Sender<Result<(), Error>>,
 }
 
-impl ActiveWriteAt {
+impl WriteAtRequest {
     /// Build the next positioned write SQE for the remaining bytes.
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.file.as_raw_fd());
@@ -697,17 +592,17 @@ impl ActiveWriteAt {
     }
 }
 
-/// Active state for a logical fsync request.
-pub struct ActiveSync {
+/// Logical fsync request and its in-loop state.
+pub(super) struct SyncRequest {
     /// File descriptor to sync.
-    file: Arc<File>,
+    pub(super) file: Arc<File>,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
-    result: Option<std::io::Result<()>>,
+    pub(super) result: Option<std::io::Result<()>>,
     /// Completion channel for the top-level caller.
-    sender: oneshot::Sender<std::io::Result<()>>,
+    pub(super) sender: oneshot::Sender<std::io::Result<()>>,
 }
 
-impl ActiveSync {
+impl SyncRequest {
     /// Build the fsync SQE for this request.
     fn build_sqe(&self) -> SqueueEntry {
         let fd = Fd(self.file.as_raw_fd());
@@ -753,23 +648,6 @@ mod tests {
         panic::{catch_unwind, AssertUnwindSafe},
     };
 
-    type SendRx = oneshot::Receiver<Result<(), Error>>;
-    type RecvRx = oneshot::Receiver<(IoBufMut, Result<usize, Error>)>;
-    type ReadRx = oneshot::Receiver<(IoBufMut, Result<(), Error>)>;
-    type SyncRx = oneshot::Receiver<std::io::Result<()>>;
-
-    fn assert_requeue(completed: bool) {
-        assert!(!completed);
-    }
-
-    fn assert_complete(completed: bool) {
-        assert!(completed);
-    }
-
-    fn active_state() -> WaiterState {
-        WaiterState::Active { target_tick: None }
-    }
-
     fn make_socket_fd() -> Arc<OwnedFd> {
         let (left, _right) = UnixStream::pair().expect("failed to create unix socket pair");
         Arc::new(left.into())
@@ -782,83 +660,17 @@ mod tests {
         Arc::new(file)
     }
 
-    fn make_send_request(bufs: IoBufs) -> (ActiveRequest, SendRx) {
-        let (tx, rx) = oneshot::channel();
-        (
-            ActiveRequest::from_request(Request::Send(SendRequest {
-                fd: make_socket_fd(),
-                bufs,
-                deadline: None,
-                sender: tx,
-            })),
-            rx,
-        )
-    }
-
-    fn make_recv_request(len: usize, offset: usize, exact: bool) -> (ActiveRequest, RecvRx) {
-        let (tx, rx) = oneshot::channel();
-        (
-            ActiveRequest::from_request(Request::Recv(RecvRequest {
-                fd: make_socket_fd(),
-                buf: IoBufMut::with_capacity(len),
-                offset,
-                len,
-                exact,
-                deadline: None,
-                sender: tx,
-            })),
-            rx,
-        )
-    }
-
-    fn make_read_request(len: usize) -> (ActiveRequest, ReadRx) {
-        let (tx, rx) = oneshot::channel();
-        (
-            ActiveRequest::from_request(Request::ReadAt(ReadAtRequest {
-                file: make_file_fd(),
-                offset: 0,
-                len,
-                buf: IoBufMut::with_capacity(len),
-                sender: tx,
-            })),
-            rx,
-        )
-    }
-
-    fn make_write_request(bufs: IoBufs) -> (ActiveRequest, SendRx) {
-        let (tx, rx) = oneshot::channel();
-        (
-            ActiveRequest::from_request(Request::WriteAt(WriteAtRequest {
-                file: make_file_fd(),
-                offset: 0,
-                bufs,
-                sender: tx,
-            })),
-            rx,
-        )
-    }
-
-    fn make_sync_request() -> (ActiveRequest, SyncRx) {
-        let (tx, rx) = oneshot::channel();
-        (
-            ActiveRequest::from_request(Request::Sync(SyncRequest {
-                file: make_file_fd(),
-                sender: tx,
-            })),
-            rx,
-        )
-    }
-
     #[test]
     fn test_request_deadline_helpers_and_invariants() {
         // Verify deadline helpers only report deadlines for network requests and
-        // that invalid request invariants still fail fast at construction time.
+        // that invalid low-level request shapes still fail before reaching the kernel.
         // Network requests carry optional deadlines that should be surfaced.
         let send_deadline = Instant::now();
         let send = Request::Send(SendRequest {
             fd: make_socket_fd(),
-            bufs: IoBufs::from(IoBuf::from(b"hello")),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
             deadline: Some(send_deadline),
+            result: None,
             sender: oneshot::channel().0,
         });
         assert_eq!(send.deadline(), Some(send_deadline));
@@ -872,6 +684,7 @@ mod tests {
             len: 8,
             exact: true,
             deadline: Some(recv_deadline),
+            result: None,
             sender: oneshot::channel().0,
         });
         assert_eq!(recv.deadline(), Some(recv_deadline));
@@ -881,48 +694,57 @@ mod tests {
             file: make_file_fd(),
             offset: 0,
             len: 4,
+            read: 0,
             buf: IoBufMut::with_capacity(4),
+            result: None,
             sender: oneshot::channel().0,
         });
         assert_eq!(read.deadline(), None);
         assert!(!read.has_deadline());
 
-        // Invalid request shapes should still panic at construction time so the
-        // loop never has to defend against impossible in-flight state.
+        // Invalid request shapes should still panic as soon as low-level SQE
+        // construction would observe them.
         let recv_overread = std::panic::catch_unwind(|| {
-            let _ = ActiveRequest::from_request(Request::Recv(RecvRequest {
+            let mut request = Request::Recv(RecvRequest {
                 fd: make_socket_fd(),
                 buf: IoBufMut::with_capacity(4),
                 offset: 5,
                 len: 4,
                 exact: true,
                 deadline: None,
+                result: None,
                 sender: oneshot::channel().0,
-            }));
+            });
+            let _ = request.build_sqe(WaiterId::new(0, 0));
         });
         assert!(recv_overread.is_err());
 
         let recv_oversized = std::panic::catch_unwind(|| {
-            let _ = ActiveRequest::from_request(Request::Recv(RecvRequest {
+            let mut request = Request::Recv(RecvRequest {
                 fd: make_socket_fd(),
                 buf: IoBufMut::with_capacity(4),
                 offset: 0,
                 len: 5,
                 exact: true,
                 deadline: None,
+                result: None,
                 sender: oneshot::channel().0,
-            }));
+            });
+            let _ = request.build_sqe(WaiterId::new(0, 0));
         });
         assert!(recv_oversized.is_err());
 
         let read_oversized = std::panic::catch_unwind(|| {
-            let _ = ActiveRequest::from_request(Request::ReadAt(ReadAtRequest {
+            let mut request = Request::ReadAt(ReadAtRequest {
                 file: make_file_fd(),
                 offset: 0,
                 len: 5,
+                read: 0,
                 buf: IoBufMut::with_capacity(4),
+                result: None,
                 sender: oneshot::channel().0,
-            }));
+            });
+            let _ = request.build_sqe(WaiterId::new(0, 0));
         });
         assert!(read_oversized.is_err());
     }
@@ -932,13 +754,27 @@ mod tests {
         // Verify send state handling across retry, timeout, success, and hard-failure CQEs.
 
         // Retryable CQEs should simply requeue while the request is still active.
-        let (mut request, _rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert_requeue(request.on_cqe(active_state(), -libc::EAGAIN));
+        let (tx, _rx) = oneshot::channel();
+        let mut request = Request::Send(SendRequest {
+            fd: make_socket_fd(),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
 
         // Partial progress followed by a retry after timeout should resolve to timeout.
-        let (mut request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert_requeue(request.on_cqe(active_state(), 2));
-        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::EAGAIN));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Send(SendRequest {
+            fd: make_socket_fd(),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
+        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::EAGAIN));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing send result"),
@@ -946,9 +782,16 @@ mod tests {
         ));
 
         // Partial progress after timeout must also resolve to timeout rather than requeueing.
-        let (mut request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert_requeue(request.on_cqe(active_state(), 2));
-        assert_complete(request.on_cqe(WaiterState::CancelRequested, 1));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Send(SendRequest {
+            fd: make_socket_fd(),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
+        assert!(request.on_cqe(WaiterState::CancelRequested, 1));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing partial-timeout result"),
@@ -956,8 +799,15 @@ mod tests {
         ));
 
         // A canceled send that comes back as ECANCELED should also resolve to timeout.
-        let (mut request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Send(SendRequest {
+            fd: make_socket_fd(),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing timeout-cancel result"),
@@ -968,25 +818,46 @@ mod tests {
         let mut vectored = IoBufs::default();
         vectored.append(IoBuf::from(b"abc"));
         vectored.append(IoBuf::from(b"de"));
-        let (mut request, rx) = make_send_request(vectored);
-        assert_requeue(request.on_cqe(active_state(), 3));
-        assert_complete(request.on_cqe(active_state(), 2));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Send(SendRequest {
+            fd: make_socket_fd(),
+            write: vectored.into(),
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 3));
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 2));
         request.finish();
         block_on(rx)
             .expect("missing send completion")
             .expect("send should complete successfully");
 
         // Zero-byte and hard-error CQEs should both surface as send failures.
-        let (mut request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert_complete(request.on_cqe(active_state(), 0));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Send(SendRequest {
+            fd: make_socket_fd(),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing zero-result completion"),
             Err(Error::SendFailed)
         ));
 
-        let (mut request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert_complete(request.on_cqe(active_state(), -libc::EIO));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Send(SendRequest {
+            fd: make_socket_fd(),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing hard-error completion"),
@@ -994,8 +865,15 @@ mod tests {
         ));
 
         // A fully successful CQE still wins even if timeout was already requested.
-        let (mut request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert_complete(request.on_cqe(WaiterState::CancelRequested, 5));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Send(SendRequest {
+            fd: make_socket_fd(),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::CancelRequested, 5));
         request.finish();
         block_on(rx)
             .expect("missing send completion")
@@ -1007,65 +885,169 @@ mod tests {
         // Verify recv state handling across buffered progress, timeout, success, and hard failure.
 
         // Retryable CQEs should requeue while the recv is still active.
-        let (mut request, _rx) = make_recv_request(5, 0, true);
-        assert_requeue(request.on_cqe(active_state(), -libc::EAGAIN));
+        let (tx, _rx) = oneshot::channel();
+        let mut request = Request::Recv(RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
 
         // Non-exact recv should complete as soon as any positive byte count arrives.
-        let (mut request, rx) = make_recv_request(5, 0, false);
-        assert_complete(request.on_cqe(active_state(), 3));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Recv(RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: false,
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 3));
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing recv completion");
-        assert_eq!(result.expect("recv should complete successfully"), 3);
+        let (_buf, read) = block_on(rx)
+            .expect("missing recv completion")
+            .expect("recv should complete successfully");
+        assert_eq!(read, 3);
 
         // Exact recv should requeue after partial progress, but timeout wins if the follow-up CQE
         // arrives after cancellation was requested.
-        let (mut request, rx) = make_recv_request(5, 0, true);
-        assert_requeue(request.on_cqe(active_state(), 3));
-        assert_complete(request.on_cqe(WaiterState::CancelRequested, 1));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Recv(RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 3));
+        assert!(request.on_cqe(WaiterState::CancelRequested, 1));
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing timeout completion");
-        assert!(matches!(result, Err(Error::Timeout)));
+        assert!(matches!(
+            block_on(rx).expect("missing timeout completion"),
+            Err((_, Error::Timeout))
+        ));
 
         // Retryable and ECANCELED completions after timeout should both resolve to timeout.
-        let (mut request, rx) = make_recv_request(5, 0, true);
-        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::EINTR));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Recv(RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::EINTR));
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing retryable completion");
-        assert!(matches!(result, Err(Error::Timeout)));
+        assert!(matches!(
+            block_on(rx).expect("missing retryable completion"),
+            Err((_, Error::Timeout))
+        ));
 
-        let (mut request, rx) = make_recv_request(5, 0, true);
-        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Recv(RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing timeout-cancel completion");
-        assert!(matches!(result, Err(Error::Timeout)));
+        assert!(matches!(
+            block_on(rx).expect("missing timeout-cancel completion"),
+            Err((_, Error::Timeout))
+        ));
 
         // A fully successful CQE still wins after timeout was requested.
-        let (mut request, rx) = make_recv_request(5, 0, true);
-        assert_complete(request.on_cqe(WaiterState::CancelRequested, 5));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Recv(RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::CancelRequested, 5));
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing successful completion");
-        assert_eq!(result.expect("recv should complete successfully"), 5);
+        let (_buf, read) = block_on(rx)
+            .expect("missing successful completion")
+            .expect("recv should complete successfully");
+        assert_eq!(read, 5);
 
         // A kernel completion larger than the requested remaining length must
         // trip the local invariant before it can corrupt buffer state.
-        let (mut request, _rx) = make_recv_request(5, 0, true);
+        let (tx, _rx) = oneshot::channel();
+        let mut request = Request::Recv(RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
         let overflow = catch_unwind(AssertUnwindSafe(|| {
-            let _ = request.on_cqe(active_state(), 6);
+            let _ = request.on_cqe(WaiterState::Active { target_tick: None }, 6);
         }));
         assert!(overflow.is_err());
 
         // Zero-byte and hard-error CQEs should both surface as recv failures.
-        let (mut request, rx) = make_recv_request(5, 0, true);
-        assert_complete(request.on_cqe(active_state(), 0));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Recv(RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing zero completion");
-        assert!(matches!(result, Err(Error::RecvFailed)));
+        assert!(matches!(
+            block_on(rx).expect("missing zero completion"),
+            Err((_, Error::RecvFailed))
+        ));
 
-        let (mut request, rx) = make_recv_request(5, 0, true);
-        assert_complete(request.on_cqe(active_state(), -libc::EIO));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Recv(RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing error completion");
-        assert!(matches!(result, Err(Error::RecvFailed)));
+        assert!(matches!(
+            block_on(rx).expect("missing error completion"),
+            Err((_, Error::RecvFailed))
+        ));
     }
 
     #[test]
@@ -1073,36 +1055,88 @@ mod tests {
         // Verify read-at state handling across retry, EOF, timeout-cancel, and hard failure.
 
         // Retryable CQEs should requeue the positioned read.
-        let (mut request, _rx) = make_read_request(5);
-        assert_requeue(request.on_cqe(active_state(), -libc::EAGAIN));
+        let (tx, _rx) = oneshot::channel();
+        let mut request = Request::ReadAt(ReadAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            len: 5,
+            read: 0,
+            buf: IoBufMut::with_capacity(5),
+            result: None,
+            sender: tx,
+        });
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
 
         // Partial reads should requeue until the full logical length is satisfied.
-        let (mut request, rx) = make_read_request(5);
-        assert_requeue(request.on_cqe(active_state(), 2));
-        assert_complete(request.on_cqe(active_state(), 3));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::ReadAt(ReadAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            len: 5,
+            read: 0,
+            buf: IoBufMut::with_capacity(5),
+            result: None,
+            sender: tx,
+        });
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 3));
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing read completion");
-        result.expect("read should complete successfully");
+        block_on(rx)
+            .expect("missing read completion")
+            .expect("read should complete successfully");
 
         // EOF and hard-error CQEs should map to the storage read error surface.
-        let (mut request, rx) = make_read_request(5);
-        assert_complete(request.on_cqe(active_state(), 0));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::ReadAt(ReadAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            len: 5,
+            read: 0,
+            buf: IoBufMut::with_capacity(5),
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing eof completion");
-        assert!(matches!(result, Err(Error::BlobInsufficientLength)));
+        assert!(matches!(
+            block_on(rx).expect("missing eof completion"),
+            Err((_, Error::BlobInsufficientLength))
+        ));
 
-        let (mut request, rx) = make_read_request(5);
-        assert_complete(request.on_cqe(active_state(), -libc::EIO));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::ReadAt(ReadAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            len: 5,
+            read: 0,
+            buf: IoBufMut::with_capacity(5),
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing read failure");
-        assert!(matches!(result, Err(Error::ReadFailed)));
+        assert!(matches!(
+            block_on(rx).expect("missing read failure"),
+            Err((_, Error::ReadFailed))
+        ));
 
         // Timeout cancellation should also surface as a read failure.
-        let (mut request, rx) = make_read_request(5);
-        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::ReadAt(ReadAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            len: 5,
+            read: 0,
+            buf: IoBufMut::with_capacity(5),
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing timeout-cancel failure");
-        assert!(matches!(result, Err(Error::ReadFailed)));
+        assert!(matches!(
+            block_on(rx).expect("missing timeout-cancel failure"),
+            Err((_, Error::ReadFailed))
+        ));
     }
 
     #[test]
@@ -1110,13 +1144,29 @@ mod tests {
         // Verify write-at state handling across retry, partial progress, timeout-cancel, and failure.
 
         // Retryable CQEs should requeue the positioned write.
-        let (mut request, _rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert_requeue(request.on_cqe(active_state(), -libc::EAGAIN));
+        let (tx, _rx) = oneshot::channel();
+        let mut request = Request::WriteAt(WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            result: None,
+            sender: tx,
+        });
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EAGAIN));
 
         // Single-buffer writes should track partial progress until complete.
-        let (mut request, rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert_requeue(request.on_cqe(active_state(), 2));
-        assert_complete(request.on_cqe(active_state(), 3));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::WriteAt(WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            result: None,
+            sender: tx,
+        });
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 2));
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 3));
         request.finish();
         block_on(rx)
             .expect("missing write completion")
@@ -1126,25 +1176,49 @@ mod tests {
         let mut vectored = IoBufs::default();
         vectored.append(IoBuf::from(b"abc"));
         vectored.append(IoBuf::from(b"de"));
-        let (mut request, rx) = make_write_request(vectored);
-        assert_requeue(request.on_cqe(active_state(), 4));
-        assert_complete(request.on_cqe(active_state(), 1));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::WriteAt(WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: vectored.into(),
+            result: None,
+            sender: tx,
+        });
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, 4));
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 1));
         request.finish();
         block_on(rx)
             .expect("missing vectored write completion")
             .expect("vectored write should complete successfully");
 
         // Zero-byte and hard-error CQEs should surface as write failures.
-        let (mut request, rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert_complete(request.on_cqe(active_state(), 0));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::WriteAt(WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing zero-result write"),
             Err(Error::WriteFailed)
         ));
 
-        let (mut request, rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert_complete(request.on_cqe(active_state(), -libc::EIO));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::WriteAt(WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing write failure"),
@@ -1152,8 +1226,16 @@ mod tests {
         ));
 
         // Timeout cancellation should also surface as a write failure.
-        let (mut request, rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
-        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::WriteAt(WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing timeout-cancel write failure"),
@@ -1166,12 +1248,22 @@ mod tests {
         // Verify sync state handling across retry, timeout-cancel, error conversion, and success.
 
         // Retryable CQEs should requeue the fsync request.
-        let (mut request, _rx) = make_sync_request();
-        assert_requeue(request.on_cqe(active_state(), -libc::EINTR));
+        let (tx, _rx) = oneshot::channel();
+        let mut request = Request::Sync(SyncRequest {
+            file: make_file_fd(),
+            result: None,
+            sender: tx,
+        });
+        assert!(!request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EINTR));
 
         // Timeout cancellation should preserve the kernel ECANCELED surface for sync callers.
-        let (mut request, rx) = make_sync_request();
-        assert_complete(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Sync(SyncRequest {
+            file: make_file_fd(),
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::CancelRequested, -libc::ECANCELED));
         request.finish();
         let err = block_on(rx)
             .expect("missing timeout cancel result")
@@ -1179,8 +1271,13 @@ mod tests {
         assert_eq!(err.raw_os_error(), Some(libc::ECANCELED));
 
         // Hard errors should round-trip as std::io::Error values.
-        let (mut request, rx) = make_sync_request();
-        assert_complete(request.on_cqe(active_state(), -libc::EIO));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Sync(SyncRequest {
+            file: make_file_fd(),
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, -libc::EIO));
         request.finish();
         let err = block_on(rx)
             .expect("missing hard error result")
@@ -1188,22 +1285,37 @@ mod tests {
         assert_eq!(err.raw_os_error(), Some(libc::EIO));
 
         // Both zero and positive CQE results should count as sync success.
-        let (mut request, rx) = make_sync_request();
-        assert_complete(request.on_cqe(active_state(), 0));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Sync(SyncRequest {
+            file: make_file_fd(),
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 0));
         request.finish();
         block_on(rx)
             .expect("missing zero-result completion")
             .expect("sync should succeed on zero");
 
-        let (mut request, rx) = make_sync_request();
-        assert_complete(request.on_cqe(active_state(), 1));
+        let (tx, rx) = oneshot::channel();
+        let mut request = Request::Sync(SyncRequest {
+            file: make_file_fd(),
+            result: None,
+            sender: tx,
+        });
+        assert!(request.on_cqe(WaiterState::Active { target_tick: None }, 1));
         request.finish();
         block_on(rx)
             .expect("missing positive-result completion")
             .expect("sync should succeed on positive");
 
         // Local timeout delivery should use TimedOut for the storage-facing API.
-        let (request, rx) = make_sync_request();
+        let (tx, rx) = oneshot::channel();
+        let request = Request::Sync(SyncRequest {
+            file: make_file_fd(),
+            result: None,
+            sender: tx,
+        });
         request.timeout();
         let err = block_on(rx)
             .expect("missing timeout result")
@@ -1217,25 +1329,63 @@ mod tests {
         // Network and storage requests each have their own fallback error surface.
 
         // Network sends and recvs should preserve their wrapper-specific fallback errors.
-        let (request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
+        let (tx, rx) = oneshot::channel();
+        let request = Request::Send(SendRequest {
+            fd: make_socket_fd(),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing send fallback"),
             Err(Error::SendFailed)
         ));
 
-        let (request, rx) = make_recv_request(5, 0, true);
+        let (tx, rx) = oneshot::channel();
+        let request = Request::Recv(RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing recv fallback");
-        assert!(matches!(result, Err(Error::RecvFailed)));
+        assert!(matches!(
+            block_on(rx).expect("missing recv fallback"),
+            Err((_, Error::RecvFailed))
+        ));
 
         // Storage reads and writes should surface the corresponding storage wrapper errors.
-        let (request, rx) = make_read_request(5);
+        let (tx, rx) = oneshot::channel();
+        let request = Request::ReadAt(ReadAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            len: 5,
+            read: 0,
+            buf: IoBufMut::with_capacity(5),
+            result: None,
+            sender: tx,
+        });
         request.finish();
-        let (_buf, result) = block_on(rx).expect("missing read fallback");
-        assert!(matches!(result, Err(Error::ReadFailed)));
+        assert!(matches!(
+            block_on(rx).expect("missing read fallback"),
+            Err((_, Error::ReadFailed))
+        ));
 
-        let (request, rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
+        let (tx, rx) = oneshot::channel();
+        let request = Request::WriteAt(WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            result: None,
+            sender: tx,
+        });
         request.finish();
         assert!(matches!(
             block_on(rx).expect("missing write fallback"),
@@ -1244,7 +1394,12 @@ mod tests {
 
         // Sync fallback remains success because the wrapper treats "no CQE seen"
         // as an already-finished local sync during shutdown abandonment.
-        let (request, rx) = make_sync_request();
+        let (tx, rx) = oneshot::channel();
+        let request = Request::Sync(SyncRequest {
+            file: make_file_fd(),
+            result: None,
+            sender: tx,
+        });
         request.finish();
         block_on(rx)
             .expect("missing sync fallback")
@@ -1258,25 +1413,63 @@ mod tests {
         // timeout surface when no CQE was processed yet.
 
         // Network operations should map directly to the shared logical timeout.
-        let (request, rx) = make_send_request(IoBufs::from(IoBuf::from(b"hello")));
+        let (tx, rx) = oneshot::channel();
+        let request = Request::Send(SendRequest {
+            fd: make_socket_fd(),
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
         request.timeout();
         assert!(matches!(
             block_on(rx).expect("missing send timeout"),
             Err(Error::Timeout)
         ));
 
-        let (request, rx) = make_recv_request(5, 0, true);
+        let (tx, rx) = oneshot::channel();
+        let request = Request::Recv(RecvRequest {
+            fd: make_socket_fd(),
+            buf: IoBufMut::with_capacity(5),
+            offset: 0,
+            len: 5,
+            exact: true,
+            deadline: None,
+            result: None,
+            sender: tx,
+        });
         request.timeout();
-        let (_buf, result) = block_on(rx).expect("missing recv timeout");
-        assert!(matches!(result, Err(Error::Timeout)));
+        assert!(matches!(
+            block_on(rx).expect("missing recv timeout"),
+            Err((_, Error::Timeout))
+        ));
 
         // Storage reads and writes also use the common logical timeout surface.
-        let (request, rx) = make_read_request(5);
+        let (tx, rx) = oneshot::channel();
+        let request = Request::ReadAt(ReadAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            len: 5,
+            read: 0,
+            buf: IoBufMut::with_capacity(5),
+            result: None,
+            sender: tx,
+        });
         request.timeout();
-        let (_buf, result) = block_on(rx).expect("missing read timeout");
-        assert!(matches!(result, Err(Error::Timeout)));
+        assert!(matches!(
+            block_on(rx).expect("missing read timeout"),
+            Err((_, Error::Timeout))
+        ));
 
-        let (request, rx) = make_write_request(IoBufs::from(IoBuf::from(b"hello")));
+        let (tx, rx) = oneshot::channel();
+        let request = Request::WriteAt(WriteAtRequest {
+            file: make_file_fd(),
+            offset: 0,
+            written: 0,
+            write: IoBufs::from(IoBuf::from(b"hello")).into(),
+            result: None,
+            sender: tx,
+        });
         request.timeout();
         assert!(matches!(
             block_on(rx).expect("missing write timeout"),
@@ -1284,7 +1477,12 @@ mod tests {
         ));
 
         // Sync uses `std::io::ErrorKind::TimedOut` to match its storage-facing API.
-        let (request, rx) = make_sync_request();
+        let (tx, rx) = oneshot::channel();
+        let request = Request::Sync(SyncRequest {
+            file: make_file_fd(),
+            result: None,
+            sender: tx,
+        });
         request.timeout();
         let err = block_on(rx)
             .expect("missing sync timeout")

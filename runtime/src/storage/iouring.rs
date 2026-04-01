@@ -3,9 +3,8 @@
 //!
 //! ## Architecture
 //!
-//! I/O operations are sent as high-level [Request][crate::iouring::IoUringRequest]s via a
-//! [commonware_utils::channel::mpsc] channel to a dedicated io_uring event loop running in another
-//! thread. Operation results are returned via typed [commonware_utils::channel::oneshot] channels.
+//! I/O operations are submitted through an io_uring [Handle][crate::iouring::Handle] to a
+//! dedicated event loop running in another thread.
 //!
 //! ## Memory Safety
 //!
@@ -23,11 +22,11 @@
 
 use super::Header;
 use crate::{
-    iouring::{self, IoUringRequest, ReadAtRequest, SyncRequest, WriteAtRequest},
+    iouring::{self},
     utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
-use commonware_utils::{channel::oneshot, from_hex, hex};
+use commonware_utils::{from_hex, hex};
 use prometheus_client::registry::Registry;
 use std::{
     fs::{self, File},
@@ -70,7 +69,7 @@ pub struct Config {
 #[derive(Clone)]
 pub struct Storage {
     storage_directory: PathBuf,
-    io_submitter: iouring::Submitter,
+    io_handle: iouring::Handle,
     pool: BufferPool,
 }
 
@@ -89,11 +88,11 @@ impl Storage {
         // the ring is the only thread submitting work to it.
         iouring_config.single_issuer = true;
 
-        let (io_submitter, iouring_loop) = iouring::IoUringLoop::new(iouring_config, registry);
+        let (io_handle, iouring_loop) = iouring::IoUringLoop::new(iouring_config, registry);
 
         let storage = Self {
             storage_directory,
-            io_submitter,
+            io_handle,
             pool,
         };
 
@@ -175,7 +174,7 @@ impl crate::Storage for Storage {
             partition.into(),
             name,
             file,
-            self.io_submitter.clone(),
+            self.io_handle.clone(),
             self.pool.clone(),
         );
         Ok((blob, logical_len, blob_version))
@@ -236,7 +235,7 @@ pub struct Blob {
     /// The underlying file
     file: Arc<File>,
     /// Where to send IO operations to be executed
-    io_submitter: iouring::Submitter,
+    io_handle: iouring::Handle,
     /// Buffer pool for read allocations
     pool: BufferPool,
 }
@@ -247,7 +246,7 @@ impl Clone for Blob {
             partition: self.partition.clone(),
             name: self.name.clone(),
             file: self.file.clone(),
-            io_submitter: self.io_submitter.clone(),
+            io_handle: self.io_handle.clone(),
             pool: self.pool.clone(),
         }
     }
@@ -259,14 +258,14 @@ impl Blob {
         partition: String,
         name: &[u8],
         file: File,
-        io_submitter: iouring::Submitter,
+        io_handle: iouring::Handle,
         pool: BufferPool,
     ) -> Self {
         Self {
             partition,
             name: name.to_vec(),
             file: Arc::new(file),
-            io_submitter,
+            io_handle,
             pool,
         }
     }
@@ -306,20 +305,11 @@ impl crate::Blob for Blob {
             return Ok(original_bufs.unwrap_or_else(|| io_buf.into()));
         }
 
-        let (tx, rx) = oneshot::channel();
-        self.io_submitter
-            .send(IoUringRequest::ReadAt(ReadAtRequest {
-                file: self.file.clone(),
-                offset,
-                len,
-                buf: io_buf,
-                sender: tx,
-            }))
+        let io_buf = self
+            .io_handle
+            .read_at(self.file.clone(), offset, len, io_buf)
             .await
-            .map_err(|_| Error::ReadFailed)?;
-
-        let (io_buf, result) = rx.await.map_err(|_| Error::ReadFailed)?;
-        result?;
+            .map_err(|(_, err)| err)?;
 
         match original_bufs {
             None => Ok(io_buf.into()),
@@ -340,18 +330,9 @@ impl crate::Blob for Blob {
             return Ok(());
         }
 
-        let (tx, rx) = oneshot::channel();
-        self.io_submitter
-            .send(IoUringRequest::WriteAt(WriteAtRequest {
-                file: self.file.clone(),
-                offset,
-                bufs,
-                sender: tx,
-            }))
+        self.io_handle
+            .write_at(self.file.clone(), offset, bufs)
             .await
-            .map_err(|_| Error::WriteFailed)?;
-
-        rx.await.map_err(|_| Error::WriteFailed)?
     }
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
@@ -365,30 +346,10 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        let (tx, rx) = oneshot::channel();
-        self.io_submitter
-            .send(IoUringRequest::Sync(SyncRequest {
-                file: self.file.clone(),
-                sender: tx,
-            }))
+        self.io_handle
+            .sync(self.file.clone())
             .await
-            .map_err(|_| {
-                Error::BlobSyncFailed(
-                    self.partition.clone(),
-                    hex(&self.name),
-                    IoError::other("failed to send work"),
-                )
-            })?;
-
-        let result = rx.await.map_err(|_| {
-            Error::BlobSyncFailed(
-                self.partition.clone(),
-                hex(&self.name),
-                IoError::other("failed to read result"),
-            )
-        })?;
-
-        result.map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
+            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
     }
 }
 
@@ -822,14 +783,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_and_write_report_submitter_disconnect() {
+    async fn test_read_and_write_report_handle_disconnect() {
         // Verify read/write wrappers report channel disconnects before any work
         // reaches the io_uring loop.
         let storage_directory = create_test_directory();
         let path = storage_directory.join("disconnected");
         let file = File::create(&path).unwrap();
 
-        // Drop the loop immediately so the submitter behaves like a dead
+        // Drop the loop immediately so the handle behaves like a dead
         // backend while the blob handle still exists.
         let mut registry = Registry::default();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
@@ -867,14 +828,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_blob_sync_reports_submitter_disconnect() {
+    async fn test_blob_sync_reports_handle_disconnect() {
         // Verify the storage wrapper maps submission-channel disconnects to
         // `BlobSyncFailed(..., "failed to send work")`.
         let storage_directory = create_test_directory();
         let path = storage_directory.join("disconnected");
         let file = File::create(&path).unwrap();
 
-        // Construct a blob handle whose submitter has already lost its loop so
+        // Construct a blob handle whose handle has already lost its loop so
         // the wrapper must synthesize the disconnect error locally.
         let mut registry = Registry::default();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut Registry::default());
