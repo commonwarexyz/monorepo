@@ -1,5 +1,6 @@
 use crate::{
     authenticated::{
+        channels::ContentRouter,
         data::EncodedData,
         lookup::{channels::Channels, types},
         relay::Relay,
@@ -99,6 +100,18 @@ impl<P: PublicKey> Messenger<P> {
                 success,
             })
             .await
+    }
+}
+
+impl<P: PublicKey> ContentRouter for Messenger<P> {
+    async fn content(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+        channel: Channel,
+        message: IoBufs,
+        priority: bool,
+    ) -> Vec<Self::PublicKey> {
+        self.content(recipients, channel, message, priority).await
     }
 }
 

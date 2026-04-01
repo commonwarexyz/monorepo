@@ -7,6 +7,7 @@
 //! [lookup] operates under the assumption that peer addresses are known in advance,
 //! and that they can be looked up by their identifiers.
 
+pub(crate) mod channels;
 mod data;
 pub(crate) mod dialing;
 pub mod discovery;
