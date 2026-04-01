@@ -196,19 +196,8 @@ mod metrics;
 mod network;
 mod types;
 
-use thiserror::Error;
-
-/// Errors that can occur when interacting with the network.
-#[derive(Error, Debug)]
-pub enum Error {
-    #[error("message too large: {0}")]
-    MessageTooLarge(usize),
-    #[error("network closed")]
-    NetworkClosed,
-}
-
 pub use actors::tracker::Oracle;
-pub use channels::{Receiver, Sender};
+pub use channels::{Error, Receiver, Sender};
 pub use config::Config;
 pub use network::Network;
 

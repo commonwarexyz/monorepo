@@ -22,6 +22,7 @@ use commonware_stream::utils::codec::{recv_frame, send_frame};
 use commonware_utils::{
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
     ordered::Set,
+    sync::RwLock,
     NZUsize, TryCollect,
 };
 use either::Either;
@@ -30,15 +31,52 @@ use prometheus_client::metrics::{counter::Counter, family::Family};
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
 
 /// Task type representing a message to be sent within the network.
 type Task<P> = (Channel, P, Recipients<P>, IoBuf, oneshot::Sender<Vec<P>>);
+
+#[derive(Clone, Debug)]
+struct PrimaryPeers<P: PublicKey>(Arc<PrimaryPeersInner<P>>);
+
+#[derive(Debug)]
+struct PrimaryPeersInner<P: PublicKey> {
+    generation: AtomicU64,
+    peers: RwLock<Set<P>>,
+}
+
+impl<P: PublicKey> Default for PrimaryPeers<P> {
+    fn default() -> Self {
+        Self(Arc::new(PrimaryPeersInner {
+            generation: AtomicU64::new(0),
+            peers: RwLock::new(Set::default()),
+        }))
+    }
+}
+
+impl<P: PublicKey> PrimaryPeers<P> {
+    fn contains(&self, peer: &P) -> bool {
+        self.0.peers.read().position(peer).is_some()
+    }
+
+    fn generation(&self) -> u64 {
+        self.0.generation.load(Ordering::Acquire)
+    }
+
+    fn replace(&self, peers: Set<P>) {
+        *self.0.peers.write() = peers;
+        self.0.generation.fetch_add(1, Ordering::Release);
+    }
+}
 
 /// Target for a message in a split receiver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +186,10 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Reference count for each peer (number of secondary peer sets they belong to).
     secondary_refs: BTreeMap<P, usize>,
 
+    // Shared snapshot of the current primary peers, used to prioritize
+    // inbound delivery under load.
+    primary_peers: PrimaryPeers<P>,
+
     // Maximum number of peer sets to track
     tracked_peer_sets: Option<usize>,
 
@@ -206,6 +248,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 primary_refs: BTreeMap::new(),
                 secondary_sets: BTreeMap::new(),
                 secondary_refs: BTreeMap::new(),
+                primary_peers: PrimaryPeers::default(),
                 blocks: BTreeSet::new(),
                 transmitter: transmitter::State::new(),
                 subscribers: Vec::new(),
@@ -338,6 +381,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     }
                 }
 
+                self.refresh_primary_peers();
+
                 // Notify all subscribers about the new peer set
                 let all = self.all_primary_peers();
                 let notification = (id, primary, all);
@@ -358,6 +403,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // When not using peer sets, broadcast updated peer list to subscribers
                 if is_new && self.primary_sets.is_empty() {
+                    self.refresh_primary_peers();
                     self.broadcast_peer_list().await;
                 }
 
@@ -382,7 +428,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // Create a receiver that allows receiving messages from the network for a certain channel
                 let peer = self.peers.get_mut(&public_key).unwrap();
                 let receiver = match peer.register(channel, handle).await {
-                    Ok(receiver) => Receiver { receiver },
+                    Ok(receiver) => receiver,
                     Err(err) => return send_result(result, Err(err)),
                 };
 
@@ -443,6 +489,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // When not using peer sets, broadcast updated peer list to subscribers
                 if is_new && self.primary_sets.is_empty() {
+                    self.refresh_primary_peers();
                     self.broadcast_peer_list().await;
                 }
 
@@ -469,6 +516,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // When not using peer sets, broadcast updated peer list to subscribers
                 if (sender_is_new || receiver_is_new) && self.primary_sets.is_empty() {
+                    self.refresh_primary_peers();
                     self.broadcast_peer_list().await;
                 }
 
@@ -523,6 +571,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 public_key.clone(),
                 socket,
                 self.max_size,
+                self.primary_peers.clone(),
             )
             .await;
 
@@ -551,6 +600,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             }
         }
         self.peer_subscribers = live_subscribers;
+    }
+
+    /// Refresh the shared primary peer snapshot used for prioritized
+    /// inbound delivery.
+    fn refresh_primary_peers(&self) {
+        self.primary_peers.replace(self.all_primary_peers());
     }
 
     /// Get all primary peers as an ordered set.
@@ -1045,12 +1100,33 @@ impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
     }
 }
 
-type MessageReceiver<P> = mpsc::UnboundedReceiver<Message<P>>;
+#[derive(Clone, Debug)]
+struct PrioritizedSender<P: PublicKey> {
+    sender: mpsc::UnboundedSender<Message<P>>,
+}
+
+impl<P: PublicKey> PrioritizedSender<P> {
+    fn send(&self, message: Message<P>) -> Result<(), mpsc::error::SendError<Message<P>>> {
+        self.sender.send(message)
+    }
+}
 
 /// Implementation of a [crate::Receiver] for the simulated network.
 #[derive(Debug)]
+struct BufferedPeer {
+    is_primary: bool,
+    messages: VecDeque<(u64, IoBuf)>,
+}
+
+#[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
-    receiver: MessageReceiver<P>,
+    receiver: mpsc::UnboundedReceiver<Message<P>>,
+    primary_peers: PrimaryPeers<P>,
+    buffered: BTreeMap<P, BufferedPeer>,
+    primary_ready: BTreeSet<(u64, P)>,
+    secondary_ready: BTreeSet<(u64, P)>,
+    next_sequence: u64,
+    primary_generation: u64,
 }
 
 impl<P: PublicKey> crate::Receiver for Receiver<P> {
@@ -1058,11 +1134,146 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
     type PublicKey = P;
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Error> {
-        self.receiver.recv().await.ok_or(Error::NetworkClosed)
+        self.recv_inner().await
     }
 }
 
 impl<P: PublicKey> Receiver<P> {
+    fn new(
+        receiver: mpsc::UnboundedReceiver<Message<P>>,
+        primary_peers: PrimaryPeers<P>,
+    ) -> Self {
+        Self {
+            receiver,
+            primary_generation: primary_peers.generation(),
+            primary_peers,
+            buffered: BTreeMap::new(),
+            primary_ready: BTreeSet::new(),
+            secondary_ready: BTreeSet::new(),
+            next_sequence: 0,
+        }
+    }
+
+    fn single(receiver: mpsc::UnboundedReceiver<Message<P>>) -> Self {
+        Self::new(receiver, PrimaryPeers::default())
+    }
+
+    fn buffer(&mut self, message: Message<P>) {
+        let (peer, message) = message;
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        let is_primary = self.primary_peers.contains(&peer);
+        let entry = self.buffered.entry(peer.clone()).or_insert_with(|| BufferedPeer {
+            is_primary,
+            messages: VecDeque::new(),
+        });
+        if entry.messages.is_empty() {
+            entry.is_primary = is_primary;
+        }
+        entry.messages.push_back((sequence, message));
+        if entry.messages.len() == 1 {
+            let key = (sequence, peer);
+            if entry.is_primary {
+                self.primary_ready.insert(key);
+            } else {
+                self.secondary_ready.insert(key);
+            }
+        }
+    }
+
+    fn refresh_priorities(&mut self) {
+        let generation = self.primary_peers.generation();
+        if generation == self.primary_generation {
+            return;
+        }
+        self.primary_generation = generation;
+
+        let updates: Vec<_> = self
+            .buffered
+            .iter_mut()
+            .filter_map(|(peer, state)| {
+                let is_primary = self.primary_peers.contains(peer);
+                if is_primary == state.is_primary {
+                    return None;
+                }
+                let sequence = state
+                    .messages
+                    .front()
+                    .expect("buffered peers must have a head message")
+                    .0;
+                let previous = state.is_primary;
+                state.is_primary = is_primary;
+                Some((sequence, peer.clone(), previous, is_primary))
+            })
+            .collect();
+
+        for (sequence, peer, previous, is_primary) in updates {
+            let key = (sequence, peer.clone());
+            if previous {
+                self.primary_ready.remove(&key);
+            } else {
+                self.secondary_ready.remove(&key);
+            }
+            if is_primary {
+                self.primary_ready.insert(key);
+            } else {
+                self.secondary_ready.insert(key);
+            }
+        }
+    }
+
+    fn pop_ready(&mut self, primary: bool) -> Option<Message<P>> {
+        let key = if primary {
+            self.primary_ready.iter().next().cloned()
+        } else {
+            self.secondary_ready.iter().next().cloned()
+        }?;
+        if primary {
+            self.primary_ready.remove(&key);
+        } else {
+            self.secondary_ready.remove(&key);
+        }
+
+        let (_, peer) = key;
+        let mut state = self
+            .buffered
+            .remove(&peer)
+            .expect("selected peer must have buffered messages");
+        let (_, message) = state
+            .messages
+            .pop_front()
+            .expect("selected peer must have a buffered head message");
+        if let Some((sequence, _)) = state.messages.front() {
+            let key = (*sequence, peer.clone());
+            if state.is_primary {
+                self.primary_ready.insert(key);
+            } else {
+                self.secondary_ready.insert(key);
+            }
+            self.buffered.insert(peer.clone(), state);
+        }
+        Some((peer, message))
+    }
+
+    async fn recv_inner(&mut self) -> Result<Message<P>, Error> {
+        loop {
+            while let Ok(message) = self.receiver.try_recv() {
+                self.buffer(message);
+            }
+
+            self.refresh_priorities();
+
+            if let Some(message) = self.pop_ready(true).or_else(|| self.pop_ready(false)) {
+                return Ok(message);
+            }
+
+            let Some(message) = self.receiver.recv().await else {
+                return Err(Error::NetworkClosed);
+            };
+            self.buffer(message);
+        }
+    }
+
     /// Split this [Receiver] into a [SplitTarget::Primary] and [SplitTarget::Secondary] receiver.
     pub fn split_with<E: Spawner, R: SplitRouter<P>>(
         mut self,
@@ -1072,7 +1283,7 @@ impl<P: PublicKey> Receiver<P> {
         let (primary_tx, primary_rx) = mpsc::unbounded_channel();
         let (secondary_tx, secondary_rx) = mpsc::unbounded_channel();
         context.spawn(move |_| async move {
-            while let Some(message) = self.receiver.recv().await {
+            while let Ok(message) = self.recv_inner().await {
                 // Route message to the appropriate target
                 let direction = router(&message);
                 match direction {
@@ -1105,12 +1316,8 @@ impl<P: PublicKey> Receiver<P> {
         });
 
         (
-            Self {
-                receiver: primary_rx,
-            },
-            Self {
-                receiver: secondary_rx,
-            },
+            Self::single(primary_rx),
+            Self::single(secondary_rx),
         )
     }
 }
@@ -1123,7 +1330,7 @@ struct Peer<P: PublicKey> {
     socket: SocketAddr,
 
     // Control to register new channels
-    control: mpsc::UnboundedSender<(Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>)>,
+    control: mpsc::UnboundedSender<(Channel, Handle<()>, oneshot::Sender<Receiver<P>>)>,
 }
 
 impl<P: PublicKey> Peer<P> {
@@ -1136,12 +1343,13 @@ impl<P: PublicKey> Peer<P> {
         public_key: P,
         socket: SocketAddr,
         max_size: u32,
+        primary_peers: PrimaryPeers<P>,
     ) -> Self {
         // The control is used to register channels.
         // There is exactly one mailbox created for each channel that the peer is registered for.
         #[allow(clippy::type_complexity)]
         let (control_sender, mut control_receiver): (
-            mpsc::UnboundedSender<(Channel, Handle<()>, oneshot::Sender<MessageReceiver<P>>)>,
+            mpsc::UnboundedSender<(Channel, Handle<()>, oneshot::Sender<Receiver<P>>)>,
             _,
         ) = mpsc::unbounded_channel();
 
@@ -1162,13 +1370,16 @@ impl<P: PublicKey> Peer<P> {
                 Some((channel, sender, result_tx)) = control_receiver.recv() else break => {
                     // Register channel
                     let (receiver_tx, receiver_rx) = mpsc::unbounded_channel();
+                    let receiver_tx = PrioritizedSender { sender: receiver_tx };
                     if let Some((_, existing_sender)) =
                         mailboxes.insert(channel, (receiver_tx, sender))
                     {
                         warn!(?public_key, ?channel, "overwriting existing channel");
                         existing_sender.abort();
                     }
-                    result_tx.send(receiver_rx).unwrap();
+                    result_tx
+                        .send(Receiver::new(receiver_rx, primary_peers.clone()))
+                        .unwrap();
                 },
 
                 // Listen for messages from the inbox, which are forwarded to the appropriate mailbox
@@ -1258,7 +1469,7 @@ impl<P: PublicKey> Peer<P> {
         &mut self,
         channel: Channel,
         sender: Handle<()>,
-    ) -> Result<MessageReceiver<P>, Error> {
+    ) -> Result<Receiver<P>, Error> {
         let (result_tx, result_rx) = oneshot::channel();
         self.control
             .send((channel, sender, result_tx))
@@ -1345,7 +1556,7 @@ mod tests {
     use super::*;
     use crate::{Manager as _, Provider, Receiver as _, Recipients, Sender as _, TrackedPeers};
     use commonware_cryptography::{ed25519, Signer as _};
-    use commonware_runtime::{deterministic, Quota, Runner as _};
+    use commonware_runtime::{deterministic, IoBuf, Quota, Runner as _};
     use commonware_utils::ordered::Set;
     use futures::FutureExt;
     use std::num::NonZeroU32;
@@ -1403,6 +1614,51 @@ mod tests {
                 oracle.add_link(pk1, pk2, link).await,
                 Err(Error::LinkExists)
             ));
+        });
+    }
+
+    #[test]
+    fn test_receiver_prioritizes_live_primary_peers() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            let primary_peers = PrimaryPeers::default();
+            let (sender_tx, sender_rx) = mpsc::unbounded_channel();
+            let sender = PrioritizedSender { sender: sender_tx };
+            let mut receiver = Receiver::new(sender_rx, primary_peers.clone());
+            let secondary_peer = ed25519::PrivateKey::from_seed(10).public_key();
+            let primary_peer = ed25519::PrivateKey::from_seed(11).public_key();
+
+            sender
+                .send((secondary_peer, IoBuf::from(b"secondary")))
+                .unwrap();
+            primary_peers.replace(Set::try_from([primary_peer.clone()]).unwrap());
+            sender.send((primary_peer, IoBuf::from(b"primary"))).unwrap();
+
+            let (_, first) = receiver.recv().await.unwrap();
+            assert_eq!(first.as_ref(), b"primary");
+            let (_, second) = receiver.recv().await.unwrap();
+            assert_eq!(second.as_ref(), b"secondary");
+        });
+    }
+
+    #[test]
+    fn test_receiver_preserves_fifo_when_peer_priority_changes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_context| async move {
+            let primary_peers = PrimaryPeers::default();
+            let (sender_tx, sender_rx) = mpsc::unbounded_channel();
+            let sender = PrioritizedSender { sender: sender_tx };
+            let mut receiver = Receiver::new(sender_rx, primary_peers.clone());
+            let peer = ed25519::PrivateKey::from_seed(12).public_key();
+
+            sender.send((peer.clone(), IoBuf::from(b"first"))).unwrap();
+            primary_peers.replace(Set::try_from([peer.clone()]).unwrap());
+            sender.send((peer, IoBuf::from(b"second"))).unwrap();
+
+            let (_, first) = receiver.recv().await.unwrap();
+            assert_eq!(first.as_ref(), b"first");
+            let (_, second) = receiver.recv().await.unwrap();
+            assert_eq!(second.as_ref(), b"second");
         });
     }
 
