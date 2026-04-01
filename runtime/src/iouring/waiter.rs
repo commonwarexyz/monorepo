@@ -1,7 +1,9 @@
-//! Waiter identity and lifecycle state for io_uring in-flight requests.
+//! Waiter identity and lifecycle state for tracked io_uring requests.
 //!
-//! This module manages waiter IDs and request lifecycle transitions.
-//! It is the source of truth for in-flight request completion state.
+//! This module manages waiter IDs, request lifecycle transitions, and
+//! outstanding-operation tracking. It is the source of truth for which logical
+//! requests are still tracked and whether each currently has an operation SQE
+//! outstanding.
 
 use super::{
     request::{ActiveRequest, CqeAction},
@@ -87,16 +89,16 @@ impl WaiterId {
     ///
     /// The returned waiter id always has the cancel-tag bit stripped. The
     /// boolean reports whether that bit was set in the input value.
-    pub const fn from_user_data(user_data: UserData) -> (Self, bool) {
+    const fn from_user_data(user_data: UserData) -> (Self, bool) {
         let is_cancel = (user_data & Self::CANCEL_TAG) != 0;
         (Self(user_data & !Self::CANCEL_TAG), is_cancel)
     }
 }
 
-/// Lifecycle state of an in-flight request.
+/// Lifecycle state of a tracked request.
 #[derive(Clone, Copy, Debug)]
 pub enum WaiterState {
-    /// Request is active in the ring.
+    /// Request is still tracked and has not transitioned to cancellation.
     Active {
         /// Absolute wheel tick by which the request must complete.
         ///
@@ -112,7 +114,7 @@ pub enum WaiterState {
     CancelRequested,
 }
 
-/// State for one in-flight logical request.
+/// State for one tracked logical request.
 struct Waiter {
     /// Stable identity of this waiter slot instance.
     id: WaiterId,
@@ -154,7 +156,7 @@ pub enum CqeOutcome {
     },
 }
 
-/// Tracks in-flight logical requests and the state needed to complete them.
+/// Tracks logical requests and the state needed to complete them.
 pub struct Waiters {
     /// Waiters indexed by slot index.
     ///
@@ -162,12 +164,12 @@ pub struct Waiters {
     entries: Vec<Option<Waiter>>,
     /// Stack of reusable waiter ids.
     free: Vec<WaiterId>,
-    /// Number of active waiters currently stored in `entries`.
+    /// Number of tracked waiters currently stored in `entries`.
     len: usize,
 }
 
 impl Waiters {
-    /// Create an empty waiter set that can track at most `capacity` in-flight
+    /// Create an empty waiter set that can track at most `capacity` logical
     /// requests at once.
     pub fn new(capacity: usize) -> Self {
         let mut entries = Vec::with_capacity(capacity);
@@ -186,12 +188,12 @@ impl Waiters {
         }
     }
 
-    /// Return the number of currently in-flight waiters.
+    /// Return the number of currently tracked waiters.
     pub const fn len(&self) -> usize {
         self.len
     }
 
-    /// Return whether there are no in-flight waiters.
+    /// Return whether there are no tracked waiters.
     pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -245,9 +247,9 @@ impl Waiters {
     /// If the waiter timed out while parked in the ready queue, this removes it
     /// from the table and returns the request for local timeout completion.
     ///
-    /// When this returns [`StageAction::Submit`], the waiter is marked
-    /// in-flight immediately. In this implementation, the caller pushes the SQE
-    /// right away and treats push failure as fatal.
+    /// When this returns [`StageAction::Submit`], the waiter is marked as
+    /// having an operation SQE outstanding immediately. In this implementation,
+    /// the caller pushes the SQE right away and treats push failure as fatal.
     pub fn stage_sqe(&mut self, waiter_id: WaiterId) -> StageAction {
         let index = waiter_id.index() as usize;
         let should_timeout_locally = {
