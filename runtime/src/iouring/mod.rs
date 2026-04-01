@@ -932,18 +932,6 @@ fn new_ring(cfg: &Config) -> Result<IoUring, std::io::Error> {
     builder.build(cfg.size)
 }
 
-/// Returns whether some result should be retried due to a transient error.
-///
-/// Errors considered transient:
-/// * EAGAIN: There is no data ready. Try again later.
-/// * EWOULDBLOCK: Operation would block.
-/// * EINTR: A signal interrupted the operation before any data was transferred.
-pub const fn should_retry(return_value: i32) -> bool {
-    return_value == -libc::EAGAIN
-        || return_value == -libc::EWOULDBLOCK
-        || return_value == -libc::EINTR
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -979,19 +967,6 @@ mod tests {
         };
         let (_, iouring) = IoUringLoop::new(cfg, &mut registry);
         assert_eq!(iouring.cfg.size, 1_024);
-    }
-
-    #[test]
-    fn test_should_retry_classification() {
-        // Transient retryable codes.
-        for code in [-libc::EAGAIN, -libc::EWOULDBLOCK, -libc::EINTR] {
-            assert!(should_retry(code));
-        }
-
-        // Non-transient examples.
-        for code in [0, -libc::EINVAL, -libc::ETIMEDOUT] {
-            assert!(!should_retry(code));
-        }
     }
 
     #[test]

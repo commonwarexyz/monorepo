@@ -22,12 +22,11 @@ const IOVEC_BATCH_SIZE: usize = 32;
 
 /// Normalized write buffer for [SendRequest] and [WriteAtRequest].
 ///
-/// Single-buffer writes track a byte cursor. Vectored writes track progress
-/// via [IoBufs::advance] and reuse a pre-allocated iovec scratch buffer.
+/// Preserves a single-buffer fast path and a vectored path with reusable
+/// iovec scratch space.
 pub(super) enum WriteBuffers {
     Single {
         buf: IoBuf,
-        cursor: usize,
     },
     Vectored {
         bufs: IoBufs,
@@ -40,7 +39,7 @@ impl From<IoBufs> for WriteBuffers {
     /// or a vectored representation with reusable iovec scratch space.
     fn from(bufs: IoBufs) -> Self {
         match bufs.try_into_single() {
-            Ok(buf) => Self::Single { buf, cursor: 0 },
+            Ok(buf) => Self::Single { buf },
             Err(bufs) => {
                 let max_iovecs = bufs.chunk_count().min(IOVEC_BATCH_SIZE);
                 let iovecs: Box<[libc::iovec]> = std::iter::repeat_n(
@@ -61,7 +60,7 @@ impl WriteBuffers {
     /// Return the remaining number of bytes that still need to be written.
     fn remaining_len(&self) -> usize {
         match self {
-            Self::Single { buf, cursor } => buf.len() - *cursor,
+            Self::Single { buf } => buf.len(),
             Self::Vectored { bufs, .. } => bufs.len(),
         }
     }
@@ -71,54 +70,12 @@ impl WriteBuffers {
         self.remaining_len() == 0
     }
 
-    /// Advance the logical write cursor after a successful CQE.
+    /// Advance the remaining bytes after a successful CQE.
     fn advance(&mut self, n: usize) {
         match self {
-            Self::Single { cursor, .. } => *cursor += n,
+            Self::Single { buf } => buf.advance(n),
             Self::Vectored { bufs, .. } => bufs.advance(n),
         }
-    }
-}
-
-/// Refresh the iovec scratch from the current `IoBufs` state.
-fn refresh_iovecs(bufs: &IoBufs, iovecs: &mut Box<[libc::iovec]>) -> u32 {
-    let max_iovecs = bufs.chunk_count().min(iovecs.len());
-    // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
-    let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
-        std::slice::from_raw_parts_mut(
-            iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
-            max_iovecs,
-        )
-    };
-    bufs.chunks_vectored(io_slices)
-        .try_into()
-        .expect("iovecs_len exceeds u32")
-}
-
-/// Classified raw CQE result code.
-///
-/// `classify` pre-merges `ECANCELED + CancelRequested` into [`RawResult::TimeoutCancel`]
-/// so that per-variant `on_cqe` handlers never see a raw ECANCELED.
-enum RawResult {
-    Retryable,
-    TimeoutCancel,
-    HardError(i32),
-    Zero,
-    Positive(usize),
-}
-
-/// Classify a raw CQE result code against the current waiter state.
-const fn classify_result(result: i32, state: WaiterState) -> RawResult {
-    if super::should_retry(result) {
-        RawResult::Retryable
-    } else if result == -libc::ECANCELED && matches!(state, WaiterState::CancelRequested) {
-        RawResult::TimeoutCancel
-    } else if result < 0 {
-        RawResult::HardError(result)
-    } else if result == 0 {
-        RawResult::Zero
-    } else {
-        RawResult::Positive(result as usize)
     }
 }
 
@@ -223,15 +180,62 @@ impl Request {
             Self::Sync(s) => {
                 // Sync requests currently do not carry deadlines, but keep the
                 // timeout path consistent with storage's std::io::Result API.
-                let _ = s.sender.send(Err(sync_timeout_error()));
+                let _ = s.sender.send(Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "request timed out",
+                )));
             }
         }
     }
 }
 
-/// Build the std::io::Error used if storage requests ever time out locally.
-fn sync_timeout_error() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::TimedOut, "request timed out")
+/// Shared classification of a CQE result for the request state machines.
+///
+/// `CqeResult::from_raw` collapses the raw io_uring result space into the small
+/// set of cases the per-request state machines care about:
+/// - `EAGAIN`, `EWOULDBLOCK`, and `EINTR` become [`CqeResult::Retryable`]
+/// - `ECANCELED` becomes [`CqeResult::TimeoutCancel`] only when the waiter was
+///   already in [`WaiterState::CancelRequested`]
+/// - other negative results stay as [`CqeResult::HardError`]
+/// - zero stays distinct because some request kinds treat it differently from
+///   a hard error
+/// - positive results carry their byte or item count as [`CqeResult::Positive`]
+///
+/// This helper intentionally does not assign request-specific meaning beyond
+/// that normalization. For example, [`CqeResult::Zero`] means EOF for reads
+/// and recvs, but success for fsync.
+enum CqeResult {
+    /// Transient kernel result that may be retried with another SQE.
+    Retry,
+    /// `ECANCELED` for an operation whose waiter had already timed out and
+    /// requested async cancellation.
+    Cancelled,
+    /// Non-retryable negative CQE result code.
+    Error(i32),
+    /// Successful CQE with zero progress.
+    Zero,
+    /// Successful CQE with positive progress.
+    Positive(usize),
+}
+
+impl CqeResult {
+    /// Build a classified result from a raw CQE result code and waiter state.
+    const fn from_raw(result: i32, state: WaiterState) -> Self {
+        // Transient "try again later" results:
+        // - EAGAIN / EWOULDBLOCK: no data or capacity was ready yet
+        // - EINTR: interrupted before completion
+        if result == -libc::EAGAIN || result == -libc::EWOULDBLOCK || result == -libc::EINTR {
+            Self::Retry
+        } else if result == -libc::ECANCELED && matches!(state, WaiterState::CancelRequested) {
+            Self::Cancelled
+        } else if result < 0 {
+            Self::Error(result)
+        } else if result == 0 {
+            Self::Zero
+        } else {
+            Self::Positive(result as usize)
+        }
+    }
 }
 
 /// Logical network send request and its in-loop state.
@@ -253,16 +257,9 @@ impl SendRequest {
     fn build_sqe(&mut self) -> SqueueEntry {
         let fd = Fd(self.fd.as_raw_fd());
         match &mut self.write {
-            WriteBuffers::Single { buf, cursor } => {
-                assert!(
-                    *cursor <= buf.len(),
-                    "send cursor exceeds buffer length: cursor={} len={}",
-                    *cursor,
-                    buf.len()
-                );
-                // SAFETY: buf is an IoBuf with stable memory. cursor <= buf.len().
-                let ptr = unsafe { buf.as_ptr().add(*cursor) };
-                let remaining = buf.len() - *cursor;
+            WriteBuffers::Single { buf } => {
+                let ptr = buf.as_ptr();
+                let remaining = buf.remaining();
                 opcode::Send::new(
                     fd,
                     ptr,
@@ -273,7 +270,19 @@ impl SendRequest {
                 .build()
             }
             WriteBuffers::Vectored { bufs, iovecs } => {
-                let iovecs_len = refresh_iovecs(bufs, iovecs);
+                let max_iovecs = bufs.chunk_count().min(iovecs.len());
+                // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+                let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
+                        max_iovecs,
+                    )
+                };
+                let iovecs_len = bufs
+                    .chunks_vectored(io_slices)
+                    .try_into()
+                    .expect("iovecs_len exceeds u32");
+
                 // `Writev` is sufficient here because network sends only need
                 // ordered byte delivery; this layer does not need sendmsg
                 // ancillary data or zerocopy completion management.
@@ -285,21 +294,21 @@ impl SendRequest {
     /// Classify one send CQE and decide whether the logical request completes
     /// or needs another SQE.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
-        match classify_result(result, state) {
-            RawResult::Retryable if matches!(state, WaiterState::CancelRequested) => {
+        match CqeResult::from_raw(result, state) {
+            CqeResult::Retry if matches!(state, WaiterState::CancelRequested) => {
                 self.result = Some(Err(Error::Timeout));
                 true
             }
-            RawResult::Retryable => false,
-            RawResult::TimeoutCancel => {
+            CqeResult::Retry => false,
+            CqeResult::Cancelled => {
                 self.result = Some(Err(Error::Timeout));
                 true
             }
-            RawResult::HardError(_) | RawResult::Zero => {
+            CqeResult::Error(_) | CqeResult::Zero => {
                 self.result = Some(Err(Error::SendFailed));
                 true
             }
-            RawResult::Positive(n) => {
+            CqeResult::Positive(n) => {
                 self.write.advance(n);
                 if self.write.is_complete() {
                     self.result = Some(Ok(()));
@@ -370,21 +379,21 @@ impl RecvRequest {
     /// Classify one recv CQE and decide whether the logical request completes
     /// or needs another SQE.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
-        match classify_result(result, state) {
-            RawResult::Retryable if matches!(state, WaiterState::CancelRequested) => {
+        match CqeResult::from_raw(result, state) {
+            CqeResult::Retry if matches!(state, WaiterState::CancelRequested) => {
                 self.result = Some(Err(Error::Timeout));
                 true
             }
-            RawResult::Retryable => false,
-            RawResult::TimeoutCancel => {
+            CqeResult::Retry => false,
+            CqeResult::Cancelled => {
                 self.result = Some(Err(Error::Timeout));
                 true
             }
-            RawResult::HardError(_) | RawResult::Zero => {
+            CqeResult::Error(_) | CqeResult::Zero => {
                 self.result = Some(Err(Error::RecvFailed));
                 true
             }
-            RawResult::Positive(n) => {
+            CqeResult::Positive(n) => {
                 let remaining = self.len - self.offset;
                 assert!(
                     n <= remaining,
@@ -458,17 +467,17 @@ impl ReadAtRequest {
     /// Classify one read CQE and decide whether the logical request completes
     /// or needs another SQE.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
-        match classify_result(result, state) {
-            RawResult::Retryable => false,
-            RawResult::TimeoutCancel | RawResult::HardError(_) => {
+        match CqeResult::from_raw(result, state) {
+            CqeResult::Retry => false,
+            CqeResult::Cancelled | CqeResult::Error(_) => {
                 self.result = Some(Err(Error::ReadFailed));
                 true
             }
-            RawResult::Zero => {
+            CqeResult::Zero => {
                 self.result = Some(Err(Error::BlobInsufficientLength));
                 true
             }
-            RawResult::Positive(n) => {
+            CqeResult::Positive(n) => {
                 let remaining = self.len - self.read;
                 assert!(
                     n <= remaining,
@@ -517,20 +526,9 @@ impl WriteAtRequest {
         let fd = Fd(self.file.as_raw_fd());
         let offset = self.offset + self.written as u64;
         match &mut self.write {
-            WriteBuffers::Single { buf, cursor } => {
-                assert_eq!(
-                    self.written, *cursor,
-                    "single-buffer write cursor must match written byte count"
-                );
-                assert!(
-                    *cursor <= buf.len(),
-                    "write_at cursor exceeds buffer length: cursor={} len={}",
-                    *cursor,
-                    buf.len()
-                );
-                // SAFETY: buf is an IoBuf with stable memory. cursor <= buf.len().
-                let ptr = unsafe { buf.as_ptr().add(*cursor) };
-                let remaining = buf.len() - *cursor;
+            WriteBuffers::Single { buf } => {
+                let ptr = buf.as_ptr();
+                let remaining = buf.remaining();
                 opcode::Write::new(
                     fd,
                     ptr,
@@ -542,7 +540,19 @@ impl WriteAtRequest {
                 .build()
             }
             WriteBuffers::Vectored { bufs, iovecs } => {
-                let iovecs_len = refresh_iovecs(bufs, iovecs);
+                let max_iovecs = bufs.chunk_count().min(iovecs.len());
+                // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
+                let io_slices: &mut [std::io::IoSlice<'_>] = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        iovecs.as_mut_ptr().cast::<std::io::IoSlice<'_>>(),
+                        max_iovecs,
+                    )
+                };
+                let iovecs_len = bufs
+                    .chunks_vectored(io_slices)
+                    .try_into()
+                    .expect("iovecs_len exceeds u32");
+
                 opcode::Writev::new(fd, iovecs.as_ptr(), iovecs_len)
                     .offset(offset)
                     .build()
@@ -553,27 +563,15 @@ impl WriteAtRequest {
     /// Classify one write CQE and decide whether the logical request completes
     /// or needs another SQE.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
-        match classify_result(result, state) {
-            RawResult::Retryable => false,
-            RawResult::TimeoutCancel | RawResult::HardError(_) | RawResult::Zero => {
+        match CqeResult::from_raw(result, state) {
+            CqeResult::Retry => false,
+            CqeResult::Cancelled | CqeResult::Error(_) | CqeResult::Zero => {
                 self.result = Some(Err(Error::WriteFailed));
                 true
             }
-            RawResult::Positive(n) => {
-                if let WriteBuffers::Single { cursor, .. } = &self.write {
-                    assert_eq!(
-                        self.written, *cursor,
-                        "single-buffer write cursor must match written byte count"
-                    );
-                }
+            CqeResult::Positive(n) => {
                 self.written += n;
                 self.write.advance(n);
-                if let WriteBuffers::Single { cursor, .. } = &self.write {
-                    assert_eq!(
-                        self.written, *cursor,
-                        "single-buffer write cursor must match written byte count"
-                    );
-                }
                 if self.write.is_complete() {
                     self.result = Some(Ok(()));
                     true
@@ -612,17 +610,17 @@ impl SyncRequest {
     /// Classify one fsync CQE and decide whether the logical request completes
     /// or needs another SQE.
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> bool {
-        match classify_result(result, state) {
-            RawResult::Retryable => false,
-            RawResult::TimeoutCancel => {
+        match CqeResult::from_raw(result, state) {
+            CqeResult::Retry => false,
+            CqeResult::Cancelled => {
                 self.result = Some(Err(std::io::Error::from_raw_os_error(libc::ECANCELED)));
                 true
             }
-            RawResult::HardError(code) => {
+            CqeResult::Error(code) => {
                 self.result = Some(Err(std::io::Error::from_raw_os_error(-code)));
                 true
             }
-            RawResult::Zero | RawResult::Positive(_) => {
+            CqeResult::Zero | CqeResult::Positive(_) => {
                 self.result = Some(Ok(()));
                 true
             }
@@ -658,6 +656,23 @@ mod tests {
         // SAFETY: `left` is a valid owned fd and is transferred into `File`.
         let file = unsafe { File::from_raw_fd(left.into_raw_fd()) };
         Arc::new(file)
+    }
+
+    #[test]
+    fn test_cqe_result_from_raw_retryable_codes() {
+        for code in [-libc::EAGAIN, -libc::EWOULDBLOCK, -libc::EINTR] {
+            assert!(matches!(
+                CqeResult::from_raw(code, WaiterState::Active { target_tick: None }),
+                CqeResult::Retry
+            ));
+        }
+
+        for code in [0, -libc::EINVAL, -libc::ETIMEDOUT] {
+            assert!(!matches!(
+                CqeResult::from_raw(code, WaiterState::Active { target_tick: None }),
+                CqeResult::Retry
+            ));
+        }
     }
 
     #[test]
