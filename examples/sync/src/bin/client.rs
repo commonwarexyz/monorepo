@@ -8,7 +8,7 @@ use commonware_codec::{EncodeShared, Read};
 use commonware_runtime::{
     tokio as tokio_runtime, BufferPooler, Clock, Metrics, Network, Runner, Spawner, Storage,
 };
-use commonware_storage::qmdb::sync;
+use commonware_storage::{mmr, qmdb::sync};
 use commonware_sync::{
     any, crate_version, current, databases::DatabaseType, immutable, net::Resolver, Digest, Error,
     Key,
@@ -60,9 +60,9 @@ struct Config {
 async fn target_update_task<E, Op, D>(
     context: E,
     resolver: Resolver<Op, D>,
-    update_tx: mpsc::Sender<sync::Target<D>>,
+    update_tx: mpsc::Sender<sync::Target<mmr::Family, D>>,
     interval_duration: Duration,
-    initial_target: sync::Target<D>,
+    initial_target: sync::Target<mmr::Family, D>,
 ) -> Result<(), Error>
 where
     E: Clock,
