@@ -537,8 +537,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     }
 
     /// Appends an item to `Journal` in a given `section`, returning the offset
-    /// where the item was written and the size of the item (which may now be smaller
-    /// than the encoded size from the codec, if compression is enabled).
+    /// where the item was written and the size of the item (which may differ
+    /// from the raw encoded size if compression is enabled).
     pub async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
         let (buf, item_len) = Self::encode_item(self.compression, item)?;
         self.append_raw(section, &buf)

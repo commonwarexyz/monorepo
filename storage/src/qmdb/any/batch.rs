@@ -292,7 +292,9 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let mut locations = Vec::with_capacity(mutations.len());
+        // Extra slack (*3/2) avoids re-allocations when index collisions
+        // cause more than one location per key.
+        let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
         if self.base_diff.is_empty() {
             for key in mutations.keys() {
                 locations.extend(db.snapshot.get(key).copied());
