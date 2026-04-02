@@ -10,7 +10,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{Digest, Hasher, PublicKey};
-use commonware_macros::{select, select_loop};
+use commonware_macros::select_loop;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use commonware_utils::channel::{
     fallible::{AsyncFallibleExt, OneshotExt},
@@ -124,12 +124,6 @@ impl<D: Digest, P: PublicKey> Re for Mailbox<D, P> {
 const GENESIS_BYTES: &[u8] = b"genesis";
 
 type Latency = (f64, f64);
-
-enum Certification {
-    Respond(bool),
-    Cancel,
-    Pending,
-}
 
 /// Predicate to determine whether a payload should be certified.
 /// Returning true means certify, false means reject.
@@ -256,19 +250,6 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         panic!("[{:?}] {}", self.me, msg);
     }
 
-    /// Sleeps for the requested duration, but returns early if stopping begins.
-    ///
-    /// Returning `false` lets callers abandon in-flight work immediately
-    /// during shutdown.
-    async fn sleep(&mut self, duration: Duration) -> bool {
-        let context = self.context.clone();
-        let mut stopped = context.stopped();
-        select! {
-            _ = &mut stopped => false,
-            _ = context.sleep(duration) => true,
-        }
-    }
-
     fn genesis(&mut self, epoch: Epoch) -> H::Digest {
         self.hasher
             .update(&(Bytes::from(GENESIS_BYTES), epoch).encode());
@@ -279,12 +260,12 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
     /// When proposing a block, we do not care if the parent is verified (or even in our possession).
     /// Backfilling verification dependencies is considered out-of-scope for consensus.
-    async fn propose(&mut self, context: Context<H::Digest, P>) -> Option<H::Digest> {
+    async fn propose(&mut self, context: Context<H::Digest, P>) -> H::Digest {
         // Simulate the propose latency
         let duration = self.propose_latency.sample(&mut self.context);
-        if !self.sleep(Duration::from_millis(duration as u64)).await {
-            return None;
-        }
+        self.context
+            .sleep(Duration::from_millis(duration as u64))
+            .await;
 
         // Generate the payload
         let rand = self.context.gen::<u64>();
@@ -297,7 +278,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
 
         // Store pending payload
         self.pending.insert(digest, payload);
-        Some(digest)
+        digest
     }
 
     async fn verify(
@@ -305,16 +286,16 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         context: Context<H::Digest, P>,
         payload: H::Digest,
         mut contents: Bytes,
-    ) -> Option<bool> {
+    ) -> bool {
         // Simulate the verify latency
         let duration = self.verify_latency.sample(&mut self.context);
-        if !self.sleep(Duration::from_millis(duration as u64)).await {
-            return None;
-        }
+        self.context
+            .sleep(Duration::from_millis(duration as u64))
+            .await;
 
         // Check if we should fail verification
         if self.fail_verification {
-            return Some(false);
+            return false;
         }
 
         // Verify contents
@@ -322,7 +303,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             #[cfg(feature = "mocks")]
             {
                 // During fuzzing, return false for invalid payloads
-                return Some(false);
+                return false;
             }
             #[cfg(not(feature = "mocks"))]
             panic!("[{:?}] invalid payload", self.me);
@@ -332,7 +313,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             #[cfg(feature = "mocks")]
             {
                 // During fuzzing, return false for round mismatches
-                return Some(false);
+                return false;
             }
             #[cfg(not(feature = "mocks"))]
             self.panic(&format!(
@@ -344,7 +325,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
             #[cfg(feature = "mocks")]
             {
                 // During fuzzing, return false for parent mismatches
-                return Some(false);
+                return false;
             }
             #[cfg(not(feature = "mocks"))]
             self.panic(&format!(
@@ -354,25 +335,22 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         }
         // We don't care about the random number
         self.verified.insert(payload);
-        Some(true)
+        true
     }
 
-    async fn certify(&mut self, payload: H::Digest, _contents: Bytes) -> Option<Certification> {
+    async fn certify(&mut self, payload: H::Digest, _contents: Bytes) -> Option<bool> {
         // Simulate the certify latency
         let duration = self.certify_latency.sample(&mut self.context);
-        if !self.sleep(Duration::from_millis(duration as u64)).await {
-            return None;
-        }
+        self.context
+            .sleep(Duration::from_millis(duration as u64))
+            .await;
 
         // Use configured predicate to determine certification
         match &self.should_certify {
-            Certifier::Always => Some(Certification::Respond(true)),
-            Certifier::Sometimes => Some(Certification::Respond(
-                (payload.as_ref().last().copied().unwrap_or(0) % 11) < 9,
-            )),
-            Certifier::Custom(func) => Some(Certification::Respond(func(payload))),
-            Certifier::Cancel => Some(Certification::Cancel),
-            Certifier::Pending => Some(Certification::Pending),
+            Certifier::Always => Some(true),
+            Certifier::Sometimes => Some((payload.as_ref().last().copied().unwrap_or(0) % 11) < 9),
+            Certifier::Custom(func) => Some(func(payload)),
+            Certifier::Cancel | Certifier::Pending => None,
         }
     }
 
@@ -410,10 +388,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         if self.drop_proposals {
                             continue;
                         }
-
-                        let Some(digest) = self.propose(context).await else {
-                            return;
-                        };
+                        let digest = self.propose(context).await;
                         response.send_lossy(digest);
                     }
                     Message::Verify {
@@ -425,11 +400,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                             continue;
                         }
                         if let Some(contents) = seen.get(&payload) {
-                            let Some(verified) =
-                                self.verify(context, payload, contents.clone()).await
-                            else {
-                                return;
-                            };
+                            let verified = self.verify(context, payload, contents.clone()).await;
                             response.send_lossy(verified);
                         } else {
                             waiters
@@ -444,23 +415,15 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                         response,
                     } => {
                         let contents = seen.get(&payload).cloned().unwrap_or_default();
-                        let Some(certification) = self.certify(payload, contents).await else {
-                            return;
-                        };
-                        match certification {
-                            Certification::Respond(certified) => {
-                                response.send_lossy(certified);
-                            }
-                            Certification::Cancel => {
-                                // Drop sender -> immediate RecvError on receiver.
-                            }
-                            Certification::Pending => {
-                                // Hold the sender alive so the receiver never resolves.
-                                // This simulates a certify that hangs indefinitely (e.g.,
-                                // block never arrives for reconstruction).
-                                self.pending_certifications.push(response);
-                            }
+                        if let Some(certified) = self.certify(payload, contents).await {
+                            response.send_lossy(certified);
+                        } else if matches!(self.should_certify, Certifier::Pending) {
+                            // Hold the sender alive so the receiver never resolves.
+                            // This simulates a certify that hangs indefinitely (e.g.,
+                            // block never arrives for reconstruction).
+                            self.pending_certifications.push(response);
                         }
+                        // Cancel: drop sender -> immediate RecvError on receiver.
                     }
                     Message::Broadcast { payload } => {
                         self.broadcast(payload);
@@ -474,10 +437,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                 // Check if we have a waiter
                 if let Some(waiters) = waiters.remove(&digest) {
                     for (context, sender) in waiters {
-                        let Some(verified) = self.verify(context, digest, contents.clone()).await
-                        else {
-                            return;
-                        };
+                        let verified = self.verify(context, digest, contents.clone()).await;
                         sender.send_lossy(verified);
                     }
                 }
