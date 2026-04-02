@@ -43,7 +43,7 @@ impl<T: Write> Write for &[T] {
 
     #[inline]
     fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.len().write(buf);
+        self.len().write_bufs(buf);
         for item in self.iter() {
             item.write_bufs(buf);
         }
@@ -58,7 +58,7 @@ impl<T: EncodeSize> EncodeSize for &[T] {
 
     #[inline]
     fn encode_inline_size(&self) -> usize {
-        self.len().encode_size()
+        self.len().encode_inline_size()
             + self
                 .iter()
                 .map(EncodeSize::encode_inline_size)

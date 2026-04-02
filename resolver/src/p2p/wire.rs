@@ -20,7 +20,7 @@ impl<Key: Span> Write for Message<Key> {
     }
 
     fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.id.write(buf);
+        self.id.write_bufs(buf);
         self.payload.write_bufs(buf);
     }
 }
@@ -31,7 +31,7 @@ impl<Key: Span> EncodeSize for Message<Key> {
     }
 
     fn encode_inline_size(&self) -> usize {
-        self.id.encode_size() + self.payload.encode_inline_size()
+        self.id.encode_inline_size() + self.payload.encode_inline_size()
     }
 }
 
@@ -92,15 +92,15 @@ impl<Key: Span> Write for Payload<Key> {
     fn write_bufs(&self, buf: &mut impl BufsMut) {
         match self {
             Self::Request(key) => {
-                buf.put_u8(0);
-                key.write(buf);
+                0u8.write_bufs(buf);
+                key.write_bufs(buf);
             }
             Self::Response(data) => {
-                buf.put_u8(1);
+                1u8.write_bufs(buf);
                 data.write_bufs(buf);
             }
             Self::Error => {
-                buf.put_u8(2);
+                2u8.write_bufs(buf);
             }
         }
     }
@@ -116,11 +116,12 @@ impl<Key: Span> EncodeSize for Payload<Key> {
     }
 
     fn encode_inline_size(&self) -> usize {
-        1 + match self {
-            Self::Request(key) => key.encode_size(),
-            Self::Response(data) => data.encode_inline_size(),
-            Self::Error => 0,
-        }
+        0u8.encode_inline_size()
+            + match self {
+                Self::Request(key) => key.encode_inline_size(),
+                Self::Response(data) => data.encode_inline_size(),
+                Self::Error => 0,
+            }
     }
 }
 

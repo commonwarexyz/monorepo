@@ -200,7 +200,7 @@ impl<T: Write> Write for Option<T> {
 
     #[inline]
     fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.is_some().write(buf);
+        self.is_some().write_bufs(buf);
         if let Some(inner) = self {
             inner.write_bufs(buf);
         }
@@ -215,8 +215,8 @@ impl<T: EncodeSize> EncodeSize for Option<T> {
 
     #[inline]
     fn encode_inline_size(&self) -> usize {
-        self.as_ref()
-            .map_or(1, |inner| 1 + inner.encode_inline_size())
+        self.is_some().encode_inline_size()
+            + self.as_ref().map_or(0, EncodeSize::encode_inline_size)
     }
 }
 

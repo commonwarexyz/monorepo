@@ -30,7 +30,7 @@ impl<K: Ord + Eq + Write, V: Write> Write for BTreeMap<K, V> {
     }
 
     fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.len().write(buf);
+        self.len().write_bufs(buf);
 
         // Keys are already sorted in BTreeMap, so we can iterate directly
         for (k, v) in self {
@@ -55,7 +55,7 @@ impl<K: Ord + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
 
     fn encode_inline_size(&self) -> usize {
         // Start with the size of the length prefix
-        let mut size = self.len().encode_size();
+        let mut size = self.len().encode_inline_size();
 
         // Add the encoded size of each key and value
         for (k, v) in self {

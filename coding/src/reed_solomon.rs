@@ -128,8 +128,8 @@ impl<D: Digest> Write for Chunk<D> {
 
     fn write_bufs(&self, buf: &mut impl BufsMut) {
         self.shard.write_bufs(buf);
-        self.index.write(buf);
-        self.proof.write(buf);
+        self.index.write_bufs(buf);
+        self.proof.write_bufs(buf);
     }
 }
 
@@ -155,7 +155,9 @@ impl<D: Digest> EncodeSize for Chunk<D> {
     }
 
     fn encode_inline_size(&self) -> usize {
-        self.shard.encode_inline_size() + self.index.encode_size() + self.proof.encode_size()
+        self.shard.encode_inline_size()
+            + self.index.encode_inline_size()
+            + self.proof.encode_inline_size()
     }
 }
 

@@ -29,7 +29,7 @@ impl<K: Ord + Eq + Write> Write for BTreeSet<K> {
     }
 
     fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.len().write(buf);
+        self.len().write_bufs(buf);
 
         // Items are already sorted in BTreeSet, so we can iterate directly
         for item in self {
@@ -48,7 +48,7 @@ impl<K: Ord + Eq + EncodeSize> EncodeSize for BTreeSet<K> {
     }
 
     fn encode_inline_size(&self) -> usize {
-        let mut size = self.len().encode_size();
+        let mut size = self.len().encode_inline_size();
         for item in self {
             size += item.encode_inline_size();
         }

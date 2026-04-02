@@ -15,7 +15,7 @@ impl Write for Bytes {
 
     #[inline]
     fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.len().write(buf);
+        self.len().write_bufs(buf);
         buf.push(self.clone());
     }
 }
@@ -28,7 +28,7 @@ impl EncodeSize for Bytes {
 
     #[inline]
     fn encode_inline_size(&self) -> usize {
-        self.len().encode_size()
+        self.len().encode_inline_size()
     }
 }
 

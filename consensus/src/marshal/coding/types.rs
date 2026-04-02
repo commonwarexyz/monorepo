@@ -77,8 +77,8 @@ impl<C: Scheme, H: Hasher> Write for Shard<C, H> {
     }
 
     fn write_bufs(&self, buf: &mut impl BufsMut) {
-        self.commitment.write(buf);
-        self.index.write(buf);
+        self.commitment.write_bufs(buf);
+        self.index.write_bufs(buf);
         self.inner.write_bufs(buf);
     }
 }
@@ -89,7 +89,9 @@ impl<C: Scheme, H: Hasher> EncodeSize for Shard<C, H> {
     }
 
     fn encode_inline_size(&self) -> usize {
-        self.commitment.encode_size() + self.index.encode_size() + self.inner.encode_inline_size()
+        self.commitment.encode_inline_size()
+            + self.index.encode_inline_size()
+            + self.inner.encode_inline_size()
     }
 }
 
