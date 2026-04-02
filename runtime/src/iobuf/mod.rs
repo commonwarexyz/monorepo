@@ -379,12 +379,23 @@ impl Write for IoBuf {
         self.len().write(buf);
         buf.put_slice(self.as_ref());
     }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.len().write(buf);
+        buf.push(self.clone());
+    }
 }
 
 impl EncodeSize for IoBuf {
     #[inline]
     fn encode_size(&self) -> usize {
         self.len().encode_size() + self.len()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.len().encode_size()
     }
 }
 
@@ -2337,8 +2348,10 @@ impl<T: EncodeSize + Write> EncodeExt for T {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BytesMut;
-    use commonware_codec::{Decode, Encode, RangeCfg};
+    use bytes::{Bytes, BytesMut};
+    use commonware_codec::{types::lazy::Lazy, Decode, Encode, RangeCfg};
+    use core::ops::{Range, RangeFrom, RangeInclusive, RangeToInclusive};
+    use std::collections::{BTreeMap, HashMap};
 
     fn test_pool() -> BufferPool {
         cfg_if::cfg_if! {
@@ -2355,6 +2368,15 @@ mod tests {
         }
         let mut registry = prometheus_client::registry::Registry::default();
         BufferPool::new(pool_config, &mut registry)
+    }
+
+    fn assert_encode_with_pool_matches_encode<T: Encode + EncodeExt>(value: &T) {
+        let pool = test_pool();
+        let mut pooled = value.encode_with_pool(&pool);
+        let baseline = value.encode();
+        let mut pooled_bytes = vec![0u8; pooled.remaining()];
+        pooled.copy_to_slice(&mut pooled_bytes);
+        assert_eq!(pooled_bytes, baseline.as_ref());
     }
 
     #[test]
@@ -4636,14 +4658,8 @@ mod tests {
 
     #[test]
     fn test_encode_with_pool_matches_encode() {
-        let pool = test_pool();
         let value = vec![1u8, 2, 3, 4, 5, 6];
-
-        let mut pooled = value.encode_with_pool(&pool);
-        let baseline = value.encode();
-        let mut pooled_bytes = vec![0u8; pooled.remaining()];
-        pooled.copy_to_slice(&mut pooled_bytes);
-        assert_eq!(pooled_bytes, baseline.as_ref());
+        assert_encode_with_pool_matches_encode(&value);
     }
 
     #[test]
@@ -4653,6 +4669,56 @@ mod tests {
 
         let buf = value.encode_with_pool_mut(&pool);
         assert_eq!(buf.len(), value.encode_size());
+    }
+
+    #[test]
+    fn test_iobuf_encode_with_pool_matches_encode() {
+        let value = IoBuf::from(vec![0xAB; 512]);
+        assert_encode_with_pool_matches_encode(&value);
+    }
+
+    #[test]
+    fn test_nested_container_encode_with_pool_matches_encode() {
+        let value = (
+            Some(Bytes::from(vec![0xAA; 256])),
+            vec![Bytes::from(vec![0xBB; 128]), Bytes::from(vec![0xCC; 64])],
+        );
+        assert_encode_with_pool_matches_encode(&value);
+    }
+
+    #[test]
+    fn test_map_encode_with_pool_matches_encode() {
+        let mut btree = BTreeMap::new();
+        btree.insert(2u8, Bytes::from(vec![0xDD; 96]));
+        btree.insert(1u8, Bytes::from(vec![0xEE; 48]));
+        assert_encode_with_pool_matches_encode(&btree);
+
+        let mut hash = HashMap::new();
+        hash.insert(2u8, Bytes::from(vec![0x11; 96]));
+        hash.insert(1u8, Bytes::from(vec![0x22; 48]));
+        assert_encode_with_pool_matches_encode(&hash);
+    }
+
+    #[test]
+    fn test_lazy_encode_with_pool_matches_encode() {
+        let value = Lazy::new(Bytes::from(vec![0x44; 200]));
+        assert_encode_with_pool_matches_encode(&value);
+    }
+
+    #[test]
+    fn test_range_encode_with_pool_matches_encode() {
+        let range: Range<Bytes> = Bytes::from(vec![0x10; 32])..Bytes::from(vec![0x20; 48]);
+        assert_encode_with_pool_matches_encode(&range);
+
+        let inclusive: RangeInclusive<Bytes> =
+            Bytes::from(vec![0x30; 16])..=Bytes::from(vec![0x40; 24]);
+        assert_encode_with_pool_matches_encode(&inclusive);
+
+        let from: RangeFrom<IoBuf> = IoBuf::from(vec![0x50; 40])..;
+        assert_encode_with_pool_matches_encode(&from);
+
+        let to_inclusive: RangeToInclusive<IoBuf> = ..=IoBuf::from(vec![0x60; 56]);
+        assert_encode_with_pool_matches_encode(&to_inclusive);
     }
 
     #[cfg(feature = "arbitrary")]
