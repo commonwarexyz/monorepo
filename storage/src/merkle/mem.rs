@@ -114,7 +114,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
             return Err(Error::InvalidSize(*size));
         }
 
-        let expected_pinned_positions = F::nodes_to_pin(config.pruning_boundary);
+        let expected_pinned_positions: Vec<_> = F::nodes_to_pin(config.pruning_boundary).collect();
         if config.pinned_nodes.len() != expected_pinned_positions.len() {
             return Err(Error::InvalidPinnedNodes);
         }
@@ -273,7 +273,6 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// Get the nodes (position + digest) that need to be pinned when pruned to `prune_loc`.
     pub(crate) fn nodes_to_pin(&self, prune_loc: Location<F>) -> BTreeMap<Position<F>, D> {
         F::nodes_to_pin(prune_loc)
-            .into_iter()
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
     }
@@ -364,7 +363,6 @@ impl<F: Family, D: Digest> Mem<F, D> {
     #[cfg(test)]
     pub(crate) fn node_digests_to_pin(&self, prune_loc: Location<F>) -> Vec<D> {
         F::nodes_to_pin(prune_loc)
-            .into_iter()
             .map(|pos| *self.get_node_unchecked(pos))
             .collect()
     }

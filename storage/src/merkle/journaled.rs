@@ -487,7 +487,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         let journal_leaves = Location::try_from(journal_size)?;
         if let Some(pinned_nodes) = cfg.pinned_nodes {
             // Use caller-provided pinned nodes.
-            let nodes_to_pin_persisted = F::nodes_to_pin(prune_loc);
+            let nodes_to_pin_persisted: Vec<_> = F::nodes_to_pin(prune_loc).collect();
             if pinned_nodes.len() != nodes_to_pin_persisted.len() {
                 return Err(Error::<F>::InvalidPinnedNodes);
             }

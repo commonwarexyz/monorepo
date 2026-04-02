@@ -154,7 +154,6 @@ where
             return Err(crate::merkle::Error::LocationOverflow(loc).into());
         }
         let futs: Vec<_> = F::nodes_to_pin(loc)
-            .into_iter()
             .map(|p| async move {
                 self.log
                     .merkle

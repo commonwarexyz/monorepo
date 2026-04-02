@@ -16,11 +16,11 @@ use crate::{
         hasher::Hasher,
         mmr::{
             self,
-            iterator::nodes_to_pin,
             mem::{Config, Mmr},
             verification, Error, Location, Position, Proof,
         },
         storage::Storage,
+        Family as _,
     },
     metadata::{Config as MConfig, Metadata},
     Context,
@@ -335,7 +335,7 @@ impl<E: Context, D: Digest, const N: usize> MerkleizedBitMap<E, D, N> {
         }
 
         let mut pinned_nodes = Vec::new();
-        for (index, pos) in nodes_to_pin(pruned_loc).enumerate() {
+        for (index, pos) in mmr::Family::nodes_to_pin(pruned_loc).enumerate() {
             let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, index as u64)) else {
                 error!(?pruned_loc, ?pos, "missing pinned node");
                 return Err(Error::MissingNode(pos));
@@ -392,7 +392,7 @@ impl<E: Context, D: Digest, const N: usize> MerkleizedBitMap<E, D, N> {
             pruned_loc.is_valid(),
             "expected valid location from pruned_chunks"
         );
-        for (i, digest) in nodes_to_pin(pruned_loc).enumerate() {
+        for (i, digest) in mmr::Family::nodes_to_pin(pruned_loc).enumerate() {
             let digest = self.mmr.get_node_unchecked(digest);
             let key = U64::new(NODE_PREFIX, i as u64);
             self.metadata.put(key, digest.to_vec());

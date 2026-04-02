@@ -2,8 +2,6 @@
 //! properties from their output. These are lower levels methods that are useful for implementing
 //! new MMR variants or extensions.
 
-#[cfg(any(feature = "std", test))]
-use crate::merkle::mmr::Location;
 use crate::merkle::{
     mmr::{Family, Position},
     Family as _,
@@ -130,17 +128,6 @@ pub(crate) const fn pos_to_height(pos: Position) -> u32 {
     }
 
     pos as u32
-}
-
-/// Return the positions of nodes that must be pinned when pruning to `start_loc`.
-///
-/// Delegates to the default [`Family::nodes_to_pin`](crate::merkle::Family::nodes_to_pin)
-/// implementation, returning an iterator for caller convenience.
-#[cfg(any(feature = "std", test))]
-pub(crate) fn nodes_to_pin(start_loc: Location) -> impl Iterator<Item = Position> {
-    assert!(start_loc.is_valid(), "start_loc invalid");
-    let start_pos = Family::location_to_position(start_loc);
-    PeakIterator::new(PeakIterator::to_nearest_size(start_pos)).map(|(pos, _)| pos)
 }
 
 #[cfg(test)]

@@ -81,10 +81,13 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     ///
     /// Implementations panic if `prune_loc` is invalid (i.e., exceeds
     /// [`MAX_LEAVES`](Self::MAX_LEAVES)). Callers must validate inputs before calling.
-    fn nodes_to_pin(prune_loc: Location<Self>) -> Vec<Position<Self>> {
-        Self::peaks(Self::location_to_position(prune_loc))
+    fn nodes_to_pin(prune_loc: Location<Self>) -> impl Iterator<Item = Position<Self>> + Send {
+        let prune_pos = Self::location_to_position(prune_loc);
+        Self::peaks(prune_pos)
+            .filter(move |&(pos, _)| pos < prune_pos)
             .map(|(pos, _)| pos)
-            .collect()
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     /// Return the positions of the left and right children of the node at `pos` with the
