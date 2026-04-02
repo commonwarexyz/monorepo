@@ -277,13 +277,17 @@ where
         }
     }
 
-    /// Gather the existing-key locations for all keys in `mutations`.
+    /// Gather existing-key locations for all keys in `mutations`.
     ///
     /// For each mutation key, checks the base diff first (returning the
     /// uncommitted location for Active entries, skipping Deleted entries).
-    /// For Active entries, also scans the snapshot bucket for collision
-    /// siblings (excluding the key's own stale committed location). Keys
-    /// not in the base diff fall back to the base DB snapshot.
+    /// Keys not in the base diff fall back to the base DB snapshot.
+    ///
+    /// When `include_active_collision_siblings` is true, Active entries
+    /// also scan the snapshot bucket for collision siblings (other keys
+    /// sharing the same translated-key bucket). The ordered path needs
+    /// these so their `next_key` pointers are rewritten when a sibling
+    /// is deleted; the unordered path can skip them.
     fn gather_existing_locations<E, C, I>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
