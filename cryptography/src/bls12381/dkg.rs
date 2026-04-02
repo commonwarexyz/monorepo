@@ -3648,6 +3648,13 @@ mod test {
         assert!(debug.contains("REDACTED"));
     }
 
+    #[test]
+    fn test_dealer_priv_msg_decode_rejects_zero_scalar() {
+        let mut encoded = Scalar::zero().encode();
+        let decoded: Result<DealerPrivMsg, _> = Read::read_cfg(&mut encoded, &());
+        assert!(decoded.is_err());
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
