@@ -20,6 +20,10 @@ module tests {
 
     pure val CERTIFY_ALL_TRUE = Replicas.mapBy(_ => app::certify_always_true)
 
+    // This test injects an invalid leader vote directly to replicas. The
+    // honest `propose` action only models successful proposals by correct
+    // leaders, so invalid payloads must be introduced through `on_notarize`
+    // helpers instead.
     run invalidLeaderProposalTriggersNullifyTest = {
         val invalid_proposal = {
             payload: "inv_b3",
@@ -31,11 +35,15 @@ module tests {
             Map(0 -> "n1", 1 -> "n2", 2 -> "n0", 3 -> "n1", 4 -> "n2", 5 -> "n3", 6 -> "n0"),
             CERTIFY_ALL_TRUE
         )
-            .then(propose("n2", invalid_proposal.payload, invalid_proposal.parent))
+            // Deliver the leader's invalid notarize vote to each correct
+            // replica, including the leader itself.
+            .then(replica_receives_notarize_vote("n2", "inv_b3", FIRST_VIEW, GENESIS_VIEW, "n2"))
             .then(replica_receives_notarize_vote("n0", "inv_b3", FIRST_VIEW, GENESIS_VIEW, "n2"))
             .then(replica_receives_notarize_vote("n1", "inv_b3", FIRST_VIEW, GENESIS_VIEW, "n2"))
             .then(all {
                 assert(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == FIRST_VIEW)),
+                assert(sent_nullify_votes.exists(v => v.sig == "n1" and v.view == FIRST_VIEW)),
+                assert(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == FIRST_VIEW)),
                 assert(replica_state.get("n0").broadcast_nullify.get(FIRST_VIEW) == true),
                 assert(replica_state.get("n0").view == FIRST_VIEW),
                 unchanged_all,

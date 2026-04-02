@@ -736,7 +736,7 @@ module replica {
             all {
                 byzantine_replica_step,
                 _unchanged_replica_state,
-                lastAction' = "byzantine",
+                lastAction' = "byzantine_step",
             }
         }
     }
@@ -783,6 +783,11 @@ module replica {
         }
     }
 
+    // This action models only the successful leader proposal path:
+    // find_parent must already have succeeded, and the application-level
+    // propose(v, parent) must have returned Some(payload). Invalid parents
+    // therefore disable this action rather than triggering nullify. The
+    // missing-proposal case (propose returning None) is not modeled here.
     // Upon entering a view, the leader may propose and implicitly cast notarize(c, v).
     action propose(
         id: ReplicaId,
@@ -811,27 +816,17 @@ module replica {
             id == leader.get(self.view),
             not(self.propose_sent),
             not(self.broadcast_nullify.get(self.view)),
-            sent_proposal' = if (proposal_ok)
-                sent_proposal.union(Set((sig_of(id), proposal)))
-              else
-                sent_proposal,
-            sent_notarize_votes' = if (proposal_ok)
-                sent_notarize_votes.union(Set({ proposal: proposal, sig: sig_of(id) }))
-              else
-                sent_notarize_votes,
-            sent_nullify_votes' = if (proposal_ok) sent_nullify_votes else timer.next_sent_nullify,
+            proposal_ok,
+
+            sent_proposal' = sent_proposal.union(Set((sig_of(id), proposal))),
+            sent_notarize_votes' = sent_notarize_votes.union(Set({ proposal: proposal, sig: sig_of(id) })),
+            sent_nullify_votes' = sent_nullify_votes,
             sent_finalize_votes' = sent_finalize_votes,
-            store_notarize_votes' = if (proposal_ok)
-                store_notarize_votes.set(id, store_notarize.union(Set({ proposal: proposal, sig: sig_of(id) })))
-              else
-                store_notarize_votes,
-            store_nullify_votes' = if (proposal_ok)
-                store_nullify_votes
-              else
-                store_nullify_votes.set(id, timer.next_stored_nullify),
+            store_notarize_votes' = store_notarize_votes.set(id, store_notarize.union(Set({ proposal: proposal, sig: sig_of(id) }))),
+            store_nullify_votes' = store_nullify_votes,
             store_finalize_votes' = store_finalize_votes,
             replica_state' = replica_state.set(id,
-                if (proposal_ok) {
+               {
                     ...mark_vote_broadcast(
                         observe_leader_proposal(
                             record_local_proposal(self, proposal),
@@ -842,8 +837,7 @@ module replica {
                     ),
                     propose_sent: true,
                     leader_timeout: self.leader_timeout.set(self.view, None)
-                } else
-                    timer.next_self
+               }
             ),
             // unchanged
             sent_certificates' = sent_certificates,
