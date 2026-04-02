@@ -18,7 +18,7 @@ mod pool;
 
 use aligned::{AlignedBuf, AlignedBufMut, AlignedBuffer, PooledBuf, PooledBufMut};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use commonware_codec::{util::at_least, EncodeSize, Error, RangeCfg, Read, Write};
+use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
 use std::{collections::VecDeque, io::IoSlice, num::NonZeroUsize, ops::RangeBounds};
 
@@ -379,12 +379,23 @@ impl Write for IoBuf {
         self.len().write(buf);
         buf.put_slice(self.as_ref());
     }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.len().write(buf);
+        buf.push(self.clone());
+    }
 }
 
 impl EncodeSize for IoBuf {
     #[inline]
     fn encode_size(&self) -> usize {
         self.len().encode_size() + self.len()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.len().encode_size()
     }
 }
 
@@ -2185,6 +2196,106 @@ where
     written
 }
 
+/// Assembles [`IoBufs`] from a mix of inline writes and zero-copy pieces.
+///
+/// All inline writes go into a single pool-backed buffer. [`BufsMut::push`]
+/// records boundaries without flushing. [`Builder::finish`] freezes the buffer
+/// once and uses [`IoBuf::slice`] to carve it into pieces at the recorded
+/// boundaries, interleaved with the pushed [`Bytes`].
+///
+/// The inline buffer has a fixed capacity set at construction and will not
+/// grow. Callers must ensure the capacity accounts for all inline
+/// (non-pushed) bytes that will be written. Exceeding it will panic.
+///
+/// ```text
+/// builder.put_u16(99);                        // inline
+/// builder.push(shard_payload.clone());        // zero-copy (Arc clone)
+/// builder.put_u32(checksum);                  // inline
+/// let output = builder.finish();
+///
+/// // output: [ 99 | --- 1 MB shard --- | checksum ]
+/// //           pool    Arc clone          pool
+/// //            \________________________/
+/// //             slices of one allocation
+/// ```
+pub struct Builder {
+    // Single working buffer for all inline writes.
+    buf: IoBufMut,
+    // Each entry is (offset_in_buf, pushed_bytes) recording where a push
+    // interrupts the inline byte stream.
+    pushes: Vec<(usize, Bytes)>,
+}
+
+impl Builder {
+    /// Creates a new builder with a fixed-capacity inline buffer.
+    ///
+    /// `capacity` is the minimum number of inline bytes the buffer can hold.
+    /// The pool may round up to a larger size class. Writing more inline
+    /// bytes than the allocated capacity will panic.
+    pub fn new(pool: &BufferPool, capacity: NonZeroUsize) -> Self {
+        Self {
+            buf: pool.alloc(capacity.get()),
+            pushes: Vec::new(),
+        }
+    }
+
+    /// Freezes the inline buffer and assembles [`IoBufs`] by slicing at
+    /// the recorded push boundaries.
+    pub fn finish(self) -> IoBufs {
+        if self.pushes.is_empty() {
+            return IoBufs::from(self.buf.freeze());
+        }
+
+        let frozen = self.buf.freeze();
+        let mut result = IoBufs::default();
+        let mut pos = 0;
+
+        for (offset, pushed) in self.pushes {
+            if offset > pos {
+                result.append(frozen.slice(pos..offset));
+            }
+            result.append(IoBuf::from(pushed));
+            pos = offset;
+        }
+
+        if pos < frozen.len() {
+            result.append(frozen.slice(pos..));
+        }
+
+        result
+    }
+}
+
+// SAFETY: All methods delegate directly to `self.buf`, a pool-backed
+// `IoBufMut` with a sound `BufMut` implementation. The inline buffer has
+// fixed capacity; writes that exceed it will panic via the underlying
+// `IoBufMut` implementation.
+unsafe impl BufMut for Builder {
+    #[inline]
+    fn remaining_mut(&self) -> usize {
+        self.buf.remaining_mut()
+    }
+
+    #[inline]
+    unsafe fn advance_mut(&mut self, cnt: usize) {
+        self.buf.advance_mut(cnt);
+    }
+
+    #[inline]
+    fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
+        self.buf.chunk_mut()
+    }
+}
+
+impl BufsMut for Builder {
+    fn push(&mut self, bytes: impl Into<Bytes>) {
+        let bytes = bytes.into();
+        if !bytes.is_empty() {
+            self.pushes.push((self.buf.len(), bytes));
+        }
+    }
+}
+
 /// Extension trait for encoding values into pooled I/O buffers.
 ///
 /// This is useful for hot paths that need to avoid frequent heap allocations
@@ -2208,14 +2319,27 @@ pub trait EncodeExt: EncodeSize + Write {
         buf
     }
 
-    /// Encode this value into an immutable [`IoBuf`] allocated from `pool`.
+    /// Encode into [`IoBufs`] using pool allocation.
+    ///
+    /// Override [`Write::write_bufs`] to avoid copying large [`Bytes`] fields.
     ///
     /// # Panics
     ///
-    /// Panics if [`EncodeSize::encode_size`] does not match the number of
-    /// bytes written by [`Write::write`].
-    fn encode_with_pool(&self, pool: &BufferPool) -> IoBuf {
-        self.encode_with_pool_mut(pool).freeze()
+    /// Panics if [`EncodeSize::encode_inline_size`] underreports the number
+    /// of inline bytes written by [`Write::write_bufs`], or if
+    /// [`EncodeSize::encode_size`] does not match the total bytes written.
+    fn encode_with_pool(&self, pool: &BufferPool) -> IoBufs {
+        let len = self.encode_size();
+        let capacity = NonZeroUsize::new(self.encode_inline_size()).unwrap_or(NonZeroUsize::MIN);
+        let mut builder = Builder::new(pool, capacity);
+        self.write_bufs(&mut builder);
+        let bufs = builder.finish();
+        assert_eq!(
+            bufs.remaining(),
+            len,
+            "write_bufs() did not write expected bytes"
+        );
+        bufs
     }
 }
 
@@ -2224,8 +2348,10 @@ impl<T: EncodeSize + Write> EncodeExt for T {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BytesMut;
-    use commonware_codec::{Decode, Encode, RangeCfg};
+    use bytes::{Bytes, BytesMut};
+    use commonware_codec::{types::lazy::Lazy, Decode, Encode, RangeCfg};
+    use core::ops::{Range, RangeFrom, RangeInclusive, RangeToInclusive};
+    use std::collections::{BTreeMap, HashMap};
 
     fn test_pool() -> BufferPool {
         cfg_if::cfg_if! {
@@ -2242,6 +2368,15 @@ mod tests {
         }
         let mut registry = prometheus_client::registry::Registry::default();
         BufferPool::new(pool_config, &mut registry)
+    }
+
+    fn assert_encode_with_pool_matches_encode<T: Encode + EncodeExt>(value: &T) {
+        let pool = test_pool();
+        let mut pooled = value.encode_with_pool(&pool);
+        let baseline = value.encode();
+        let mut pooled_bytes = vec![0u8; pooled.remaining()];
+        pooled.copy_to_slice(&mut pooled_bytes);
+        assert_eq!(pooled_bytes, baseline.as_ref());
     }
 
     #[test]
@@ -4523,12 +4658,8 @@ mod tests {
 
     #[test]
     fn test_encode_with_pool_matches_encode() {
-        let pool = test_pool();
         let value = vec![1u8, 2, 3, 4, 5, 6];
-
-        let pooled = value.encode_with_pool(&pool);
-        let baseline = value.encode();
-        assert_eq!(pooled.as_ref(), baseline.as_ref());
+        assert_encode_with_pool_matches_encode(&value);
     }
 
     #[test]
@@ -4540,6 +4671,56 @@ mod tests {
         assert_eq!(buf.len(), value.encode_size());
     }
 
+    #[test]
+    fn test_iobuf_encode_with_pool_matches_encode() {
+        let value = IoBuf::from(vec![0xAB; 512]);
+        assert_encode_with_pool_matches_encode(&value);
+    }
+
+    #[test]
+    fn test_nested_container_encode_with_pool_matches_encode() {
+        let value = (
+            Some(Bytes::from(vec![0xAA; 256])),
+            vec![Bytes::from(vec![0xBB; 128]), Bytes::from(vec![0xCC; 64])],
+        );
+        assert_encode_with_pool_matches_encode(&value);
+    }
+
+    #[test]
+    fn test_map_encode_with_pool_matches_encode() {
+        let mut btree = BTreeMap::new();
+        btree.insert(2u8, Bytes::from(vec![0xDD; 96]));
+        btree.insert(1u8, Bytes::from(vec![0xEE; 48]));
+        assert_encode_with_pool_matches_encode(&btree);
+
+        let mut hash = HashMap::new();
+        hash.insert(2u8, Bytes::from(vec![0x11; 96]));
+        hash.insert(1u8, Bytes::from(vec![0x22; 48]));
+        assert_encode_with_pool_matches_encode(&hash);
+    }
+
+    #[test]
+    fn test_lazy_encode_with_pool_matches_encode() {
+        let value = Lazy::new(Bytes::from(vec![0x44; 200]));
+        assert_encode_with_pool_matches_encode(&value);
+    }
+
+    #[test]
+    fn test_range_encode_with_pool_matches_encode() {
+        let range: Range<Bytes> = Bytes::from(vec![0x10; 32])..Bytes::from(vec![0x20; 48]);
+        assert_encode_with_pool_matches_encode(&range);
+
+        let inclusive: RangeInclusive<Bytes> =
+            Bytes::from(vec![0x30; 16])..=Bytes::from(vec![0x40; 24]);
+        assert_encode_with_pool_matches_encode(&inclusive);
+
+        let from: RangeFrom<IoBuf> = IoBuf::from(vec![0x50; 40])..;
+        assert_encode_with_pool_matches_encode(&from);
+
+        let to_inclusive: RangeToInclusive<IoBuf> = ..=IoBuf::from(vec![0x60; 56]);
+        assert_encode_with_pool_matches_encode(&to_inclusive);
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::IoBuf;
@@ -4547,6 +4728,206 @@ mod tests {
 
         commonware_conformance::conformance_tests! {
             CodecConformance<IoBuf>
+        }
+    }
+
+    mod builder_tests {
+        use super::*;
+        use commonware_codec::{BufsMut, Encode, Write};
+
+        fn builder(capacity: usize) -> Builder {
+            Builder::new(&test_pool(), NonZeroUsize::new(capacity).unwrap())
+        }
+
+        // Only inline writes, no pushes.
+        #[test]
+        fn test_inline_only() {
+            let mut b = builder(64);
+            b.put_u32(42);
+            b.put_u8(7);
+            let mut r = b.finish();
+            assert_eq!(r.remaining(), 5);
+            assert_eq!(r.get_u32(), 42);
+            assert_eq!(r.get_u8(), 7);
+        }
+
+        // Only zero-copy pushes, no inline writes.
+        #[test]
+        fn test_push_only() {
+            let mut b = builder(64);
+            let data = Bytes::from(vec![0xAA; 1024]);
+            b.push(data.clone());
+            let mut r = b.finish();
+            assert_eq!(r.remaining(), 1024);
+            assert_eq!(r.copy_to_bytes(1024), data);
+        }
+
+        // Interleaved: inline header, zero-copy push, inline trailer.
+        #[test]
+        fn test_inline_push_inline() {
+            let mut b = builder(64);
+            b.put_u16(99);
+            let payload = Bytes::from(vec![0xBB; 512]);
+            b.push(payload.clone());
+            b.put_u8(1);
+            let mut r = b.finish();
+            assert_eq!(r.remaining(), 2 + 512 + 1);
+            assert_eq!(r.get_u16(), 99);
+            assert_eq!(r.copy_to_bytes(512), payload);
+            assert_eq!(r.get_u8(), 1);
+        }
+
+        // Bytes::write_bufs produces identical wire format to Bytes::write.
+        #[test]
+        fn test_write_bufs_matches_write() {
+            let data = Bytes::from(vec![0xCC; 256]);
+            let mut b = builder(64);
+            data.write_bufs(&mut b);
+            let mut bufs = b.finish();
+
+            let mut out = vec![0u8; bufs.remaining()];
+            bufs.copy_to_slice(&mut out);
+            assert_eq!(out, data.encode().as_ref());
+        }
+
+        // Finishing an unused builder produces empty IoBufs.
+        #[test]
+        fn test_empty() {
+            let bufs = builder(64).finish();
+            assert_eq!(bufs.remaining(), 0);
+        }
+
+        // Inline writes exceeding capacity panic.
+        #[test]
+        #[should_panic]
+        fn test_inline_overflow_panics() {
+            let mut b = builder(1);
+            let cap = b.remaining_mut();
+            b.put_slice(&vec![0xFF; cap]);
+            b.put_u8(1); // exceeds capacity
+        }
+
+        // Pushing empty Bytes is a no-op.
+        #[test]
+        fn test_empty_push_ignored() {
+            let mut b = builder(64);
+            b.push(Bytes::new());
+            b.put_u8(1);
+            let bufs = b.finish();
+            assert_eq!(bufs.remaining(), 1);
+        }
+
+        // Consecutive pushes without inline writes between them.
+        #[test]
+        fn test_multiple_pushes() {
+            let mut b = builder(64);
+            let a = Bytes::from(vec![0xAA; 100]);
+            let c = Bytes::from(vec![0xCC; 200]);
+            b.push(a.clone());
+            b.push(c.clone());
+            let mut r = b.finish();
+            assert_eq!(r.remaining(), 300);
+            assert_eq!(r.copy_to_bytes(100), a);
+            assert_eq!(r.copy_to_bytes(200), c);
+        }
+
+        // put() exceeding capacity panics.
+        #[test]
+        #[should_panic]
+        fn test_put_exceeding_capacity_panics() {
+            let mut b = builder(1);
+            let cap = b.remaining_mut();
+            let src = Bytes::from(vec![0xAB; cap + 1]);
+            b.put(src);
+        }
+
+        // put_slice() exceeding capacity panics.
+        #[test]
+        #[should_panic]
+        fn test_put_slice_exceeding_capacity_panics() {
+            let mut b = builder(1);
+            let cap = b.remaining_mut();
+            b.put_slice(&vec![0xFE; cap + 1]);
+        }
+
+        // Simulates a multi-field struct: [u16 | Bytes (via push) | u32].
+        // Verifies write_bufs produces identical wire format to write.
+        #[test]
+        fn test_multi_field_struct_equivalence() {
+            let header: u16 = 0xCAFE;
+            let payload = Bytes::from(vec![0xDD; 1024]);
+            let trailer: u32 = 0xDEADBEEF;
+
+            // Flat encoding via write.
+            let size = header.encode_size() + payload.encode_size() + trailer.encode_size();
+            let mut flat = BytesMut::with_capacity(size);
+            header.write(&mut flat);
+            payload.write(&mut flat);
+            trailer.write(&mut flat);
+
+            // Multi-buffer encoding via write_bufs.
+            let mut b = builder(64);
+            header.write(&mut b);
+            payload.write_bufs(&mut b);
+            trailer.write(&mut b);
+            let mut bufs = b.finish();
+
+            let mut out = vec![0u8; bufs.remaining()];
+            bufs.copy_to_slice(&mut out);
+            assert_eq!(out, flat.as_ref());
+        }
+
+        // encode_with_pool (Builder path) matches encode (flat BytesMut path).
+        #[test]
+        fn test_encode_with_pool_matches_encode() {
+            let pool = test_pool();
+            let data = Bytes::from(vec![0xEE; 500]);
+            let mut pooled = data.encode_with_pool(&pool);
+            let baseline = data.encode();
+            let mut out = vec![0u8; pooled.remaining()];
+            pooled.copy_to_slice(&mut out);
+            assert_eq!(out, baseline.as_ref());
+        }
+
+        // Exercise remaining_mut, chunk_mut, and advance_mut directly.
+        #[test]
+        fn test_chunk_mut_and_advance_mut() {
+            let mut b = builder(64);
+            let initial = b.remaining_mut();
+            assert!(initial >= 64);
+            let chunk = b.chunk_mut();
+            chunk[0..1].copy_from_slice(&[0xAB]);
+            // SAFETY: We just wrote 1 byte into chunk_mut above.
+            unsafe { b.advance_mut(1) };
+            assert_eq!(b.remaining_mut(), initial - 1);
+            let mut r = b.finish();
+            assert_eq!(r.remaining(), 1);
+            assert_eq!(r.get_u8(), 0xAB);
+        }
+
+        // Writing past a full buffer panics (fixed capacity).
+        #[test]
+        #[should_panic]
+        fn test_write_past_full_panics() {
+            let mut b = builder(1);
+            let cap = b.remaining_mut();
+            b.put_slice(&vec![0xFF; cap]); // fill the buffer completely
+            assert_eq!(b.remaining_mut(), 0);
+            b.put_u8(0x42); // panics
+        }
+
+        // Push at offset 0 with inline trailer exercises finish branch
+        // where offset == pos (no inline prefix before push).
+        #[test]
+        fn test_push_at_start_with_trailer() {
+            let mut b = builder(64);
+            let payload = Bytes::from(vec![0xCC; 32]);
+            b.push(payload.clone());
+            b.put_u8(0x01);
+            let mut r = b.finish();
+            assert_eq!(r.remaining(), 33);
+            assert_eq!(r.copy_to_bytes(32), payload);
+            assert_eq!(r.get_u8(), 0x01);
         }
     }
 }
