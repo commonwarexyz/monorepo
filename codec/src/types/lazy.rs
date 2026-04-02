@@ -185,6 +185,7 @@ impl<T: Read + Write> Write for Lazy<T> {
 
     fn write_bufs(&self, buf: &mut impl BufsMut) {
         if let Some(pending) = &self.pending {
+            // Write raw bytes without length prefix (Bytes::write_bufs adds a length prefix)
             buf.push(pending.bytes.clone());
             return;
         }
