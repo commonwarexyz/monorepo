@@ -15,7 +15,8 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    mmr::{self, journaled::Config as MmrConfig, Location},
+    merkle::{mmb, mmr, Graftable, Location},
+    mmr::journaled::Config as MmrConfig,
     qmdb::current::{unordered::variable::Db as Current, VariableConfig},
     translator::TwoCap,
 };
@@ -34,7 +35,7 @@ type RawValue = [u8; 32];
 /// Maximum write buffer size.
 const MAX_WRITE_BUF: usize = 2048;
 
-type Db = Current<mmr::Family, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
+type Db<F> = Current<F, deterministic::Context, Key, Value, Sha256, TwoCap, 32>;
 
 fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
     u.int_in_range(1..=256)
@@ -67,7 +68,7 @@ enum CurrentOperation {
 }
 
 /// Fuzz input containing fault injection parameters and operations.
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 struct FuzzInput {
     seed: u64,
     #[arbitrary(with = bounded_page_size)]
@@ -114,7 +115,7 @@ fn make_config(
             codec_config: ((), ()),
             page_cache,
         },
-        grafted_metadata_partition: format!("crash-grafted-mmr-metadata-{suffix}"),
+        grafted_metadata_partition: format!("crash-grafted-metadata-{suffix}"),
         translator: TwoCap,
     }
 }
@@ -148,7 +149,7 @@ fn apply_pending(
 
 /// Commit pending writes. Returns `true` on success, `false` on error.
 async fn commit_pending(
-    db: &mut Db,
+    db: &mut Db<impl Graftable>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     pending: &mut HashMap<RawKey, Option<RawValue>>,
     committed: &mut HashMap<RawKey, RawValue>,
@@ -177,7 +178,7 @@ async fn commit_pending(
     true
 }
 
-fn fuzz(input: FuzzInput) {
+fn fuzz_family<F: Graftable>(input: &FuzzInput, family_suffix: &str) {
     if input.operations.is_empty() {
         return;
     }
@@ -189,8 +190,8 @@ fn fuzz(input: FuzzInput) {
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
     let sync_failure_rate = input.sync_failure_rate;
     let write_failure_rate = input.write_failure_rate;
-    let operations = input.operations;
-    let suffix = format!("current_{}", input.seed);
+    let operations = input.operations.clone();
+    let suffix = format!("current_{family_suffix}_{}", input.seed);
 
     let cfg = deterministic::Config::default().with_seed(input.seed);
     let runner = deterministic::Runner::new(cfg);
@@ -201,7 +202,7 @@ fn fuzz(input: FuzzInput) {
         let suffix = suffix.clone();
         let operations = operations.clone();
         async move {
-            let mut db = Db::init(
+            let mut db = Db::<F>::init(
                 ctx.with_label("db"),
                 make_config(
                     &ctx,
@@ -284,7 +285,7 @@ fn fuzz(input: FuzzInput) {
         async move {
             *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            let mut db = Db::init(
+            let mut db = Db::<F>::init(
                 ctx.with_label("recovered"),
                 make_config(
                     &ctx,
@@ -319,7 +320,7 @@ fn fuzz(input: FuzzInput) {
                     .await
                     .expect("proof generation should not fail for committed key");
                 assert!(
-                    Db::verify_key_value_proof(&mut hasher, k, v, &proof, &root),
+                    Db::<F>::verify_key_value_proof(&mut hasher, k, v, &proof, &root),
                     "key value proof failed to verify after crash recovery"
                 );
             }
@@ -328,13 +329,13 @@ fn fuzz(input: FuzzInput) {
             let floor = *db.inactivity_floor_loc();
             let size = *db.bounds().await.end;
             for i in floor..size {
-                let loc = Location::new(i);
+                let loc = Location::<F>::new(i);
                 let (proof, ops, chunks) = db
                     .range_proof(&mut hasher, loc, NZU64!(4))
                     .await
                     .expect("range proof should not fail after recovery");
                 assert!(
-                    Db::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
+                    Db::<F>::verify_range_proof(&mut hasher, &proof, loc, &ops, &chunks, &root),
                     "range proof failed to verify after crash recovery at loc {loc}"
                 );
             }
@@ -363,5 +364,6 @@ fn fuzz(input: FuzzInput) {
 }
 
 fuzz_target!(|input: FuzzInput| {
-    fuzz(input);
+    fuzz_family::<mmr::Family>(&input, "mmr");
+    fuzz_family::<mmb::Family>(&input, "mmb");
 });
