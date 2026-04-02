@@ -241,8 +241,8 @@ pub struct Scalar(blst_fr);
 #[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for Scalar {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let ikm = u.arbitrary::<[u8; IKM_LENGTH]>()?;
-        Ok(Self::from_ikm(&ikm))
+        let bytes = u.arbitrary::<[u8; SCALAR_LENGTH + 128 / 8]>()?;
+        Ok(Self::reduce_bytes(&bytes))
     }
 }
 
@@ -518,15 +518,18 @@ impl FixedSize for Private {
 }
 
 impl Random for Private {
-    fn random(rng: impl CryptoRngCore) -> Self {
-        Self::new(Scalar::random(rng))
+    fn random(mut rng: impl CryptoRngCore) -> Self {
+        let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
+        rng.fill_bytes(ikm.as_mut());
+        Self::new(Scalar::from_ikm(&ikm))
     }
 }
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Private {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self::new(u.arbitrary::<Scalar>()?))
+        let ikm = u.arbitrary::<[u8; IKM_LENGTH]>()?;
+        Ok(Self::new(Scalar::from_ikm(&ikm)))
     }
 }
 
@@ -534,6 +537,20 @@ impl arbitrary::Arbitrary<'_> for Private {
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
+    /// Creates a scalar by reducing a wide big-endian integer modulo `r`.
+    fn reduce_bytes(bytes: &[u8]) -> Self {
+        debug_assert_eq!(bytes.len(), SCALAR_LENGTH + 128 / 8);
+        let mut fr = blst_fr::default();
+        // SAFETY: bytes points to a valid `SCALAR_LENGTH + 128 / 8` byte buffer.
+        unsafe {
+            let mut scalar = blst_scalar::default();
+            blst_scalar_from_be_bytes(&mut scalar, bytes.as_ptr(), bytes.len());
+            blst_fr_from_scalar(&mut fr, &scalar);
+        }
+
+        Self(fr)
+    }
+
     /// Creates a scalar from input key material.
     /// Uses IETF BLS KeyGen which loops internally until a non-zero value is produced.
     fn from_ikm(ikm: &[u8; IKM_LENGTH]) -> Self {
@@ -562,30 +579,19 @@ impl Scalar {
         // These 48 bytes provide sufficient entropy to ensure uniform distribution
         // in the scalar field after modular reduction, maintaining the security
         // properties required by the hash-to-field construction.
-        const L: usize = 48;
-        let mut uniform_bytes = Zeroizing::new([0u8; L]);
+        let mut uniform_bytes = Zeroizing::new([0u8; SCALAR_LENGTH + 128 / 8]);
         // SAFETY: All buffers are valid with correct lengths; blst handles empty inputs.
         unsafe {
             blst_expand_message_xmd(
                 uniform_bytes.as_mut_ptr(),
-                L,
+                SCALAR_LENGTH + 128 / 8,
                 msg.as_ptr(),
                 msg.len(),
                 dst.as_ptr(),
                 dst.len(),
             );
         }
-
-        // Transform expanded bytes with modular reduction
-        let mut fr = blst_fr::default();
-        // SAFETY: uniform_bytes is a valid 48-byte buffer.
-        unsafe {
-            let mut scalar = blst_scalar::default();
-            blst_scalar_from_be_bytes(&mut scalar, uniform_bytes.as_ptr(), L);
-            blst_fr_from_scalar(&mut fr, &scalar);
-        }
-
-        Self(fr)
+        Self::reduce_bytes(uniform_bytes.as_ref())
     }
 
     /// Creates a new scalar from the given limbs in little-endian representation.
@@ -824,11 +830,11 @@ impl Field for Scalar {
 }
 
 impl Random for Scalar {
-    /// Returns a random non-zero scalar.
+    /// Returns a random scalar, including zero.
     fn random(mut rng: impl CryptoRngCore) -> Self {
-        let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
-        rng.fill_bytes(ikm.as_mut());
-        Self::from_ikm(&ikm)
+        let mut bytes = Zeroizing::new([0u8; SCALAR_LENGTH + 128 / 8]);
+        rng.fill_bytes(bytes.as_mut());
+        Self::reduce_bytes(bytes.as_ref())
     }
 }
 
