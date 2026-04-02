@@ -40,7 +40,7 @@ module twins {
 
   val safe_invariants = i::safe_invariants
   val test_invariants = i::test_invariants
-  val no_proposal_equivocation = i::no_proposal_equivocation
+  val no_notarize_equivocation = i::no_notarize_equivocation
   val agreement = i::agreement
   val no_vote_equivocation_inv = i::no_vote_equivocation_inv
   val no_nullification_and_finalization_in_the_same_view = i::no_nullification_and_finalization_in_the_same_view

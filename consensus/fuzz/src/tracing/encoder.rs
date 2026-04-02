@@ -1383,7 +1383,6 @@ fn write_reporter_helpers(out: &mut String) {
 /// Writes the standard helper actions used by test modules.
 fn write_helpers(out: &mut String) {
     writeln!(out, "    action unchanged_all = all {{").unwrap();
-    writeln!(out, "        sent_proposal' = sent_proposal,").unwrap();
     writeln!(out, "        sent_notarize_votes' = sent_notarize_votes,").unwrap();
     writeln!(out, "        sent_nullify_votes' = sent_nullify_votes,").unwrap();
     writeln!(out, "        sent_finalize_votes' = sent_finalize_votes,").unwrap();
@@ -1416,7 +1415,6 @@ fn write_helpers(out: &mut String) {
     .unwrap();
     writeln!(out, "        sent_nullify_votes' = sent_nullify_votes,").unwrap();
     writeln!(out, "        sent_finalize_votes' = sent_finalize_votes,").unwrap();
-    writeln!(out, "        sent_proposal' = sent_proposal,").unwrap();
     writeln!(out, "        sent_certificates' = sent_certificates,").unwrap();
     writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
     writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
@@ -1446,7 +1444,6 @@ fn write_helpers(out: &mut String) {
     )
     .unwrap();
     writeln!(out, "        sent_finalize_votes' = sent_finalize_votes,").unwrap();
-    writeln!(out, "        sent_proposal' = sent_proposal,").unwrap();
     writeln!(out, "        sent_certificates' = sent_certificates,").unwrap();
     writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
     writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
@@ -1476,7 +1473,6 @@ fn write_helpers(out: &mut String) {
         "        sent_finalize_votes' = sent_finalize_votes.union(Set(vote)),"
     )
     .unwrap();
-    writeln!(out, "        sent_proposal' = sent_proposal,").unwrap();
     writeln!(out, "        sent_certificates' = sent_certificates,").unwrap();
     writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
     writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
@@ -1548,7 +1544,6 @@ fn write_helpers(out: &mut String) {
     .unwrap();
     writeln!(out, "            }}").unwrap();
     writeln!(out, "        }},").unwrap();
-    writeln!(out, "        sent_proposal' = sent_proposal,").unwrap();
     writeln!(out, "        sent_certificates' = sent_certificates,").unwrap();
     writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
     writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();

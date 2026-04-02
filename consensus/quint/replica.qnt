@@ -40,8 +40,6 @@ module replica {
     // the leader function from the view to the replicas identities
     var leader: ViewNumber -> ReplicaId
 
-    // proposals sent by the replicas, correct and byzantine
-    var sent_proposal: Set[(Signature, Proposal)]
     // votes sent by the replicas, correct and byzantine
     var sent_notarize_votes: Set[NotarizeVote]
     var sent_nullify_votes: Set[NullifyVote]
@@ -155,7 +153,6 @@ module replica {
         sent_notarize_votes.exists(v => v.sig == sig_of(id) and v.proposal.view == view),
         sent_nullify_votes.exists(v => v.sig == sig_of(id) and v.view == view),
         sent_finalize_votes.exists(v => v.sig == sig_of(id) and v.proposal.view == view),
-        sent_proposal.exists(((s, p)) => s == sig_of(id) and p.view == view),
     }
 
     // The designated leader for `view` is considered inactive if they have not
@@ -705,7 +702,6 @@ module replica {
                 leader_timeout: VIEWS.mapBy(_ => Some(false)),
                 certification_timeout: VIEWS.mapBy(_ => Some(false))
             }),
-            sent_proposal' = Set(),
             sent_notarize_votes' = Set(),
             sent_nullify_votes' = Set(),
             sent_finalize_votes' = Set(),
@@ -818,7 +814,6 @@ module replica {
             not(self.broadcast_nullify.get(self.view)),
             proposal_ok,
 
-            sent_proposal' = sent_proposal.union(Set((sig_of(id), proposal))),
             sent_notarize_votes' = sent_notarize_votes.union(Set({ proposal: proposal, sig: sig_of(id) })),
             sent_nullify_votes' = sent_nullify_votes,
             sent_finalize_votes' = sent_finalize_votes,
@@ -874,7 +869,6 @@ module replica {
 
         if (proposal_conflicted) {
             all {
-                sent_proposal' = sent_proposal,
                 sent_notarize_votes' = sent_notarize_votes,
                 sent_nullify_votes' = sent_nullify_votes,
                 sent_finalize_votes' = sent_finalize_votes,
@@ -968,7 +962,6 @@ module replica {
                 ghost_committed_blocks' = ghost_committed_blocks,
 
                 // unchanged
-                sent_proposal' = sent_proposal,
                 leader' = leader,
                 certify_policy' = certify_policy,
                 lastAction' = "on_notarize"
@@ -1024,7 +1017,6 @@ module replica {
                 ghost_committed_blocks' = ghost_committed_blocks,
 
                 // unchanged
-                sent_proposal' = sent_proposal,
                 leader' = leader,
                 certify_policy' = certify_policy,
                 lastAction' = "on_notarize"
@@ -1071,7 +1063,6 @@ module replica {
                 }
             },
             // unchanged
-            sent_proposal' = sent_proposal,
             leader' = leader,
             certify_policy' = certify_policy,
             lastAction' = "on_finalize"
@@ -1134,7 +1125,6 @@ module replica {
                 }
             },
             // unchanged
-            sent_proposal' = sent_proposal,
             leader' = leader,
             certify_policy' = certify_policy,
             lastAction' = "on_nullify"
@@ -1185,7 +1175,6 @@ module replica {
             },
 
             // unchanged
-            sent_proposal' = sent_proposal,
             leader' = leader,
             certify_policy' = certify_policy,
             lastAction' = "on_certificate"
@@ -1453,7 +1442,6 @@ module replica {
             replica_state' = replica_state.set(id, timer.next_self),
 
             // unchanged
-            sent_proposal' = sent_proposal,
             sent_certificates' = sent_certificates,
             store_certificates' = store_certificates,
             leader' = leader,
@@ -1552,20 +1540,6 @@ module replica {
             }
             sent_certificates' = sent_certificates.union(Set(cert))
         },
-
-        // Adversary may inject arbitrary proposal.
-        all {
-            nondet parent = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
-            nondet view = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
-            nondet sig = BYZANTINE.oneOf()
-            nondet payload = AllPayloads.oneOf()
-            val p = {
-                view: view,
-                payload: payload,
-                parent: parent,
-            }
-            sent_proposal' = sent_proposal.union(Set((sig_of(sig), p))),
-        }
     }
 
     // Part of the state not touched by byzantine validators.
@@ -1633,16 +1607,14 @@ module replica {
       val no_nullification_and_finalization_in_the_same_view =
           nullified_views_seen.intersect(finalized_views_seen) == Set()
 
-    val no_proposal_equivocation = CORRECT.forall(id => {
-        or {
-            sig_of(id).in(ByzantineSigs),
-            VIEWS.forall(v =>
-                sent_proposal
-                    .filter(((s, p)) => s == sig_of(id) and p.view == v)
-                    .size() <= 1
-            )
-        }
-    })
+    val no_notarize_equivocation = CORRECT.forall(id =>
+          VIEWS.forall(v =>
+              sent_notarize_votes
+                  .filter(vote => vote.sig == sig_of(id) and vote.proposal.view == v)
+                  .map(vote => vote.proposal)
+                  .size() <= 1
+          )
+      )
 
     val valid_last_finalized = CORRECT.forall(id => {
         val self = replica_state.get(id)
@@ -1763,7 +1735,7 @@ module replica {
             )
 
     val safe_invariants = all {
-        no_proposal_equivocation,
+        no_notarize_equivocation,
         agreement,
         no_vote_equivocation_inv,
         no_nullification_and_finalization_in_the_same_view,

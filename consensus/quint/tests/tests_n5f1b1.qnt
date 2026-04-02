@@ -385,7 +385,6 @@ module tests {
     }
 
     action send_proposal(sender: Signature, proposal: Proposal): bool = all {
-        sent_proposal' = sent_proposal.union(Set((sender, proposal))),
         sent_notarize_votes' = sent_notarize_votes,
         sent_nullify_votes' = sent_nullify_votes,
         sent_finalize_votes' = sent_finalize_votes,
@@ -415,7 +414,6 @@ module tests {
         on_nullify(id, { view: view, sig: src })
 
     action send_nullify_vote(vote: NullifyVote): bool = all {
-        sent_proposal' = sent_proposal,
         sent_notarize_votes' = sent_notarize_votes,
         sent_nullify_votes' = sent_nullify_votes.union(Set(vote)),
         sent_finalize_votes' = sent_finalize_votes,
@@ -432,7 +430,6 @@ module tests {
     }
 
     action send_notarize_vote(vote: NotarizeVote): bool = all {
-        sent_proposal' = sent_proposal,
         sent_notarize_votes' = sent_notarize_votes.union(Set(vote)),
         sent_nullify_votes' = sent_nullify_votes,
         sent_finalize_votes' = sent_finalize_votes,
@@ -449,7 +446,6 @@ module tests {
     }
 
     action send_finalize_vote(vote: FinalizeVote): bool = all {
-        sent_proposal' = sent_proposal,
         sent_notarize_votes' = sent_notarize_votes,
         sent_nullify_votes' = sent_nullify_votes,
         sent_finalize_votes' = sent_finalize_votes.union(Set(vote)),
@@ -472,7 +468,6 @@ module tests {
         leader_timeout: Option[bool],
         certification_timeout: Option[bool]
     ): bool = all {
-        sent_proposal' = sent_proposal,
         sent_notarize_votes' = sent_notarize_votes,
         sent_nullify_votes' = sent_nullify_votes,
         sent_finalize_votes' = sent_finalize_votes,
@@ -496,7 +491,6 @@ module tests {
     }
 
     action unchanged_all = all {
-        sent_proposal' = sent_proposal,
         sent_notarize_votes' = sent_notarize_votes,
         sent_nullify_votes' = sent_nullify_votes,
         sent_finalize_votes' = sent_finalize_votes,

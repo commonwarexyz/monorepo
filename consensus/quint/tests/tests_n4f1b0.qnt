@@ -160,7 +160,7 @@ module tests {
             assert(replica_state.get("n0").certification_timeout.get(FIRST_VIEW) == Some(false)),
             assert(replica_state.get("n0").propose_sent == false),
             assert(replica_state.get("n0").view == FIRST_VIEW),
-            assert(not(sent_proposal.exists(((s, p)) => s == "n0" and p.view == FIRST_VIEW))),
+            assert(not(sent_notarize_votes.exists(v => v.sig == "n0" and v.proposal.view == FIRST_VIEW))),
             unchanged_all,
         })
         .expect(test_invariants)
@@ -248,11 +248,11 @@ module tests {
         })
         .then(propose("n0", "val_b0", GENESIS_VIEW))
         .then(all {
-            assert(sent_proposal.exists(((s, p)) =>
-                s == "n0" and p.view == 2 and p.parent == GENESIS_VIEW and p.payload == "val_b0"
+            assert(sent_notarize_votes.exists(v =>
+                v.sig == "n0" and v.proposal.view == 2 and v.proposal.parent == GENESIS_VIEW and v.proposal.payload == "val_b0"
             )),
-            assert(not(sent_proposal.exists(((s, p)) =>
-                s == "n0" and p.view == 2 and p.parent == FIRST_VIEW
+            assert(not(sent_notarize_votes.exists(v =>
+                v.sig == "n0" and v.proposal.view == 2 and v.proposal.parent == FIRST_VIEW
             ))),
             assert(not(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == 2))),
             unchanged_all,
@@ -667,7 +667,6 @@ module tests {
         }
 
     action send_proposal(sender: Signature, proposal: Proposal): bool = all {
-        sent_proposal' = sent_proposal.union(Set((sender, proposal))),
         sent_notarize_votes' = sent_notarize_votes,
         sent_nullify_votes' = sent_nullify_votes,
         sent_finalize_votes' = sent_finalize_votes,
@@ -797,7 +796,6 @@ module tests {
     }
 
     action unchanged_all = all {
-        sent_proposal' = sent_proposal,
         sent_notarize_votes' = sent_notarize_votes,
         sent_nullify_votes' = sent_nullify_votes,
         sent_finalize_votes' = sent_finalize_votes,

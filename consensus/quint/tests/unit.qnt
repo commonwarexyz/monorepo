@@ -21,7 +21,6 @@ module tests {
     pure val CERTIFY_ALL_TRUE = Replicas.mapBy(_ => app::certify_always_true)
 
     action unchanged_all = all {
-        sent_proposal' = sent_proposal,
         sent_notarize_votes' = sent_notarize_votes,
         sent_nullify_votes' = sent_nullify_votes,
         sent_finalize_votes' = sent_finalize_votes,
@@ -43,7 +42,6 @@ module tests {
             CERTIFY_ALL_TRUE
         ).then(all {
             ghost_committed_blocks' = chains,
-            sent_proposal' = sent_proposal,
             sent_notarize_votes' = sent_notarize_votes,
             sent_nullify_votes' = sent_nullify_votes,
             sent_finalize_votes' = sent_finalize_votes,
