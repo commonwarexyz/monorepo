@@ -188,10 +188,6 @@ impl merkle::Family for Family {
         iterator::PeakIterator::new(size)
     }
 
-    fn nodes_to_pin(leaves: Location, prune_loc: Location) -> alloc::vec::Vec<Position> {
-        iterator::nodes_to_pin(leaves, prune_loc)
-    }
-
     fn children(pos: Position, height: u32) -> (Position, Position) {
         iterator::children(pos, height)
     }

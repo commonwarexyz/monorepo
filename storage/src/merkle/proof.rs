@@ -310,7 +310,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             return false;
         }
 
-        let pinned_positions = F::nodes_to_pin(self.leaves, start_loc);
+        let pinned_positions = F::nodes_to_pin(start_loc);
         if pinned_positions.len() != pinned_nodes.len() {
             return false;
         }
