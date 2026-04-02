@@ -595,13 +595,16 @@ where
                         // Exit the engine for this epoch now that the boundary is finalized
                         orchestrator.exit(epoch).await;
 
-                        // If the update is stop, wait forever.
+                        // If the callback requests stop, stop participating in
+                        // the DKG flow but keep this actor alive until the
+                        // runtime actually begins shutdown.
                         if let PostUpdate::Stop = callback.on_update(update).await {
                             // Close the mailbox to prevent accepting any new messages
                             drop(self.mailbox);
-                            // Keep running until killed to keep the orchestrator mailbox alive
+                            // Keep the actor alive so any outstanding handles
+                            // remain valid until shutdown begins.
                             info!("DKG complete; waiting for shutdown...");
-                            futures::future::pending::<()>().await;
+                            let _ = self.context.stopped().await;
                             break 'actor;
                         }
 

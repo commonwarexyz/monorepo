@@ -737,6 +737,21 @@ mod test {
                                     ));
                                 }
                             }
+
+                            // The test is done observing protocol progress, but
+                            // some participants may already have received
+                            // `Continue` callbacks and started entering the
+                            // next epoch. Abort and await every participant
+                            // before returning so the test does not hand
+                            // shutdown races to the runtime.
+                            let handles = std::mem::take(&mut team.handles);
+                            for handle in handles.values() {
+                                handle.abort();
+                            }
+                            for (_, handle) in handles {
+                                let _ = handle.await;
+                            }
+
                             return Ok(PlanResult {
                                 state: ctx.auditor().state(),
                                 failures,
@@ -814,17 +829,27 @@ mod test {
                                 debug!(pk = ?pk, "participant already crashed");
                                 continue;
                             };
-                            handle.abort();
                             info!(pk = ?pk, "crashed participant");
 
-                            // Schedule restart after downtime
+                            // Wait for both the requested downtime and the old
+                            // participant's cleanup before restarting. The
+                            // cleanup wait is necessary because abort is
+                            // asynchronous and the old participant can keep its
+                            // network and mux registrations alive until its
+                            // tasks actually finish dropping.
                             let restart_sender = restart_sender.clone();
                             let downtime = *downtime;
                             let pk_clone = pk.clone();
+                            handle.abort();
                             ctx.clone().spawn(move |ctx| async move {
-                                if downtime > Duration::ZERO {
-                                    ctx.sleep(downtime).await;
-                                }
+                                let _ = futures::join!(
+                                    async {
+                                        if downtime > Duration::ZERO {
+                                            ctx.sleep(downtime).await;
+                                        }
+                                    },
+                                    handle,
+                                );
                                 let _ = restart_sender.send(pk_clone).await;
                             });
                         }

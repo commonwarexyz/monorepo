@@ -54,7 +54,9 @@ impl<E: Spawner, S: Scheme<H::Digest>, H: Hasher> NullifyOnly<E, S, H> {
             if let Vote::Notarize(notarize) = msg {
                 let nullify = Nullify::sign::<H::Digest>(&self.scheme, notarize.round()).unwrap();
                 let msg = Vote::<S, H::Digest>::Nullify(nullify).encode();
-                sender.send(Recipients::All, msg, true).await.unwrap();
+                if sender.send(Recipients::All, msg, true).await.is_err() {
+                    break;
+                }
             }
         }
     }

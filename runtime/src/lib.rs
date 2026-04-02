@@ -79,6 +79,15 @@ stability_scope!(BETA {
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
 
+    /// Reason why graceful stopping began.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum StopReason {
+        /// Stopping was explicitly requested through [`Spawner::stop`].
+        Requested(i32),
+        /// Stopping began because runtime shutdown started after the root task exited.
+        Shutdown,
+    }
+
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug)]
     pub enum Error {
@@ -149,9 +158,35 @@ stability_scope!(BETA {
 
         /// Start running a root task.
         ///
-        /// When this function returns, all spawned tasks will be canceled. If clean
-        /// shutdown cannot be implemented via `Drop`, consider using [Spawner::stop] and
-        /// [Spawner::stopped] to coordinate clean shutdown.
+        /// This method runs `f` as the runtime's root task and returns its
+        /// output. When the root task exits, the runtime runs its shutdown
+        /// sequence for the remaining task tree before this method returns.
+        ///
+        /// If spawned tasks need advance notice so they can clean up before the
+        /// root exits, use [`Spawner::stop`] and [`Spawner::stopped`] to
+        /// coordinate graceful stopping.
+        ///
+        /// Calling [`Spawner::stop`] **does not** by itself cause this method to
+        /// return. It begins graceful stopping by resolving
+        /// [`Spawner::stopped`], and the root task may continue running
+        /// indefinitely even after graceful stopping has completed.
+        ///
+        /// **Runtime shutdown begins only once the root task exits.** Shutdown
+        /// implies stopping, so if no task has already called
+        /// [`Spawner::stop`], the runtime first resolves [`Spawner::stopped`]
+        /// to [`StopReason::Shutdown`] so graceful stop handlers can clean up.
+        ///
+        /// Shutdown then waits for graceful stopping to finish. If a shutdown
+        /// timeout is configured, shutdown leaves the graceful phase once that
+        /// timeout elapses. During the graceful phase, tasks may continue
+        /// running and may continue spawning follow-on cleanup work.
+        ///
+        /// If graceful stopping times out, shutdown closes task registration so
+        /// new [`Spawner::spawn`] calls return [`Error::Closed`], aborts the
+        /// remaining supervision tree, and does best-effort final cleanup
+        /// within whatever time remains before this function returns. If no
+        /// shutdown timeout is configured, shutdown waits indefinitely instead
+        /// of leaving the graceful phase on a deadline.
         fn start<F, Fut>(self, f: F) -> Fut::Output
         where
             F: FnOnce(Self::Context) -> Fut,
@@ -220,20 +255,29 @@ stability_scope!(BETA {
             Fut: Future<Output = T> + Send + 'static,
             T: Send + 'static;
 
-        /// Signals the runtime to stop execution and waits for all outstanding tasks
-        /// to perform any required cleanup and exit.
+        /// Requests graceful stopping and waits for all outstanding
+        /// [`signal::Signal`] handles that were already created by
+        /// [`Spawner::stopped`] to be dropped.
         ///
-        /// This method does not actually kill any tasks but rather signals to them, using
-        /// the [signal::Signal] returned by [Spawner::stopped], that they should exit.
-        /// It then waits for all [signal::Signal] references to be dropped before returning.
+        /// This method is still cooperative: it does not shut the runtime down,
+        /// does not close task registration, and does not actually kill any
+        /// tasks. Instead, it resolves the [signal::Signal] returned by
+        /// [`Spawner::stopped`] to [`StopReason::Requested`] with the provided
+        /// value so tasks can react gracefully.
+        ///
+        /// Tasks that never call [`Spawner::stopped`] do not participate in
+        /// this completion tracking. Even after this method returns, the root
+        /// task may keep running, tasks may still be alive, and new tasks may
+        /// still be spawned.
         ///
         /// ## Multiple Stop Calls
         ///
-        /// This method is idempotent and safe to call multiple times concurrently (on
-        /// different instances of the same context since it consumes `self`). The first
-        /// call initiates shutdown with the provided `value`, and all subsequent calls
-        /// will wait for the same completion regardless of their `value` parameter, i.e.
-        /// the original `value` from the first call is preserved.
+        /// This method is idempotent and safe to call multiple times
+        /// concurrently (on different instances of the same context since it
+        /// consumes `self`). The first call initiates graceful stopping with
+        /// the provided `value`, and all subsequent calls will wait for the
+        /// same completion regardless of their `value` parameter, i.e. the
+        /// original `value` from the first call is preserved.
         ///
         /// ## Timeout
         ///
@@ -245,13 +289,20 @@ stability_scope!(BETA {
             timeout: Option<Duration>,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// Returns an instance of a [signal::Signal] that resolves when [Spawner::stop] is called by
-        /// any task.
+        /// Returns an instance of a [signal::Signal] that resolves when
+        /// [`Spawner::stop`] is called by any task or when runtime shutdown
+        /// begins because the root task exits.
         ///
-        /// If [Spawner::stop] has already been called, the [signal::Signal] returned will resolve
-        /// immediately. The [signal::Signal] returned will always resolve to the value of the
-        /// first [Spawner::stop] call.
-        fn stopped(&self) -> signal::Signal;
+        /// This signal marks the beginning of graceful stopping. It does not
+        /// imply that runtime shutdown has started, nor that the runtime is
+        /// quiescent.
+        ///
+        /// If stopping has already begun, the returned [signal::Signal]
+        /// resolves immediately to the reason produced by the first stop
+        /// trigger. Explicit calls to [`Spawner::stop`] yield
+        /// [`StopReason::Requested`], while runtime shutdown caused by
+        /// root-task exit yields [`StopReason::Shutdown`].
+        fn stopped(&self) -> signal::Signal<StopReason>;
     }
 
     /// Trait for creating [rayon]-compatible thread pools with each worker thread
@@ -1025,6 +1076,23 @@ mod tests {
         test_root_exit_waits_for_direct_child_cleanup(runner, true);
     }
 
+    fn test_root_completion_without_shutdown_timeout_waits_for_direct_child_cleanup<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner,
+    {
+        test_root_exit_waits_for_direct_child_cleanup(runner, false);
+    }
+
+    fn test_root_panic_without_shutdown_timeout_waits_for_direct_child_cleanup_before_unwind<R>(
+        runner: R,
+    ) where
+        R: Runner + Send + 'static,
+        R::Context: Spawner,
+    {
+        test_root_exit_waits_for_direct_child_cleanup(runner, true);
+    }
+
     fn test_spawn_after_root_exit_returns_closed<R>(runner: R, should_panic: bool)
     where
         R: Runner + Send + 'static,
@@ -1680,7 +1748,7 @@ mod tests {
         });
     }
 
-    fn test_shutdown<R: Runner>(runner: R)
+    fn test_stop<R: Runner>(runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -1691,8 +1759,8 @@ mod tests {
                 .with_label("before")
                 .spawn(move |context| async move {
                     let mut signal = context.stopped();
-                    let value = (&mut signal).await.unwrap();
-                    assert_eq!(value, kill);
+                    let reason = (&mut signal).await.unwrap();
+                    assert_eq!(reason, StopReason::Requested(kill));
                     drop(signal);
                 });
 
@@ -1700,23 +1768,72 @@ mod tests {
             let result = context.clone().stop(kill, None).await;
             assert!(result.is_ok());
 
-            // Spawn a task after stop is called
+            // Calls to `stopped()` after stop still resolve immediately to the
+            // original stop reason.
+            let reason = context.stopped().await.unwrap();
+            assert_eq!(reason, StopReason::Requested(kill));
+
+            // Stopping is not shutdown: new tasks may still be spawned and can
+            // observe the already-resolved stop signal immediately.
             let after = context
                 .with_label("after")
                 .spawn(move |context| async move {
-                    // A call to `stopped()` after `stop()` resolves immediately
-                    let value = context.stopped().await.unwrap();
-                    assert_eq!(value, kill);
+                    let reason = context.stopped().await.unwrap();
+                    assert_eq!(reason, StopReason::Requested(kill));
                 });
+            assert!(after.await.is_ok());
 
-            // Ensure both tasks complete
-            let result = join!(before, after);
-            assert!(result.0.is_ok());
-            assert!(result.1.is_ok());
+            // Ensure the pre-existing task completed its graceful cleanup.
+            assert!(before.await.is_ok());
         });
     }
 
-    fn test_shutdown_multiple_signals<R: Runner>(runner: R)
+    fn test_stop_does_not_shutdown<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Clock + Send + 'static,
+    {
+        let (stop_finished_tx, stop_finished_rx) = oneshot::channel();
+        let release_root = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release_root2 = release_root.clone();
+        let kill = 7;
+
+        let thread = std::thread::spawn(move || {
+            runner.start(|context| async move {
+                let (task_started_tx, task_started_rx) = oneshot::channel();
+                context.clone().spawn(move |context| async move {
+                    let mut signal = context.stopped();
+                    task_started_tx.send(()).unwrap();
+                    let reason = (&mut signal).await.unwrap();
+                    assert_eq!(reason, StopReason::Requested(kill));
+                    drop(signal);
+                });
+
+                task_started_rx.await.unwrap();
+                context.clone().stop(kill, None).await.unwrap();
+                stop_finished_tx.send(()).unwrap();
+
+                // `stop()` completing does not shut the runtime down; the root
+                // may keep running and do more work afterwards.
+                while !release_root2.load(Ordering::Relaxed) {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+            });
+        });
+
+        stop_finished_rx
+            .blocking_recv()
+            .expect("stop should complete while the root is still running");
+        assert!(
+            !thread.is_finished(),
+            "graceful stopping should not by itself shut the runtime down",
+        );
+
+        release_root.store(true, Ordering::Relaxed);
+        thread.join().expect("runner thread should join cleanly");
+    }
+
+    fn test_stop_multiple_signals<R: Runner>(runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -1737,8 +1854,8 @@ mod tests {
                     started_tx.send(()).await.unwrap();
 
                     // Increment once killed
-                    let value = (&mut signal).await.unwrap();
-                    assert_eq!(value, kill);
+                    let reason = (&mut signal).await.unwrap();
+                    assert_eq!(reason, StopReason::Requested(kill));
                     context.sleep(cleanup_duration).await;
                     counter.fetch_add(1, Ordering::SeqCst);
 
@@ -1768,7 +1885,7 @@ mod tests {
         });
     }
 
-    fn test_shutdown_timeout<R: Runner>(runner: R)
+    fn test_stop_timeout<R: Runner>(runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -1794,7 +1911,7 @@ mod tests {
         });
     }
 
-    fn test_shutdown_multiple_stop_calls<R: Runner>(runner: R)
+    fn test_stop_multiple_stop_calls<R: Runner>(runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -1814,8 +1931,8 @@ mod tests {
                     started_tx.send(()).unwrap();
 
                     // Wait for signal to be resolved
-                    let value = (&mut signal).await.unwrap();
-                    assert_eq!(value, kill1);
+                    let reason = (&mut signal).await.unwrap();
+                    assert_eq!(reason, StopReason::Requested(kill1));
                     context.sleep(Duration::from_millis(50)).await;
 
                     // Increment counter
@@ -1844,7 +1961,7 @@ mod tests {
 
             // Verify first stop value wins
             let sig = context.stopped().await;
-            assert_eq!(sig.unwrap(), kill1);
+            assert_eq!(sig.unwrap(), StopReason::Requested(kill1));
 
             // Wait for blocking task to complete
             let result = task.await;
@@ -1856,26 +1973,173 @@ mod tests {
         });
     }
 
-    fn test_unfulfilled_shutdown<R: Runner>(runner: R)
-    where
-        R::Context: Spawner + Metrics,
+    fn test_root_exit_signals_stopped<R>(
+        runner: R,
+        should_panic: bool,
+        explicit_stop_value: Option<i32>,
+    ) where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
     {
-        runner.start(|context| async move {
-            // Spawn a task that waits for signal
-            context
-                .with_label("before")
-                .spawn(move |context| async move {
-                    let mut signal = context.stopped();
-                    let value = (&mut signal).await.unwrap();
+        let (task_started_tx, task_started_rx) = oneshot::channel();
+        let (root_exit_tx, root_exit_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
 
-                    // We should never reach this point
-                    assert_eq!(value, 42);
+        // Run the root future on another thread so the test can observe the
+        // graceful stopping phase inside runtime shutdown before `start()`
+        // returns or resumes
+        // unwinding.
+        let thread = std::thread::spawn(move || {
+            runner.start(|context| async move {
+                context.clone().spawn(move |context| async move {
+                    // Acquire the stop signal before runtime shutdown begins so
+                    // this task participates in graceful root teardown.
+                    let mut signal = context.stopped();
+                    task_started_tx.send(()).unwrap();
+
+                    let reason = (&mut signal).await.unwrap();
+                    let expected =
+                        explicit_stop_value.map_or(StopReason::Shutdown, StopReason::Requested);
+                    assert_eq!(reason, expected);
+
+                    // Hold shutdown open until the test confirms the root is
+                    // still blocked in graceful cleanup.
+                    release_rx.await.unwrap();
                     drop(signal);
                 });
 
-            // Ensure waker is registered
-            reschedule().await;
+                // Ensure the child has registered its stop signal before
+                // runtime shutdown begins.
+                task_started_rx.await.unwrap();
+                if let Some(kill) = explicit_stop_value {
+                    // Start graceful stopping from a sibling task and wait only
+                    // until the explicit stop request becomes visible. The
+                    // actual stop future remains pending in the sibling task,
+                    // so root teardown must still join that in-flight graceful
+                    // stop instead of starting a separate shutdown sequence.
+                    context.clone().spawn(move |context| async move {
+                        let _ = context.stop(kill, None).await;
+                    });
+                    let reason = context.stopped().await.unwrap();
+                    assert_eq!(reason, StopReason::Requested(kill));
+                }
+                root_exit_tx.send(()).unwrap();
+                if should_panic {
+                    panic!("root panic");
+                }
+            });
         });
+
+        // Once the root is ready to return or resume unwinding, `start()`
+        // should still remain blocked until the already-open stop signal is
+        // released by the child task above.
+        root_exit_rx
+            .blocking_recv()
+            .expect("root should reach exit after graceful stop is requested");
+        assert!(
+            !thread.is_finished(),
+            "root shutdown should wait for graceful stopped cleanup",
+        );
+
+        release_tx.send(()).unwrap();
+        let result = thread.join();
+        if should_panic {
+            assert!(result.is_err(), "root should have panicked");
+        } else {
+            result.unwrap();
+        }
+    }
+
+    fn test_root_completion_signals_stopped<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        test_root_exit_signals_stopped(runner, false, None);
+    }
+
+    fn test_root_panic_signals_stopped_before_unwind<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        test_root_exit_signals_stopped(runner, true, None);
+    }
+
+    fn test_root_completion_joins_existing_stop<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        test_root_exit_signals_stopped(runner, false, Some(42));
+    }
+
+    fn test_root_panic_joins_existing_stop_before_unwind<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        test_root_exit_signals_stopped(runner, true, Some(42));
+    }
+
+    fn test_root_exit_waits_for_external_stopped_handle<R>(runner: R, should_panic: bool)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        let (signal_tx, signal_rx) = oneshot::channel();
+
+        // Run the root future on another thread so the test can keep a
+        // pre-registered `stopped()` handle alive outside the runtime task set
+        // while `start()` remains blocked in shutdown.
+        let thread = std::thread::spawn(move || {
+            runner.start(|context| async move {
+                assert!(
+                    signal_tx.send(context.stopped()).is_ok(),
+                    "root should send external stopped handle",
+                );
+                if should_panic {
+                    panic!("root panic");
+                }
+            });
+        });
+
+        let mut signal = signal_rx
+            .blocking_recv()
+            .expect("root should publish an external stopped handle");
+
+        // The handle should resolve once root shutdown begins, but the runtime
+        // must remain blocked until the externally-held signal is dropped.
+        let reason = futures::executor::block_on(async { (&mut signal).await.unwrap() });
+        assert_eq!(reason, StopReason::Shutdown);
+        assert!(
+            !thread.is_finished(),
+            "root shutdown should wait for external stopped handles",
+        );
+
+        drop(signal);
+        let result = thread.join();
+        if should_panic {
+            assert!(result.is_err(), "root should have panicked");
+        } else {
+            result.unwrap();
+        }
+    }
+
+    fn test_root_completion_waits_for_external_stopped_handle<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        test_root_exit_waits_for_external_stopped_handle(runner, false);
+    }
+
+    fn test_root_panic_waits_for_external_stopped_handle_before_unwind<R>(runner: R)
+    where
+        R: Runner + Send + 'static,
+        R::Context: Spawner + Send + 'static,
+    {
+        test_root_exit_waits_for_external_stopped_handle(runner, true);
     }
 
     fn test_spawn_dedicated<R: Runner>(runner: R)
@@ -3514,33 +3778,87 @@ mod tests {
     }
 
     #[test]
-    fn test_deterministic_shutdown() {
+    fn test_deterministic_stop() {
         let executor = deterministic::Runner::default();
-        test_shutdown(executor);
+        test_stop(executor);
     }
 
     #[test]
-    fn test_deterministic_shutdown_multiple_signals() {
+    fn test_deterministic_stop_does_not_shutdown() {
         let executor = deterministic::Runner::default();
-        test_shutdown_multiple_signals(executor);
+        test_stop_does_not_shutdown(executor);
     }
 
     #[test]
-    fn test_deterministic_shutdown_timeout() {
+    fn test_deterministic_stop_multiple_signals() {
         let executor = deterministic::Runner::default();
-        test_shutdown_timeout(executor);
+        test_stop_multiple_signals(executor);
     }
 
     #[test]
-    fn test_deterministic_shutdown_multiple_stop_calls() {
+    fn test_deterministic_stop_timeout() {
         let executor = deterministic::Runner::default();
-        test_shutdown_multiple_stop_calls(executor);
+        test_stop_timeout(executor);
     }
 
     #[test]
-    fn test_deterministic_unfulfilled_shutdown() {
+    fn test_deterministic_stop_multiple_stop_calls() {
         let executor = deterministic::Runner::default();
-        test_unfulfilled_shutdown(executor);
+        test_stop_multiple_stop_calls(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_completion_signals_stopped() {
+        let executor = deterministic::Runner::default();
+        test_root_completion_signals_stopped(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_panic_signals_stopped_before_unwind() {
+        let executor = deterministic::Runner::default();
+        test_root_panic_signals_stopped_before_unwind(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_completion_waits_for_direct_child_cleanup_without_shutdown_timeout()
+    {
+        let cfg = deterministic::Config::default().with_shutdown_timeout(None);
+        let executor = deterministic::Runner::new(cfg);
+        test_root_completion_without_shutdown_timeout_waits_for_direct_child_cleanup(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_panic_waits_for_direct_child_cleanup_without_shutdown_timeout_before_unwind(
+    ) {
+        let cfg = deterministic::Config::default().with_shutdown_timeout(None);
+        let executor = deterministic::Runner::new(cfg);
+        test_root_panic_without_shutdown_timeout_waits_for_direct_child_cleanup_before_unwind(
+            executor,
+        );
+    }
+
+    #[test]
+    fn test_deterministic_root_completion_joins_existing_stop() {
+        let executor = deterministic::Runner::default();
+        test_root_completion_joins_existing_stop(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_panic_joins_existing_stop_before_unwind() {
+        let executor = deterministic::Runner::default();
+        test_root_panic_joins_existing_stop_before_unwind(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_completion_waits_for_external_stopped_handle() {
+        let executor = deterministic::Runner::default();
+        test_root_completion_waits_for_external_stopped_handle(executor);
+    }
+
+    #[test]
+    fn test_deterministic_root_panic_waits_for_external_stopped_handle_before_unwind() {
+        let executor = deterministic::Runner::default();
+        test_root_panic_waits_for_external_stopped_handle_before_unwind(executor);
     }
 
     #[test]
@@ -3760,28 +4078,45 @@ mod tests {
 
     #[test]
     fn test_tokio_root_completion_waits_for_direct_child_cleanup() {
-        let cfg = tokio::Config::default().with_shutdown_timeout(Duration::from_secs(1));
+        let cfg = tokio::Config::default().with_shutdown_timeout(Some(Duration::from_secs(1)));
         let executor = tokio::Runner::new(cfg);
         test_root_completion_waits_for_direct_child_cleanup(executor);
     }
 
     #[test]
     fn test_tokio_root_panic_waits_for_direct_child_cleanup_before_unwind() {
-        let cfg = tokio::Config::default().with_shutdown_timeout(Duration::from_secs(1));
+        let cfg = tokio::Config::default().with_shutdown_timeout(Some(Duration::from_secs(1)));
         let executor = tokio::Runner::new(cfg);
         test_root_panic_waits_for_direct_child_cleanup_before_unwind(executor);
     }
 
     #[test]
+    fn test_tokio_root_completion_waits_for_direct_child_cleanup_without_shutdown_timeout() {
+        let cfg = tokio::Config::default().with_shutdown_timeout(None);
+        let executor = tokio::Runner::new(cfg);
+        test_root_completion_without_shutdown_timeout_waits_for_direct_child_cleanup(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_panic_waits_for_direct_child_cleanup_without_shutdown_timeout_before_unwind()
+    {
+        let cfg = tokio::Config::default().with_shutdown_timeout(None);
+        let executor = tokio::Runner::new(cfg);
+        test_root_panic_without_shutdown_timeout_waits_for_direct_child_cleanup_before_unwind(
+            executor,
+        );
+    }
+
+    #[test]
     fn test_tokio_spawn_after_root_shutdown_returns_closed() {
-        let cfg = tokio::Config::default().with_shutdown_timeout(Duration::from_secs(1));
+        let cfg = tokio::Config::default().with_shutdown_timeout(Some(Duration::from_secs(1)));
         let executor = tokio::Runner::new(cfg);
         test_spawn_after_root_shutdown_returns_closed(executor);
     }
 
     #[test]
     fn test_tokio_spawn_after_root_panic_returns_closed() {
-        let cfg = tokio::Config::default().with_shutdown_timeout(Duration::from_secs(1));
+        let cfg = tokio::Config::default().with_shutdown_timeout(Some(Duration::from_secs(1)));
         let executor = tokio::Runner::new(cfg);
         test_spawn_after_root_panic_returns_closed(executor);
     }
@@ -3897,33 +4232,73 @@ mod tests {
     }
 
     #[test]
-    fn test_tokio_shutdown() {
+    fn test_tokio_stop() {
         let executor = tokio::Runner::default();
-        test_shutdown(executor);
+        test_stop(executor);
     }
 
     #[test]
-    fn test_tokio_shutdown_multiple_signals() {
+    fn test_tokio_stop_does_not_shutdown() {
         let executor = tokio::Runner::default();
-        test_shutdown_multiple_signals(executor);
+        test_stop_does_not_shutdown(executor);
     }
 
     #[test]
-    fn test_tokio_shutdown_timeout() {
+    fn test_tokio_stop_multiple_signals() {
         let executor = tokio::Runner::default();
-        test_shutdown_timeout(executor);
+        test_stop_multiple_signals(executor);
     }
 
     #[test]
-    fn test_tokio_shutdown_multiple_stop_calls() {
-        let executor = tokio::Runner::default();
-        test_shutdown_multiple_stop_calls(executor);
+    fn test_tokio_stop_timeout() {
+        // Use a shorter runtime shutdown timeout here because a timed-out
+        // graceful `stop()` still leaves root teardown to spend its own
+        // shutdown timeout before aborting the remaining task.
+        let cfg = tokio::Config::default().with_shutdown_timeout(Some(Duration::from_millis(100)));
+        let executor = tokio::Runner::new(cfg);
+        test_stop_timeout(executor);
     }
 
     #[test]
-    fn test_tokio_unfulfilled_shutdown() {
+    fn test_tokio_stop_multiple_stop_calls() {
         let executor = tokio::Runner::default();
-        test_unfulfilled_shutdown(executor);
+        test_stop_multiple_stop_calls(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_completion_signals_stopped() {
+        let executor = tokio::Runner::default();
+        test_root_completion_signals_stopped(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_panic_signals_stopped_before_unwind() {
+        let executor = tokio::Runner::default();
+        test_root_panic_signals_stopped_before_unwind(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_completion_joins_existing_stop() {
+        let executor = tokio::Runner::default();
+        test_root_completion_joins_existing_stop(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_panic_joins_existing_stop_before_unwind() {
+        let executor = tokio::Runner::default();
+        test_root_panic_joins_existing_stop_before_unwind(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_completion_waits_for_external_stopped_handle() {
+        let executor = tokio::Runner::default();
+        test_root_completion_waits_for_external_stopped_handle(executor);
+    }
+
+    #[test]
+    fn test_tokio_root_panic_waits_for_external_stopped_handle_before_unwind() {
+        let executor = tokio::Runner::default();
+        test_root_panic_waits_for_external_stopped_handle_before_unwind(executor);
     }
 
     #[test]
