@@ -46,9 +46,9 @@ pub trait Write {
     /// Implementations should panic if the buffer doesn't have enough capacity.
     fn write(&self, buf: &mut impl BufMut);
 
-    /// Writes to a [BufsMut], allowing zero-copy for [Bytes] fields via
-    /// [`BufsMut::push`]. Must encode to the same format as [Write::write].
-    /// Defaults to [Write::write].
+    /// Writes to a [`BufsMut`], allowing existing [`Bytes`] chunks to be
+    /// appended via [`BufsMut::push`] instead of written inline. Must encode
+    /// to the same format as [`Write::write`]. Defaults to [`Write::write`].
     fn write_bufs(&self, buf: &mut impl BufsMut) {
         self.write(buf);
     }
@@ -209,9 +209,10 @@ pub trait CodecFixedShared: CodecFixed<Cfg = ()> + Send + Sync {}
 // Automatically implement `CodecFixedShared` for types that meet all bounds.
 impl<T: CodecFixed<Cfg = ()> + Send + Sync> CodecFixedShared for T {}
 
-/// A [BufMut] that can also accept pre-existing [Bytes] without copying.
+/// A [`BufMut`] that can also append pre-existing [`Bytes`] chunks.
 pub trait BufsMut: BufMut {
-    /// Append bytes by reference, without copying the underlying data.
+    /// Appends a [`Bytes`] chunk instead of writing its contents inline into
+    /// the destination buffer.
     fn push(&mut self, bytes: impl Into<Bytes>);
 }
 
