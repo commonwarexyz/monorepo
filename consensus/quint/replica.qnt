@@ -696,9 +696,9 @@ module replica {
                 broadcast_notarization: VIEWS.mapBy(_ => false),
                 broadcast_nullification: VIEWS.mapBy(_ => false),
                 broadcast_finalization: VIEWS.mapBy(_ => false),
-                proposal: VIEWS.union(Set(GENESIS_VIEW)).mapBy(_ => None),
-                leader_proposal: VIEWS.union(Set(GENESIS_VIEW)).mapBy(_ => None),
-                leader_proposal_conflicted: VIEWS.union(Set(GENESIS_VIEW)).mapBy(_ => false),
+                proposal: VIEWS.mapBy(_ => None),
+                leader_proposal: VIEWS.mapBy(_ => None),
+                leader_proposal_conflicted: VIEWS.mapBy(_ => false),
                 certify: VIEWS.mapBy(_ => None),
                 certified: VIEWS.mapBy(_ => None),
                 propose_sent: false,
@@ -763,12 +763,8 @@ module replica {
                     on_timeout(id, CertificationTimeoutKind)
                 },
                 {
-                    val notarize_votes = sent_notarize_votes
-                    all {
-                        notarize_votes != Set(),
-                        nondet vote = notarize_votes.oneOf()
-                        on_notarize(id, vote)
-                    }
+                    nondet vote = sent_notarize_votes.oneOf()
+                    on_notarize(id, vote)
                 },
                 {
                     nondet vote = sent_finalize_votes.oneOf()
@@ -875,14 +871,6 @@ module replica {
         val payload_ok = VALID_PAYLOADS.contains(payload)
         val is_leader_vote = (vote.sig == sig_of(leader.get(view)))
         val proposal_conflicted = has_leader_proposal_conflict(self, proposal)
-        val timer = forced_timeout_expired(
-            self,
-            id,
-            view,
-            InvalidProposalReason,
-            sent_nullify_votes,
-            store_nullify
-        )
         val can_process_as_proposal = and {
             is_leader_vote,
             view == self.view,
@@ -908,6 +896,14 @@ module replica {
                 lastAction' = "on_notarize"
             }
         } else if (can_process_as_proposal) {
+            val timer = forced_timeout_expired(
+                self,
+                id,
+                view,
+                InvalidProposalReason,
+                sent_nullify_votes,
+                store_nullify
+            )
             // Proposal processing: validate the leader's proposal and vote
             val notarize_ok = is_some(construct_notarize(self, view, proposal, payload_ok and parent_ok))
             val new_store_notarize_p = if (notarize_ok)
@@ -1473,41 +1469,6 @@ module replica {
         }
     }
 
-    action byzantine_votes(
-        sender: ReplicaId,
-        view: ViewNumber,
-        payload: Payload,
-        parent_view: ViewNumber,
-        kinds: Set[Kind]
-    ): bool = all {
-        sent_notarize_votes' = sent_notarize_votes.union(
-            kinds.filter(k => k == NotarizeKind).map(_ => {
-                proposal: {
-                    view: view,
-                    payload: payload,
-                    parent: parent_view,
-                },
-                sig: sig_of(sender),
-            })
-        ),
-        sent_nullify_votes' = sent_nullify_votes.union(
-            kinds.filter(k => k == NullifyKind).map(_ => {
-                view: view,
-                sig: sig_of(sender),
-            })
-        ),
-        sent_finalize_votes' = sent_finalize_votes.union(
-            kinds.filter(k => k == FinalizeKind).map(_ => {
-                proposal: {
-                    view: view,
-                    payload: payload,
-                    parent: parent_view,
-                },
-                sig: sig_of(sender),
-            })
-        )
-    }
-
     // Byzantine behavior (completely adversarial)
     action byzantine_replica_step: bool = all {
         BYZANTINE != Set(),
@@ -1518,11 +1479,48 @@ module replica {
               nondet view = VIEWS.oneOf()
               nondet payload = AllPayloads.oneOf()
               nondet parent_view = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
+              val p = {
+                  view: view,
+                  payload: payload,
+                  parent: parent_view,
+              }
+              val vote = {
+                  proposal: p,
+                  sig: sig_of(sender)
+              }
 
-              nondet base = Set(NotarizeKind, NullifyKind, FinalizeKind).powerset().oneOf()
-              nondet kind = Set(NotarizeKind, NullifyKind, FinalizeKind).oneOf()
-              val kinds = base.union(Set(kind))
-              byzantine_votes(sender, view, payload, parent_view, kinds)
+              sent_notarize_votes' = sent_notarize_votes.union(Set(vote)),
+        },
+
+        all {
+              nondet sender = BYZANTINE.oneOf()
+              nondet view = VIEWS.oneOf()
+
+              val vote = {
+                  view: view,
+                  sig: sig_of(sender)
+              }
+
+              sent_nullify_votes' = sent_nullify_votes.union(Set(vote))
+        },
+
+        all {
+              nondet sender = BYZANTINE.oneOf()
+              nondet view = VIEWS.oneOf()
+              nondet payload = AllPayloads.oneOf()
+              nondet parent_view = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
+
+              val p = {
+                  view: view,
+                  payload: payload,
+                  parent: parent_view,
+              }
+              val vote = {
+                  proposal: p,
+                  sig: sig_of(sender)
+              }
+
+              sent_finalize_votes' = sent_finalize_votes.union(Set(vote))
         },
 
         // Adversary may inject arbitrary certificates.
@@ -1567,12 +1565,12 @@ module replica {
             nondet view = VIEWS.union(Set(GENESIS_VIEW)).oneOf()
             nondet sig = BYZANTINE.oneOf()
             nondet payload = AllPayloads.oneOf()
-            val proposal = {
+            val p = {
                 view: view,
                 payload: payload,
                 parent: parent,
             }
-            sent_proposal' = sent_proposal.union(Set((sig_of(sig), proposal))),
+            sent_proposal' = sent_proposal.union(Set((sig_of(sig), p))),
         }
     }
 
