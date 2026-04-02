@@ -126,58 +126,84 @@ pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     transcript: &mut Transcript,
     statement: &Statement<F, G>,
     proof: Proof<F, G>,
-    _strategy: &impl Strategy,
+    strategy: &impl Strategy,
 ) -> bool {
     assert_eq!(statement.setup.g.len(), statement.setup.h.len());
     assert!(statement.setup.g.len().is_power_of_two());
 
-    let mut g = statement.setup.g.clone();
-    let mut h = statement.setup.h.clone();
-    let mut product =
-        statement.setup.product_generator.clone() * &statement.product + &statement.commitment;
-    let mut l_r_coms = proof.l_r_coms;
-    l_r_coms.reverse();
-    while g.len() > 1 {
-        let half_len = g.len() / 2;
-        let (g_lo, g_hi) = g.split_at_mut(half_len);
-        let (h_lo, h_hi) = h.split_at_mut(half_len);
-        let Some((l, r)) = l_r_coms.pop() else {
-            return false;
-        };
+    let rounds = statement.setup.g.len().ilog2() as usize;
+    let Proof {
+        l_r_coms,
+        a_final,
+        b_final,
+    } = proof;
+    if l_r_coms.len() != rounds {
+        return false;
+    }
+
+    // We reduce verification down to one MSM which needs to equal 0:
+    // commitment + product * U + sum(u_i^2 * L_i + u_i^-2 * R_i)
+    // - a_final * g_final - b_final * h_final - a_final * b_final * U = 0.
+    let capacity = statement.setup.g.len() + statement.setup.h.len() + 2 * rounds + 1;
+    let mut points = Vec::<G>::with_capacity(capacity);
+    let mut weights = Vec::<F>::with_capacity(capacity);
+    let mut us = Vec::<(F, F)>::with_capacity(rounds);
+
+    for (l, r) in l_r_coms {
         transcript.commit(l.encode());
         transcript.commit(r.encode());
-        let mut u = sample_challenge::<F>(transcript);
-        let mut u_inv = u.inv();
-
-        for (g_lo_i, g_hi_i) in g_lo.iter_mut().zip(g_hi.iter_mut()) {
-            *g_lo_i *= &u_inv;
-            *g_lo_i += &(g_hi_i.clone() * &u);
-        }
-        g.truncate(half_len);
-
-        for (h_lo_i, h_hi_i) in h_lo.iter_mut().zip(h_hi.iter_mut()) {
-            *h_lo_i *= &u;
-            *h_lo_i += &(h_hi_i.clone() * &u_inv);
-        }
-        h.truncate(half_len);
-
+        let u = sample_challenge::<F>(transcript);
+        let u_inv = u.inv();
+        us.push((u.clone(), u_inv.clone()));
         let u2 = {
-            u.square();
-            u
+            let mut out = u;
+            out.square();
+            out
         };
         let u_inv2 = {
-            u_inv.square();
-            u_inv
+            let mut out = u_inv;
+            out.square();
+            out
         };
-
-        product += &(l * &u2 + &(r * &u_inv2));
+        points.push(l);
+        weights.push(u2);
+        points.push(r);
+        weights.push(u_inv2);
     }
-    let g_final = g.pop().expect("g should be non empty");
-    let h_final = h.pop().expect("h should be non empty");
-    let expected_product = g_final * &proof.a_final
-        + &(h_final * &proof.b_final)
-        + &(statement.setup.product_generator.clone() * &(proof.a_final * &proof.b_final));
-    expected_product == product
+
+    points.extend_from_slice(&statement.setup.g);
+    points.extend_from_slice(&statement.setup.h);
+    points.push(statement.setup.product_generator.clone());
+
+    let g_h_weights_start = weights.len();
+    weights.push(F::one());
+    for (u, u_inv) in us.into_iter().rev() {
+        let end = weights.len();
+        weights.extend_from_within(g_h_weights_start..end);
+        for left_i in &mut weights[g_h_weights_start..end] {
+            *left_i *= &u_inv;
+        }
+        for right_i in &mut weights[end..] {
+            *right_i *= &u;
+        }
+    }
+    let g_end = weights.len();
+    weights.extend_from_within(g_h_weights_start..g_end);
+    weights[g_end..].reverse();
+
+    let g_weight_tweak = -a_final.clone();
+    for g_w_i in &mut weights[g_h_weights_start..g_end] {
+        *g_w_i *= &g_weight_tweak;
+    }
+
+    let h_weight_tweak = -b_final.clone();
+    for h_w_i in &mut weights[g_end..] {
+        *h_w_i *= &h_weight_tweak;
+    }
+
+    weights.push(statement.product.clone() - &(a_final * &b_final));
+
+    G::msm(&points, &weights, strategy) == -statement.commitment.clone()
 }
 
 #[cfg(test)]
