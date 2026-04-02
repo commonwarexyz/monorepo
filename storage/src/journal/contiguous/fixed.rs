@@ -660,14 +660,17 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok(self.inner.read().await.size);
         }
 
+        // Encode before grabbing write guard.
+        let encoded: Vec<_> = items.iter().map(|item| item.encode()).collect();
+
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
         let mut last_position = 0;
-        for item in items {
-            // Append the item to the journal.
+        for buf in &encoded {
+            // Append the pre-encoded item to the journal.
             let (section, _) = self.position_to_section(inner.size);
-            inner.journal.append(section, item).await?;
+            inner.journal.append_raw(section, buf).await?;
             last_position = inner.size;
             inner.size += 1;
 

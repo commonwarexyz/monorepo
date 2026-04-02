@@ -202,6 +202,9 @@ pub struct Journal<E: Context, V: Codec> {
     /// This value is immutable after initialization and must remain consistent
     /// across restarts. Changing this value will result in data loss or corruption.
     items_per_section: u64,
+
+    /// Optional compression level when encoding items.
+    compression: Option<u8>,
 }
 
 /// A reader guard that holds a consistent snapshot of the variable journal's bounds.
@@ -311,6 +314,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             }),
             offsets,
             items_per_section,
+            compression: cfg.compression,
         })
     }
 
@@ -354,6 +358,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             }),
             offsets,
             items_per_section: cfg.items_per_section.get(),
+            compression: cfg.compression,
         })
     }
 
@@ -521,16 +526,22 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             return Ok(self.inner.read().await.size);
         }
 
+        // Encode before grabbing write guard.
+        let encoded: Vec<_> = items
+            .iter()
+            .map(|item| variable::Journal::<E, V>::encode_item(self.compression, item))
+            .collect::<Result<Vec<_>, _>>()?;
+
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
         let mut last_position = 0;
-        for (index, item) in items.iter().enumerate() {
+        for (index, (buf, _item_len)) in encoded.iter().enumerate() {
             // Calculate which section this position belongs to.
             let section = position_to_section(inner.size, self.items_per_section);
 
-            // Append to data journal, get offset.
-            let (offset, _size) = inner.data.append(section, item).await?;
+            // Append pre-encoded data to the data journal, get offset.
+            let offset = inner.data.append_raw(section, buf).await?;
 
             // Append offset to offsets journal.
             let offsets_pos = self.offsets.append(&offset).await?;
