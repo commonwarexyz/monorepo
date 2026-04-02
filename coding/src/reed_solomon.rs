@@ -657,8 +657,10 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
+    use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
     use commonware_utils::NZU16;
 
     type RS = ReedSolomon<Sha256>;
@@ -1074,10 +1076,6 @@ mod tests {
 
     #[test]
     fn test_chunk_encode_with_pool_matches_encode() {
-        use bytes::Buf;
-        use commonware_codec::Encode;
-        use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pool = context.network_buffer_pool();

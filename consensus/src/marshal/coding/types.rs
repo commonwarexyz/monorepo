@@ -529,9 +529,11 @@ pub fn coding_config_for_participants(n_participants: u16) -> CodingConfig {
 mod test {
     use super::*;
     use crate::{marshal::mocks::block::Block as MockBlock, Block as _};
+    use bytes::Buf;
     use commonware_codec::{Decode, Encode};
     use commonware_coding::{CodecConfig, ReedSolomon};
     use commonware_cryptography::{sha256::Digest as Sha256Digest, Digest, Sha256};
+    use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
 
     const MAX_SHARD_SIZE: CodecConfig = CodecConfig {
         maximum_shard_size: 1024 * 1024, // 1 MiB
@@ -688,9 +690,6 @@ mod test {
 
     #[test]
     fn test_shard_encode_with_pool_matches_encode() {
-        use bytes::Buf;
-        use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pool = context.network_buffer_pool();
