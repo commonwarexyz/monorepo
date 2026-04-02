@@ -69,11 +69,11 @@ impl<const N: usize> ClearSet<N> {
         }
     }
 
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         self.locations.len()
     }
 
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.locations.is_empty()
     }
 
