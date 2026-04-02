@@ -1,3 +1,7 @@
+#[cfg(any(feature = "iouring-network", feature = "iouring-storage"))]
+use crate::iouring;
+#[cfg(feature = "iouring-network")]
+use crate::network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork};
 #[cfg(not(feature = "iouring-network"))]
 use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
 #[cfg(feature = "iouring-storage")]
@@ -6,11 +10,6 @@ use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage
 use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 #[cfg(feature = "external")]
 use crate::Pacer;
-#[cfg(feature = "iouring-network")]
-use crate::{
-    iouring,
-    network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
-};
 use crate::{
     network::metered::Network as MeteredNetwork,
     process::metered::Metrics as MeteredProcess,
@@ -18,7 +17,8 @@ use crate::{
     storage::metered::Storage as MeteredStorage,
     telemetry::metrics::task::Label,
     utils::{
-        self, add_attribute, signal::Stopper, supervision::Tree, Panicker, Registry, ScopeGuard,
+        self, add_attribute, signal::Stopper, supervision::Tree, MetricHandle, Panicker, Registry,
+        ScopeGuard,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Metrics as _, SinkOf,
     Spawner as _, StreamOf, METRICS_PREFIX,
@@ -26,7 +26,10 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::ThreadPool;
-use commonware_utils::{sync::Mutex, NZUsize};
+use commonware_utils::{
+    sync::{Condvar, Mutex},
+    NZUsize,
+};
 use futures::future::Either;
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use prometheus_client::{
@@ -42,12 +45,16 @@ use std::{
     future::Future,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     path::PathBuf,
-    sync::Arc,
-    time::{Duration, SystemTime},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant, SystemTime},
 };
-use tokio::runtime::{Builder, Runtime};
-use tracing::{info_span, Instrument};
+use tokio::runtime::{Builder, Handle as TokioHandle};
+use tracing::{error, info_span, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[cfg(feature = "iouring-network")]
@@ -84,6 +91,128 @@ impl Metrics {
             metrics.tasks_running.clone(),
         );
         metrics
+    }
+}
+
+/// Tracks running spawned tasks.
+#[derive(Default)]
+struct TaskTracker {
+    // Current state: bit 0 marks shutdown-closed task registration, the
+    // remaining bits store the live tracked-task count.
+    state: AtomicUsize,
+    gate: Mutex<()>,
+    idle: Condvar,
+}
+
+impl TaskTracker {
+    const CLOSED: usize = 1;
+    const LIVE_INCREMENT: usize = 2;
+
+    #[inline]
+    const fn closed(state: usize) -> bool {
+        state & Self::CLOSED != 0
+    }
+
+    #[inline]
+    const fn live(state: usize) -> usize {
+        state >> 1
+    }
+
+    /// Reserves a task slot and returns a guard that releases it on drop.
+    ///
+    /// Returns `None` if shutdown has already closed task registration.
+    fn track(self: &Arc<Self>) -> Option<TaskGuard> {
+        // Atomically increment the live-task count only if shutdown has not
+        // already closed task registration. This single state transition is
+        // the linearization point between "task accepted" and "shutdown
+        // closed registration".
+        self.state
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |state| {
+                if Self::closed(state) {
+                    None
+                } else {
+                    Some(
+                        state
+                            .checked_add(Self::LIVE_INCREMENT)
+                            .expect("task tracker overflow"),
+                    )
+                }
+            })
+            .ok()?;
+
+        Some(TaskGuard {
+            tracker: self.clone(),
+        })
+    }
+
+    /// Closes task registration for shutdown.
+    fn close(&self) {
+        self.state.fetch_or(Self::CLOSED, Ordering::Relaxed);
+    }
+
+    /// Waits for all tracked tasks to finish.
+    ///
+    /// Task registration must already be closed before calling this function.
+    ///
+    /// Returns `true` if all tracked tasks finish before `timeout`, or `false`
+    /// if shutdown timed out first.
+    fn wait_for_idle(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .expect("shutdown timeout overflow");
+
+        let mut gate = self.gate.lock();
+        let state = self.state.load(Ordering::Relaxed);
+        assert!(
+            Self::closed(state),
+            "task registration must be closed before waiting for idle",
+        );
+        if Self::live(state) == 0 {
+            return true;
+        }
+
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return false;
+        };
+        if remaining.is_zero() {
+            return false;
+        }
+
+        // Unlike `std`, `parking_lot`'s `Condvar` does not wake up spuriously,
+        // so we don't need to loop here:
+        //
+        // https://docs.rs/parking_lot/0.12.5/parking_lot/struct.Condvar.html#differences-from-the-standard-library-condvar
+        self.idle.wait_for(&mut gate, remaining);
+        Self::live(self.state.load(Ordering::Relaxed)) == 0
+    }
+
+    /// Decrements the live task count and wakes a shutdown waiter if this was
+    /// the final tracked task.
+    fn release(&self) {
+        let state = self
+            .state
+            .fetch_sub(Self::LIVE_INCREMENT, Ordering::Relaxed);
+        assert_ne!(Self::live(state), 0, "task tracker underflow");
+        // Only the transition from `closed + 1 live task` to `closed + 0 live
+        // tasks` needs to wake the shutdown waiter.
+        if state == (Self::CLOSED | Self::LIVE_INCREMENT) {
+            let _gate = self.gate.lock();
+            self.idle.notify_one();
+        }
+    }
+}
+
+/// Guard held by a spawned task until it has fully exited.
+///
+/// Dropping the guard decrements the live task count and wakes waiters when the
+/// final tracked task completes.
+struct TaskGuard {
+    tracker: Arc<TaskTracker>,
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        self.tracker.release();
     }
 }
 
@@ -142,7 +271,7 @@ pub struct Config {
     /// operations that require blocking (like `fs` and writing to `Stdout`).
     max_blocking_threads: usize,
 
-    /// Stack size to use for runtime-owned threads.
+    /// Whether spawned tasks should catch panics instead of propagating them.
     ///
     /// Defaults to the system stack size when the current platform exposes it,
     /// and otherwise falls back to Rust's default spawned-thread stack size.
@@ -150,8 +279,11 @@ pub struct Config {
     /// See [utils::thread::system_thread_stack_size].
     thread_stack_size: usize,
 
-    /// Whether or not to catch panics.
+    /// Whether spawned tasks should catch panics instead of propagating them.
     catch_panics: bool,
+
+    /// Maximum time to wait for spawned tasks to finish after shutdown begins.
+    shutdown_timeout: Duration,
 
     /// Base directory for all storage operations.
     storage_directory: PathBuf,
@@ -181,6 +313,7 @@ impl Config {
             max_blocking_threads: 512,
             thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
+            shutdown_timeout: Duration::from_secs(60),
             storage_directory,
             maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
             network_cfg: NetworkConfig::default(),
@@ -208,6 +341,11 @@ impl Config {
     /// See [Config]
     pub const fn with_catch_panics(mut self, b: bool) -> Self {
         self.catch_panics = b;
+        self
+    }
+    /// See [Config]
+    pub const fn with_shutdown_timeout(mut self, d: Duration) -> Self {
+        self.shutdown_timeout = d;
         self
     }
     /// See [Config]
@@ -264,6 +402,10 @@ impl Config {
         self.catch_panics
     }
     /// See [Config]
+    pub const fn shutdown_timeout(&self) -> Duration {
+        self.shutdown_timeout
+    }
+    /// See [Config]
     pub const fn read_write_timeout(&self) -> Duration {
         self.network_cfg.read_write_timeout
     }
@@ -313,8 +455,9 @@ impl Default for Config {
 pub struct Executor {
     registry: Mutex<Registry>,
     metrics: Arc<Metrics>,
-    runtime: Runtime,
+    handle: TokioHandle,
     shutdown: Mutex<Stopper>,
+    tasks: Arc<TaskTracker>,
     panicker: Panicker,
     thread_stack_size: usize,
 }
@@ -388,7 +531,10 @@ impl crate::Runner for Runner {
                     IoUringStorage::start(
                         IoUringConfig {
                             storage_directory: self.cfg.storage_directory.clone(),
-                            iouring_config: Default::default(),
+                            iouring_config: iouring::Config {
+                                shutdown_timeout: Some(self.cfg.shutdown_timeout),
+                                ..Default::default()
+                            },
                             thread_stack_size: self.cfg.thread_stack_size,
                         },
                         iouring_registry,
@@ -423,7 +569,7 @@ impl crate::Runner for Runner {
                         // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
                         size: IOURING_NETWORK_SIZE,
                         max_op_timeout: self.cfg.network_cfg.read_write_timeout,
-                        shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
+                        shutdown_timeout: Some(self.cfg.shutdown_timeout),
                         ..Default::default()
                     },
                     thread_stack_size: self.cfg.thread_stack_size,
@@ -455,8 +601,9 @@ impl crate::Runner for Runner {
         let executor = Arc::new(Executor {
             registry: Mutex::new(registry),
             metrics,
-            runtime,
+            handle: runtime.handle().clone(),
             shutdown: Mutex::new(Stopper::default()),
+            tasks: Arc::new(TaskTracker::default()),
             panicker,
             thread_stack_size: self.cfg.thread_stack_size,
         });
@@ -464,9 +611,15 @@ impl crate::Runner for Runner {
         // Get metrics
         let label = Label::root();
         executor.metrics.tasks_spawned.get_or_create(&label).inc();
-        let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
+        let metric =
+            MetricHandle::new(executor.metrics.tasks_running.get_or_create(&label).clone());
 
-        // Run the future
+        // Build the root context and run the future.
+        //
+        // Catch root panics and propagated child panics so we can still abort
+        // descendants, finish metrics, and wait for task cleanup before
+        // resuming the original unwind.
+        let tree = Tree::root();
         let context = Context {
             storage,
             name: label.name(),
@@ -476,13 +629,52 @@ impl crate::Runner for Runner {
             network,
             network_buffer_pool,
             storage_buffer_pool,
-            tree: Tree::root(),
+            tree: tree.clone(),
             execution: Execution::default(),
             instrumented: false,
         };
-        let output = executor.runtime.block_on(panicked.interrupt(f(context)));
-        gauge.dec();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            runtime.block_on(panicked.monitor(f(context)))
+        }));
 
+        // Close task registration before aborting the tree so task cleanup
+        // cannot enqueue new work while shutdown is propagating.
+        executor.tasks.close();
+        tree.abort();
+        metric.finish();
+
+        // Enforce the shutdown timeout once across both our own task-tracker wait and
+        // Tokio's runtime teardown. Reusing the full timeout for both phases would
+        // allow shutdown to exceed the configured bound.
+        let shutdown_deadline = Instant::now()
+            .checked_add(self.cfg.shutdown_timeout)
+            .expect("shutdown timeout overflow");
+
+        // If a tracked task does not finish before the timeout (may be a blocking task we
+        // cannot cancel), log the slow shutdown and continue returning or resuming
+        // the original panic.
+        if !executor.tasks.wait_for_idle(self.cfg.shutdown_timeout) {
+            error!("unfinished tasks remaining after shutdown timeout");
+        }
+        runtime.shutdown_timeout(
+            shutdown_deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or(Duration::ZERO),
+        );
+
+        // Resume any root or propagated child panic after cleanup. If the root
+        // returned normally, also check whether a child panicked while we were
+        // waiting for aborted tasks to finish cleaning up.
+        let (result, mut panicked) = result.unwrap_or_else(|payload| resume_unwind(payload));
+        let output = match result {
+            Ok(output) => output,
+            Err(payload) => resume_unwind(payload),
+        };
+        if let Some(panicked) = panicked.as_mut() {
+            if let Ok(payload) = panicked.try_recv() {
+                resume_unwind(payload);
+            }
+        }
         output
     }
 }
@@ -570,6 +762,10 @@ impl crate::Spawner for Context {
     {
         // Get metrics
         let (label, metric) = spawn_metrics!(self);
+        let Some(task_guard) = self.executor.tasks.track() else {
+            // Shutdown has started and new tasks can no longer be registered.
+            return Handle::closed(metric);
+        };
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
@@ -600,25 +796,29 @@ impl crate::Spawner for Context {
             executor.panicker.clone(),
             Arc::clone(&parent),
         );
+        let f = async move {
+            let _task_guard = task_guard;
+            f.await;
+        };
 
         if matches!(past, Execution::Dedicated) {
             utils::thread::spawn(executor.thread_stack_size, {
                 // Ensure the task can access the tokio runtime
-                let handle = executor.runtime.handle().clone();
+                let handle = executor.handle.clone();
                 move || {
                     handle.block_on(f);
                 }
             });
         } else if matches!(past, Execution::Shared(true)) {
-            executor.runtime.spawn_blocking({
+            executor.handle.spawn_blocking({
                 // Ensure the task can access the tokio runtime
-                let handle = executor.runtime.handle().clone();
+                let handle = executor.handle.clone();
                 move || {
                     handle.block_on(f);
                 }
             });
         } else {
-            executor.runtime.spawn(f);
+            executor.handle.spawn(f);
         }
 
         // Register the task on the parent
@@ -873,6 +1073,15 @@ impl crate::BufferPooler for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Runner as _;
+    use commonware_utils::channel::oneshot;
+    use std::{
+        future::pending,
+        panic::{catch_unwind, AssertUnwindSafe},
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {
@@ -936,5 +1145,166 @@ mod tests {
                 .with_thread_cache_disabled()
                 .thread_cache_config
         );
+    }
+
+    #[test]
+    fn test_shutdown_waits_for_spawn_in_flight() {
+        let (context_tx, context_rx) = mpsc::channel();
+        let (allow_root_return_tx, allow_root_return_rx) = oneshot::channel();
+        let (spawn_entered_tx, spawn_entered_rx) = mpsc::channel();
+        let (release_spawn_tx, release_spawn_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+
+        // Run the root on a separate thread so the test can drive shutdown
+        // while another thread stalls a concurrent spawn call mid-flight.
+        let runner = thread::spawn(move || {
+            let runner =
+                Runner::new(Config::default().with_shutdown_timeout(Duration::from_secs(1)));
+            runner.start(|context| async move {
+                context_tx
+                    .send(context.clone())
+                    .expect("context receiver should stay open");
+                let _ = allow_root_return_rx.await;
+            });
+            finished_tx
+                .send(())
+                .expect("runner completion receiver should stay open");
+        });
+
+        // Reuse a cloned context after the root has started so spawn races with
+        // root shutdown from another thread.
+        let context = context_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("root should publish a cloneable context before returning");
+        let spawn = thread::spawn(move || {
+            let handle = context.spawn(move |_| {
+                // Block inside spawn before it can finish registration.
+                spawn_entered_tx
+                    .send(())
+                    .expect("spawn entry receiver should stay open");
+                release_spawn_rx
+                    .recv()
+                    .expect("spawn release sender should stay open");
+                async move { pending::<()>().await }
+            });
+            drop(handle);
+        });
+
+        // Start shutdown while the concurrent spawn is still in progress. The
+        // regression was that `start()` could return from this state.
+        spawn_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawn should block inside the in-flight window");
+        allow_root_return_tx
+            .send(())
+            .expect("root return gate should stay open");
+        let returned_early = finished_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        release_spawn_tx
+            .send(())
+            .expect("spawn release receiver should stay open");
+
+        assert!(
+            !returned_early,
+            "root shutdown returned while a spawn was still in flight",
+        );
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("runner should finish after the in-flight spawn is released");
+        spawn.join().expect("spawn thread should join cleanly");
+        runner.join().expect("runner thread should join cleanly");
+    }
+
+    #[test]
+    fn test_cleanup_wait_keeps_propagating_panics() {
+        let (root_returning_tx, root_returning_rx) = mpsc::channel();
+        let (panic_now_tx, panic_now_rx) = mpsc::channel();
+
+        // Run the runner on another thread so the test can trigger a child
+        // panic after the root has already entered cleanup.
+        let thread = thread::spawn(move || {
+            catch_unwind(AssertUnwindSafe(|| {
+                let runner =
+                    Runner::new(Config::default().with_shutdown_timeout(Duration::from_secs(1)));
+                runner.start(|context| async move {
+                    let (started_tx, started_rx) = oneshot::channel();
+                    context.shared(true).spawn(move |_| async move {
+                        let _ = started_tx.send(());
+                        // Hold the blocking task until the root has returned,
+                        // then panic while `start()` is waiting for cleanup.
+                        panic_now_rx
+                            .recv()
+                            .expect("panic trigger sender should stay open");
+                        panic!("cleanup panic");
+                    });
+                    let _ = started_rx.await;
+                    root_returning_tx
+                        .send(())
+                        .expect("root return receiver should stay open");
+                });
+            }))
+        });
+
+        // Confirm the root has finished its future and is in the shutdown wait
+        // before letting the child panic.
+        root_returning_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("root should enter cleanup after child startup");
+        panic_now_tx
+            .send(())
+            .expect("panic trigger should stay open until cleanup");
+
+        let result = thread
+            .join()
+            .expect("runner thread should catch its own unwind");
+        assert!(
+            result.is_err(),
+            "cleanup panic should still abort the Tokio runner",
+        );
+    }
+
+    #[test]
+    fn test_shutdown_timeout_uses_remaining_runtime_budget() {
+        let shutdown_timeout = Duration::from_millis(300);
+        let (root_returned_tx, root_returned_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+
+        let runner = thread::spawn(move || {
+            let runner = Runner::new(Config::default().with_shutdown_timeout(shutdown_timeout));
+            runner.start(|context| async move {
+                let (started_tx, started_rx) = oneshot::channel();
+                drop(context.shared(true).spawn(move |_| async move {
+                    started_tx
+                        .send(())
+                        .expect("startup receiver should stay open");
+
+                    // Block forever on the spawn_blocking thread while still owning the sender
+                    // so shutdown must rely on Tokio's timeout rather than task completion.
+                    let (_never_send_tx, never_send_rx) = mpsc::channel::<()>();
+                    never_send_rx
+                        .recv()
+                        .expect("sender should stay open while blocking forever");
+                }));
+                started_rx.await.expect("blocking task should start");
+                root_returned_tx
+                    .send(Instant::now())
+                    .expect("root return receiver should stay open");
+            });
+            finished_tx
+                .send(Instant::now())
+                .expect("runner completion receiver should stay open");
+        });
+
+        let root_returned_at = root_returned_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("root should enter shutdown after child startup");
+        let finished_at = finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("runner should honor the shutdown timeout");
+
+        assert!(
+            finished_at.duration_since(root_returned_at) < Duration::from_millis(450),
+            "shutdown exceeded the configured budget by reusing the full timeout for Tokio teardown",
+        );
+        runner.join().expect("runner thread should join cleanly");
     }
 }

@@ -5,7 +5,6 @@ use commonware_utils::{
 };
 use futures::{
     future::{select, Either},
-    pin_mut,
     stream::{AbortHandle, Abortable, Aborted},
     FutureExt as _,
 };
@@ -13,7 +12,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use std::{
     any::Any,
     future::Future,
-    panic::{resume_unwind, AssertUnwindSafe},
+    panic::AssertUnwindSafe,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -225,30 +224,26 @@ pub(crate) struct Panicked {
 }
 
 impl Panicked {
-    /// Polls a task that should be interrupted by a panic.
-    pub(crate) async fn interrupt<Fut>(self, task: Fut) -> Fut::Output
+    /// Waits for `task` to complete or for the first propagated task panic.
+    ///
+    /// If `task` completes first, returns its output and the panic receiver so
+    /// callers can continue monitoring for panics during follow-on cleanup.
+    pub(crate) async fn monitor<Fut>(self, task: Fut) -> (Result<Fut::Output, Panic>, Option<Self>)
     where
         Fut: Future,
     {
-        // Wait for task to complete or panic
-        let panicked = self.receiver;
-        pin_mut!(panicked);
-        pin_mut!(task);
-        match select(panicked, task).await {
+        match select(self.receiver, Box::pin(task)).await {
             Either::Left((panic, task)) => match panic {
-                // If there is a panic, resume the unwind
-                Ok(panic) => {
-                    resume_unwind(panic);
-                }
-                // If there can never be a panic (oneshot is closed), wait for the task to complete
-                // and return the output
-                Err(_) => task.await,
+                Ok(panic) => (Err(panic), None),
+                Err(_) => (Ok(task.await), None),
             },
-            Either::Right((output, _)) => {
-                // Return the output
-                output
-            }
+            Either::Right((output, receiver)) => (Ok(output), Some(Self { receiver })),
         }
+    }
+
+    /// Attempts to receive a panic without waiting.
+    pub(crate) fn try_recv(&mut self) -> Result<Panic, oneshot::error::TryRecvError> {
+        self.receiver.try_recv()
     }
 }
 
