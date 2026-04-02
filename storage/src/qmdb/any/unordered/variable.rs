@@ -708,30 +708,23 @@ pub(crate) mod test {
     // FromSyncTestable implementation for from_sync_result tests
     mod from_sync_testable {
         use super::*;
-        use crate::{
-            merkle::{
-                mmr::{self, journaled::Mmr},
-                Family as _,
-            },
-            qmdb::any::sync::tests::FromSyncTestable,
-        };
-        use futures::future::join_all;
+        use crate::{merkle::mmr::journaled::Mmr, qmdb::any::sync::tests::FromSyncTestable};
 
         type TestMmr = Mmr<deterministic::Context, Digest>;
 
         impl FromSyncTestable for AnyTest {
-            type Mmr = TestMmr;
+            type Merkle = TestMmr;
 
-            fn into_log_components(self) -> (Self::Mmr, Self::Journal) {
+            fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
                 (self.log.merkle, self.log.journal)
             }
 
-            async fn pinned_nodes_at(&self, loc: mmr::Location) -> Vec<Digest> {
-                join_all(mmr::Family::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
-                    .await
-                    .into_iter()
-                    .map(|n| n.unwrap().unwrap())
-                    .collect()
+            async fn pinned_nodes_at(&self, loc: Location<mmr::Family>) -> Vec<Digest> {
+                let mut pinned = Vec::new();
+                for p in <mmr::Family as crate::merkle::Family>::nodes_to_pin(loc) {
+                    pinned.push(self.log.merkle.get_node(p).await.unwrap().unwrap());
+                }
+                pinned
             }
         }
     }

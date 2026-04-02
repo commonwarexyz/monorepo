@@ -128,13 +128,13 @@ macro_rules! bench_keyless_one {
             let v = make_var_value(&mut rng);
             batch = batch.append(v);
             if rng.next_u32() % KEYLESS_COMMIT_FREQ == 0 {
-                let finalized = batch.merkleize(None).finalize();
-                db.apply_batch(finalized).await.unwrap();
+                let merkleized = batch.merkleize(&db, None);
+                db.apply_batch(merkleized).await.unwrap();
                 batch = db.new_batch();
             }
         }
-        let finalized = batch.merkleize(None).finalize();
-        db.apply_batch(finalized).await.unwrap();
+        let merkleized = batch.merkleize(&db, None);
+        db.apply_batch(merkleized).await.unwrap();
         db.sync().await.unwrap();
         let elapsed = start.elapsed();
         db.destroy().await.unwrap();

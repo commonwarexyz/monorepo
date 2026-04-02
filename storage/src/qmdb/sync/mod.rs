@@ -26,11 +26,13 @@ pub use target::Target;
 mod requests;
 
 /// Create/open a database and sync it to a target state
-pub async fn sync<DB, R>(config: Config<DB, R>) -> Result<DB, Error<R::Error, DB::Digest>>
+pub async fn sync<DB, R>(
+    config: Config<DB, R>,
+) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
 where
     DB: Database,
     DB::Op: Encode,
-    R: resolver::Resolver<Op = DB::Op, Digest = DB::Digest>,
+    R: resolver::Resolver<Family = DB::Family, Op = DB::Op, Digest = DB::Digest>,
 {
     Engine::new(config).await?.sync().await
 }

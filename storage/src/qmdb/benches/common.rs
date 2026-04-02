@@ -88,11 +88,6 @@ pub type CurMmbOVarVecDb =
 pub type KeylessMmrDb = Keyless<mmr::Family, Context, Vec<u8>, Sha256>;
 pub type KeylessMmbDb = Keyless<mmb::Family, Context, Vec<u8>, Sha256>;
 
-pub async fn open_keyless_db(ctx: Context) -> KeylessDb {
-    let cfg = keyless_cfg(&ctx);
-    KeylessDb::init(ctx, cfg).await.unwrap()
-}
-
 // -- Variant enums --
 
 #[derive(Debug, Clone, Copy)]

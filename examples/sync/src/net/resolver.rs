@@ -3,7 +3,10 @@ use crate::net::request_id;
 use commonware_codec::{EncodeShared, IsUnit, Read};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
-use commonware_storage::{mmr::Location, qmdb::sync};
+use commonware_storage::{
+    mmr::{self, Location},
+    qmdb::sync,
+};
 use commonware_utils::channel::{mpsc, oneshot};
 use std::num::NonZeroU64;
 
@@ -42,7 +45,7 @@ where
     }
 
     /// Returns the current sync target from the server.
-    pub async fn get_sync_target(&self) -> Result<sync::Target<D>, crate::Error> {
+    pub async fn get_sync_target(&self) -> Result<sync::Target<mmr::Family, D>, crate::Error> {
         let request_id = self.request_id_generator.next();
         let request =
             wire::Message::GetSyncTargetRequest(wire::GetSyncTargetRequest { request_id });
@@ -75,6 +78,7 @@ where
     Op::Cfg: IsUnit,
     D: Digest,
 {
+    type Family = mmr::Family;
     type Digest = D;
     type Op = Op;
     type Error = crate::Error;
@@ -86,7 +90,7 @@ where
         max_ops: NonZeroU64,
         include_pinned_nodes: bool,
         _cancel_rx: oneshot::Receiver<()>,
-    ) -> Result<sync::resolver::FetchResult<Self::Op, Self::Digest>, Self::Error> {
+    ) -> Result<sync::resolver::FetchResult<mmr::Family, Self::Op, Self::Digest>, Self::Error> {
         let request_id = self.request_id_generator.next();
         let request = wire::Message::GetOperationsRequest(wire::GetOperationsRequest {
             request_id,
