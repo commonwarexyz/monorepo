@@ -37,7 +37,12 @@ use commonware_storage::{
     translator::Translator,
     Persistable,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
+use commonware_utils::{
+    channel::mpsc,
+    non_empty_range,
+    sync::{AsyncRwLock, AsyncRwLockReadGuard},
+    Array,
+};
 use std::{ops::Deref, sync::Arc};
 
 type AnyDbHandle<E, C, I, H, U> = Arc<AsyncRwLock<Db<mmr::Family, E, C, I, H, U>>>;
@@ -75,6 +80,18 @@ where
     pub fn with_metadata(mut self, metadata: V::Value) -> Self {
         self.metadata = Some(metadata);
         self
+    }
+
+    /// Acquire a read lock on the DB.
+    pub async fn lock(
+        &self,
+    ) -> AsyncRwLockReadGuard<'_, Db<mmr::Family, E, C, I, H, unordered::Update<K, V>>> {
+        self.db.read().await
+    }
+
+    /// Get a reference to the inner batch.
+    pub const fn batch(&self) -> &UnmerkleizedBatch<mmr::Family, H, unordered::Update<K, V>> {
+        &self.batch
     }
 
     /// Read a value by key, falling back to committed state.

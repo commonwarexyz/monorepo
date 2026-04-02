@@ -723,6 +723,8 @@ macro_rules! impl_state_sync_set {
                             let mut generation_rx = Some(db_channels.$idx.generation_rx);
                             let mut current_generation = 0usize;
                             let mut current_target = targets.$idx.clone();
+                            let mut last_reached_target = None;
+                            let mut last_reported_generation = None;
                             let reached_event_sender = reached_event_tx.clone();
                             let completion_signal = completion_tx.clone();
                             let sync = $T::sync_db(
@@ -738,21 +740,16 @@ macro_rules! impl_state_sync_set {
                             );
                             let forward_reached = async move {
                                 loop {
-                                    if let Some(updates) = generation_rx.as_mut() {
-                                        loop {
-                                            match updates.try_recv() {
-                                                Ok((generation, target)) => {
-                                                    current_generation = generation;
-                                                    current_target = target;
-                                                }
-                                                Err(mpsc::error::TryRecvError::Empty) => break,
-                                                Err(mpsc::error::TryRecvError::Disconnected) => {
-                                                    generation_rx = None;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
+                                    drain_generation_updates(
+                                        &mut generation_rx,
+                                        &mut current_generation,
+                                        &mut current_target,
+                                        &last_reached_target,
+                                        &mut last_reported_generation,
+                                        &reached_event_sender,
+                                        $idx,
+                                    )
+                                    .await;
 
                                     let update_future = generation_rx.as_mut().map_or_else(
                                         || Either::Right(pending()),
@@ -764,32 +761,30 @@ macro_rules! impl_state_sync_set {
                                                 return;
                                             };
 
+                                            last_reached_target = Some(reached_target.clone());
+                                            drain_generation_updates(
+                                                &mut generation_rx,
+                                                &mut current_generation,
+                                                &mut current_target,
+                                                &last_reached_target,
+                                                &mut last_reported_generation,
+                                                &reached_event_sender,
+                                                $idx,
+                                            )
+                                            .await;
+
                                             if reached_target != current_target {
-                                                if let Some(updates) = generation_rx.as_mut() {
-                                                    loop {
-                                                        match updates.try_recv() {
-                                                            Ok((generation, target)) => {
-                                                                current_generation = generation;
-                                                                current_target = target;
-                                                            }
-                                                            Err(mpsc::error::TryRecvError::Empty) => break,
-                                                            Err(mpsc::error::TryRecvError::Disconnected) => {
-                                                                generation_rx = None;
-                                                                break;
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                if reached_target != current_target {
-                                                    continue;
-                                                }
+                                                continue;
                                             }
 
-                                            if !reached_event_sender
-                                                .send_lossy(($idx, current_generation))
-                                                .await
-                                            {
-                                                return;
+                                            if last_reported_generation != Some(current_generation) {
+                                                if !reached_event_sender
+                                                    .send_lossy(($idx, current_generation))
+                                                    .await
+                                                {
+                                                    return;
+                                                }
+                                                last_reported_generation = Some(current_generation);
                                             }
                                         },
                                         update = update_future => {
@@ -799,6 +794,17 @@ macro_rules! impl_state_sync_set {
                                             };
                                             current_generation = generation;
                                             current_target = target;
+                                            if last_reached_target.as_ref() == Some(&current_target)
+                                                && last_reported_generation != Some(current_generation)
+                                            {
+                                                if !reached_event_sender
+                                                    .send_lossy(($idx, current_generation))
+                                                    .await
+                                                {
+                                                    return;
+                                                }
+                                                last_reported_generation = Some(current_generation);
+                                            }
                                         },
                                     };
                                 }
@@ -866,6 +872,46 @@ impl_state_sync_set!(
     DB7: R7: 6,
     DB8: R8: 7
 );
+
+async fn drain_generation_updates<T>(
+    generation_rx: &mut Option<mpsc::Receiver<(usize, T)>>,
+    current_generation: &mut usize,
+    current_target: &mut T,
+    last_reached_target: &Option<T>,
+    last_reported_generation: &mut Option<usize>,
+    reached_event_sender: &mpsc::Sender<(usize, usize)>,
+    idx: usize,
+) where
+    T: Clone + PartialEq,
+{
+    if let Some(updates) = generation_rx.as_mut() {
+        loop {
+            match updates.try_recv() {
+                Ok((generation, target)) => {
+                    *current_generation = generation;
+                    *current_target = target;
+
+                    if last_reached_target.as_ref() == Some(current_target)
+                        && *last_reported_generation != Some(*current_generation)
+                    {
+                        if !reached_event_sender
+                            .send_lossy((idx, *current_generation))
+                            .await
+                        {
+                            return;
+                        }
+                        *last_reported_generation = Some(*current_generation);
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    *generation_rx = None;
+                    break;
+                }
+            }
+        }
+    }
+}
 
 /// Per-database sync tracking state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1299,6 +1345,10 @@ mod tests {
         final_target: u64,
     }
 
+    struct DistinctObservedFastSyncDb {
+        final_target: u64,
+    }
+
     #[derive(Clone)]
     struct SlowSyncController {
         release: Arc<AtomicBool>,
@@ -1545,6 +1595,36 @@ mod tests {
 
         async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
             unreachable!("ObservedFastSyncDb is only constructed through state sync in tests")
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            self.final_target
+        }
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl<E: Send> ManagedDb<E> for DistinctObservedFastSyncDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            unreachable!(
+                "DistinctObservedFastSyncDb is only constructed through state sync in tests"
+            )
         }
 
         async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
@@ -1908,6 +1988,76 @@ mod tests {
                                 observer.update_count.fetch_add(1, Ordering::SeqCst);
                                 final_target = update;
                                 reported_target = None;
+                            }
+                            None => {
+                                tip_updates = None;
+                                if finish.is_none() {
+                                    break;
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+
+            Ok(Self { final_target })
+        }
+    }
+
+    impl<E: Send> StateSyncDb<E, FastSyncObserver> for DistinctObservedFastSyncDb {
+        type SyncError = Infallible;
+
+        async fn sync_db(
+            _context: E,
+            _config: Self::Config,
+            observer: FastSyncObserver,
+            target: Self::SyncTarget,
+            tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+            _progress_tx: Option<mpsc::Sender<SyncProgress>>,
+        ) -> Result<Self, Self::SyncError> {
+            let mut final_target = target;
+            let mut tip_updates = Some(tip_updates);
+            let mut reported_target = None;
+            observer.ready.store(true, Ordering::SeqCst);
+
+            loop {
+                if reported_target != Some(final_target) {
+                    if let Some(reached_target) = reached_target.as_ref() {
+                        if reached_target.send(final_target).await.is_err() {
+                            break;
+                        }
+                    }
+                    reported_target = Some(final_target);
+                }
+
+                if finish.is_none() && tip_updates.is_none() {
+                    break;
+                }
+
+                let finish_signal = finish.as_mut().map_or_else(
+                    || futures::future::Either::Right(futures::future::pending()),
+                    |finish_rx| futures::future::Either::Left(finish_rx.recv()),
+                );
+                let update_signal = tip_updates.as_mut().map_or_else(
+                    || futures::future::Either::Right(futures::future::pending()),
+                    |update_rx| futures::future::Either::Left(update_rx.recv()),
+                );
+
+                select! {
+                    _ = finish_signal => {
+                        break;
+                    },
+                    update = update_signal => {
+                        match update {
+                            Some(update) => {
+                                observer.update_count.fetch_add(1, Ordering::SeqCst);
+                                if update != final_target {
+                                    final_target = update;
+                                    reported_target = None;
+                                }
                             }
                             None => {
                                 tip_updates = None;
@@ -2616,6 +2766,75 @@ mod tests {
                 fast_update_count.load(Ordering::SeqCst),
                 0,
                 "already-at-target database should not receive tip updates"
+            );
+        });
+    }
+
+    #[test]
+    fn tuple_state_sync_regroup_completes_when_database_target_is_unchanged() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let slow_release = Arc::new(AtomicBool::new(false));
+            let fast_ready = Arc::new(AtomicBool::new(false));
+            let fast_update_count = Arc::new(AtomicUsize::new(0));
+
+            let sync = context
+                .clone()
+                .with_label("tuple_state_sync_regroup_unchanged_target")
+                .spawn({
+                    let slow_resolver = slow_release.clone();
+                    let fast_resolver = FastSyncObserver {
+                        ready: fast_ready.clone(),
+                        update_count: fast_update_count.clone(),
+                    };
+                    move |context| async move {
+                        <(
+                            Arc<AsyncRwLock<SlowSyncDb>>,
+                            Arc<AsyncRwLock<DistinctObservedFastSyncDb>>,
+                        ) as StateSyncSet<
+                            deterministic::Context,
+                            (Arc<AtomicBool>, FastSyncObserver),
+                            sha256::Digest,
+                        >>::sync(
+                            context,
+                            ((), ()),
+                            (slow_resolver, fast_resolver),
+                            anchor(0),
+                            (0, 7),
+                            tip_rx,
+                            SyncEngineConfig {
+                                fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                                apply_batch_size: 1,
+                                max_outstanding_requests: 1,
+                                update_channel_size: NonZeroUsize::new(4).unwrap(),
+                                max_retained_roots: 0,
+                            },
+                        )
+                        .await
+                        .expect("tuple state sync should succeed")
+                    }
+                });
+
+            while !fast_ready.load(Ordering::SeqCst) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            let _ = tip_tx.send((anchor(9), (9, 7))).await;
+            context.sleep(Duration::from_millis(1)).await;
+            slow_release.store(true, Ordering::SeqCst);
+            drop(tip_tx);
+
+            let (synced, converged_anchor) = sync.await.expect("sync task should complete");
+            let slow_target = synced.0.read().await.final_target;
+            let fast_target = synced.1.read().await.final_target;
+
+            assert_eq!(slow_target, 9);
+            assert_eq!(fast_target, 7);
+            assert_eq!(converged_anchor, anchor(9));
+            assert_eq!(
+                fast_update_count.load(Ordering::SeqCst),
+                1,
+                "the unchanged-target database should receive the regroup retarget exactly once",
             );
         });
     }
