@@ -177,6 +177,7 @@ mod tests {
     use super::*;
     use crate::p2p::mocks::Key as MockKey;
     use commonware_codec::{DecodeExt, Encode};
+    use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
 
     #[test]
     fn test_codec_request() {
@@ -208,9 +209,6 @@ mod tests {
 
     #[test]
     fn test_message_encode_with_pool_matches_encode() {
-        use bytes::Buf;
-        use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pool = context.network_buffer_pool();
@@ -230,9 +228,6 @@ mod tests {
 
     #[test]
     fn test_payload_response_encode_with_pool_matches_encode() {
-        use bytes::Buf;
-        use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
-
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pool = context.network_buffer_pool();
