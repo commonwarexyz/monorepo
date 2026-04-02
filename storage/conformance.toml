@@ -150,7 +150,11 @@ hash = "cce5f888e506282f861e0e49e176b26c65f92e457f0c5f5353fc9b7196f07478"
 n_cases = 65536
 hash = "fdca5df62d243b28676ee15034663694cd219d5ef80749079126b0ed73effe0d"
 
-["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<U64>>"]
+["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<FixedEncoding<U64>>>"]
+n_cases = 65536
+hash = "c692a20fa40180844888e7a26401f99a45ce3127faeca5f1228a41b454424623"
+
+["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<VariableEncoding<U64>>>"]
 n_cases = 65536
 hash = "b41d6c6ec560bde9caf2e206526864c618a0721af367585a1719617ca7ce9291"
 
