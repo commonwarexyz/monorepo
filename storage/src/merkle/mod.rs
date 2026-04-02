@@ -69,20 +69,26 @@ pub trait Family: Copy + Clone + Debug + Send + Sync + 'static {
     /// [`Hasher::root`](crate::merkle::hasher::Hasher::root)).
     fn peaks(size: Position<Self>) -> impl Iterator<Item = (Position<Self>, u32)>;
 
-    /// Compute positions of nodes that must be pinned when pruning to `prune_loc`
-    /// in a structure with the given leaf count.
+    /// Compute positions of nodes that must be pinned when pruning to `prune_loc`.
     ///
-    /// Implementations may return a conservative superset of the minimally required nodes.
-    /// Callers must therefore treat the result as "safe to retain" rather than assuming it is
-    /// minimal or canonical. Families may also differ in how this set depends on `leaves`; for
-    /// example, some families may ignore `leaves`, while others may grow the returned set as the
-    /// structure is appended to.
+    /// The default implementation returns the peaks of the sub-structure at `prune_loc`,
+    /// which is sufficient for both root computation and re-merkleization of retained leaves.
+    /// Implementations may override to return a conservative superset of the minimally
+    /// required nodes. Callers must therefore treat the result as "safe to retain" rather
+    /// than assuming it is minimal or canonical.
     ///
     /// # Panics
     ///
-    /// Implementations panic if `leaves` or `prune_loc` are invalid (i.e., exceed
+    /// Implementations panic if `prune_loc` is invalid (i.e., exceeds
     /// [`MAX_LEAVES`](Self::MAX_LEAVES)). Callers must validate inputs before calling.
-    fn nodes_to_pin(leaves: Location<Self>, prune_loc: Location<Self>) -> Vec<Position<Self>>;
+    fn nodes_to_pin(prune_loc: Location<Self>) -> impl Iterator<Item = Position<Self>> + Send {
+        let prune_pos = Self::location_to_position(prune_loc);
+        Self::peaks(prune_pos)
+            .filter(move |&(pos, _)| pos < prune_pos)
+            .map(|(pos, _)| pos)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
 
     /// Return the positions of the left and right children of the node at `pos` with the
     /// given `height`. The caller guarantees `height > 0` (leaves have no children).

@@ -218,10 +218,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         journal: &Journal<E, D>,
         prune_pos: Position<F>,
     ) -> Result<(), Error<F>> {
-        let leaves = mem.leaves();
         let prune_loc = Location::try_from(prune_pos).expect("valid prune_pos");
         let mut pinned_nodes = BTreeMap::new();
-        for pos in F::nodes_to_pin(leaves, prune_loc) {
+        for pos in F::nodes_to_pin(prune_loc) {
             let digest = Self::get_from_metadata_or_journal(metadata, journal, pos).await?;
             pinned_nodes.insert(pos, digest);
         }
@@ -351,7 +350,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         // Initialize the mem in the "prune_all" state.
         let journal_leaves = Location::try_from(journal_size)?;
         let mut pinned_nodes = Vec::new();
-        for pos in F::nodes_to_pin(journal_leaves, journal_leaves) {
+        for pos in F::nodes_to_pin(journal_leaves) {
             let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
             pinned_nodes.push(digest);
         }
@@ -387,11 +386,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
             assert_eq!(mem.size(), journal.size().await);
 
             // Prune mem and reinstate pinned nodes.
-            let mem_leaves = mem.leaves();
             let effective_prune_loc =
                 Location::try_from(effective_prune_pos).expect("valid effective_prune_pos");
             let mut pn = BTreeMap::new();
-            for p in F::nodes_to_pin(mem_leaves, effective_prune_loc) {
+            for p in F::nodes_to_pin(effective_prune_loc) {
                 let d = mem.get_node_unchecked(p);
                 pn.insert(p, *d);
             }
@@ -483,14 +481,13 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         );
 
         // Write the required pinned nodes to metadata.
-        // The caller-provided pinned nodes were computed for a structure of size `range.end`
-        // pruned to `range.start`, so we must validate against those same parameters.
-        let target_leaves = cfg.range.end;
+        // The set of pinned nodes depends only on the prune boundary, not on the total
+        // structure size, so we validate against `nodes_to_pin(prune_loc)` alone.
         let prune_loc = Location::try_from(prune_pos)?;
         let journal_leaves = Location::try_from(journal_size)?;
         if let Some(pinned_nodes) = cfg.pinned_nodes {
             // Use caller-provided pinned nodes.
-            let nodes_to_pin_persisted = F::nodes_to_pin(target_leaves, prune_loc);
+            let nodes_to_pin_persisted: Vec<_> = F::nodes_to_pin(prune_loc).collect();
             if pinned_nodes.len() != nodes_to_pin_persisted.len() {
                 return Err(Error::<F>::InvalidPinnedNodes);
             }
@@ -502,7 +499,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
         // Create the in-memory structure with the pinned nodes required for its size. This must be
         // performed *before* pruning the journal to range.start to ensure all pinned nodes are
         // present.
-        let nodes_to_pin_mem = F::nodes_to_pin(journal_leaves, journal_leaves);
+        let nodes_to_pin_mem = F::nodes_to_pin(journal_leaves);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
             let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
@@ -549,10 +546,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
     ) -> Result<BTreeMap<Position<F>, D>, Error<F>> {
         assert!(prune_to_pos >= self.inner.get_mut().pruned_to_pos);
 
-        let leaves = self.inner.get_mut().mem.leaves();
         let prune_loc = Location::try_from(prune_to_pos).expect("valid prune_to_pos");
         let mut pinned_nodes = BTreeMap::new();
-        for pos in F::nodes_to_pin(leaves, prune_loc) {
+        for pos in F::nodes_to_pin(prune_loc) {
             let digest = self.get_node(pos).await?.expect(
                 "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
             );
@@ -619,10 +615,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
 
             // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared
             // by pruning the mem.
-            let mem_leaves = inner.mem.leaves();
             let prune_loc = Location::try_from(inner.pruned_to_pos).expect("valid pruned_to_pos");
             let mut pinned_nodes = BTreeMap::new();
-            for pos in F::nodes_to_pin(mem_leaves, prune_loc) {
+            for pos in F::nodes_to_pin(prune_loc) {
                 let digest = inner.mem.get_node_unchecked(pos);
                 pinned_nodes.insert(pos, *digest);
             }
@@ -841,7 +836,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
             inner.mem.truncate(new_size, hasher);
         } else {
             let mut pinned_nodes = Vec::new();
-            for pos in F::nodes_to_pin(destination_loc, destination_loc) {
+            for pos in F::nodes_to_pin(destination_loc) {
                 pinned_nodes.push(
                     Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?,
                 );

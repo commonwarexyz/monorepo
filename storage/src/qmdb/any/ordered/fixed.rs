@@ -1699,7 +1699,10 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::mmr::{iterator::nodes_to_pin, journaled::Mmr},
+            merkle::{
+                mmr::{self, journaled::Mmr},
+                Family as _,
+            },
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
@@ -1714,7 +1717,7 @@ pub(crate) mod test {
             }
 
             async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
-                join_all(nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
+                join_all(mmr::Family::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
                     .await
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())

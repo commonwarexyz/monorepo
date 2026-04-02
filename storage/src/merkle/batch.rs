@@ -588,13 +588,12 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         }
         let root = self.root();
         let size = self.size();
-        let leaves = self.leaves();
         let pruning_boundary = self.pruning_boundary();
         let pruning_pos = Position::try_from(pruning_boundary).expect("valid pruning_boundary");
 
         // Collect pinned nodes (peaks at the prune boundary).
         let mut pinned_nodes = BTreeMap::new();
-        for pos in F::nodes_to_pin(leaves, pruning_boundary) {
+        for pos in F::nodes_to_pin(pruning_boundary) {
             let d = self
                 .get_node(pos)
                 .expect("pinned node must exist in batch chain");

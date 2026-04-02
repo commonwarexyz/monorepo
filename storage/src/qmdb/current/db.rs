@@ -11,12 +11,9 @@ use crate::{
     merkle::{
         batch::MIN_TO_PARALLELIZE,
         hasher::Hasher as _,
-        mmr::{
-            self,
-            iterator::{nodes_to_pin, PeakIterator},
-            Location, Position, StandardHasher,
-        },
+        mmr::{self, iterator::PeakIterator, Location, Position, StandardHasher},
         storage::Storage as MerkleStorage,
+        Family as _,
     },
     metadata::{Config as MConfig, Metadata},
     qmdb::{
@@ -428,7 +425,7 @@ where
         let pinned_nodes = if pruned_chunks > 0 {
             let mmr_size = Location::new(pruned_chunks as u64);
             let mut pinned_nodes = Vec::new();
-            for pos in nodes_to_pin(mmr_size) {
+            for pos in mmr::Family::nodes_to_pin(mmr_size) {
                 let digest = self
                     .grafted_mmr
                     .get_node(pos)
@@ -868,7 +865,7 @@ pub(super) async fn init_metadata<E: Context, D: Digest>(
             return Err(Error::DataCorrupted("pruned chunks exceeds MAX_LEAVES"));
         }
         let mut pinned = Vec::new();
-        for (index, pos) in nodes_to_pin(pruned_loc).enumerate() {
+        for (index, pos) in mmr::Family::nodes_to_pin(pruned_loc).enumerate() {
             let metadata_key = U64::new(NODE_PREFIX, index as u64);
             let Some(bytes) = metadata.get(&metadata_key) else {
                 return Err(mmr::Error::MissingNode(pos).into());
