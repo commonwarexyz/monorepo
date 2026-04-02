@@ -771,7 +771,6 @@ module replica {
                     on_nullify(id, vote)
                 },
                 all {
-                    sent_certificates != Set(),
                     nondet cert = oneOf(sent_certificates)
                     on_certificate(id, cert)
                 },
