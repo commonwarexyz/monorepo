@@ -33,7 +33,7 @@ cfg_if::cfg_if! {
 }
 
 /// Populate, prune, and sync a database (used in setup phase).
-async fn populate_and_sync<C: DbAny<commonware_storage::merkle::mmr::Family, Key = Digest>>(
+async fn populate_and_sync<F: commonware_storage::merkle::Family, C: DbAny<F, Key = Digest>>(
     db: &mut C,
     elements: u64,
     operations: u64,
