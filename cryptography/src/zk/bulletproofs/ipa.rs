@@ -8,22 +8,120 @@ use commonware_codec::Encode;
 use commonware_math::algebra::{CryptoGroup, Field, Random, Space};
 use commonware_parallel::Strategy;
 
+/// A setup decides on what group elements we use to commit to vectors and their product.
+///
+/// A setup for an inner product argument for `c = <a_i, b_i>` needs generators
+/// to commit to `a_i`, which we call `G_i`, generators for `b_i`, which we call
+/// `H_i`, and a generator for the product, `c`, which we call `Q`, or "the product generator".
+///
+/// We can support inner products of different sizes, as long as we have enough generators.
+///
+/// To construct this type, see [`Self::new`].
 pub struct Setup<G> {
-    pub g: Vec<G>,
-    pub h: Vec<G>,
-    pub product_generator: G,
+    g: Vec<G>,
+    h: Vec<G>,
+    product_generator: G,
 }
 
-pub struct Statement<F, G> {
+impl<G> Setup<G> {
+    /// Create a new [`Setup`], given specific choices of the generator.
+    ///
+    /// You MUST ensure that all of the values provided to this function are unique.
+    pub fn new(product_generator: G, g_and_h: impl IntoIterator<Item = (G, G)>) -> Self {
+        let (g, h): (Vec<G>, Vec<G>) = g_and_h.into_iter().collect();
+        Self {
+            g,
+            h,
+            product_generator,
+        }
+    }
+
+    /// The left-side generators `G_i`.
+    pub fn g(&self) -> &[G] {
+        &self.g
+    }
+
+    /// The right-side generators `H_i`.
+    pub fn h(&self) -> &[G] {
+        &self.h
+    }
+
+    /// The product generator `Q`.
+    pub const fn product_generator(&self) -> &G {
+        &self.product_generator
+    }
+}
+
+/// The public claim we're making about the inner product.
+///
+/// We claim that our commitment `P` is equal to `<a_i, G_i> + <b_i, H_i>`,
+/// and that our product `c` is equal to `<a_i, b_i>`.
+pub struct Claim<F, G> {
     pub commitment: G,
     pub product: F,
 }
 
+/// The witness contains the actual vectors `a_i` and `b_i` for the inner product argument.
+///
+/// This struct guarantees that their lengths are equal, and a power of two.
 pub struct Witness<F> {
-    pub a: Vec<F>,
-    pub b: Vec<F>,
+    a: Vec<F>,
+    b: Vec<F>,
 }
 
+impl<F> Witness<F> {
+    /// Create a new witness, from the two vectors whose product we're taking.
+    ///
+    /// This function returns `None` if the iterator does not produce a power of
+    /// two number of elements.
+    pub fn new(elements: impl IntoIterator<Item = (F, F)>) -> Option<Self> {
+        let (a, b): (Vec<F>, Vec<F>) = elements.into_iter().collect();
+        if !a.len().is_power_of_two() {
+            return None;
+        }
+        Some(Self { a, b })
+    }
+}
+
+impl<F: Field> Witness<F> {
+    /// Like [`Self::new`], but also produces a [`Claim`], for convenience.
+    ///
+    /// In some situations, you have a claim from somewhere else, using the
+    /// proof system in this module as just one step in some larger proof.
+    ///
+    /// If you don't have a claim, this lets you compute a valid one.
+    ///
+    /// To do so, you need a [`Setup`], which can be reused across different
+    /// witnesses.
+    pub fn new_with_claim<G: Space<F>>(
+        setup: &Setup<G>,
+        elements: impl IntoIterator<Item = (F, F)>,
+    ) -> Option<(Self, Claim<F, G>)> {
+        let witness = Self::new(elements)?;
+        // By invariant, h has the same len as g, and b has the same len as a,
+        // so we can just check this.
+        if setup.g.len() < witness.a.len() {
+            return None;
+        }
+        let claim = {
+            let mut commitment = G::zero();
+            let mut product = F::zero();
+            for (((a_i, b_i), g_i), h_i) in
+                witness.a.iter().zip(&witness.b).zip(&setup.g).zip(&setup.h)
+            {
+                commitment += &(g_i.clone() * a_i + &(h_i.clone() * b_i));
+                product += &(a_i.clone() * b_i);
+            }
+            Claim {
+                commitment,
+                product,
+            }
+        };
+        Some((witness, claim))
+    }
+}
+
+/// A proof for the inner product argument.
 pub struct Proof<F, G> {
     l_r_coms: Vec<(G, G)>,
     a_final: F,
@@ -39,10 +137,14 @@ fn sample_challenge<F: Field + Random>(transcript: &Transcript) -> F {
     challenge
 }
 
+/// Prove that a given [`Witness`] is valid, relative to a [`Claim`] and [`Setup`].
+///
+/// We also take in a transcript, allowing us to tie in this proof to a specific context.
+/// This is useful when using this argument in the context of a larger proof.
 pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     transcript: &mut Transcript,
     setup: &Setup<G>,
-    statement: &Statement<F, G>,
+    claim: &Claim<F, G>,
     witness: Witness<F>,
     strategy: &impl Strategy,
 ) -> Proof<F, G> {
@@ -50,14 +152,14 @@ pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     assert_eq!(setup.g.len(), witness.a.len());
     assert_eq!(witness.a.len(), witness.b.len());
     assert!(setup.g.len().is_power_of_two());
-    // TODO: commit to the statement.
+    // TODO: commit to the claim.
 
     let mut l_r_coms = Vec::<(G, G)>::new();
     let mut a = witness.a;
     let mut b = witness.b;
     let mut g = setup.g.clone();
     let mut h = setup.h.clone();
-    let mut product = setup.product_generator.clone() * &statement.product + &statement.commitment;
+    let mut product = setup.product_generator.clone() * &claim.product + &claim.commitment;
     while a.len() > 1 {
         let half_len = a.len() / 2;
         let (a_lo, a_hi) = a.split_at_mut(half_len);
@@ -120,11 +222,20 @@ pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     }
 }
 
+/// Check a [`Proof`], relative to a [`Claim`] and [`Setup`].
+///  
+/// If the check succeeds, we are convinced that the prover knows a valid
+/// [`Witness`] to this particular [`Claim`].
+///
+/// It's important that the verifier uses a [`Setup`] that they know to be
+/// correct, rather than one that the prover is telling them to use. For example,
+/// by using one generated from a deterministic seed that's agreed upon, or
+/// something similar.
 #[must_use]
 pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     transcript: &mut Transcript,
     setup: &Setup<G>,
-    statement: &Statement<F, G>,
+    claim: &Claim<F, G>,
     proof: Proof<F, G>,
     strategy: &impl Strategy,
 ) -> bool {
@@ -201,9 +312,9 @@ pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
         *h_w_i *= &h_weight_tweak;
     }
 
-    weights.push(statement.product.clone() - &(a_final * &b_final));
+    weights.push(claim.product.clone() - &(a_final * &b_final));
 
-    G::msm(&points, &weights, strategy) == -statement.commitment.clone()
+    G::msm(&points, &weights, strategy) == -claim.commitment.clone()
 }
 
 #[cfg(test)]
@@ -244,36 +355,23 @@ mod tests {
             let strategy = Sequential;
             let len = self.a.len();
 
-            let setup = Setup {
-                g: generators[..len].to_vec(),
-                h: generators[len..2 * len].to_vec(),
-                product_generator: generators[2 * MAX_VECTOR_LEN],
-            };
-            let commitment =
-                G::msm(&setup.g, &self.a, &strategy) + &G::msm(&setup.h, &self.b, &strategy);
-            let product = F::msm(&self.a, &self.b, &strategy);
-            let statement = Statement {
-                commitment,
-                product,
-            };
-            let witness = Witness {
-                a: self.a,
-                b: self.b,
-            };
+            let setup = Setup::new(
+                generators[0],
+                generators[1..]
+                    .chunks_exact(2)
+                    .take(len)
+                    .map(|chunk| (chunk[0], chunk[1])),
+            );
+            let (witness, claim) = Witness::new_with_claim(&setup, self.a.into_iter().zip(self.b))
+                .expect("plan vectors are powers of two and fit the setup");
 
             let mut prover_transcript = Transcript::new(NAMESPACE);
-            let proof = prove(
-                &mut prover_transcript,
-                &setup,
-                &statement,
-                witness,
-                &strategy,
-            );
+            let proof = prove(&mut prover_transcript, &setup, &claim, witness, &strategy);
             let mut verifier_transcript = Transcript::new(NAMESPACE);
             assert!(verify(
                 &mut verifier_transcript,
                 &setup,
-                &statement,
+                &claim,
                 proof,
                 &strategy,
             ));
