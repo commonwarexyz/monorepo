@@ -26,7 +26,7 @@ use blst::{
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
     blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
-    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_scalar_from_fr, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -659,16 +659,22 @@ impl Read for Scalar {
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            let valid = match cfg {
-                ScalarReadCfg::RejectZero => blst_sk_check(&scalar),
-                ScalarReadCfg::AllowZero => blst_scalar_fr_check(&scalar),
-            };
-            if !valid {
-                return Err(Invalid("Scalar", "Invalid"));
+            if !blst_scalar_fr_check(&scalar) {
+                return Err(Invalid("Scalar", "invalid scalar"));
             }
             blst_fr_from_scalar(&mut ret, &scalar);
         }
-        Ok(Self(ret))
+        let out = Self(ret);
+        // Some cfgs will have more stringent requirements
+        match cfg {
+            ScalarReadCfg::AllowZero => {}
+            ScalarReadCfg::RejectZero => {
+                if out == Self::zero() {
+                    return Err(Invalid("Scalar", "scalar == 0, cfg = RejectZero"));
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
