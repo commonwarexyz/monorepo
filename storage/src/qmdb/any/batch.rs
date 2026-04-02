@@ -277,15 +277,22 @@ where
         }
     }
 
-    /// Gather the existing-key locations for all keys in `mutations`.
+    /// Gather existing-key locations for all keys in `mutations`.
     ///
     /// For each mutation key, checks the base diff first (returning the
-    /// uncommitted location for Active entries, skipping Deleted entries), then
-    /// falls back to the base DB snapshot.
+    /// uncommitted location for Active entries, skipping Deleted entries).
+    /// Keys not in the base diff fall back to the base DB snapshot.
+    ///
+    /// When `include_active_collision_siblings` is true, Active entries
+    /// also scan the snapshot bucket for collision siblings (other keys
+    /// sharing the same translated-key bucket). The ordered path needs
+    /// these so their `next_key` pointers are rewritten when a sibling
+    /// is deleted; the unordered path can skip them.
     fn gather_existing_locations<E, C, I>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
         db: &Db<F, E, C, I, H, U>,
+        include_active_collision_siblings: bool,
     ) -> Vec<Location<F>>
     where
         E: Context,
@@ -301,13 +308,30 @@ where
             }
         } else {
             for key in mutations.keys() {
-                if let Some(entry) = self.base_diff.get(key) {
-                    if let Some(loc) = entry.loc() {
-                        locations.push(loc);
+                match self.base_diff.get(key) {
+                    Some(DiffEntry::Deleted { .. }) => {
+                        // Stale; handled via extract_parent_deleted_creates.
                     }
-                    continue;
+                    Some(DiffEntry::Active {
+                        loc, base_old_loc, ..
+                    }) => {
+                        // Push the parent's uncommitted location, then scan
+                        // the snapshot bucket for collision siblings (excluding
+                        // this key's own stale committed location).
+                        locations.push(*loc);
+                        if include_active_collision_siblings {
+                            locations.extend(
+                                db.snapshot
+                                    .get(key)
+                                    .copied()
+                                    .filter(move |loc| Some(*loc) != *base_old_loc),
+                            );
+                        }
+                    }
+                    None => {
+                        locations.extend(db.snapshot.get(key).copied());
+                    }
                 }
-                locations.extend(db.snapshot.get(key).copied());
             }
         }
         locations.sort();
@@ -588,7 +612,7 @@ where
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O, parallelized).
-        let locations = m.gather_existing_locations(&mutations, db);
+        let locations = m.gather_existing_locations(&mutations, db, false);
         let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
         let results = try_join_all(futures).await?;
 
@@ -727,7 +751,7 @@ where
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O).
-        let locations = m.gather_existing_locations(&mutations, db);
+        let locations = m.gather_existing_locations(&mutations, db, true);
 
         // Read and unwrap Update operations (snapshot only references Updates).
         let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
