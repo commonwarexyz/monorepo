@@ -15,7 +15,6 @@ pub struct Setup<G> {
 }
 
 pub struct Statement<F, G> {
-    pub setup: Setup<G>,
     pub commitment: G,
     pub product: F,
 }
@@ -42,23 +41,23 @@ fn sample_challenge<F: Field + Random>(transcript: &Transcript) -> F {
 
 pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     transcript: &mut Transcript,
+    setup: &Setup<G>,
     statement: &Statement<F, G>,
     witness: Witness<F>,
     strategy: &impl Strategy,
 ) -> Proof<F, G> {
-    assert_eq!(statement.setup.g.len(), statement.setup.h.len());
-    assert_eq!(statement.setup.g.len(), witness.a.len());
+    assert_eq!(setup.g.len(), setup.h.len());
+    assert_eq!(setup.g.len(), witness.a.len());
     assert_eq!(witness.a.len(), witness.b.len());
-    assert!(statement.setup.g.len().is_power_of_two());
+    assert!(setup.g.len().is_power_of_two());
     // TODO: commit to the statement.
 
     let mut l_r_coms = Vec::<(G, G)>::new();
     let mut a = witness.a;
     let mut b = witness.b;
-    let mut g = statement.setup.g.clone();
-    let mut h = statement.setup.h.clone();
-    let mut product =
-        statement.setup.product_generator.clone() * &statement.product + &statement.commitment;
+    let mut g = setup.g.clone();
+    let mut h = setup.h.clone();
+    let mut product = setup.product_generator.clone() * &statement.product + &statement.commitment;
     while a.len() > 1 {
         let half_len = a.len() / 2;
         let (a_lo, a_hi) = a.split_at_mut(half_len);
@@ -67,10 +66,10 @@ pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
         let (h_lo, h_hi) = h.split_at_mut(half_len);
         let l = G::msm(g_hi, a_lo, strategy)
             + &G::msm(h_lo, b_hi, strategy)
-            + &(statement.setup.product_generator.clone() * &F::msm(a_lo, b_hi, strategy));
+            + &(setup.product_generator.clone() * &F::msm(a_lo, b_hi, strategy));
         let r = G::msm(g_lo, a_hi, strategy)
             + &G::msm(h_hi, b_lo, strategy)
-            + &(statement.setup.product_generator.clone() * &F::msm(a_hi, b_lo, strategy));
+            + &(setup.product_generator.clone() * &F::msm(a_hi, b_lo, strategy));
         l_r_coms.push((l.clone(), r.clone()));
         transcript.commit(l.encode());
         transcript.commit(r.encode());
@@ -124,14 +123,15 @@ pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
 #[must_use]
 pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     transcript: &mut Transcript,
+    setup: &Setup<G>,
     statement: &Statement<F, G>,
     proof: Proof<F, G>,
     strategy: &impl Strategy,
 ) -> bool {
-    assert_eq!(statement.setup.g.len(), statement.setup.h.len());
-    assert!(statement.setup.g.len().is_power_of_two());
+    assert_eq!(setup.g.len(), setup.h.len());
+    assert!(setup.g.len().is_power_of_two());
 
-    let rounds = statement.setup.g.len().ilog2() as usize;
+    let rounds = setup.g.len().ilog2() as usize;
     let Proof {
         l_r_coms,
         a_final,
@@ -144,7 +144,7 @@ pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     // We reduce verification down to one MSM which needs to equal 0:
     // commitment + product * U + sum(u_i^2 * L_i + u_i^-2 * R_i)
     // - a_final * g_final - b_final * h_final - a_final * b_final * U = 0.
-    let capacity = statement.setup.g.len() + statement.setup.h.len() + 2 * rounds + 1;
+    let capacity = setup.g.len() + setup.h.len() + 2 * rounds + 1;
     let mut points = Vec::<G>::with_capacity(capacity);
     let mut weights = Vec::<F>::with_capacity(capacity);
     let mut us = Vec::<(F, F)>::with_capacity(rounds);
@@ -171,9 +171,9 @@ pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
         weights.push(u_inv2);
     }
 
-    points.extend_from_slice(&statement.setup.g);
-    points.extend_from_slice(&statement.setup.h);
-    points.push(statement.setup.product_generator.clone());
+    points.extend_from_slice(&setup.g);
+    points.extend_from_slice(&setup.h);
+    points.push(setup.product_generator.clone());
 
     let g_h_weights_start = weights.len();
     weights.push(F::one());
@@ -253,7 +253,6 @@ mod tests {
                 G::msm(&setup.g, &self.a, &strategy) + &G::msm(&setup.h, &self.b, &strategy);
             let product = F::msm(&self.a, &self.b, &strategy);
             let statement = Statement {
-                setup,
                 commitment,
                 product,
             };
@@ -263,10 +262,17 @@ mod tests {
             };
 
             let mut prover_transcript = Transcript::new(NAMESPACE);
-            let proof = prove(&mut prover_transcript, &statement, witness, &strategy);
+            let proof = prove(
+                &mut prover_transcript,
+                &setup,
+                &statement,
+                witness,
+                &strategy,
+            );
             let mut verifier_transcript = Transcript::new(NAMESPACE);
             assert!(verify(
                 &mut verifier_transcript,
+                &setup,
                 &statement,
                 proof,
                 &strategy,
