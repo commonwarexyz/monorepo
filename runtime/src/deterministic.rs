@@ -907,18 +907,22 @@ where
         let mut stop_cx = task::Context::from_waker(&waker);
 
         loop {
-            // Return if the deadline has elapsed.
-            if self.check_deadline(deadline, false) {
-                return true;
-            }
-
             if let Some(stop) = stop.as_mut() {
+                // If graceful stopping completed on the previous iteration,
+                // prefer that result over timing out at the exact deadline
+                // boundary.
+                //
                 // Once all pre-registered `stopped()` listeners have dropped
                 // their signals, runtime shutdown can move on to closing
                 // spawns and aborting any remaining tasks.
                 if stop.as_mut().poll(&mut stop_cx).is_ready() {
                     return false;
                 }
+            }
+
+            // Return if the deadline has elapsed.
+            if self.check_deadline(deadline, false) {
+                return true;
             }
 
             // Shutdown cleanup no longer needs to poll runtime tasks once none
