@@ -57,8 +57,10 @@ impl<K: Ord + Hash + Eq + EncodeSize, V: EncodeSize> EncodeSize for HashMap<K, V
     }
 
     fn encode_inline_size(&self) -> usize {
+        // Start with the size of the length prefix
         let mut size = self.len().encode_size();
 
+        // Add the encoded size of each key and value
         // Note: Iteration order doesn't matter for size calculation.
         for (k, v) in self {
             size += k.encode_inline_size();

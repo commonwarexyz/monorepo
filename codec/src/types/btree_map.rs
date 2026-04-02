@@ -54,8 +54,10 @@ impl<K: Ord + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
     }
 
     fn encode_inline_size(&self) -> usize {
+        // Start with the size of the length prefix
         let mut size = self.len().encode_size();
 
+        // Add the encoded size of each key and value
         for (k, v) in self {
             size += k.encode_inline_size();
             size += v.encode_inline_size();
