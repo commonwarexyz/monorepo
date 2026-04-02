@@ -9,7 +9,7 @@ use commonware_consensus::{
     Viewable,
 };
 use commonware_cryptography::sha256::Digest as Sha256Digest;
-use commonware_macros::select;
+use commonware_macros::select_loop;
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, Handle, IoBuf, Spawner};
 use rand::Rng;
@@ -208,57 +208,62 @@ where
         let (mut vote_sender, mut vote_receiver) = vote_network;
         let (mut cert_sender, mut cert_receiver) = certificate_network;
         let (mut resolver_sender, mut resolver_receiver) = resolver_network;
-
-        loop {
-            // Send disruptive messages across all channels
-            match (self.context.gen::<u8>()) % 7 {
-                0 => self.send_random_vote(&mut vote_sender).await,
-                1 => self.send_proposal(&mut vote_sender).await,
-                2 => {
-                    // Equivocation style: send multiple different proposals
-                    self.send_proposal(&mut vote_sender).await;
-                    self.send_proposal(&mut vote_sender).await;
-                }
-                3 => {
-                    self.send_random_message(&mut cert_sender).await;
-                }
-                4 => {
-                    self.send_random_message(&mut resolver_sender).await;
-                }
-                5 => {
-                    // flood random victim
-                    self.flood_victim(&mut vote_sender).await;
-                }
-                _ => {
-                    // Send on multiple channels simultaneously
-                    self.send_proposal(&mut vote_sender).await;
-                    self.send_random_message(&mut cert_sender).await;
-                    self.send_random_message(&mut resolver_sender).await;
-                }
-            }
-
-            select! {
-                result = vote_receiver.recv() => {
-                    if let Ok((_, msg)) = result {
-                        self.handle_vote(&mut vote_sender, msg.into()).await;
+        select_loop! {
+            self.context,
+            on_start => {
+                // Send disruptive messages across all channels before waiting
+                // on more traffic so the actor keeps perturbing the network
+                // while it is alive.
+                match (self.context.gen::<u8>()) % 7 {
+                    0 => self.send_random_vote(&mut vote_sender).await,
+                    1 => self.send_proposal(&mut vote_sender).await,
+                    2 => {
+                        // Equivocation style: send multiple different proposals.
+                        self.send_proposal(&mut vote_sender).await;
+                        self.send_proposal(&mut vote_sender).await;
                     }
-                },
-                result = cert_receiver.recv() => {
-                    if let Ok((_, msg)) = result {
-                        self.handle_certificate(&mut cert_sender, msg.into()).await;
+                    3 => {
+                        self.send_random_message(&mut cert_sender).await;
                     }
-                },
-                result = resolver_receiver.recv() => {
-                    if let Ok((_, msg)) = result {
-                        self.handle_resolver(&mut resolver_sender, msg.into()).await;
+                    4 => {
+                        self.send_random_message(&mut resolver_sender).await;
                     }
-                },
-                _ = self.context.sleep(TIMEOUT) => {
-                    self.send_random_vote(&mut vote_sender).await;
-                    self.send_random_message(&mut cert_sender).await;
-                    self.send_random_message(&mut resolver_sender).await;
-                },
-            }
+                    5 => {
+                        // Flood a random victim.
+                        self.flood_victim(&mut vote_sender).await;
+                    }
+                    _ => {
+                        // Send on multiple channels simultaneously.
+                        self.send_proposal(&mut vote_sender).await;
+                        self.send_random_message(&mut cert_sender).await;
+                        self.send_random_message(&mut resolver_sender).await;
+                    }
+                }
+            },
+            // Stop generating adversarial traffic once graceful stopping
+            // begins so shutdown does not spend its entire budget draining
+            // synthetic network churn.
+            on_stopped => {},
+            result = vote_receiver.recv() => {
+                if let Ok((_, msg)) = result {
+                    self.handle_vote(&mut vote_sender, msg.into()).await;
+                }
+            },
+            result = cert_receiver.recv() => {
+                if let Ok((_, msg)) = result {
+                    self.handle_certificate(&mut cert_sender, msg.into()).await;
+                }
+            },
+            result = resolver_receiver.recv() => {
+                if let Ok((_, msg)) = result {
+                    self.handle_resolver(&mut resolver_sender, msg.into()).await;
+                }
+            },
+            _ = self.context.sleep(TIMEOUT) => {
+                self.send_random_vote(&mut vote_sender).await;
+                self.send_random_message(&mut cert_sender).await;
+                self.send_random_message(&mut resolver_sender).await;
+            },
         }
     }
 
