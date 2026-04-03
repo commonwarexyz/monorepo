@@ -1507,7 +1507,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{self, Control, Link, Oracle},
-        Manager as _,
+        Manager as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Quota, Runner};
@@ -4576,6 +4576,18 @@ mod tests {
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
+                let np = &non_participants[0];
+
+                // Re-track the non-participant as a secondary-only peer to
+                // verify reconstruction does not rely on the primary set.
+                let participants_only: Set<P> =
+                    Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone()));
+                let secondary_only = Set::from_iter_dedup([np.public_key.clone()]);
+                oracle
+                    .manager()
+                    .track(2, TrackedPeers::new(participants_only, secondary_only))
+                    .await;
+                context.sleep(Duration::from_millis(10)).await;
 
                 let leader = peers[0].public_key.clone();
                 peers[0].mailbox.proposed(round, coded_block.clone()).await;
@@ -4591,7 +4603,6 @@ mod tests {
 
                 // Non-participant discovers the leader after shards are already
                 // propagating through the network.
-                let np = &non_participants[0];
                 let block_sub = np.mailbox.subscribe(commitment).await;
                 np.mailbox
                     .discovered(commitment, leader.clone(), round)
