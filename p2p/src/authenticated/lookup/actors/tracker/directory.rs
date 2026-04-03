@@ -19,6 +19,7 @@ use rand::Rng;
 use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
     net::IpAddr,
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, warn};
@@ -35,7 +36,7 @@ pub struct Config {
     pub bypass_ip_check: bool,
 
     /// The maximum number of peer sets to track.
-    pub max_sets: usize,
+    pub max_sets: NonZeroUsize,
 
     /// The cooldown between reservations for a given peer.
     pub peer_connection_cooldown: Duration,
@@ -50,7 +51,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
 
     // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
-    max_sets: usize,
+    max_sets: NonZeroUsize,
 
     /// Whether private IPs are connectable.
     pub allow_private_ips: bool,
@@ -223,7 +224,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.secondary_sets.insert(index, secondaries.into_keys());
 
         // Remove oldest tracked peer sets if necessary.
-        while self.primary_sets.len() > self.max_sets {
+        while self.primary_sets.len() > self.max_sets.get() {
             let (primary_index, primaries) = self.primary_sets.pop_first().unwrap();
             let (secondary_index, secondaries) = self.secondary_sets.pop_first().unwrap();
             assert_eq!(primary_index, secondary_index);
@@ -560,7 +561,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 1,
+            max_sets: commonware_utils::NZUsize!(1),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -632,7 +633,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 2,
+            max_sets: commonware_utils::NZUsize!(2),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -697,7 +698,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -804,7 +805,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -857,7 +858,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -916,7 +917,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 1,
+            max_sets: commonware_utils::NZUsize!(1),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -964,7 +965,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
@@ -1040,7 +1041,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -1141,7 +1142,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: false,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -1208,7 +1209,7 @@ mod tests {
             allow_private_ips: false,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -1275,7 +1276,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -1339,7 +1340,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
@@ -1422,7 +1423,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 1, // Only keep 1 set so we can evict peers
+            max_sets: commonware_utils::NZUsize!(1), // Only keep 1 set so we can evict peers
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
@@ -1532,7 +1533,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
@@ -1623,7 +1624,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
@@ -1668,7 +1669,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
@@ -1761,7 +1762,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
@@ -1863,7 +1864,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
@@ -1918,7 +1919,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
         };
@@ -1971,7 +1972,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
         };
@@ -2011,7 +2012,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
         };
@@ -2038,7 +2039,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(3600),
         };
@@ -2077,7 +2078,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(200),
             block_duration,
         };
@@ -2127,7 +2128,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(200),
             block_duration,
         };
@@ -2172,7 +2173,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: true, // Bypass IP check to simplify test
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
@@ -2227,7 +2228,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
@@ -2282,7 +2283,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
@@ -2334,7 +2335,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -2376,7 +2377,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -2402,7 +2403,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 1,
+            max_sets: commonware_utils::NZUsize!(1),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -2443,7 +2444,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
         };
@@ -2490,7 +2491,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };
@@ -2515,7 +2516,7 @@ mod tests {
             allow_private_ips: true,
             allow_dns: true,
             bypass_ip_check: false,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
         };

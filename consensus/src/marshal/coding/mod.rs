@@ -240,7 +240,7 @@ mod tests {
     fn test_certify_lower_view_after_higher_view() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -361,7 +361,7 @@ mod tests {
     fn test_marshaled_reproposal_validation() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -579,7 +579,7 @@ mod tests {
     fn test_marshaled_rejects_mismatched_context_digest() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -670,7 +670,7 @@ mod tests {
     fn test_reproposal_verify_receiver_drop_does_not_synthesize_false() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -747,7 +747,7 @@ mod tests {
     fn test_reproposal_missing_block_does_not_synthesize_false() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -839,7 +839,7 @@ mod tests {
     fn test_core_subscription_closes_when_coding_buffer_prunes_missing_commitment() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -931,7 +931,7 @@ mod tests {
 
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -1035,7 +1035,7 @@ mod tests {
     fn test_marshaled_rejects_invalid_ancestry() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -1208,7 +1208,7 @@ mod tests {
         //   4. Return Ok(true) for a valid block
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -1326,7 +1326,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             // 1) Set up a single validator marshal stack.
-            let mut oracle = setup_network(context.clone(), None);
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -1415,7 +1415,7 @@ mod tests {
         // the block unless V::commitment(block) matches the finalization payload.
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), Some(1));
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,

@@ -318,10 +318,7 @@ where
     tracked_peers: Set<P>,
 
     /// Latest primary peers allowed to retain pre-leader shard buffers.
-    ///
-    /// Before the first peer-set update arrives we preserve startup behavior and
-    /// allow buffering for any peer.
-    latest_primary_peers: Option<Set<P>>,
+    latest_primary_peers: Set<P>,
 
     /// Capacity of the background receiver channel.
     background_channel_capacity: usize,
@@ -385,7 +382,7 @@ where
                 peer_buffer_size: config.peer_buffer_size,
                 peer_provider: config.peer_provider,
                 tracked_peers: Set::default(),
-                latest_primary_peers: None,
+                latest_primary_peers: Set::default(),
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
@@ -460,6 +457,42 @@ where
                 self.update_latest_primary_peers(update.latest.primary);
                 self.tracked_peers = all_peers;
             },
+            Some((peer, shard)) = receiver.recv() else {
+                debug!("receiver closed, stopping shard engine");
+                return;
+            } => {
+                // Track shard receipt per peer.
+                self.metrics
+                    .shards_received
+                    .get_or_create(&Peer::new(&peer))
+                    .inc();
+
+                let commitment = shard.commitment();
+                if !self.should_handle_network_shard(commitment) {
+                    continue;
+                }
+
+                if let Some(state) = self.state.get_mut(&commitment) {
+                    let round = state.round();
+                    let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
+                        warn!(%commitment, "no scheme for epoch, ignoring shard");
+                        continue;
+                    };
+                    let progressed = state
+                        .on_network_shard(
+                            peer,
+                            shard,
+                            InsertCtx::new(scheme.as_ref(), &self.strategy),
+                            &mut self.blocker,
+                        )
+                        .await;
+                    if progressed {
+                        self.try_advance(&mut sender, commitment).await;
+                    }
+                } else {
+                    self.buffer_peer_shard(peer, shard);
+                }
+            },
             Some(message) = self.mailbox.recv() else {
                 debug!("shard mailbox closed, stopping shard engine");
                 return;
@@ -510,42 +543,6 @@ where
                 }
                 Message::Prune { through } => {
                     self.prune(through);
-                }
-            },
-            Some((peer, shard)) = receiver.recv() else {
-                debug!("receiver closed, stopping shard engine");
-                return;
-            } => {
-                // Track shard receipt per peer.
-                self.metrics
-                    .shards_received
-                    .get_or_create(&Peer::new(&peer))
-                    .inc();
-
-                let commitment = shard.commitment();
-                if !self.should_handle_network_shard(commitment) {
-                    continue;
-                }
-
-                if let Some(state) = self.state.get_mut(&commitment) {
-                    let round = state.round();
-                    let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
-                        warn!(%commitment, "no scheme for epoch, ignoring shard");
-                        continue;
-                    };
-                    let progressed = state
-                        .on_network_shard(
-                            peer,
-                            shard,
-                            InsertCtx::new(scheme.as_ref(), &self.strategy),
-                            &mut self.blocker,
-                        )
-                        .await;
-                    if progressed {
-                        self.try_advance(&mut sender, commitment).await;
-                    }
-                } else {
-                    self.buffer_peer_shard(peer, shard);
                 }
             },
         }
@@ -699,14 +696,11 @@ where
     fn update_latest_primary_peers(&mut self, peers: Set<P>) {
         self.peer_buffers
             .retain(|peer, _| peers.as_ref().contains(peer));
-        self.latest_primary_peers = Some(peers);
+        self.latest_primary_peers = peers;
     }
 
     fn should_buffer_peer(&self, peer: &P) -> bool {
-        match &self.latest_primary_peers {
-            Some(primary) => primary.as_ref().contains(peer),
-            None => true,
-        }
+        self.latest_primary_peers.as_ref().contains(peer)
     }
 
     /// Ingest buffered pre-leader shards for a commitment into active state.
@@ -1731,17 +1725,12 @@ mod tests {
         ) {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
-                let tracked_peer_sets = if self.num_non_participants > 0 {
-                    Some(1)
-                } else {
-                    None
-                };
                 let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                     context.with_label("network"),
                     simulated::Config {
                         max_size: MAX_SHARD_SIZE as u32,
                         disconnect_on_block: true,
-                        tracked_peer_sets,
+                        tracked_peer_sets: commonware_utils::NZUsize!(1),
                     },
                 );
                 network.start();
@@ -3665,7 +3654,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -3709,6 +3698,14 @@ mod tests {
                 .add_link(future_peer_pk.clone(), receiver_pk.clone(), DEFAULT_LINK)
                 .await
                 .expect("link should be added");
+            oracle
+                .manager()
+                .track(
+                    0,
+                    Set::from_iter_dedup([receiver_pk.clone(), future_peer_pk.clone()]),
+                )
+                .await;
+            context.sleep(Duration::from_millis(10)).await;
 
             // Set up the receiver's engine with a multi-epoch provider.
             let scheme_epoch0 =
@@ -3792,7 +3789,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -3831,6 +3828,8 @@ mod tests {
                         .expect("link should be added");
                 }
             }
+            oracle.manager().track(0, participants.clone()).await;
+            context.sleep(Duration::from_millis(10)).await;
 
             let (_leader_control, mut leader_sender, _leader_receiver) = registrations
                 .remove(&leader_pk)
@@ -4668,7 +4667,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(2),
+                    tracked_peer_sets: commonware_utils::NZUsize!(2),
                 },
             );
             network.start();
@@ -4814,7 +4813,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(2),
+                    tracked_peer_sets: commonware_utils::NZUsize!(2),
                 },
             );
             network.start();

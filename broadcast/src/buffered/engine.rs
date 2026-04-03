@@ -98,10 +98,7 @@ where
     counts: BTreeMap<M::Digest, usize>,
 
     /// Latest primary peer set allowed to keep buffered messages resident.
-    ///
-    /// Before the first peer-set update arrives we preserve startup behavior and
-    /// allow buffering for any peer.
-    latest_primary_peers: Option<Set<P>>,
+    latest_primary_peers: Set<P>,
 
     ////////////////////////////////////////
     // Metrics
@@ -137,7 +134,7 @@ where
             deques: BTreeMap::new(),
             items: BTreeMap::new(),
             counts: BTreeMap::new(),
-            latest_primary_peers: None,
+            latest_primary_peers: Set::default(),
             peer_provider: cfg.peer_provider,
             metrics,
         };
@@ -196,6 +193,13 @@ where
                     self.handle_get(digest, responder);
                 }
             },
+            Some(update) = peer_set_subscription.recv() else {
+                debug!("peer set subscription closed");
+                break;
+            } => {
+                // Evict by latest primary only; see buffered module docs.
+                self.update_latest_primary_peers(update.latest.primary);
+            },
             // Handle incoming messages
             msg = receiver.recv() => {
                 // Error handling
@@ -223,13 +227,6 @@ where
                     .get_or_create(&SequencerLabel::from(&peer))
                     .inc();
                 self.handle_network(peer, msg);
-            },
-            Some(update) = peer_set_subscription.recv() else {
-                debug!("peer set subscription closed");
-                break;
-            } => {
-                // Evict by latest primary only; see buffered module docs.
-                self.update_latest_primary_peers(update.latest.primary);
             },
         }
     }
@@ -366,21 +363,18 @@ where
 
     fn update_latest_primary_peers(&mut self, peers: Set<P>) {
         self.evict_untracked_peers(&peers);
-        self.latest_primary_peers = Some(peers);
+        self.latest_primary_peers = peers;
     }
 
     fn should_buffer_peer(&self, peer: &P) -> bool {
-        match &self.latest_primary_peers {
-            Some(primary) => primary.as_ref().contains(peer),
-            None => true,
-        }
+        peer == &self.public_key || self.latest_primary_peers.as_ref().contains(peer)
     }
 
     fn evict_untracked_peers(&mut self, primary_peers: &Set<P>) {
         let primary = primary_peers.as_ref();
         for (peer, deque) in self
             .deques
-            .extract_if(.., |peer, _| !primary.contains(peer))
+            .extract_if(.., |peer, _| peer != &self.public_key && !primary.contains(peer))
         {
             debug!(?peer, digests = deque.len(), "evicting disconnected peer");
             for digest in deque {

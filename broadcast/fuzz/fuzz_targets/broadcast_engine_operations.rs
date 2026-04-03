@@ -13,6 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{simulated::Network, Recipients};
 use commonware_runtime::{deterministic, Buf, BufMut, Clock, Metrics, Quota, Runner};
+use commonware_utils::ordered::Set;
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
 use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
@@ -178,7 +179,7 @@ fn fuzz(input: FuzzInput) {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: false,
-                tracked_peer_sets: None,
+                tracked_peer_sets: commonware_utils::NZUsize!(1),
             },
         );
         network.start();
@@ -230,6 +231,11 @@ fn fuzz(input: FuzzInput) {
                 }
             }
         }
+        oracle
+            .manager()
+            .track(0, Set::from_iter_dedup(peers.clone()))
+            .await;
+        context.sleep(Duration::from_millis(1)).await;
 
         // Execute fuzzed actions
         for action in input.actions {

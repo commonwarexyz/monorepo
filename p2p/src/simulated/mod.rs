@@ -77,7 +77,7 @@
 //! let p2p_cfg = Config {
 //!     max_size: 1024 * 1024, // 1MB
 //!     disconnect_on_block: true,
-//!     tracked_peer_sets: Some(3),
+//!     tracked_peer_sets: commonware_utils::NZUsize!(3),
 //! };
 //!
 //! // Rate limit quota (1000 messages per second per peer)
@@ -215,6 +215,16 @@ mod tests {
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+    async fn track_peers<I>(
+        oracle: &Oracle<PublicKey, deterministic::Context>,
+        peers: I,
+    ) where
+        I: IntoIterator<Item = PublicKey>,
+    {
+        let mut manager = oracle.manager();
+        manager.track(0, Set::from_iter_dedup(peers)).await;
+    }
+
     fn simulate_messages(seed: u64, size: usize) -> (String, Vec<usize>) {
         let executor = deterministic::Runner::seeded(seed);
         executor.start(|context| async move {
@@ -224,7 +234,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
 
@@ -254,6 +264,7 @@ mod tests {
                         // Exiting early here tests the case where the recipient end of an agent is dropped
                     });
             }
+            track_peers(&oracle, agents.keys().cloned()).await;
 
             // Randomly link agents
             let only_inbound = PrivateKey::from_seed(0).public_key();
@@ -347,7 +358,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
 
@@ -393,7 +404,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
 
@@ -436,7 +447,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
 
@@ -482,6 +493,7 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(&oracle, [my_pk.clone(), other_pk.clone()]).await;
 
             // Send messages
             let msg = IoBuf::from(b"hello");
@@ -548,7 +560,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
 
@@ -597,7 +609,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: commonware_utils::NZUsize!(3),
                 },
             );
             network.start();
@@ -660,7 +672,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
 
@@ -692,6 +704,7 @@ mod tests {
                 .register(2, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(&oracle, [pk1.clone(), pk2.clone()]).await;
 
             // Link agents
             oracle
@@ -751,7 +764,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
 
@@ -771,6 +784,7 @@ mod tests {
                 .register(1, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(&oracle, [pk1.clone(), pk2.clone()]).await;
 
             // Link agents
             oracle
@@ -813,7 +827,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
 
@@ -833,6 +847,7 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(&oracle, [pk1.clone(), pk2.clone()]).await;
 
             // Link agents
             oracle
@@ -892,7 +907,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
 
@@ -912,6 +927,7 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(&oracle, [pk1.clone(), pk2.clone()]).await;
 
             // Send messages
             let msg1 = IoBuf::from(b"attempt 1: hello from pk1");
@@ -1018,6 +1034,7 @@ mod tests {
     async fn test_bandwidth_between_peers(
         context: &mut deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,
+        index: u64,
         sender_bps: Option<usize>,
         receiver_bps: Option<usize>,
         message_size: usize,
@@ -1036,6 +1053,13 @@ mod tests {
             .register(0, TEST_QUOTA)
             .await
             .unwrap();
+        let mut manager = oracle.manager();
+        manager
+            .track(
+                index,
+                Set::from_iter_dedup([pk1.clone(), pk2.clone()]),
+            )
+            .await;
 
         // Set bandwidth limits
         oracle
@@ -1095,7 +1119,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -1105,6 +1129,7 @@ mod tests {
             test_bandwidth_between_peers(
                 &mut context,
                 &oracle,
+                0,
                 Some(1000), // sender egress
                 Some(1000), // receiver ingress
                 500,        // message size
@@ -1118,6 +1143,7 @@ mod tests {
             test_bandwidth_between_peers(
                 &mut context,
                 &oracle,
+                1,
                 Some(500),  // sender egress
                 Some(2000), // receiver ingress
                 250,        // message size
@@ -1131,6 +1157,7 @@ mod tests {
             test_bandwidth_between_peers(
                 &mut context,
                 &oracle,
+                2,
                 Some(2000), // sender egress
                 Some(500),  // receiver ingress
                 250,        // message size
@@ -1144,6 +1171,7 @@ mod tests {
             test_bandwidth_between_peers(
                 &mut context,
                 &oracle,
+                3,
                 None,       // sender egress (unlimited)
                 Some(1000), // receiver ingress
                 500,        // message size
@@ -1157,6 +1185,7 @@ mod tests {
             test_bandwidth_between_peers(
                 &mut context,
                 &oracle,
+                4,
                 Some(1000), // sender egress
                 None,       // receiver ingress (unlimited)
                 500,        // message size
@@ -1169,6 +1198,7 @@ mod tests {
             test_bandwidth_between_peers(
                 &mut context,
                 &oracle,
+                5,
                 None, // sender egress (unlimited)
                 None, // receiver ingress (unlimited)
                 500,  // message size
@@ -1188,7 +1218,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -1215,6 +1245,7 @@ mod tests {
                 senders.push(sender);
                 receivers.push(receiver);
             }
+            track_peers(&oracle, peers.iter().cloned()).await;
 
             // Set bandwidth limits for all peers
             for pk in &peers {
@@ -1343,7 +1374,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -1361,6 +1392,7 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(&oracle, [pk1.clone(), pk2.clone()]).await;
 
             // Link agents with high jitter to create variable delays
             oracle
@@ -1410,7 +1442,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -1419,6 +1451,7 @@ mod tests {
             let pk2 = PrivateKey::from_seed(2).public_key();
             let (mut sender, _) = oracle.control(pk1.clone()).register(0, TEST_QUOTA).await.unwrap();
             let (_, mut receiver) = oracle.control(pk2.clone()).register(0, TEST_QUOTA).await.unwrap();
+            track_peers(&oracle, [pk1.clone(), pk2.clone()]).await;
 
             const BPS: usize = 1_000;
             oracle
@@ -1517,7 +1550,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -1548,6 +1581,11 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(
+                &oracle,
+                senders.iter().cloned().chain([receiver.clone()]),
+            )
+            .await;
 
             // Receiver has 100KB/s ingress
             oracle
@@ -1609,7 +1647,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -1661,6 +1699,11 @@ mod tests {
                     .await
                     .unwrap();
             }
+            track_peers(
+                &oracle,
+                core::iter::once(sender.clone()).chain(receivers.iter().cloned()),
+            )
+            .await;
 
             let start = context.current();
 
@@ -1702,7 +1745,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -1734,6 +1777,11 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(
+                &oracle,
+                senders.iter().cloned().chain([receiver.clone()]),
+            )
+            .await;
 
             // Receiver has 10KB/s ingress (can handle all 10 senders at full speed)
             oracle
@@ -1801,7 +1849,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -1833,6 +1881,11 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(
+                &oracle,
+                senders.iter().cloned().chain([receiver.clone()]),
+            )
+            .await;
             oracle
                 .limit_bandwidth(receiver.clone(), None, Some(30_000))
                 .await
@@ -1950,7 +2003,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -1982,6 +2035,11 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(
+                &oracle,
+                senders.iter().cloned().chain([receiver.clone()]),
+            )
+            .await;
             oracle
                 .limit_bandwidth(receiver.clone(), None, Some(30_000))
                 .await
@@ -2054,7 +2112,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -2073,6 +2131,7 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(&oracle, [sender.clone(), receiver.clone()]).await;
 
             // Set bandwidth: 1000 B/s (1 byte per millisecond)
             oracle
@@ -2160,7 +2219,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -2179,6 +2238,7 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(&oracle, [pk_sender.clone(), pk_receiver.clone()]).await;
             oracle
                 .add_link(
                     pk_sender.clone(),
@@ -2255,7 +2315,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -2274,6 +2334,7 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(&oracle, [pk_sender.clone(), pk_receiver.clone()]).await;
             oracle
                 .add_link(
                     pk_sender.clone(),
@@ -2335,7 +2396,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -2354,6 +2415,7 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            track_peers(&oracle, [pk_sender.clone(), pk_receiver.clone()]).await;
             oracle
                 .add_link(
                     pk_sender.clone(),
@@ -2415,13 +2477,13 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: commonware_utils::NZUsize!(3),
                 },
             );
             network.start();
 
             let mut manager = oracle.manager();
-            assert_eq!(manager.peer_set(0).await, Some([].try_into().unwrap()));
+            assert_eq!(manager.peer_set(0).await, None);
 
             let pk1 = PrivateKey::from_seed(1).public_key();
             let pk2 = PrivateKey::from_seed(2).public_key();
@@ -2445,7 +2507,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: commonware_utils::NZUsize!(3),
                 },
             );
             network.start();
@@ -2508,7 +2570,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: commonware_utils::NZUsize!(3),
                 },
             );
             network.start();
@@ -2543,7 +2605,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: commonware_utils::NZUsize!(3),
                 },
             );
             network.start();
@@ -2580,7 +2642,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: commonware_utils::NZUsize!(3),
                 },
             );
             network.start();
@@ -2634,7 +2696,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(2), // Only track 2 peer sets
+                    tracked_peer_sets: commonware_utils::NZUsize!(2), // Only track 2 peer sets
                 },
             );
             network.start();
@@ -2770,7 +2832,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(1),
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
             );
             network.start();
@@ -2895,7 +2957,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(2),
+                    tracked_peer_sets: commonware_utils::NZUsize!(2),
                 },
             );
             network.start();
@@ -3000,7 +3062,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: commonware_utils::NZUsize!(3),
                 },
             );
             network.start();
@@ -3055,7 +3117,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(2),
+                    tracked_peer_sets: commonware_utils::NZUsize!(2),
                 },
             );
             network.start();
@@ -3152,7 +3214,7 @@ mod tests {
             let cfg = Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -3235,7 +3297,7 @@ mod tests {
             let cfg = Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -3308,7 +3370,7 @@ mod tests {
             let cfg = Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context, cfg);
@@ -3399,7 +3461,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: commonware_utils::NZUsize!(3),
                 },
             );
             network.start();
@@ -3448,7 +3510,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(3),
+                    tracked_peer_sets: commonware_utils::NZUsize!(3),
                 },
             );
             network.start();

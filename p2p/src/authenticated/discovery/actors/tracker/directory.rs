@@ -20,6 +20,7 @@ use commonware_utils::{ordered::Set as OrderedSet, PrioritySet, SystemTimeExt};
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
+    num::NonZeroUsize,
     ops::Deref,
     time::{Duration, SystemTime},
 };
@@ -34,7 +35,7 @@ pub struct Config {
     pub allow_dns: bool,
 
     /// The maximum number of peer sets to track.
-    pub max_sets: usize,
+    pub max_sets: NonZeroUsize,
 
     /// The minimum number of times we should fail to dial a peer before attempting to ask other
     /// peers for its peer info again.
@@ -59,7 +60,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     allow_dns: bool,
 
     /// The maximum number of peer sets to track.
-    max_sets: usize,
+    max_sets: NonZeroUsize,
 
     /// The minimum number of times we should fail to dial a peer before attempting to ask other
     /// peers for its peer info again.
@@ -258,7 +259,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.secondary_sets.insert(index, secondaries);
 
         // Remove oldest tracked peer sets if necessary.
-        while self.primary_sets.len() > self.max_sets {
+        while self.primary_sets.len() > self.max_sets.get() {
             let (primary_index, primary_set) = self.primary_sets.pop_first().unwrap();
             let (secondary_index, secondary_set) = self.secondary_sets.pop_first().unwrap();
             assert_eq!(primary_index, secondary_index);
@@ -598,7 +599,7 @@ mod tests {
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -641,7 +642,7 @@ mod tests {
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
-            max_sets: 2,
+            max_sets: commonware_utils::NZUsize!(2),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -688,7 +689,7 @@ mod tests {
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -773,7 +774,7 @@ mod tests {
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -818,7 +819,7 @@ mod tests {
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -917,7 +918,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -983,7 +984,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1058,7 +1059,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 1, // Only keep 1 set so we can evict peers
+            max_sets: commonware_utils::NZUsize!(1), // Only keep 1 set so we can evict peers
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1158,7 +1159,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1239,7 +1240,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1296,7 +1297,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1352,7 +1353,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1405,7 +1406,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1473,7 +1474,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1539,7 +1540,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1618,7 +1619,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
@@ -1670,7 +1671,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
@@ -1711,7 +1712,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(200),
             block_duration: Duration::from_secs(100),
@@ -1739,7 +1740,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(200),
             block_duration,
@@ -1776,7 +1777,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(200),
             block_duration,
@@ -1827,7 +1828,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(200),
             block_duration,

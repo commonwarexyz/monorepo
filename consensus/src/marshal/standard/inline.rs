@@ -580,7 +580,7 @@ mod tests {
     fn test_certify_returns_immediately_after_verify_fetches_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
@@ -656,7 +656,7 @@ mod tests {
     fn test_certify_succeeds_without_verify_task() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), None);
+            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,

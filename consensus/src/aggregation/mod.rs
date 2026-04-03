@@ -97,7 +97,10 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
+    use commonware_p2p::{
+        simulated::{Link, Network, Oracle, Receiver, Sender},
+        Manager as _,
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef,
@@ -106,6 +109,7 @@ mod tests {
     };
     use commonware_utils::{
         channel::{fallible::OneshotExt, oneshot},
+        ordered::Set,
         test_rng, NZUsize, NonZeroDuration, NZU16,
     };
     use futures::future::join_all;
@@ -145,6 +149,10 @@ mod tests {
                 .unwrap();
             registrations.insert(participant.clone(), (sender, receiver));
         }
+        oracle
+            .manager()
+            .track(0, Set::from_iter_dedup(participants.iter().cloned()))
+            .await;
         registrations
     }
 
@@ -181,7 +189,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: None,
+                tracked_peer_sets: commonware_utils::NZUsize!(1),
             },
         );
         network.start();

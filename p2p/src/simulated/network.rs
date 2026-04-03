@@ -33,6 +33,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, error, trace, warn};
@@ -97,9 +98,7 @@ pub struct Config {
     /// The maximum number of peer sets to track. When a new peer set is registered and this
     /// limit is exceeded, the oldest peer set is removed. Peers that are no longer in any
     /// tracked peer set will have their links removed and messages to them will be dropped.
-    ///
-    /// If [None], peer sets are not considered.
-    pub tracked_peer_sets: Option<usize>,
+    pub tracked_peer_sets: NonZeroUsize,
 }
 
 /// Implementation of a simulated network.
@@ -149,7 +148,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     secondary_refs: BTreeMap<P, usize>,
 
     // Maximum number of peer sets to track
-    tracked_peer_sets: Option<usize>,
+    tracked_peer_sets: NonZeroUsize,
 
     // A map of peers blocking each other
     blocks: BTreeSet<(P, P)>,
@@ -264,10 +263,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let primary = peers.primary;
                 let secondary = peers.secondary;
 
-                let Some(tracked_peer_sets) = self.tracked_peer_sets else {
-                    warn!("attempted to register peer set when tracking is disabled");
-                    return;
-                };
+                let tracked_peer_sets = self.tracked_peer_sets;
 
                 // Check if peer set already exists
                 if self.primary_sets.contains_key(&id) {
@@ -305,7 +301,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 self.secondary_sets.insert(id, secondary.clone());
 
                 // Remove oldest tracked peer sets if we exceed the limit.
-                while self.primary_sets.len() > tracked_peer_sets {
+                while self.primary_sets.len() > tracked_peer_sets.get() {
                     let (primary_index, primary_set) = self.primary_sets.pop_first().unwrap();
                     let (secondary_index, secondary_set) = self.secondary_sets.pop_first().unwrap();
                     assert_eq!(primary_index, secondary_index);
@@ -358,8 +354,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // If peer does not exist, then create it.
                 let (_, is_new) = self.ensure_peer_exists(&public_key).await;
 
-                // When not using peer sets, broadcast updated peer list to subscribers
-                if is_new && self.primary_sets.is_empty() {
+                if is_new {
                     self.broadcast_peer_list().await;
                 }
 
@@ -391,19 +386,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 send_result(result, Ok((sender, receiver)))
             }
             ingress::Message::PeerSet { id, response } => {
-                if self.primary_sets.is_empty() {
-                    // Return all peers if no peer sets are registered.
-                    let _ = response.send(Some(
-                        self.peers
-                            .keys()
-                            .cloned()
-                            .try_collect()
-                            .expect("BTreeMap keys are unique"),
-                    ));
-                } else {
-                    // Return the peer set at the given index
-                    let _ = response.send(self.primary_sets.get(&id).cloned());
-                }
+                let _ = response.send(self.primary_sets.get(&id).cloned());
             }
             ingress::Message::Subscribe { response } => {
                 // Create a new subscription channel
@@ -441,8 +424,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // If peer does not exist, then create it.
                 let (_, is_new) = self.ensure_peer_exists(&public_key).await;
 
-                // When not using peer sets, broadcast updated peer list to subscribers
-                if is_new && self.primary_sets.is_empty() {
+                if is_new {
                     self.broadcast_peer_list().await;
                 }
 
@@ -467,8 +449,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let (_, sender_is_new) = self.ensure_peer_exists(&sender).await;
                 let (receiver_socket, receiver_is_new) = self.ensure_peer_exists(&receiver).await;
 
-                // When not using peer sets, broadcast updated peer list to subscribers
-                if (sender_is_new || receiver_is_new) && self.primary_sets.is_empty() {
+                if sender_is_new || receiver_is_new {
                     self.broadcast_peer_list().await;
                 }
 
@@ -537,8 +518,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Broadcast updated peer list to all peer subscribers.
     ///
-    /// This is called when the peer list changes (either from peer set updates
-    /// or from new peers being added when not using peer sets).
+    /// This is called when the peer list changes.
     ///
     /// Subscribers whose receivers have been dropped are removed to prevent
     /// memory leaks.
@@ -554,24 +534,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     }
 
     /// Get all primary peers as an ordered set.
-    ///
-    /// When peer sets are registered, returns only the peers from those sets.
-    /// Otherwise, returns all registered peers (for compatibility with tests
-    /// that don't use peer sets).
     fn all_tracked_peers(&self) -> TrackedPeers<P> {
-        let primary = if self.primary_sets.is_empty() && self.tracked_peer_sets.is_none() {
-            self.peers
-                .keys()
-                .cloned()
-                .try_collect()
-                .expect("BTreeMap keys are unique")
-        } else {
-            self.primary_refs
-                .keys()
-                .cloned()
-                .try_collect()
-                .expect("BTreeMap keys are unique")
-        };
+        let primary = self
+            .primary_refs
+            .keys()
+            .cloned()
+            .try_collect()
+            .expect("BTreeMap keys are unique");
         let secondary = self
             .secondary_refs
             .keys()
@@ -596,15 +565,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Get all peers that should be exposed to `Recipients::All`.
     ///
-    /// When peer sets are enabled, the simulated network treats all tracked
-    /// peers as reachable. Primary peers remain the ones targeted for
-    /// primary-only behavior such as dialing, but secondaries still receive
-    /// broadcast traffic, matching the expectations of higher-level tests
-    /// built on this abstraction.
+    /// The simulated network treats all tracked peers as reachable. Primary
+    /// peers remain the ones targeted for primary-only behavior such as
+    /// dialing, but secondaries still receive broadcast traffic, matching the
+    /// expectations of higher-level tests built on this abstraction.
     fn all_connected_peers(&self) -> Vec<P> {
-        if self.tracked_peer_sets.is_none() {
-            return self.peers.keys().cloned().collect();
-        }
         let mut out: Vec<P> = self.primary_refs.keys().cloned().collect();
         for peer in self.secondary_refs.keys() {
             if !self.primary_refs.contains_key(peer) {
@@ -656,9 +621,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// This method is called when a task is received from the sender, which can come from
     /// any peer in the network.
     fn handle_task(&mut self, task: Task<P>) {
-        // If peer sets are enabled and we are not in one, ignore the message (we are disconnected from all)
         let (channel, origin, recipients, message, reply) = task;
-        if self.tracked_peer_sets.is_some() && !self.is_connectable(&origin) {
+        if !self.is_connectable(&origin) {
             warn!(
                 ?origin,
                 reason = "not primary or secondary",
@@ -687,8 +651,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 continue;
             }
 
-            // If tracking peer sets, ensure recipient is primary or secondary
-            if self.tracked_peer_sets.is_some() && !self.is_connectable(&recipient) {
+            if !self.is_connectable(&recipient) {
                 trace!(
                     ?origin,
                     ?recipient,
@@ -1382,7 +1345,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1433,7 +1396,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1563,7 +1526,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1637,7 +1600,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1724,7 +1687,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -1774,7 +1737,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
-            tracked_peer_sets: None,
+            tracked_peer_sets: commonware_utils::NZUsize!(1),
         };
         let runner = deterministic::Runner::default();
 
@@ -1809,7 +1772,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
-            tracked_peer_sets: Some(3),
+            tracked_peer_sets: commonware_utils::NZUsize!(3),
         };
         let runner = deterministic::Runner::default();
 
@@ -1887,7 +1850,7 @@ mod tests {
         let cfg = Config {
             max_size: MAX_MESSAGE_SIZE,
             disconnect_on_block: true,
-            tracked_peer_sets: Some(3),
+            tracked_peer_sets: commonware_utils::NZUsize!(3),
         };
         let runner = deterministic::Runner::default();
 
@@ -1983,7 +1946,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
@@ -2062,7 +2025,7 @@ mod tests {
             let cfg = Config {
                 max_size: MAX_MESSAGE_SIZE,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(2),
+                tracked_peer_sets: commonware_utils::NZUsize!(2),
             };
             let network_context = context.with_label("network");
             let (network, oracle) = Network::new(network_context.clone(), cfg);
