@@ -158,9 +158,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 // Panic since there is no way to recover from this.
                 let max = self.max_peer_set_size;
                 let plen = primary.len();
-                assert!(plen as u64 <= max, "primary peer set too large: {plen} > {max}");
+                assert!(
+                    plen as u64 <= max,
+                    "primary peer set too large: {plen} > {max}"
+                );
                 let slen = secondary.len();
-                assert!(slen as u64 <= max, "secondary peer set too large: {slen} > {max}");
+                assert!(
+                    slen as u64 <= max,
+                    "secondary peer set too large: {slen} > {max}"
+                );
 
                 // Attempt to update tracked peers.
                 if !self
@@ -977,7 +983,10 @@ mod tests {
             assert_eq!(update.index, 0);
             assert_eq!(update.latest.primary.len(), 1);
             assert!(update.latest.primary.position(&pk).is_some());
-            assert_eq!(update.latest.secondary, Set::try_from([pk.clone()]).unwrap());
+            assert_eq!(
+                update.latest.secondary,
+                Set::try_from([pk.clone()]).unwrap()
+            );
             assert_eq!(update.all.primary, update.latest.primary);
             assert_eq!(update.all.secondary, Set::try_from([pk.clone()]).unwrap());
             assert!(mailbox.acceptable(pk).await);

@@ -743,7 +743,10 @@ mod tests {
             assert_eq!(update.index, 0);
             assert_eq!(update.latest.primary.len(), 1);
             assert!(update.latest.primary.position(&pk).is_some());
-            assert_eq!(update.latest.secondary, Set::try_from([pk.clone()]).unwrap());
+            assert_eq!(
+                update.latest.secondary,
+                Set::try_from([pk.clone()]).unwrap()
+            );
             assert_eq!(update.all.primary, update.latest.primary);
             assert_eq!(update.all.secondary, Set::try_from([pk.clone()]).unwrap());
 
