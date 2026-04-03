@@ -12,15 +12,16 @@ use crate::{
     },
     merkle::{Family, Location, Proof},
     qmdb::{
-        build_snapshot_from_log, delete_known_loc, operation::Operation as OperationTrait,
-        update_known_loc, Error,
+        bitmap::BitmapBatch, build_snapshot_from_log, delete_known_loc,
+        operation::Operation as OperationTrait, update_known_loc, Error,
     },
     Context, Persistable,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
+use commonware_utils::bitmap::{Prunable as PrunableBitMap, Readable as BitmapReadable};
 use core::num::NonZeroU64;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<F, E, C, H> = authenticated::Journal<F, E, C, H>;
@@ -82,6 +83,11 @@ pub struct Db<
 
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
+
+    /// Activity bitmap for optimized floor raising. Tracks which operations are active (bit=1)
+    /// or inactive (bit=0), allowing `BitmapScan` to skip inactive operations during floor
+    /// raising instead of reading them from the journal.
+    pub(crate) status: BitmapBatch<{ commonware_utils::bitmap::DEFAULT_CHUNK_SIZE }>,
 
     /// Marker for the update type parameter.
     pub(crate) _update: core::marker::PhantomData<U>,
@@ -192,6 +198,13 @@ where
             ));
         }
 
+        // Flatten bitmap layers and prune chunks below the inactivity floor.
+        self.status.flatten();
+        let BitmapBatch::Base(base) = &mut self.status else {
+            unreachable!("flatten() guarantees Base");
+        };
+        Arc::make_mut(base).prune_to_bit(*self.inactivity_floor_loc);
+
         self.log.prune(prune_loc).await?;
 
         Ok(())
@@ -265,6 +278,17 @@ where
                 return Err(Error::UnexpectedData(rewind_last_loc));
             };
             if *rewind_floor < bounds.start {
+                return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
+            }
+
+            // Ensure the rewind target is above the bitmap pruning boundary.
+            let pruned_bits = self.status.pruned_bits();
+            if rewind_size < pruned_bits {
+                return Err(Error::<F>::Journal(JournalError::ItemPruned(
+                    rewind_size - 1,
+                )));
+            }
+            if *rewind_floor < pruned_bits {
                 return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
             }
 
@@ -363,6 +387,19 @@ where
         self.last_commit_loc = Location::new(rewind_size - 1);
         self.inactivity_floor_loc = rewind_floor;
 
+        // Patch the activity bitmap: truncate to rewound size, mark restored locs as active.
+        self.status.flatten();
+        let BitmapBatch::Base(base) = &mut self.status else {
+            unreachable!("flatten() guarantees Base");
+        };
+        let bm = Arc::make_mut(base);
+        bm.truncate(rewind_size);
+        for loc in &restored_locs {
+            bm.set_bit(**loc, true);
+        }
+        // Mark the new tip commit as active.
+        bm.set_bit(rewind_size - 1, true);
+
         Ok(restored_locs)
     }
 }
@@ -393,6 +430,10 @@ where
     where
         Cb: FnMut(bool, Option<Location<F>>),
     {
+        // Initialize the activity bitmap. If a known inactivity floor is provided,
+        // start the bitmap at that point (matching current/mod.rs:340-349 pattern).
+        let mut status = PrunableBitMap::new();
+
         // If the last-known inactivity floor is behind the current floor, then invoke the callback
         // appropriately to report the inactive bits.
         let (last_commit_loc, inactivity_floor_loc, active_keys) = {
@@ -405,13 +446,25 @@ where
             let last_commit = reader.read(last_commit_loc).await?;
             let inactivity_floor_loc = last_commit.has_floor().expect("should be a commit");
             if let Some(known_inactivity_floor) = known_inactivity_floor {
-                (*known_inactivity_floor..*inactivity_floor_loc)
-                    .for_each(|_| callback(false, None));
+                (*known_inactivity_floor..*inactivity_floor_loc).for_each(|_| {
+                    status.push(false);
+                    callback(false, None);
+                });
             }
 
-            let active_keys =
-                build_snapshot_from_log(inactivity_floor_loc, &reader, &mut index, callback)
-                    .await?;
+            let active_keys = build_snapshot_from_log(
+                inactivity_floor_loc,
+                &reader,
+                &mut index,
+                |active, old_loc| {
+                    status.push(active);
+                    if let Some(loc) = old_loc {
+                        status.set_bit(*loc, false);
+                    }
+                    callback(active, old_loc);
+                },
+            )
+            .await?;
             (
                 Location::new(last_commit_loc),
                 inactivity_floor_loc,
@@ -425,6 +478,7 @@ where
             snapshot: index,
             last_commit_loc,
             active_keys,
+            status: BitmapBatch::Base(Arc::new(status)),
             _update: core::marker::PhantomData,
         })
     }

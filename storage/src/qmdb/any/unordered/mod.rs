@@ -99,6 +99,9 @@ impl<
             snapshot,
             last_commit_loc,
             active_keys,
+            status: crate::qmdb::bitmap::BitmapBatch::Base(std::sync::Arc::new(
+                commonware_utils::bitmap::Prunable::new(),
+            )),
             _update: core::marker::PhantomData,
         })
     }
