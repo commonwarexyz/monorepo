@@ -8,13 +8,15 @@ use crate::{
             types::{self, Info},
         },
     },
-    Ingress, TrackedPeers,
+    Ingress, PeerSetUpdate, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{ordered::Set as OrderedSet, PrioritySet, SystemTimeExt, TryCollect};
+use commonware_utils::{ordered::Set as OrderedSet, PrioritySet, SystemTimeExt};
+#[cfg(test)]
+use commonware_utils::TryCollect;
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -289,6 +291,19 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.primary_sets.keys().last().copied()
     }
 
+    /// Returns a [`PeerSetUpdate`] for the latest tracked peer set, if any.
+    pub fn latest_update(&self) -> Option<PeerSetUpdate<C>> {
+        let index = self.latest_set_index()?;
+        Some(PeerSetUpdate {
+            index,
+            latest: TrackedPeers::new(
+                self.get_set(&index).cloned().unwrap(),
+                self.get_secondary_set(&index).cloned().unwrap_or_default(),
+            ),
+            all: self.all(),
+        })
+    }
+
     /// Attempt to reserve a peer for the dialer.
     ///
     /// Returns `Some` on success, `None` otherwise.
@@ -361,8 +376,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
         }
         TrackedPeers::new(
-            primary.into_iter().try_collect().expect("HashMap keys are unique"),
-            secondary.into_iter().try_collect().expect("HashMap keys are unique"),
+            OrderedSet::from_iter_dedup(primary),
+            OrderedSet::from_iter_dedup(secondary),
         )
     }
 

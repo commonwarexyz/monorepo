@@ -5,7 +5,7 @@ use crate::{
         lookup::{actors::tracker::ingress::Releaser, metrics},
     },
     types::Address,
-    Ingress, TrackedPeers,
+    Ingress, PeerSetUpdate, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
@@ -13,7 +13,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     ordered::{Map, Set},
-    IpAddrExt, PrioritySet, SystemTimeExt, TryCollect,
+    IpAddrExt, PrioritySet, SystemTimeExt,
 };
 use rand::Rng;
 use std::{
@@ -276,8 +276,22 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Returns the latest tracked primary peer set index.
+    /// Returns the latest tracked primary peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
         self.primary_sets.keys().last().copied()
+    }
+
+    /// Returns a [`PeerSetUpdate`] for the latest tracked peer set, if any.
+    pub fn latest_update(&self) -> Option<PeerSetUpdate<C>> {
+        let index = self.latest_set_index()?;
+        Some(PeerSetUpdate {
+            index,
+            latest: TrackedPeers::new(
+                self.get_set(&index).cloned().unwrap(),
+                self.get_secondary_set(&index).cloned().unwrap_or_default(),
+            ),
+            all: self.all(),
+        })
     }
 
     /// Gets a secondary peer set by index.
@@ -355,8 +369,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
         }
         TrackedPeers::new(
-            primary.into_iter().try_collect().expect("HashMap keys are unique"),
-            secondary.into_iter().try_collect().expect("HashMap keys are unique"),
+            Set::from_iter_dedup(primary),
+            Set::from_iter_dedup(secondary),
         )
     }
 

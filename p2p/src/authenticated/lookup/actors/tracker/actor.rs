@@ -204,18 +204,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let (sender, receiver) = mpsc::unbounded_channel();
 
                 // Send the latest peer set immediately
-                if let Some(latest_set_id) = self.directory.latest_set_index() {
-                    sender.send_lossy(PeerSetUpdate {
-                        index: latest_set_id,
-                        latest: TrackedPeers::new(
-                            self.directory.get_set(&latest_set_id).cloned().unwrap(),
-                            self.directory
-                                .get_secondary_set(&latest_set_id)
-                                .cloned()
-                                .unwrap_or_default(),
-                        ),
-                        all: self.directory.all(),
-                    });
+                if let Some(update) = self.directory.latest_update() {
+                    sender.send_lossy(update);
                 }
                 self.subscribers.push(sender);
 

@@ -410,15 +410,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let (sender, receiver) = mpsc::unbounded_channel();
 
                 // Send the latest peer set upon subscription.
-                if let Some((index, peers)) = self.primary_sets.last_key_value() {
-                    sender.send_lossy(PeerSetUpdate {
-                        index: *index,
-                        latest: TrackedPeers::new(
-                            peers.clone(),
-                            self.secondary_sets.get(index).cloned().unwrap_or_default(),
-                        ),
-                        all: self.all_tracked_peers(),
-                    });
+                if let Some(update) = self.latest_update() {
+                    sender.send_lossy(update);
                 }
                 self.subscribers.push(sender);
 
@@ -586,6 +579,19 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             .try_collect()
             .expect("BTreeMap keys are unique");
         TrackedPeers::new(primary, secondary)
+    }
+
+    /// Returns a [`PeerSetUpdate`] for the latest tracked peer set, if any.
+    fn latest_update(&self) -> Option<PeerSetUpdate<P>> {
+        let (index, peers) = self.primary_sets.last_key_value()?;
+        Some(PeerSetUpdate {
+            index: *index,
+            latest: TrackedPeers::new(
+                peers.clone(),
+                self.secondary_sets.get(index).cloned().unwrap_or_default(),
+            ),
+            all: self.all_tracked_peers(),
+        })
     }
 
     /// Get all peers that should be exposed to `Recipients::All`.
