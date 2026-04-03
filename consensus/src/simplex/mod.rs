@@ -429,14 +429,14 @@ mod tests {
     use commonware_p2p::{
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
         utils::mocks::inert_channel,
-        Recipients, Sender as _,
+        Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
     };
-    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _, SeedableRng};
@@ -954,6 +954,19 @@ mod tests {
             let private_key_observer = PrivateKey::from_seed(n_active as u64);
             let public_key_observer = private_key_observer.public_key();
 
+            // Track the active validators as primary peers and the standalone
+            // observer as a secondary peer.
+            oracle
+                .manager()
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        Set::from_iter_dedup(participants.iter().cloned()),
+                        Set::from_iter_dedup([public_key_observer.clone()]),
+                    ),
+                )
+                .await;
+
             // Register all (including observer) with the network
             let mut all_validators = participants.clone();
             all_validators.push(public_key_observer.clone());
@@ -1052,7 +1065,8 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Sanity check
+            // Sanity check. The standalone secondary observer should still
+            // process the chain to the same progress threshold as validators.
             for reporter in reporters.iter() {
                 // Ensure no faults or invalid signatures
                 reporter.assert_no_faults();

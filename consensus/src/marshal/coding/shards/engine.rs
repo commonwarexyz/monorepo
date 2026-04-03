@@ -438,13 +438,14 @@ where
             on_stopped => {
                 debug!("received shutdown signal, stopping shard engine");
             },
-            Some((_, _, tracked_peers)) = peer_set_subscription.recv() else {
+            Some(update) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 return;
             } => {
+                let all_peers = update.all.union();
                 self.peer_buffers
-                    .retain(|peer, _| tracked_peers.as_ref().contains(peer));
-                self.tracked_peers = tracked_peers;
+                    .retain(|peer, _| all_peers.as_ref().contains(peer));
+                self.tracked_peers = all_peers;
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("shard mailbox closed, stopping shard engine");
@@ -1502,7 +1503,7 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{self, Control, Link, Oracle},
-        Manager as _,
+        Manager as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Quota, Runner};
@@ -1835,8 +1836,17 @@ mod tests {
                 }
 
                 if self.num_non_participants > 0 {
-                    let all_tracked: Set<P> = Set::from_iter_dedup(all_keys);
-                    oracle.manager().track(1, all_tracked).await;
+                    let primary_participants: Set<P> =
+                        Set::from_iter_dedup(peer_keys.iter().cloned());
+                    let secondary_non_participants: Set<P> =
+                        Set::from_iter_dedup(np_keys.iter().cloned());
+                    oracle
+                        .manager()
+                        .track(
+                            1,
+                            TrackedPeers::new(primary_participants, secondary_non_participants),
+                        )
+                        .await;
                     context.sleep(Duration::from_millis(10)).await;
                 }
 

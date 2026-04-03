@@ -210,11 +210,14 @@ where
                     .inc();
                 self.handle_network(peer, msg);
             },
-            Some((_, _, tracked_peers)) = peer_set_subscription.recv() else {
+            Some(update) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 break;
             } => {
-                self.evict_untracked_peers(&tracked_peers);
+                // Buffered caches are keyed to the newest primary set rather than the aggregate
+                // overlap window. Once a sender leaves `latest.primary`, stop retaining its deque
+                // even if transport tracking still keeps the peer connected.
+                self.evict_untracked_peers(&update.latest.primary);
             },
         }
     }
@@ -339,11 +342,11 @@ where
         true
     }
 
-    fn evict_untracked_peers(&mut self, tracked_peers: &Set<P>) {
-        let tracked = tracked_peers.as_ref();
+    fn evict_untracked_peers(&mut self, primary_peers: &Set<P>) {
+        let primary = primary_peers.as_ref();
         for (peer, deque) in self
             .deques
-            .extract_if(.., |peer, _| !tracked.contains(peer))
+            .extract_if(.., |peer, _| !primary.contains(peer))
         {
             debug!(?peer, digests = deque.len(), "evicting disconnected peer");
             for digest in deque {

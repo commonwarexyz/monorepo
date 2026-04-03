@@ -195,15 +195,16 @@ impl<
                 self.serves.cancel_all();
             },
             // Handle peer set updates
-            Some((id, _, all)) = peer_set_subscription.recv() else {
+            Some(update) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 return;
             } => {
-                // Instead of directing our requests to exclusively the latest set (which may still
-                // be syncing), we reconcile with all primary peers.
-                if self.last_peer_set_id < Some(id) {
-                    self.last_peer_set_id = Some(id);
-                    self.fetcher.reconcile(all.as_ref());
+                if self.last_peer_set_id < Some(update.index) {
+                    self.last_peer_set_id = Some(update.index);
+                    // Outbound fetches intentionally follow only the newest primary set.
+                    // `update.all` keeps overlap-window peers connected, but once a peer leaves
+                    // `latest.primary` it should stop receiving new resolver traffic.
+                    self.fetcher.reconcile(update.latest.primary.as_ref());
                 }
             },
             // Handle active deadline

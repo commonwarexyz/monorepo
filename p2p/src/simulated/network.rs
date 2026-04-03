@@ -9,7 +9,7 @@ use super::{
 use crate::{
     authenticated::UnboundedMailbox,
     utils::limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
-    Channel, Message, Recipients, UnlimitedSender as _,
+    Channel, Message, PeerSetUpdate, Recipients, TrackedPeers, UnlimitedSender as _,
 };
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
@@ -158,8 +158,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     transmitter: transmitter::State<P>,
 
     // Subscribers to primary peer set updates (used by Manager::subscribe())
-    #[allow(clippy::type_complexity)]
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>>,
+    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<P>>>,
 
     // Subscribers to the connectable peer list (used by PeerSource for LimitedSender)
     peer_subscribers: Vec<ring::Sender<Vec<P>>>,
@@ -303,7 +302,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.ensure_peer_exists(public_key).await;
                     *self.secondary_refs.entry(public_key.clone()).or_insert(0) += 1;
                 }
-                self.secondary_sets.insert(id, secondary);
+                self.secondary_sets.insert(id, secondary.clone());
 
                 // Remove oldest tracked peer sets if we exceed the limit.
                 while self.primary_sets.len() > tracked_peer_sets {
@@ -338,11 +337,14 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     }
                 }
 
-                // Notify all subscribers about the new peer set
-                let all = self.all_primary_peers();
-                let notification = (id, primary, all);
+                // Notify all subscribers about the new peer set.
+                let update = PeerSetUpdate {
+                    index: id,
+                    latest: TrackedPeers::new(primary.clone(), secondary.clone()),
+                    all: self.all_tracked_peers(),
+                };
                 self.subscribers
-                    .retain(|subscriber| subscriber.send_lossy(notification.clone()));
+                    .retain(|subscriber| subscriber.send_lossy(update.clone()));
 
                 // Broadcast updated peer list to LimitedSender subscribers
                 self.broadcast_peer_list().await;
@@ -407,11 +409,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // Create a new subscription channel
                 let (sender, receiver) = mpsc::unbounded_channel();
 
-                // Send the latest peer set upon subscription
-                if let Some((index, peers)) = self.primary_sets.last_key_value() {
-                    let all = self.all_primary_peers();
-                    let notification = (*index, peers.clone(), all);
-                    sender.send_lossy(notification);
+                // Send the latest peer set upon subscription.
+                if let Some(update) = self.latest_update() {
+                    sender.send_lossy(update);
                 }
                 self.subscribers.push(sender);
 
@@ -558,8 +558,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// When peer sets are registered, returns only the peers from those sets.
     /// Otherwise, returns all registered peers (for compatibility with tests
     /// that don't use peer sets).
-    fn all_primary_peers(&self) -> Set<P> {
-        if self.primary_sets.is_empty() && self.tracked_peer_sets.is_none() {
+    fn all_tracked_peers(&self) -> TrackedPeers<P> {
+        let primary = if self.primary_sets.is_empty() && self.tracked_peer_sets.is_none() {
             self.peers
                 .keys()
                 .cloned()
@@ -571,7 +571,27 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .cloned()
                 .try_collect()
                 .expect("BTreeMap keys are unique")
-        }
+        };
+        let secondary = self
+            .secondary_refs
+            .keys()
+            .cloned()
+            .try_collect()
+            .expect("BTreeMap keys are unique");
+        TrackedPeers::new(primary, secondary)
+    }
+
+    /// Returns a [`PeerSetUpdate`] for the latest tracked peer set, if any.
+    fn latest_update(&self) -> Option<PeerSetUpdate<P>> {
+        let (index, peers) = self.primary_sets.last_key_value()?;
+        Some(PeerSetUpdate {
+            index: *index,
+            latest: TrackedPeers::new(
+                peers.clone(),
+                self.secondary_sets.get(index).cloned().unwrap_or_default(),
+            ),
+            all: self.all_tracked_peers(),
+        })
     }
 
     /// Get all peers that should be exposed to `Recipients::All`.
@@ -1722,10 +1742,12 @@ mod tests {
             manager
                 .track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
                 .await;
-            let (id, new, all) = subscription.recv().await.unwrap();
-            assert_eq!(id, 10);
-            assert_eq!(new.len(), 2);
-            assert_eq!(all.len(), 2);
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 10);
+            assert_eq!(update.latest.primary.len(), 2);
+            assert!(update.latest.secondary.is_empty());
+            assert_eq!(update.all.primary.len(), 2);
+            assert!(update.all.secondary.is_empty());
 
             // Register old peer sets (ignored)
             let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
@@ -1738,10 +1760,12 @@ mod tests {
             manager
                 .track(11, Set::try_from([pk4.clone()]).unwrap())
                 .await;
-            let (id, new, all) = subscription.recv().await.unwrap();
-            assert_eq!(id, 11);
-            assert_eq!(new, Set::try_from([pk4.clone()]).unwrap());
-            assert_eq!(all, Set::try_from([pk1, pk2, pk4]).unwrap());
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 11);
+            assert_eq!(update.latest.primary, Set::try_from([pk4.clone()]).unwrap());
+            assert!(update.latest.secondary.is_empty());
+            assert_eq!(update.all.primary, Set::try_from([pk1, pk2, pk4]).unwrap());
+            assert!(update.all.secondary.is_empty());
         });
     }
 

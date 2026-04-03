@@ -180,6 +180,11 @@ impl Record {
         self.primary_sets
     }
 
+    /// Returns the number of secondary peer sets this peer is part of.
+    pub const fn secondary_sets(&self) -> usize {
+        self.secondary_sets
+    }
+
     /// Returns `true` if this peer may be used as an outbound dial target.
     ///
     /// Secondary peers remain eligible for inbound connections, but we reserve

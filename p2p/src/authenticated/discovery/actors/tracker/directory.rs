@@ -8,13 +8,15 @@ use crate::{
             types::{self, Info},
         },
     },
-    Ingress,
+    Ingress, PeerSetUpdate, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{ordered::Set as OrderedSet, PrioritySet, SystemTimeExt, TryCollect};
+#[cfg(test)]
+use commonware_utils::TryCollect;
+use commonware_utils::{ordered::Set as OrderedSet, PrioritySet, SystemTimeExt};
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -279,9 +281,27 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.primary_sets.get(index).map(Deref::deref)
     }
 
+    /// Gets a secondary peer set by index.
+    pub fn get_secondary_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
+        self.secondary_sets.get(index)
+    }
+
     /// Returns the latest tracked primary peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
         self.primary_sets.keys().last().copied()
+    }
+
+    /// Returns a [`PeerSetUpdate`] for the latest tracked peer set, if any.
+    pub fn latest_update(&self) -> Option<PeerSetUpdate<C>> {
+        let index = self.latest_set_index()?;
+        Some(PeerSetUpdate {
+            index,
+            latest: TrackedPeers::new(
+                self.get_set(&index).cloned().unwrap(),
+                self.get_secondary_set(&index).cloned().unwrap_or_default(),
+            ),
+            all: self.all(),
+        })
     }
 
     /// Attempt to reserve a peer for the dialer.
@@ -343,14 +363,22 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Getters ----------
 
-    /// Returns all peers that are part of at least one primary peer set.
-    pub fn primary(&self) -> OrderedSet<C> {
-        self.peers
-            .iter()
-            .filter(|(_, record)| record.primary_sets() > 0)
-            .map(|(k, _)| k.clone())
-            .try_collect()
-            .expect("HashMap keys are unique")
+    /// Returns all peers across all tracked primary and secondary peer sets.
+    pub fn all(&self) -> TrackedPeers<C> {
+        let mut primary = Vec::new();
+        let mut secondary = Vec::new();
+        for (k, record) in &self.peers {
+            if record.primary_sets() > 0 {
+                primary.push(k.clone());
+            }
+            if record.secondary_sets() > 0 {
+                secondary.push(k.clone());
+            }
+        }
+        TrackedPeers::new(
+            OrderedSet::from_iter_dedup(primary),
+            OrderedSet::from_iter_dedup(secondary),
+        )
     }
 
     /// Returns the sharable information for a given peer.
