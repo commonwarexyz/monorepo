@@ -17,6 +17,7 @@ stability_scope!(ALPHA, cfg(all(not(target_arch = "wasm32"), feature = "iouring-
 #[cfg(test)]
 mod tests {
     use crate::{IoBuf, IoBufs, Listener, Sink, Stream};
+    use commonware_macros::select;
     use commonware_utils::sync::Barrier;
     use futures::join;
     use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -36,6 +37,8 @@ mod tests {
         test_network_large_data(new_network()).await;
         test_network_connection_errors(new_network()).await;
         test_network_peek(new_network()).await;
+        test_network_canceled_recv_poisons_stream(new_network()).await;
+        test_network_canceled_send_poisons_sink(new_network()).await;
         test_network_recv_error_poisons_stream(new_network()).await;
         test_network_send_error_poisons_sink(new_network()).await;
     }
@@ -358,6 +361,106 @@ mod tests {
             // After consuming all data, peek should return empty
             let final_peek = stream.peek(100);
             assert!(final_peek.is_empty());
+            (sink, stream)
+        });
+
+        // Wait for both tasks to complete
+        let (server_result, client_result) = join!(server, client);
+        server_result.expect("Server task failed");
+        client_result.expect("Client task failed");
+    }
+
+    async fn test_network_canceled_recv_poisons_stream<N: crate::Network>(network: N) {
+        let mut listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("Failed to bind");
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
+
+        let server = tokio::spawn(async move {
+            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+
+            // Cancel a recv mid-flight
+            select! {
+                v = stream.recv(100) => {
+                    panic!("unexpected value: {v:?}");
+                },
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {},
+            };
+
+            // Stream should be poisoned after cancellation
+            assert!(matches!(stream.recv(1).await, Err(crate::Error::Closed)));
+
+            // Sink should remain usable
+            sink.send(IoBuf::from(b"ok"))
+                .await
+                .expect("sink should remain usable after stream cancellation");
+
+            (sink, stream)
+        });
+
+        let client = tokio::spawn(async move {
+            let (sink, mut stream) = network
+                .dial(listener_addr)
+                .await
+                .expect("Failed to dial server");
+
+            let received = stream.recv(2).await.expect("Failed to receive response");
+            assert_eq!(received.coalesce(), b"ok");
+
+            (sink, stream)
+        });
+
+        // Wait for both tasks to complete
+        let (server_result, client_result) = join!(server, client);
+        server_result.expect("Server task failed");
+        client_result.expect("Client task failed");
+    }
+
+    async fn test_network_canceled_send_poisons_sink<N: crate::Network>(network: N) {
+        let mut listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("Failed to bind");
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
+
+        let server = tokio::spawn(async move {
+            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+
+            // Cancel a large send mid-write. The payload must exceed all
+            // backend buffer sizes (TCP kernel buffer, mock backpressure
+            // threshold) so that send blocks and can be interrupted.
+            select! {
+                _ = sink.send(vec![0u8; 64 * 1024 * 1024]) => {
+                    panic!("send should have blocked on backpressure");
+                },
+                _ = tokio::time::sleep(Duration::from_millis(5)) => {},
+            };
+
+            // Sink should be poisoned after cancellation.
+            assert!(matches!(
+                sink.send(b"after".as_slice()).await,
+                Err(crate::Error::Closed)
+            ));
+
+            // Stream should remain usable.
+            let received = stream.recv(2).await.expect("stream should remain usable");
+            assert_eq!(received.coalesce(), b"ok");
+
+            (sink, stream)
+        });
+
+        let client = tokio::spawn(async move {
+            let (mut sink, stream) = network
+                .dial(listener_addr)
+                .await
+                .expect("Failed to dial server");
+
+            // Give the server time to attempt its large send and cancel.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            sink.send(IoBuf::from(b"ok")).await.expect("Failed to send");
+
             (sink, stream)
         });
 
