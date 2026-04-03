@@ -12,7 +12,7 @@ use core::{
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use ed25519_consensus::{self, VerificationKey};
+use ed25519_zebra::{self, VerificationKey};
 use rand_core::CryptoRngCore;
 #[cfg(feature = "std")]
 use std::borrow::{Cow, ToOwned};
@@ -26,7 +26,7 @@ const SIGNATURE_LENGTH: usize = 64;
 /// Ed25519 Private Key.
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
-    key: Secret<ed25519_consensus::SigningKey>,
+    key: Secret<ed25519_zebra::SigningKey>,
 }
 
 impl crate::PrivateKey for PrivateKey {}
@@ -58,7 +58,7 @@ impl PrivateKey {
 
 impl Random for PrivateKey {
     fn random(rng: impl CryptoRngCore) -> Self {
-        let key = ed25519_consensus::SigningKey::new(rng);
+        let key = ed25519_zebra::SigningKey::new(rng);
         Self {
             key: Secret::new(key),
         }
@@ -76,7 +76,7 @@ impl Read for PrivateKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let key = ed25519_consensus::SigningKey::from(*raw);
+        let key = ed25519_zebra::SigningKey::from(*raw);
         Ok(Self {
             key: Secret::new(key),
         })
@@ -87,8 +87,8 @@ impl FixedSize for PrivateKey {
     const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
 
-impl From<ed25519_consensus::SigningKey> for PrivateKey {
-    fn from(key: ed25519_consensus::SigningKey) -> Self {
+impl From<ed25519_zebra::SigningKey> for PrivateKey {
+    fn from(key: ed25519_zebra::SigningKey) -> Self {
         Self {
             key: Secret::new(key),
         }
@@ -120,9 +120,27 @@ impl PartialEq for PrivateKey {
 }
 
 /// Ed25519 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct PublicKey {
-    key: ed25519_consensus::VerificationKey,
+    key: ed25519_zebra::VerificationKey,
+}
+
+impl Hash for PublicKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.key.as_ref().hash(state);
+    }
+}
+
+impl Ord for PublicKey {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.key.as_ref().cmp(other.key.as_ref())
+    }
+}
+
+impl PartialOrd for PublicKey {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl From<PrivateKey> for PublicKey {
@@ -150,14 +168,14 @@ impl PublicKey {
             .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
             .unwrap_or_else(|| Cow::Borrowed(msg));
         self.key
-            .verify(&ed25519_consensus::Signature::from(sig.raw), &payload)
+            .verify(&ed25519_zebra::Signature::from(sig.raw), &payload)
             .is_ok()
     }
 }
 
 impl Write for PublicKey {
     fn write(&self, buf: &mut impl BufMut) {
-        self.key.as_bytes().write(buf);
+        buf.put_slice(self.key.as_ref());
     }
 }
 
@@ -242,7 +260,7 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 /// otherwise not be honestly generatable) for which a signature will verify against any message.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
-    /// Because [`ed25519_consensus::Signature`] can be created from this byte array
+    /// Because [`ed25519_zebra::Signature`] can be created from this byte array
     /// with minimal overhead, we only store the raw bytes.
     raw: [u8; SIGNATURE_LENGTH],
 }
@@ -303,8 +321,8 @@ impl Deref for Signature {
     }
 }
 
-impl From<ed25519_consensus::Signature> for Signature {
-    fn from(value: ed25519_consensus::Signature) -> Self {
+impl From<ed25519_zebra::Signature> for Signature {
+    fn from(value: ed25519_zebra::Signature) -> Self {
         let raw = value.to_bytes();
         Self { raw }
     }
@@ -344,7 +362,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 /// Ed25519 Batch Verifier.
 #[cfg(feature = "std")]
 pub struct Batch {
-    verifier: ed25519_consensus::batch::Verifier,
+    verifier: ed25519_zebra::batch::Verifier,
 }
 
 #[cfg(feature = "std")]
@@ -353,7 +371,7 @@ impl BatchVerifier for Batch {
 
     fn new() -> Self {
         Self {
-            verifier: ed25519_consensus::batch::Verifier::new(),
+            verifier: ed25519_zebra::batch::Verifier::new(),
         }
     }
 
@@ -385,9 +403,9 @@ impl Batch {
         let payload = namespace
             .map(|ns| Cow::Owned(union_unique(ns, message)))
             .unwrap_or_else(|| Cow::Borrowed(message));
-        let item = ed25519_consensus::batch::Item::from((
+        let item = ed25519_zebra::batch::Item::from((
             public_key.key.into(),
-            ed25519_consensus::Signature::from(signature.raw),
+            ed25519_zebra::Signature::from(signature.raw),
             &payload,
         ));
         self.verifier.queue(item);
@@ -802,7 +820,7 @@ mod tests {
 
     #[test]
     fn test_from_signing_key() {
-        let signing_key = ed25519_consensus::SigningKey::new(test_rng());
+        let signing_key = ed25519_zebra::SigningKey::new(test_rng());
         let expected_public = signing_key.verification_key();
         let private_key = PrivateKey::from(signing_key);
         assert_eq!(private_key.public_key().key, expected_public);

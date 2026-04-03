@@ -116,7 +116,7 @@ crossterm = "0.29.0"
 ctutils = "0.3.1"
 ecdsa = { version = "0.16.9", default-features = false }
 ed25519-consensus = { version = "2.1.0", default-features = false }
-ed25519-zebra = "4.1.0"
+ed25519-zebra = { version = "4.1.0", default-features = false }
 either = "1.13.0"
 futures = "0.3.31"
 futures-timer = "3.0.3"
