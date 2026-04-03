@@ -4,7 +4,8 @@
 //! was an invaluable reference when implementing and documenting this module.
 
 use crate::transcript::Transcript;
-use commonware_codec::Encode;
+use bytes::{Buf, BufMut};
+use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, Write};
 use commonware_math::algebra::{CryptoGroup, Field, Random, Space};
 use commonware_parallel::Strategy;
 
@@ -21,6 +22,50 @@ pub struct Setup<G> {
     g: Vec<G>,
     h: Vec<G>,
     product_generator: G,
+}
+
+impl<G: Write> Write for Setup<G> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.product_generator.write(buf);
+        self.g.len().write(buf);
+        for (g_i, h_i) in self.g.iter().zip(&self.h) {
+            g_i.write(buf);
+            h_i.write(buf);
+        }
+    }
+}
+
+impl<G: EncodeSize> EncodeSize for Setup<G> {
+    fn encode_size(&self) -> usize {
+        self.product_generator.encode_size()
+            + self.g.len().encode_size()
+            + self
+                .g
+                .iter()
+                .zip(&self.h)
+                .map(|(g_i, h_i)| g_i.encode_size() + h_i.encode_size())
+                .sum::<usize>()
+    }
+}
+
+impl<G: Read> Read for Setup<G> {
+    type Cfg = (usize, G::Cfg);
+
+    fn read_cfg(buf: &mut impl Buf, (max_len, cfg): &Self::Cfg) -> Result<Self, Error> {
+        let product_generator = G::read_cfg(buf, cfg)?;
+        let len = usize::read_cfg(buf, &RangeCfg::new(..=*max_len))?;
+        let mut g = Vec::with_capacity(len);
+        let mut h = Vec::with_capacity(len);
+        for _ in 0..len {
+            g.push(G::read_cfg(buf, cfg)?);
+            h.push(G::read_cfg(buf, cfg)?);
+        }
+        Ok(Self {
+            g,
+            h,
+            product_generator,
+        })
+    }
 }
 
 impl<G> Setup<G> {
@@ -59,6 +104,30 @@ impl<G> Setup<G> {
 pub struct Claim<F, G> {
     pub commitment: G,
     pub product: F,
+}
+
+impl<F: Write, G: Write> Write for Claim<F, G> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.commitment.write(buf);
+        self.product.write(buf);
+    }
+}
+
+impl<F: EncodeSize, G: EncodeSize> EncodeSize for Claim<F, G> {
+    fn encode_size(&self) -> usize {
+        self.commitment.encode_size() + self.product.encode_size()
+    }
+}
+
+impl<F: Read, G: Read> Read for Claim<F, G> {
+    type Cfg = (G::Cfg, F::Cfg);
+
+    fn read_cfg(buf: &mut impl Buf, (g_cfg, f_cfg): &Self::Cfg) -> Result<Self, Error> {
+        Ok(Self {
+            commitment: G::read_cfg(buf, g_cfg)?,
+            product: F::read_cfg(buf, f_cfg)?,
+        })
+    }
 }
 
 /// The witness contains the actual vectors `a_i` and `b_i` for the inner product argument.
@@ -128,6 +197,40 @@ pub struct Proof<F, G> {
     b_final: F,
 }
 
+impl<F: Write, G: Write> Write for Proof<F, G> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.l_r_coms.write(buf);
+        self.a_final.write(buf);
+        self.b_final.write(buf);
+    }
+}
+
+impl<F: EncodeSize, G: EncodeSize> EncodeSize for Proof<F, G> {
+    fn encode_size(&self) -> usize {
+        self.l_r_coms.encode_size() + self.a_final.encode_size() + self.b_final.encode_size()
+    }
+}
+
+impl<F: Read, G: Read> Read for Proof<F, G> {
+    type Cfg = (usize, (G::Cfg, F::Cfg));
+
+    fn read_cfg(buf: &mut impl Buf, (max_len, (g_cfg, f_cfg)): &Self::Cfg) -> Result<Self, Error> {
+        let max_rounds = if *max_len == 0 {
+            0
+        } else {
+            max_len.ilog2() as usize
+        };
+        Ok(Self {
+            l_r_coms: Vec::<(G, G)>::read_cfg(
+                buf,
+                &(RangeCfg::new(..=max_rounds), (g_cfg.clone(), g_cfg.clone())),
+            )?,
+            a_final: F::read_cfg(buf, f_cfg)?,
+            b_final: F::read_cfg(buf, f_cfg)?,
+        })
+    }
+}
+
 fn sample_challenge<F: Field + Random>(transcript: &Transcript) -> F {
     let mut noise = transcript.noise(b"challenge");
     let mut challenge = F::zero();
@@ -147,12 +250,12 @@ pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     claim: &Claim<F, G>,
     witness: Witness<F>,
     strategy: &impl Strategy,
-) -> Proof<F, G> {
-    assert_eq!(setup.g.len(), setup.h.len());
+) -> Proof<F, G>
+where
+    Claim<F, G>: Encode,
+{
     assert_eq!(setup.g.len(), witness.a.len());
-    assert_eq!(witness.a.len(), witness.b.len());
-    assert!(setup.g.len().is_power_of_two());
-    // TODO: commit to the claim.
+    transcript.commit(claim.encode());
 
     let mut l_r_coms = Vec::<(G, G)>::new();
     let mut a = witness.a;
@@ -238,9 +341,12 @@ pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     claim: &Claim<F, G>,
     proof: Proof<F, G>,
     strategy: &impl Strategy,
-) -> bool {
-    assert_eq!(setup.g.len(), setup.h.len());
+) -> bool
+where
+    Claim<F, G>: Encode,
+{
     assert!(setup.g.len().is_power_of_two());
+    transcript.commit(claim.encode());
 
     let rounds = setup.g.len().ilog2() as usize;
     let Proof {
@@ -321,6 +427,7 @@ pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
 mod tests {
     use super::*;
     use arbitrary::{Arbitrary, Unstructured};
+    use commonware_codec::{Decode, DecodeExt};
     use commonware_invariants::minifuzz;
     use commonware_math::test::{F, G};
     use commonware_parallel::Sequential;
@@ -364,9 +471,15 @@ mod tests {
             );
             let (witness, claim) = Witness::new_with_claim(&setup, self.a.into_iter().zip(self.b))
                 .expect("plan vectors are powers of two and fit the setup");
+            let setup = <Setup<G> as Decode>::decode_cfg(setup.encode(), &(len, ()))
+                .expect("setup should roundtrip");
+            let claim = <Claim<F, G> as DecodeExt<((), ())>>::decode(claim.encode())
+                .expect("claim should roundtrip");
 
             let mut prover_transcript = Transcript::new(NAMESPACE);
             let proof = prove(&mut prover_transcript, &setup, &claim, witness, &strategy);
+            let proof = <Proof<F, G> as Decode>::decode_cfg(proof.encode(), &(len, ((), ())))
+                .expect("proof should roundtrip");
             let mut verifier_transcript = Transcript::new(NAMESPACE);
             assert!(verify(
                 &mut verifier_transcript,
