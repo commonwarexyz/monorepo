@@ -191,8 +191,14 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
     let entries = &trace_data.entries;
     let honest_votes = collect_honest_votes(entries, cfg);
 
-    // Filter out entries where the receiver is Byzantine (no state in quint model)
-    let correct_entries: Vec<TraceEntry> = entries
+    // Filter out invalid byzantine votes (forged signer identity).
+    // Keep entries with byzantine receivers: `build_actions` needs them to
+    // emit `send_*_vote` barriers before certificates that depend on them.
+    let filtered_entries = filter_invalid_byzantine_votes(entries, cfg, &honest_votes);
+
+    // Entries with correct receivers only, for helpers that do not need
+    // byzantine-receiver entries (vote-block maps, proposal extraction).
+    let correct_entries: Vec<TraceEntry> = filtered_entries
         .iter()
         .filter(|e| {
             let receiver = match e {
@@ -203,7 +209,6 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
         })
         .cloned()
         .collect();
-    let correct_entries = filter_invalid_byzantine_votes(&correct_entries, cfg, &honest_votes);
 
     let block_map = build_block_map(trace_data);
     let leader_map = build_leader_map_to(cfg, cfg.max_view);
@@ -308,9 +313,11 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
     }
     writeln!(out).unwrap();
 
-    // Generate actions in original trace order, then group vote deliveries
+    // Generate actions in original trace order, then group vote deliveries.
+    // Pass all filtered entries (including byzantine receivers) so that
+    // `send_*_vote` barriers are emitted at the earliest occurrence.
     let action_items = build_actions(
-        &correct_entries,
+        &filtered_entries,
         &block_map,
         cfg,
         &leader_lookup,
@@ -519,6 +526,7 @@ fn build_actions(
     // cert is already in store_certificate. Skipping them avoids redundant
     // state evaluation and dramatically speeds up the quint checker.
     let mut cert_delivered: HashSet<String> = HashSet::new();
+    let mut cert_sent: HashSet<String> = HashSet::new();
 
     for entry in entries {
         match entry {
@@ -526,7 +534,14 @@ fn build_actions(
                 sender,
                 receiver,
                 vote,
-            } => match vote {
+            } => {
+                // Byzantine receivers have no state in the quint model, so
+                // skip delivery actions for them. `send_*_vote` barriers
+                // are still emitted so the global sent-vote set is updated
+                // before any certificate that depends on them.
+                let byzantine_receiver = is_byzantine_node(receiver, cfg.faults);
+
+                match vote {
                 TracedVote::Notarize { view, sig, block } => {
                     let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
                     let bn = map_block(block, block_map);
@@ -545,6 +560,10 @@ fn build_actions(
                             proposal_ref(*view, &bn),
                             sig
                         )));
+                    }
+
+                    if byzantine_receiver {
+                        continue;
                     }
 
                     // The trace typically does not contain a self-delivery for the
@@ -586,6 +605,10 @@ fn build_actions(
                         )));
                     }
 
+                    if byzantine_receiver {
+                        continue;
+                    }
+
                     // Correct finalize: self-delivery (node counts its own finalize)
                     if !is_byzantine_node(&sig, cfg.faults)
                         && self_delivered.insert((sig.clone(), *view, "finalize".into()))
@@ -625,6 +648,11 @@ fn build_actions(
                             view, sig
                         )));
                     }
+
+                    if byzantine_receiver {
+                        continue;
+                    }
+
                     // Correct nullify: inject if it was not already produced by
                     // leader proposal processing for that signer/view.
                     if !is_byzantine_node(&sig, cfg.faults) {
@@ -645,7 +673,7 @@ fn build_actions(
                         vote: format!("{{ view: {}, sig: \"{}\" }}", view, sig),
                     });
                 }
-            },
+            }},
             TraceEntry::Certificate { receiver, cert, .. } => {
                 // Skip forged certificates from byzantine senders.
                 // The sniffer captures all network messages including certs
@@ -654,10 +682,12 @@ fn build_actions(
                     continue;
                 }
 
-                // Skip duplicate cert deliveries to the same receiver.
-                // A cert is identified by (kind, view, block, signers);
-                // the ghost_sender varies but doesn't affect model behavior.
-                let cert_dedup_key = {
+                let cert_str = encode_cert(cert, block_map);
+
+                // Emit send_certificate once per unique cert (regardless of
+                // receiver) so sent_certificates is populated before any
+                // on_certificate delivery.
+                let cert_send_key = {
                     let mut signers_sorted;
                     match cert {
                         TracedCert::Notarization {
@@ -669,8 +699,7 @@ fn build_actions(
                             signers_sorted = signers.clone();
                             signers_sorted.sort();
                             format!(
-                                "{}:N:{}:{}:{}",
-                                receiver,
+                                "N:{}:{}:{}",
                                 view,
                                 map_block(block, block_map),
                                 signers_sorted.join(",")
@@ -679,7 +708,7 @@ fn build_actions(
                         TracedCert::Nullification { view, signers, .. } => {
                             signers_sorted = signers.clone();
                             signers_sorted.sort();
-                            format!("{}:U:{}:{}", receiver, view, signers_sorted.join(","))
+                            format!("U:{}:{}", view, signers_sorted.join(","))
                         }
                         TracedCert::Finalization {
                             view,
@@ -690,8 +719,7 @@ fn build_actions(
                             signers_sorted = signers.clone();
                             signers_sorted.sort();
                             format!(
-                                "{}:F:{}:{}:{}",
-                                receiver,
+                                "F:{}:{}:{}",
                                 view,
                                 map_block(block, block_map),
                                 signers_sorted.join(",")
@@ -699,12 +727,27 @@ fn build_actions(
                         }
                     }
                 };
+                if cert_sent.insert(cert_send_key) {
+                    actions.push(ActionItem::Barrier(format!(
+                        "send_certificate({})",
+                        cert_str
+                    )));
+                }
+
+                // Skip delivery to byzantine receivers (no state in quint model).
+                if is_byzantine_node(receiver, cfg.faults) {
+                    continue;
+                }
+
+                // Skip duplicate cert deliveries to the same receiver.
+                // A cert is identified by (kind, view, block, signers);
+                // the ghost_sender varies but doesn't affect model behavior.
+                let cert_dedup_key = format!("{}:{}", receiver, &cert_str);
                 if !cert_delivered.insert(cert_dedup_key) {
                     continue;
                 }
 
                 // Deliver certificate (barrier: cannot be reordered with votes)
-                let cert_str = encode_cert(cert, block_map);
                 actions.push(ActionItem::Barrier(format!(
                     "on_certificate(\"{}\", {})",
                     receiver, cert_str
@@ -1487,6 +1530,35 @@ fn write_helpers(out: &mut String) {
     writeln!(out, "        replica_state' = replica_state,").unwrap();
     writeln!(out, "        certify_policy' = certify_policy,").unwrap();
     writeln!(out, "        lastAction' = \"send_finalize_vote\",").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(
+        out,
+        "    action send_certificate(cert: Certificate): bool = all {{"
+    )
+    .unwrap();
+    writeln!(out, "        sent_notarize_votes' = sent_notarize_votes,").unwrap();
+    writeln!(out, "        sent_nullify_votes' = sent_nullify_votes,").unwrap();
+    writeln!(out, "        sent_finalize_votes' = sent_finalize_votes,").unwrap();
+    writeln!(
+        out,
+        "        sent_certificates' = sent_certificates.union(Set(cert)),"
+    )
+    .unwrap();
+    writeln!(out, "        store_notarize_votes' = store_notarize_votes,").unwrap();
+    writeln!(out, "        store_nullify_votes' = store_nullify_votes,").unwrap();
+    writeln!(out, "        store_finalize_votes' = store_finalize_votes,").unwrap();
+    writeln!(out, "        store_certificates' = store_certificates,").unwrap();
+    writeln!(
+        out,
+        "        ghost_committed_blocks' = ghost_committed_blocks,"
+    )
+    .unwrap();
+    writeln!(out, "        leader' = leader,").unwrap();
+    writeln!(out, "        replica_state' = replica_state,").unwrap();
+    writeln!(out, "        certify_policy' = certify_policy,").unwrap();
+    writeln!(out, "        lastAction' = \"send_certificate\",").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 

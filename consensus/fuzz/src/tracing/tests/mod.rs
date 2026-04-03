@@ -196,3 +196,8 @@ fn test_encoder_roundtrip_35d8bbc9bac04cc106d4c9e32f8f4c0985186069() {
 fn test_encoder_roundtrip_c72bd2b1346cedb1e287ab6c217fd1c9b1837068() {
     run_encoder_roundtrip_json("c72bd2b1346cedb1e287ab6c217fd1c9b1837068");
 }
+
+#[test]
+fn test_encoder_roundtrip_57ee33dc4aa3193f0f134235b1e9339f97335735() {
+    run_encoder_roundtrip_json("57ee33dc4aa3193f0f134235b1e9339f97335735");
+}

@@ -1,0 +1,7547 @@
+{
+  "n": 4,
+  "faults": 1,
+  "epoch": 333,
+  "max_view": 14,
+  "entries": [
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 1,
+            "sig": "n2",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 1,
+            "sig": "n2",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 1,
+            "sig": "n2",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 1,
+            "sig": "n1",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 1,
+            "sig": "n1",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 1,
+            "sig": "n1",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 1,
+            "sig": "n3",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 1,
+            "sig": "n3",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 1,
+            "sig": "n3",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Finalize": {
+            "view": 1,
+            "sig": "n3",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 1,
+            "sig": "n3",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 1,
+            "sig": "n1",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Finalize": {
+            "view": 1,
+            "sig": "n3",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Finalize": {
+            "view": 1,
+            "sig": "n1",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Finalize": {
+            "view": 1,
+            "sig": "n1",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 1,
+            "sig": "n2",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Finalize": {
+            "view": 1,
+            "sig": "n2",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Finalize": {
+            "view": 1,
+            "sig": "n2",
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 2,
+            "sig": "n3",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 2,
+            "sig": "n3",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 2,
+            "sig": "n3",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 1,
+            "block": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 2,
+            "sig": "n2",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 2,
+            "sig": "n2",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 2,
+            "sig": "n2",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 2,
+            "sig": "n1",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 2,
+            "sig": "n1",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 2,
+            "sig": "n1",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 2,
+            "sig": "n1",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Finalize": {
+            "view": 2,
+            "sig": "n1",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Finalize": {
+            "view": 2,
+            "sig": "n1",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Finalize": {
+            "view": 2,
+            "sig": "n2",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 2,
+            "sig": "n2",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Finalize": {
+            "view": 2,
+            "sig": "n2",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 2,
+            "sig": "n3",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Finalize": {
+            "view": 2,
+            "sig": "n3",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Finalize": {
+            "view": 2,
+            "sig": "n3",
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 2,
+            "block": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 3,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 3,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 3,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 3,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 3,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 3,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 3,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 3,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 3,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 3,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 3,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 3,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 3,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 3,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 3,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 3,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 3,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 3,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n1",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n1",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n1",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n1",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966baff574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n1",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966baff574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n0",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n1",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966baff574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n0",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n0",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n3",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n3",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n3",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n2",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n2",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n2",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 4,
+            "sig": "n2",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Finalize": {
+            "view": 4,
+            "sig": "n2",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Finalize": {
+            "view": 4,
+            "sig": "n2",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Finalize": {
+            "view": 4,
+            "sig": "n1",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 4,
+            "sig": "n1",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 4,
+            "sig": "n3",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Finalize": {
+            "view": 4,
+            "sig": "n1",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Finalize": {
+            "view": 4,
+            "sig": "n3",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Finalize": {
+            "view": 4,
+            "sig": "n3",
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n2",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n2",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n2",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n2",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n2",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n2",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n0",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n0",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 4,
+            "sig": "n0",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n0",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n0"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n0",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n0"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n0",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 4,
+            "block": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n0"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n3",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n3",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n3",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n1",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n1",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 5,
+            "sig": "n1",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Finalize": {
+            "view": 5,
+            "sig": "n1",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 5,
+            "sig": "n1",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Finalize": {
+            "view": 5,
+            "sig": "n1",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Finalize": {
+            "view": 5,
+            "sig": "n2",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Finalize": {
+            "view": 5,
+            "sig": "n2",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 5,
+            "sig": "n2",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 5,
+            "sig": "n3",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Finalize": {
+            "view": 5,
+            "sig": "n3",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Finalize": {
+            "view": 5,
+            "sig": "n3",
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 6,
+            "sig": "n3",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 6,
+            "sig": "n3",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 6,
+            "sig": "n3",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n0",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n0"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n0",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n0"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n0",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 5,
+            "block": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n0"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 6,
+            "sig": "n1",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 6,
+            "sig": "n1",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 6,
+            "sig": "n1",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 6,
+            "sig": "n2",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 6,
+            "sig": "n2",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 6,
+            "sig": "n2",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Finalize": {
+            "view": 6,
+            "sig": "n2",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Finalize": {
+            "view": 6,
+            "sig": "n2",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 6,
+            "sig": "n2",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Finalize": {
+            "view": 6,
+            "sig": "n1",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Finalize": {
+            "view": 6,
+            "sig": "n1",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 6,
+            "sig": "n1",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 6,
+            "sig": "n3",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Finalize": {
+            "view": 6,
+            "sig": "n3",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Finalize": {
+            "view": 6,
+            "sig": "n3",
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 7,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 7,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 7,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 7,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 7,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 7,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 7,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 7,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 7,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 7,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 7,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 7,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 7,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 7,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 7,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 7,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 7,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 7,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 8,
+            "sig": "n1",
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 8,
+            "sig": "n1",
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 8,
+            "sig": "n1",
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 8,
+            "sig": "n2",
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 8,
+            "sig": "n2",
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 8,
+            "sig": "n3",
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 8,
+            "sig": "n2",
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 8,
+            "sig": "n3",
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 8,
+            "sig": "n3",
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 8,
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 8,
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 8,
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 8,
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 8,
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 8,
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 8,
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 8,
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 8,
+            "block": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 8,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 8,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 8,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 8,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 8,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 8,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 8,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 8,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 8,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 8,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 8,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 8,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 8,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 8,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 8,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 8,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 8,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 8,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 9,
+            "sig": "n2",
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 9,
+            "sig": "n2",
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 9,
+            "sig": "n2",
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 9,
+            "sig": "n0",
+            "block": "cc5dc3565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 9,
+            "sig": "n0",
+            "block": "cc5dc3565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 9,
+            "sig": "n0",
+            "block": "cc5dc3565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 9,
+            "sig": "n3",
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 9,
+            "sig": "n3",
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 9,
+            "sig": "n3",
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 9,
+            "sig": "n1",
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 9,
+            "sig": "n1",
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 9,
+            "sig": "n1",
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 9,
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 9,
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 9,
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 9,
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 9,
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 9,
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 9,
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 9,
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 9,
+            "block": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 9,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 9,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 9,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 9,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 9,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 9,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 9,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 9,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 9,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 9,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 9,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 9,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 9,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 9,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 9,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 9,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 9,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 9,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 10,
+            "sig": "n3",
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 10,
+            "sig": "n3",
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 10,
+            "sig": "n3",
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 11,
+            "sig": "n0",
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 11,
+            "sig": "n0",
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n0",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 11,
+            "sig": "n0",
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 10,
+            "sig": "n1",
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 10,
+            "sig": "n1",
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 10,
+            "sig": "n1",
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 10,
+            "sig": "n2",
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 10,
+            "sig": "n2",
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 10,
+            "sig": "n2",
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 10,
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 10,
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 10,
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 10,
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 10,
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 10,
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 10,
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 10,
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 10,
+            "block": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 10,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 10,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 10,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 10,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 10,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 10,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 10,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 10,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 10,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 10,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 10,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 10,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 10,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 10,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 10,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 10,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 10,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 10,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 11,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 11,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 11,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 11,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 11,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 11,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 11,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 11,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 11,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 11,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 11,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 11,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 11,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 11,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 11,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 11,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 11,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 11,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 12,
+            "sig": "n1",
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 12,
+            "sig": "n1",
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 12,
+            "sig": "n1",
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 12,
+            "sig": "n2",
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 12,
+            "sig": "n2",
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 12,
+            "sig": "n2",
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 12,
+            "sig": "n3",
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 12,
+            "sig": "n3",
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 12,
+            "sig": "n3",
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 12,
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 12,
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 12,
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 12,
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 12,
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 12,
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 12,
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 12,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 12,
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 12,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 12,
+            "block": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 12,
+            "sig": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 12,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Nullify": {
+            "view": 12,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 12,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Nullify": {
+            "view": 12,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Nullify": {
+            "view": 12,
+            "sig": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Nullify": {
+            "view": 12,
+            "sig": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 12,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Finalization": {
+            "view": 6,
+            "block": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 12,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 12,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 12,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 12,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Nullification": {
+            "view": 12,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Nullification": {
+            "view": 12,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Nullification": {
+            "view": 12,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Nullification": {
+            "view": 12,
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 13,
+            "sig": "n2",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 13,
+            "sig": "n2",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 13,
+            "sig": "n2",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 13,
+            "sig": "n1",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 13,
+            "sig": "n1",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Notarize": {
+            "view": 13,
+            "sig": "n1",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 13,
+            "sig": "n3",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 13,
+            "sig": "n3",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 13,
+            "sig": "n3",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 13,
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 13,
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n3",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 13,
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n3"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 13,
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n1",
+        "cert": {
+          "Notarization": {
+            "view": 13,
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Finalize": {
+            "view": 13,
+            "sig": "n3",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 13,
+            "sig": "n3",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 13,
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n2",
+        "receiver": "n0",
+        "cert": {
+          "Notarization": {
+            "view": 13,
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n2"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Finalize": {
+            "view": 13,
+            "sig": "n3",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n3",
+        "cert": {
+          "Notarization": {
+            "view": 13,
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Certificate": {
+        "sender": "n1",
+        "receiver": "n2",
+        "cert": {
+          "Notarization": {
+            "view": 13,
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812",
+            "signers": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "ghost_sender": "n1"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n3",
+        "vote": {
+          "Finalize": {
+            "view": 13,
+            "sig": "n1",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 13,
+            "sig": "n2",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n0",
+        "vote": {
+          "Finalize": {
+            "view": 13,
+            "sig": "n1",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n0",
+        "vote": {
+          "Notarize": {
+            "view": 14,
+            "sig": "n3",
+            "block": "13950558e71ae1b12c0b512cbafd0b148bb35c13c792e1780956417890a35805"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n1",
+        "vote": {
+          "Notarize": {
+            "view": 14,
+            "sig": "n3",
+            "block": "13950558e71ae1b12c0b512cbafd0b148bb35c13c792e1780956417890a35805"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n3",
+        "vote": {
+          "Finalize": {
+            "view": 13,
+            "sig": "n2",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n3",
+        "receiver": "n2",
+        "vote": {
+          "Notarize": {
+            "view": 14,
+            "sig": "n3",
+            "block": "13950558e71ae1b12c0b512cbafd0b148bb35c13c792e1780956417890a35805"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n1",
+        "receiver": "n2",
+        "vote": {
+          "Finalize": {
+            "view": 13,
+            "sig": "n1",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    },
+    {
+      "Vote": {
+        "sender": "n2",
+        "receiver": "n1",
+        "vote": {
+          "Finalize": {
+            "view": 13,
+            "sig": "n2",
+            "block": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+          }
+        }
+      }
+    }
+  ],
+  "required_containers": 10,
+  "reporter_states": {
+    "n1": {
+      "notarizations": {
+        "1": {
+          "view": 1,
+          "parent": 0,
+          "payload": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+        },
+        "2": {
+          "view": 2,
+          "parent": 0,
+          "payload": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+        },
+        "4": {
+          "view": 4,
+          "parent": 0,
+          "payload": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+        },
+        "5": {
+          "view": 5,
+          "parent": 0,
+          "payload": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+        },
+        "6": {
+          "view": 6,
+          "parent": 0,
+          "payload": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+        },
+        "8": {
+          "view": 8,
+          "parent": 0,
+          "payload": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e"
+        },
+        "9": {
+          "view": 9,
+          "parent": 0,
+          "payload": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+        },
+        "10": {
+          "view": 10,
+          "parent": 0,
+          "payload": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+        },
+        "12": {
+          "view": 12,
+          "parent": 0,
+          "payload": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b"
+        },
+        "13": {
+          "view": 13,
+          "parent": 0,
+          "payload": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+        }
+      },
+      "notarization_signature_counts": {
+        "1": 3,
+        "2": 3,
+        "4": 3,
+        "5": 3,
+        "6": 3,
+        "8": 3,
+        "9": 3,
+        "10": 3,
+        "12": 3,
+        "13": 3
+      },
+      "nullifications": [
+        3,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "nullification_signature_counts": {
+        "3": 3,
+        "7": 3,
+        "8": 3,
+        "9": 3,
+        "10": 3,
+        "11": 3,
+        "12": 3
+      },
+      "finalizations": {
+        "1": {
+          "view": 1,
+          "parent": 0,
+          "payload": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+        },
+        "2": {
+          "view": 2,
+          "parent": 0,
+          "payload": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+        },
+        "4": {
+          "view": 4,
+          "parent": 0,
+          "payload": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+        },
+        "5": {
+          "view": 5,
+          "parent": 0,
+          "payload": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+        },
+        "6": {
+          "view": 6,
+          "parent": 0,
+          "payload": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+        },
+        "13": {
+          "view": 13,
+          "parent": 0,
+          "payload": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+        }
+      },
+      "finalization_signature_counts": {
+        "1": 3,
+        "2": 3,
+        "4": 3,
+        "5": 3,
+        "6": 3,
+        "13": 3
+      },
+      "certified": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13
+      ],
+      "notarize_signers": {
+        "1": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "2": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "4": [
+          "n0",
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "5": [
+          "n0",
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "6": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "8": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "9": [
+          "n0",
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "10": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "11": [
+          "n0"
+        ],
+        "12": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "13": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "14": [
+          "n3"
+        ]
+      },
+      "nullify_signers": {
+        "3": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "7": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "8": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "9": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "10": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "11": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "12": [
+          "n1",
+          "n2",
+          "n3"
+        ]
+      },
+      "finalize_signers": {
+        "1": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "2": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "4": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "5": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "6": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "13": [
+          "n1",
+          "n2",
+          "n3"
+        ]
+      },
+      "max_finalized_view": 13
+    },
+    "n2": {
+      "notarizations": {
+        "1": {
+          "view": 1,
+          "parent": 0,
+          "payload": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+        },
+        "2": {
+          "view": 2,
+          "parent": 0,
+          "payload": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+        },
+        "4": {
+          "view": 4,
+          "parent": 0,
+          "payload": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+        },
+        "5": {
+          "view": 5,
+          "parent": 0,
+          "payload": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+        },
+        "6": {
+          "view": 6,
+          "parent": 0,
+          "payload": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+        },
+        "8": {
+          "view": 8,
+          "parent": 0,
+          "payload": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e"
+        },
+        "9": {
+          "view": 9,
+          "parent": 0,
+          "payload": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+        },
+        "10": {
+          "view": 10,
+          "parent": 0,
+          "payload": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+        },
+        "12": {
+          "view": 12,
+          "parent": 0,
+          "payload": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b"
+        },
+        "13": {
+          "view": 13,
+          "parent": 0,
+          "payload": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+        }
+      },
+      "notarization_signature_counts": {
+        "1": 3,
+        "2": 3,
+        "4": 3,
+        "5": 3,
+        "6": 3,
+        "8": 3,
+        "9": 3,
+        "10": 3,
+        "12": 3,
+        "13": 3
+      },
+      "nullifications": [
+        3,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "nullification_signature_counts": {
+        "3": 3,
+        "7": 3,
+        "8": 3,
+        "9": 3,
+        "10": 3,
+        "11": 3,
+        "12": 3
+      },
+      "finalizations": {
+        "1": {
+          "view": 1,
+          "parent": 0,
+          "payload": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+        },
+        "2": {
+          "view": 2,
+          "parent": 0,
+          "payload": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+        },
+        "4": {
+          "view": 4,
+          "parent": 0,
+          "payload": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+        },
+        "5": {
+          "view": 5,
+          "parent": 0,
+          "payload": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+        },
+        "6": {
+          "view": 6,
+          "parent": 0,
+          "payload": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+        },
+        "13": {
+          "view": 13,
+          "parent": 0,
+          "payload": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+        }
+      },
+      "finalization_signature_counts": {
+        "1": 3,
+        "2": 3,
+        "4": 3,
+        "5": 3,
+        "6": 3,
+        "13": 3
+      },
+      "certified": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13
+      ],
+      "notarize_signers": {
+        "1": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "2": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "4": [
+          "n0",
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "5": [
+          "n0",
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "6": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "8": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "9": [
+          "n0",
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "10": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "11": [
+          "n0"
+        ],
+        "12": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "13": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "14": [
+          "n3"
+        ]
+      },
+      "nullify_signers": {
+        "3": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "7": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "8": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "9": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "10": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "11": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "12": [
+          "n1",
+          "n2",
+          "n3"
+        ]
+      },
+      "finalize_signers": {
+        "1": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "2": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "4": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "5": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "6": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "13": [
+          "n1",
+          "n2",
+          "n3"
+        ]
+      },
+      "max_finalized_view": 13
+    },
+    "n3": {
+      "notarizations": {
+        "1": {
+          "view": 1,
+          "parent": 0,
+          "payload": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+        },
+        "2": {
+          "view": 2,
+          "parent": 0,
+          "payload": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+        },
+        "4": {
+          "view": 4,
+          "parent": 0,
+          "payload": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+        },
+        "5": {
+          "view": 5,
+          "parent": 0,
+          "payload": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+        },
+        "6": {
+          "view": 6,
+          "parent": 0,
+          "payload": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+        },
+        "8": {
+          "view": 8,
+          "parent": 0,
+          "payload": "a97f8aa9df8747ddb97880b80efa59741fdd0cbab9a8db8d7ed20f659fecd78e"
+        },
+        "9": {
+          "view": 9,
+          "parent": 0,
+          "payload": "cc5dc7565b7f031bb8ba1b1588b4e182a52d14a6ea7ca120aab9ca2db7fb85db"
+        },
+        "10": {
+          "view": 10,
+          "parent": 0,
+          "payload": "b851f88a15a87f14366ff29ec2c62dec812a49ba2dbf623d89f4f594a7f3c856"
+        },
+        "12": {
+          "view": 12,
+          "parent": 0,
+          "payload": "eb5cb862144c88620a5f05033c11cf5c5d628f28f2678f0c7761bbdc9e1cd64b"
+        },
+        "13": {
+          "view": 13,
+          "parent": 0,
+          "payload": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+        }
+      },
+      "notarization_signature_counts": {
+        "1": 3,
+        "2": 3,
+        "4": 3,
+        "5": 3,
+        "6": 3,
+        "8": 3,
+        "9": 3,
+        "10": 3,
+        "12": 3,
+        "13": 3
+      },
+      "nullifications": [
+        3,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "nullification_signature_counts": {
+        "3": 3,
+        "7": 3,
+        "8": 3,
+        "9": 3,
+        "10": 3,
+        "11": 3,
+        "12": 3
+      },
+      "finalizations": {
+        "1": {
+          "view": 1,
+          "parent": 0,
+          "payload": "e2c75c8ba965bf1a6eab00781243a91482198862d168631f2975203cd4c30949"
+        },
+        "2": {
+          "view": 2,
+          "parent": 0,
+          "payload": "90e34e5af1fc157ad640e021bfaae90bdda71da0d0e3b61a40e6a369ee295dfa"
+        },
+        "4": {
+          "view": 4,
+          "parent": 0,
+          "payload": "4db7a7da57b55e897a204d09a4c912da6d2fca2239e966bab3574eb50bafabc1"
+        },
+        "5": {
+          "view": 5,
+          "parent": 0,
+          "payload": "f8b179293c4fd0c50f6289e91cfa0a671ed4b7a3bd2244a324df2e408016ba0c"
+        },
+        "6": {
+          "view": 6,
+          "parent": 0,
+          "payload": "7484838b1389053801f28d7f6c620213e0876a5eac2da1a8ef0da4284ea0ffcd"
+        },
+        "13": {
+          "view": 13,
+          "parent": 0,
+          "payload": "e20649b8663dcb91c4ce3de383c76286b4f1712c0e64461fbfd93581ea520812"
+        }
+      },
+      "finalization_signature_counts": {
+        "1": 3,
+        "2": 3,
+        "4": 3,
+        "5": 3,
+        "6": 3,
+        "13": 3
+      },
+      "certified": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13
+      ],
+      "notarize_signers": {
+        "1": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "2": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "4": [
+          "n0",
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "5": [
+          "n0",
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "6": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "8": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "9": [
+          "n0",
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "10": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "11": [
+          "n0"
+        ],
+        "12": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "13": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "14": [
+          "n3"
+        ]
+      },
+      "nullify_signers": {
+        "3": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "7": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "8": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "9": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "10": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "11": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "12": [
+          "n1",
+          "n2",
+          "n3"
+        ]
+      },
+      "finalize_signers": {
+        "1": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "2": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "4": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "5": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "6": [
+          "n1",
+          "n2",
+          "n3"
+        ],
+        "13": [
+          "n1",
+          "n2",
+          "n3"
+        ]
+      },
+      "max_finalized_view": 13
+    }
+  }
+}
