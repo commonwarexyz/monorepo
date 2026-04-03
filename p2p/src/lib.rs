@@ -249,7 +249,7 @@ stability_scope!(BETA {
 
         /// Returns the deduplicated union of primary and secondary peers.
         pub fn union(self) -> Set<P> {
-            Set::from_iter_dedup(self.primary.into_iter().chain(self.secondary.into_iter()))
+            Set::from_iter_dedup(self.primary.into_iter().chain(self.secondary))
         }
     }
 
