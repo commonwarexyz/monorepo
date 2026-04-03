@@ -386,6 +386,14 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_variable_stale_partial_ancestor_commit() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_stale_partial_ancestor_commit(ctx, open::<mmr::Family>).await;
+        });
+    }
+
+    #[test_traced]
     fn test_variable_child_root_matches_pending_and_committed() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {

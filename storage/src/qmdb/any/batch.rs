@@ -1246,9 +1246,10 @@ where
         batch: Arc<MerkleizedBatch<F, H::Digest, U>>,
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        // The DB must not have advanced past this batch's base (the point where this batch's
-        // operations begin). If it has, a batch from a different fork was committed.
-        if db_size > batch.base_size {
+        // Only two db_size values are valid: batch.db_size (nothing committed from this chain)
+        // or batch.base_size (all ancestors committed sequentially). Anything else means a
+        // different fork was committed, or ancestors were only partially committed.
+        if db_size != batch.db_size && db_size != batch.base_size {
             return Err(crate::qmdb::Error::StaleChangeset {
                 expected: batch.db_size,
                 actual: db_size,

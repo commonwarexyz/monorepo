@@ -329,7 +329,7 @@ where
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, V>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        if db_size > batch.base_size {
+        if db_size != batch.db_size && db_size != batch.base_size {
             return Err(Error::StaleChangeset {
                 expected: batch.db_size,
                 actual: db_size,
@@ -879,6 +879,36 @@ pub(crate) mod tests {
 
         let result = db.apply_batch(batch_b).await;
         assert!(matches!(result, Err(Error::StaleChangeset { .. })));
+
+        db.destroy().await.unwrap();
+    }
+
+    pub(crate) async fn test_keyless_stale_partial_ancestor_commit<F: Family, V, C, H>(
+        mut db: Keyless<F, deterministic::Context, V, C, H>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<V>> + Persistable<Error = JournalError>,
+        H: Hasher,
+        Operation<V>: EncodeShared,
+    {
+        // Chain: DB <- A <- B <- C
+        let a = db.new_batch().append(V::Value::make(10)).merkleize(None);
+        let b = a
+            .new_batch::<H>()
+            .append(V::Value::make(20))
+            .merkleize(None);
+        let c = b
+            .new_batch::<H>()
+            .append(V::Value::make(30))
+            .merkleize(None);
+
+        // Apply only A (partial prefix), then try to apply C (skipping B).
+        db.apply_batch(a).await.unwrap();
+        let result = db.apply_batch(c).await;
+        assert!(
+            matches!(result, Err(Error::StaleChangeset { .. })),
+            "expected StaleChangeset for partial ancestor commit, got {result:?}"
+        );
 
         db.destroy().await.unwrap();
     }

@@ -533,6 +533,51 @@ pub(crate) mod test {
         });
     }
 
+    /// Applying a batch after only a partial prefix of its ancestor chain
+    /// was committed must be rejected. Regression test: partial ancestor
+    /// commitment (apply A, skip B, apply C) corrupts the snapshot.
+    #[test_traced]
+    fn test_stale_changeset_partial_ancestor_commit() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            let key1 = Sha256::hash(&[1]);
+            let key2 = Sha256::hash(&[2]);
+            let key3 = Sha256::hash(&[3]);
+
+            // Chain: DB <- A <- B <- C
+            let a = db
+                .new_batch()
+                .write(key1, Some(vec![10]))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+            let b = a
+                .new_batch::<Sha256>()
+                .write(key2, Some(vec![20]))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+            let c = b
+                .new_batch::<Sha256>()
+                .write(key3, Some(vec![30]))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            // Apply only A (partial prefix), then try to apply C (skipping B).
+            db.apply_batch(a).await.unwrap();
+            let result = db.apply_batch(c).await;
+            assert!(
+                matches!(result, Err(Error::StaleChangeset { .. })),
+                "expected StaleChangeset for partial ancestor commit, got {result:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced]
     fn test_stale_changeset_chained() {
         let executor = deterministic::Runner::default();

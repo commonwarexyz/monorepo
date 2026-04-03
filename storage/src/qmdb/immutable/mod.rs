@@ -436,7 +436,7 @@ where
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        if db_size > batch.base_size {
+        if db_size != batch.db_size && db_size != batch.base_size {
             return Err(Error::StaleChangeset {
                 expected: batch.db_size,
                 actual: db_size,
@@ -1774,6 +1774,44 @@ pub(super) mod test {
         assert!(
             matches!(result, Err(Error::StaleChangeset { .. })),
             "expected StaleChangeset error, got {result:?}"
+        );
+
+        db.destroy().await.unwrap();
+    }
+
+    pub(crate) async fn test_immutable_stale_partial_ancestor_commit<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.with_label("db")).await;
+
+        let key1 = Sha256::hash(&[1]);
+        let key2 = Sha256::hash(&[2]);
+        let key3 = Sha256::hash(&[3]);
+
+        // Chain: DB <- A <- B <- C
+        let a = db.new_batch().set(key1, Sha256::fill(1u8)).merkleize(None);
+        let b = a
+            .new_batch::<Sha256>()
+            .set(key2, Sha256::fill(2u8))
+            .merkleize(None);
+        let c = b
+            .new_batch::<Sha256>()
+            .set(key3, Sha256::fill(3u8))
+            .merkleize(None);
+
+        // Apply only A, then try to apply C (skipping B).
+        db.apply_batch(a).await.unwrap();
+        let result = db.apply_batch(c).await;
+        assert!(
+            matches!(result, Err(Error::StaleChangeset { .. })),
+            "expected StaleChangeset for partial ancestor commit, got {result:?}"
         );
 
         db.destroy().await.unwrap();
