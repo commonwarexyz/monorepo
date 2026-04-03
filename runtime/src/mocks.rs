@@ -1,6 +1,6 @@
 //! A mock implementation of a channel that implements the Sink and Stream traits.
 
-use crate::{BufMut, Error, IoBufs, Sink as SinkTrait, Stream as StreamTrait};
+use crate::{BufMut, Error, IoBufs};
 use bytes::{Bytes, BytesMut};
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::sync::Arc;
@@ -55,6 +55,54 @@ impl Channel {
             },
         )
     }
+
+    /// Restores bytes that were detached from the front of the shared buffer.
+    fn restore_front(&mut self, data: Bytes) {
+        if data.is_empty() {
+            return;
+        }
+
+        let mut restored = BytesMut::with_capacity(data.len() + self.buffer.len());
+        restored.extend_from_slice(&data);
+        restored.extend_from_slice(&self.buffer);
+        self.buffer = restored;
+    }
+
+    /// Marks the sink as closed and wakes any waiter.
+    fn close_sink(&mut self) {
+        self.sink_alive = false;
+
+        // If there is a waiter, resolve it by dropping the oneshot sender.
+        self.waiter.take();
+    }
+}
+
+struct RecvWaiterGuard {
+    channel: Arc<Mutex<Channel>>,
+    active: bool,
+}
+
+impl RecvWaiterGuard {
+    const fn new(channel: Arc<Mutex<Channel>>) -> Self {
+        Self {
+            channel,
+            active: true,
+        }
+    }
+
+    const fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for RecvWaiterGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        self.channel.lock().waiter.take();
+    }
 }
 
 /// A mock sink that implements the Sink trait.
@@ -63,7 +111,7 @@ pub struct Sink {
     poisoned: bool,
 }
 
-impl SinkTrait for Sink {
+impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::Closed);
@@ -75,7 +123,7 @@ impl SinkTrait for Sink {
             // If the receiver is dead, we cannot send any more messages.
             if !channel.stream_alive {
                 self.poisoned = true;
-                return Err(Error::Closed);
+                return Err(Error::SendFailed);
             }
 
             channel.buffer.put(bufs.into());
@@ -101,22 +149,27 @@ impl SinkTrait for Sink {
             }
         };
 
-        // Resolve the waiter.
-        os_send.send(data).map_err(|_| {
-            self.poisoned = true;
-            Error::SendFailed
-        })?;
-        Ok(())
+        // A canceled recv should behave like a buffered transport:
+        // preserve the bytes and allow a subsequent recv to consume them.
+        match os_send.send(data) {
+            Ok(()) => Ok(()),
+            Err(data) => {
+                let mut channel = self.channel.lock();
+                channel.restore_front(data);
+                if !channel.stream_alive {
+                    self.poisoned = true;
+                    return Err(Error::SendFailed);
+                }
+                Ok(())
+            }
+        }
     }
 }
 
 impl Drop for Sink {
     fn drop(&mut self) {
         let mut channel = self.channel.lock();
-        channel.sink_alive = false;
-
-        // If there is a waiter, resolve it by dropping the oneshot sender.
-        channel.waiter.take();
+        channel.close_sink();
     }
 }
 
@@ -128,7 +181,7 @@ pub struct Stream {
     poisoned: bool,
 }
 
-impl StreamTrait for Stream {
+impl crate::Stream for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
         if self.poisoned {
             return Err(Error::Closed);
@@ -138,16 +191,14 @@ impl StreamTrait for Stream {
             let mut channel = self.channel.lock();
 
             // Pull data from channel buffer into local buffer.
-            if !channel.buffer.is_empty() {
-                let target = len.max(channel.read_buffer_size);
-                let pull_amount = channel
-                    .buffer
-                    .len()
-                    .min(target.saturating_sub(self.buffer.len()));
-                if pull_amount > 0 {
-                    let data = channel.buffer.split_to(pull_amount);
-                    self.buffer.extend_from_slice(&data);
-                }
+            let target = len.max(channel.read_buffer_size);
+            let pull_amount = channel
+                .buffer
+                .len()
+                .min(target.saturating_sub(self.buffer.len()));
+            if pull_amount > 0 {
+                let data = channel.buffer.split_to(pull_amount);
+                self.buffer.extend_from_slice(&data);
             }
 
             // If we have enough, return immediately.
@@ -158,7 +209,7 @@ impl StreamTrait for Stream {
             // If the sink is dead, we cannot receive any more messages.
             if !channel.sink_alive {
                 self.poisoned = true;
-                return Err(Error::Closed);
+                return Err(Error::RecvFailed);
             }
 
             // Set up waiter for remaining amount.
@@ -169,11 +220,23 @@ impl StreamTrait for Stream {
             os_recv
         };
 
+        let mut waiter_guard = RecvWaiterGuard::new(self.channel.clone());
+
+        // Pre-poison so that cancellation  leaves the stream permanently closed.
+        self.poisoned = true;
+
         // Wait for the waiter to be resolved.
-        let data = os_recv.await.map_err(|_| {
-            self.poisoned = true;
-            Error::Closed
-        })?;
+        let data = match os_recv.await {
+            Ok(data) => {
+                waiter_guard.disarm();
+                self.poisoned = false;
+                data
+            }
+            Err(_) => {
+                waiter_guard.disarm();
+                return Err(Error::RecvFailed);
+            }
+        };
         self.buffer.extend_from_slice(&data);
 
         assert!(self.buffer.len() >= len);
@@ -196,7 +259,7 @@ impl Drop for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{deterministic, Clock, Runner, Spawner};
+    use crate::{deterministic, Clock, Runner, Sink, Spawner, Stream};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
 
@@ -257,7 +320,7 @@ mod tests {
             futures::join!(
                 async {
                     let result = stream.recv(5).await;
-                    assert!(matches!(result, Err(Error::Closed)));
+                    assert!(matches!(result, Err(Error::RecvFailed)));
                     let result = stream.recv(5).await;
                     assert!(matches!(result, Err(Error::Closed)));
                 },
@@ -278,7 +341,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let result = stream.recv(5).await;
-            assert!(matches!(result, Err(Error::Closed)));
+            assert!(matches!(result, Err(Error::RecvFailed)));
             let result = stream.recv(5).await;
             assert!(matches!(result, Err(Error::Closed)));
         });
@@ -308,7 +371,7 @@ mod tests {
 
             // Try to send a message. The stream is dropped, so this should fail.
             let result = sink.send(b"hello world".as_slice()).await;
-            assert!(matches!(result, Err(Error::Closed)));
+            assert!(matches!(result, Err(Error::SendFailed)));
             let result = sink.send(b"hello world".as_slice()).await;
             assert!(matches!(result, Err(Error::Closed)));
         });
@@ -322,14 +385,14 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let result = sink.send(b"hello world".as_slice()).await;
-            assert!(matches!(result, Err(Error::Closed)));
+            assert!(matches!(result, Err(Error::SendFailed)));
             let result = sink.send(b"hello world".as_slice()).await;
             assert!(matches!(result, Err(Error::Closed)));
         });
     }
 
     #[test]
-    fn test_send_error_canceled_recv_poisoned() {
+    fn test_canceled_recv_poisons_stream_not_sink() {
         let (mut sink, mut stream) = Channel::init();
 
         let executor = deterministic::Runner::default();
@@ -342,13 +405,11 @@ mod tests {
                 _ = context.sleep(Duration::from_millis(50)) => {},
             };
 
-            // The first send hits the canceled waiter and fails.
-            let result = sink.send(b"hello".as_slice()).await;
-            assert!(matches!(result, Err(Error::SendFailed)));
+            // Stream should be poisoned after cancellation.
+            assert!(matches!(stream.recv(1).await, Err(Error::Closed)));
 
-            // After any send error, the mock sink must remain closed.
-            let result = sink.send(b"world".as_slice()).await;
-            assert!(matches!(result, Err(Error::Closed)));
+            // Sink should remain usable.
+            sink.send(b"hello".as_slice()).await.unwrap();
         });
     }
 
