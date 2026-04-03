@@ -1,12 +1,13 @@
 //! Batch mutation API for Keyless QMDBs.
 
-use super::Keyless;
+use super::{operation::Operation, Keyless};
 use crate::{
-    journal::authenticated,
-    mmr::{Location, Position},
-    qmdb::{any::VariableValue, keyless::operation::Operation, Error},
-    Context,
+    journal::{authenticated, contiguous::Mutable, Error as JournalError},
+    merkle::{Family, Location, Position},
+    qmdb::{any::value::ValueEncoding, Error},
+    Context, Persistable,
 };
+use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
 use std::sync::Arc;
 
@@ -14,16 +15,18 @@ use std::sync::Arc;
 /// to [`MerkleizedBatch`].
 ///
 /// Consuming [`UnmerkleizedBatch::merkleize`] produces an owned [`MerkleizedBatch`].
-pub struct UnmerkleizedBatch<H, V>
+pub struct UnmerkleizedBatch<F, H, V>
 where
-    V: VariableValue,
+    F: Family,
+    V: ValueEncoding,
     H: Hasher,
+    Operation<V>: EncodeShared,
 {
-    /// Authenticated journal batch for computing the speculative MMR root.
-    journal_batch: authenticated::UnmerkleizedBatch<H, Operation<V>>,
+    /// Authenticated journal batch for computing the speculative Merkle root.
+    journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<V>>,
 
     /// Pending appends.
-    appends: Vec<V>,
+    appends: Vec<V::Value>,
 
     /// One Arc segment of operations per prior batch in the chain.
     base_operations: Vec<Arc<Vec<Operation<V>>>>,
@@ -38,21 +41,24 @@ where
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
-pub struct MerkleizedBatch<D: Digest, V: VariableValue> {
-    /// Journal batch (MMR state + accumulated operation segments).
-    journal_batch: authenticated::MerkleizedBatch<D, Operation<V>>,
+pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding>
+where
+    Operation<V>: EncodeShared,
+{
+    /// Journal batch (Merkle state + accumulated operation segments).
+    pub(super) journal_batch: authenticated::MerkleizedBatch<F, D, Operation<V>>,
 
     /// Total operation count after this batch.
-    total_size: u64,
+    pub(super) total_size: u64,
 
     /// The database size when the initial batch was created.
-    db_size: u64,
+    pub(super) db_size: u64,
 }
 
 /// An owned changeset that can be applied to the database.
-pub struct Changeset<D: Digest, V: VariableValue> {
-    /// The finalized authenticated journal batch (MMR changeset + item chain).
-    pub(super) journal_finalized: authenticated::Changeset<D, Operation<V>>,
+pub struct Changeset<F: Family, D: Digest, V: ValueEncoding> {
+    /// The finalized authenticated journal batch (Merkle changeset + item chain).
+    pub(super) journal_finalized: authenticated::Changeset<F, D, Operation<V>>,
 
     /// Total operation count after this batch.
     pub(super) total_size: u64,
@@ -61,15 +67,18 @@ pub struct Changeset<D: Digest, V: VariableValue> {
     pub(super) db_size: u64,
 }
 
-impl<H, V> UnmerkleizedBatch<H, V>
+impl<F, H, V> UnmerkleizedBatch<F, H, V>
 where
-    V: VariableValue,
+    F: Family,
+    V: ValueEncoding,
     H: Hasher,
+    Operation<V>: EncodeShared,
 {
     /// Create a batch from a committed DB (no parent chain).
-    pub(super) fn new<E>(keyless: &Keyless<E, V, H>, journal_size: u64) -> Self
+    pub(super) fn new<E, C>(keyless: &Keyless<F, E, V, C, H>, journal_size: u64) -> Self
     where
         E: Context,
+        C: Mutable<Item = Operation<V>> + Persistable<Error = JournalError>,
     {
         Self {
             journal_batch: keyless.journal.to_merkleized_batch().new_batch::<H>(),
@@ -81,12 +90,12 @@ where
     }
 
     /// The location that the next appended value will be placed at.
-    pub const fn size(&self) -> Location {
+    pub const fn size(&self) -> Location<F> {
         Location::new(self.base_size + self.appends.len() as u64)
     }
 
     /// Append a value.
-    pub fn append(mut self, value: V) -> Self {
+    pub fn append(mut self, value: V::Value) -> Self {
         self.appends.push(value);
         self
     }
@@ -94,9 +103,14 @@ where
     /// Read a value at `loc`.
     ///
     /// Reads from pending appends, parent chain, or base DB.
-    pub async fn get<E>(&self, loc: Location, db: &Keyless<E, V, H>) -> Result<Option<V>, Error>
+    pub async fn get<E, C>(
+        &self,
+        loc: Location<F>,
+        db: &Keyless<F, E, V, C, H>,
+    ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
+        C: Mutable<Item = Operation<V>> + Persistable<Error = JournalError>,
     {
         let loc_val = *loc;
         let parent_ops_len: u64 = self.base_operations.iter().map(|s| s.len() as u64).sum();
@@ -123,7 +137,7 @@ where
     }
 
     /// Resolve appends into operations, merkleize, and return a [`MerkleizedBatch`].
-    pub fn merkleize(self, metadata: Option<V>) -> MerkleizedBatch<H::Digest, V> {
+    pub fn merkleize(self, metadata: Option<V::Value>) -> MerkleizedBatch<F, H::Digest, V> {
         let base = self.base_size;
 
         // Build operations: one Append per value, then Commit.
@@ -150,17 +164,25 @@ where
     }
 }
 
-impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
+impl<F: Family, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>
+where
+    Operation<V>: EncodeShared,
+{
     /// Return the speculative root.
     pub fn root(&self) -> D {
         self.journal_batch.root()
     }
 
     /// Read a value at `loc`.
-    pub async fn get<E, H>(&self, loc: Location, db: &Keyless<E, V, H>) -> Result<Option<V>, Error>
+    pub async fn get<E, H, C>(
+        &self,
+        loc: Location<F>,
+        db: &Keyless<F, E, V, C, H>,
+    ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
         H: Hasher<Digest = D>,
+        C: Mutable<Item = Operation<V>> + Persistable<Error = JournalError>,
     {
         let loc_val = *loc;
         let parent_ops_len: u64 = self
@@ -182,7 +204,7 @@ impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
     }
 
     /// Create a new speculative batch of operations with this batch as its parent.
-    pub fn new_batch<H>(&self) -> UnmerkleizedBatch<H, V>
+    pub fn new_batch<H>(&self) -> UnmerkleizedBatch<F, H, V>
     where
         H: Hasher<Digest = D>,
     {
@@ -196,7 +218,7 @@ impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
     }
 
     /// Consume this batch, producing an owned [`Changeset`].
-    pub fn finalize(self) -> Changeset<D, V> {
+    pub fn finalize(self) -> Changeset<F, D, V> {
         Changeset {
             journal_finalized: self.journal_batch.finalize(),
             total_size: self.total_size,
@@ -213,42 +235,25 @@ impl<D: Digest, V: VariableValue> MerkleizedBatch<D, V> {
     /// # Panics
     ///
     /// Panics if `current_db_size` is less than the DB size when this batch was created.
-    pub fn finalize_from(self, current_db_size: u64) -> Changeset<D, V> {
+    pub fn finalize_from(self, current_db_size: u64) -> Changeset<F, D, V> {
         assert!(
             current_db_size >= self.db_size,
             "current_db_size ({current_db_size}) < batch db_size ({})",
             self.db_size
         );
         let items_to_skip = current_db_size - self.db_size;
-        let mmr_base =
-            Position::try_from(Location::new(current_db_size)).expect("valid leaf count");
+        let merkle_base =
+            Position::try_from(Location::<F>::new(current_db_size)).expect("valid leaf count");
         Changeset {
-            journal_finalized: self.journal_batch.finalize_from(mmr_base, items_to_skip),
+            journal_finalized: self.journal_batch.finalize_from(merkle_base, items_to_skip),
             total_size: self.total_size,
             db_size: current_db_size,
         }
     }
 }
 
-impl<E, V, H> Keyless<E, V, H>
-where
-    E: Context,
-    V: VariableValue,
-    H: Hasher,
-{
-    /// Create an initial [`MerkleizedBatch`] from the committed DB state.
-    pub fn to_batch(&self) -> MerkleizedBatch<H::Digest, V> {
-        let journal_size = *self.last_commit_loc + 1;
-        MerkleizedBatch {
-            journal_batch: self.journal.to_merkleized_batch(),
-            total_size: journal_size,
-            db_size: journal_size,
-        }
-    }
-}
-
 /// Read an operation from the in-memory chain at the given offset.
-fn read_from_chain<V: VariableValue>(
+fn read_from_chain<V: ValueEncoding>(
     offset: u64,
     chain: &[Arc<Vec<Operation<V>>>],
 ) -> Operation<V> {

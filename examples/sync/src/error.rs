@@ -24,7 +24,7 @@ pub enum Error {
 
     /// Database operation failed
     #[error("database operation failed")]
-    Database(#[from] commonware_storage::qmdb::Error),
+    Database(#[from] commonware_storage::qmdb::Error<commonware_storage::mmr::Family>),
 
     /// Request channel to I/O task closed unexpectedly
     #[error("request channel closed - I/O task may have terminated")]

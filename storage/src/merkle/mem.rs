@@ -114,8 +114,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
             return Err(Error::InvalidSize(*size));
         }
 
-        let leaves = Location::try_from(size).expect("valid size");
-        let expected_pinned_positions = F::nodes_to_pin(leaves, config.pruning_boundary);
+        let expected_pinned_positions: Vec<_> = F::nodes_to_pin(config.pruning_boundary).collect();
         if config.pinned_nodes.len() != expected_pinned_positions.len() {
             return Err(Error::InvalidPinnedNodes);
         }
@@ -161,29 +160,9 @@ impl<F: Family, D: Digest> Mem<F, D> {
         )
     }
 
-    /// Build a minimal, pruned structure from a precomputed root and pinned peaks.
-    ///
-    /// The resulting structure has no retained nodes -- only the O(log N) pinned peaks needed
-    /// for proof generation and the already-known root. This avoids rehashing.
-    #[cfg(feature = "std")]
-    pub(crate) fn from_pruned(
-        root: D,
-        pruning_boundary: Position<F>,
-        pinned_nodes: BTreeMap<Position<F>, D>,
-    ) -> Self {
-        Self {
-            inner: Arc::new(MemInner {
-                nodes: VecDeque::new(),
-                pruning_boundary,
-                pinned_nodes,
-                root,
-            }),
-        }
-    }
-
     /// Build a pruned structure that retains nodes above the prune boundary.
     ///
-    /// Like [`from_pruned`](Self::from_pruned) but also accepts retained nodes (stored in the
+    /// Like `from_components` but also accepts retained nodes (stored in the
     /// `nodes` deque). Used by `flatten()` and the grafted MMR which has no disk fallback.
     #[cfg(feature = "std")]
     pub(crate) fn from_pruned_with_retained(
@@ -293,8 +272,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
     /// Get the nodes (position + digest) that need to be pinned when pruned to `prune_loc`.
     pub(crate) fn nodes_to_pin(&self, prune_loc: Location<F>) -> BTreeMap<Position<F>, D> {
-        F::nodes_to_pin(self.leaves(), prune_loc)
-            .into_iter()
+        F::nodes_to_pin(prune_loc)
             .map(|pos| (pos, *self.get_node_unchecked(pos)))
             .collect()
     }
@@ -384,8 +362,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// Get the digests of nodes that need to be pinned at the provided pruning boundary.
     #[cfg(test)]
     pub(crate) fn node_digests_to_pin(&self, prune_loc: Location<F>) -> Vec<D> {
-        F::nodes_to_pin(self.leaves(), prune_loc)
-            .into_iter()
+        F::nodes_to_pin(prune_loc)
             .map(|pos| *self.get_node_unchecked(pos))
             .collect()
     }
@@ -1055,6 +1032,44 @@ mod tests {
         );
     }
 
+    /// Prune to every valid boundary in structures of size 1..=max_n, then update_leaf +
+    /// merkleize each retained leaf and verify its inclusion proof. This exercises the pinned
+    /// nodes produced by `nodes_to_pin` under re-merkleization.
+    fn update_leaf_after_prune<F: Family>() {
+        let max_n = 20u64;
+        let hasher: H = Standard::new();
+        for n in 1..=max_n {
+            for prune_to in 1..n {
+                let mut mem = build_raw::<F>(&hasher, n);
+                mem.prune(Location::new(prune_to)).unwrap();
+
+                for update_loc in prune_to..n {
+                    // Clone so each update starts from the same pruned state.
+                    let mut m = mem.clone();
+                    let changeset = {
+                        let batch = m.new_batch();
+                        let batch = batch
+                            .update_leaf(&hasher, Location::new(update_loc), b"new")
+                            .unwrap();
+                        batch.merkleize(&hasher).finalize()
+                    };
+                    m.apply(changeset).unwrap();
+
+                    let proof = m.proof(&hasher, Location::new(update_loc)).unwrap();
+                    assert!(
+                        proof.verify_element_inclusion(
+                            &hasher,
+                            b"new",
+                            Location::new(update_loc),
+                            m.root()
+                        ),
+                        "n={n} prune={prune_to} update={update_loc}: proof should verify"
+                    );
+                }
+            }
+        }
+    }
+
     // --- MMR tests ---
 
     #[test]
@@ -1132,6 +1147,10 @@ mod tests {
     #[test]
     fn mmr_update_leaf_under_merge_parent() {
         update_leaf_under_merge_parent::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_update_leaf_after_prune() {
+        update_leaf_after_prune::<crate::mmr::Family>();
     }
 
     // --- MMB tests ---
@@ -1211,5 +1230,9 @@ mod tests {
     #[test]
     fn mmb_update_leaf_under_merge_parent() {
         update_leaf_under_merge_parent::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_update_leaf_after_prune() {
+        update_leaf_after_prune::<crate::mmb::Family>();
     }
 }

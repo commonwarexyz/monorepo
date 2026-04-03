@@ -90,41 +90,37 @@ hash = "3636363c592dddcff2eaeb4e6b01ec0cfcca654d69f9fdc1c57626c5adea0de1"
 n_cases = 65536
 hash = "f93b1dda40f6d9f1ccb3f05994be56189205dcb558551e056c2f3db03a79182d"
 
-["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<Ordered<Fixed<U64,U64>>>"]
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<mmb::Family,U64,FixedEncoding<U64\n>>>"]
 n_cases = 65536
-hash = "f07e12cc9db44b417c1e936e0f36f06d93ec8390b59c4394811d422d11b32a7d"
+hash = "606f8c7d5ce073573e0e4d37006bb9068be93fdddeccdbc265cf41df0c9fcde6"
 
-["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<Ordered<VariableValue<U64,Vec<u8>>>>"]
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<mmb::Family,U64,VariableEncoding<\nVec<u8>>>>"]
 n_cases = 65536
-hash = "1be8a11f1e27adb03ad60b57af16993cc571a4b8c2bdd1c086b1762f6a92f70e"
+hash = "1a3c262e874fb91dc65f8fe2cd9b0e64ea1e69f615e0ef2be128564cfca963ec"
 
-["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<U64,FixedEncoding<U64>>>"]
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<mmr::Family,U64,FixedEncoding<U64\n>>>"]
 n_cases = 65536
 hash = "b96e969e3c2fa571101b20a527709627a46c7cbcabc21b6c34491d942c44e11a"
 
-["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<U64,VariableEncoding<Vec<u8>>>>"]
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<OrderedOperation<mmr::Family,U64,VariableEncoding<\nVec<u8>>>>"]
 n_cases = 65536
 hash = "734013661e2e967b0ecad32fac076377319237c040b5deb2363268d23dc9c926"
 
-["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<Unordered<Fixed<U64,U64>>>"]
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<UnorderedOperation<mmb::Family,U64,FixedEncoding<\nU64>>>"]
 n_cases = 65536
-hash = "92d97caa778f4825bb78af31114456bd2fadee745387914ca4754407638b518a"
+hash = "054574a1657cfb4d4d4b216adc7eddecc87565d0c6536f693a3ab82de7c8bcad"
 
-["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<Unordered<VariableValue<U64,Vec<u8>>>>"]
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<UnorderedOperation<mmb::Family,U64,VariableEncoding<\nVec<u8>>>>"]
 n_cases = 65536
-hash = "36910b6b06e883c255d8e6f4ae688630c2bae894dd440e7a93985663119be574"
+hash = "80fce5b04a0d7c506724ea1e04e2c37efb475a0f080d321920cdf4cda9d2fa1a"
 
-["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<UnorderedOperation<U64,FixedEncoding<U64>>>"]
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<UnorderedOperation<mmr::Family,U64,FixedEncoding<\nU64>>>"]
 n_cases = 65536
 hash = "0a7354fdc9af8a461126f61f85def0eb2e5929df0b0bb045431d16fe8376ff0b"
 
-["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<UnorderedOperation<U64,VariableEncoding<Vec<u8>>>\n>"]
+["commonware_storage::qmdb::any::operation::tests::conformance::CodecConformance<UnorderedOperation<mmr::Family,U64,VariableEncoding<\nVec<u8>>>>"]
 n_cases = 65536
 hash = "32b30ab90b530340cd3d86ba14a31a4d265095a4e78719529d3a55fae2ad0bf2"
-
-["commonware_storage::qmdb::any::operation::update::tests::conformance::CodecConformance<OrderedUpdate<Fixed<U64,U64>>>"]
-n_cases = 65536
-hash = "457f73ee7d5f80f0d4a274509b374edddecfc881a9cbd0864691bf1a14f304a1"
 
 ["commonware_storage::qmdb::any::operation::update::tests::conformance::CodecConformance<OrderedUpdate<U64,FixedEncoding<U64>>>"]
 n_cases = 65536
@@ -134,14 +130,6 @@ hash = "457f73ee7d5f80f0d4a274509b374edddecfc881a9cbd0864691bf1a14f304a1"
 n_cases = 65536
 hash = "2f8ebe2f7bc78454ba8d232c80c4f7d55797f26ba4cbcc0a4abcb33ca83c2b1c"
 
-["commonware_storage::qmdb::any::operation::update::tests::conformance::CodecConformance<OrderedUpdate<VariableValue<U64,Vec<u8>>>>"]
-n_cases = 65536
-hash = "2f8ebe2f7bc78454ba8d232c80c4f7d55797f26ba4cbcc0a4abcb33ca83c2b1c"
-
-["commonware_storage::qmdb::any::operation::update::tests::conformance::CodecConformance<UnorderedUpdate<Fixed<U64,U64>>>"]
-n_cases = 65536
-hash = "f5456580eb69727a23bfb0281e33f467acc0c91273efebd334d3e82c9770ae76"
-
 ["commonware_storage::qmdb::any::operation::update::tests::conformance::CodecConformance<UnorderedUpdate<U64,FixedEncoding<U64>>>"]
 n_cases = 65536
 hash = "f5456580eb69727a23bfb0281e33f467acc0c91273efebd334d3e82c9770ae76"
@@ -150,15 +138,23 @@ hash = "f5456580eb69727a23bfb0281e33f467acc0c91273efebd334d3e82c9770ae76"
 n_cases = 65536
 hash = "a3fbb5f749fa5b73a684e9f0bebd8973c456e5ee43a0a3db75a99aa550dee302"
 
-["commonware_storage::qmdb::any::operation::update::tests::conformance::CodecConformance<UnorderedUpdate<VariableValue<U64,Vec<u8>>>>"]
+["commonware_storage::qmdb::immutable::operation::fixed::tests::conformance::CodecConformance<FixedOp>"]
 n_cases = 65536
-hash = "a3fbb5f749fa5b73a684e9f0bebd8973c456e5ee43a0a3db75a99aa550dee302"
+hash = "4f75cdf8952431729e7a3dfad38a8d5bfbb92bf6b54b1ca180a66745aed618d5"
 
-["commonware_storage::qmdb::immutable::operation::tests::conformance::CodecConformance<Operation<U64,U64>>"]
+["commonware_storage::qmdb::immutable::operation::variable::tests::conformance::CodecConformance<VarKeyOp>"]
+n_cases = 65536
+hash = "cce5f888e506282f861e0e49e176b26c65f92e457f0c5f5353fc9b7196f07478"
+
+["commonware_storage::qmdb::immutable::operation::variable::tests::conformance::CodecConformance<VarOp>"]
 n_cases = 65536
 hash = "fdca5df62d243b28676ee15034663694cd219d5ef80749079126b0ed73effe0d"
 
-["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<U64>>"]
+["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<FixedEncoding<U64>>>"]
+n_cases = 65536
+hash = "c692a20fa40180844888e7a26401f99a45ce3127faeca5f1228a41b454424623"
+
+["commonware_storage::qmdb::keyless::operation::tests::conformance::CodecConformance<Operation<VariableEncoding<U64>>>"]
 n_cases = 65536
 hash = "b41d6c6ec560bde9caf2e206526864c618a0721af367585a1719617ca7ce9291"
 

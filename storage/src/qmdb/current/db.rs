@@ -2,20 +2,20 @@
 //!
 //! The impl blocks in this file define shared functionality across all Current QMDB variants.
 
-use super::batch::BitmapRead;
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
-    merkle::{batch::MIN_TO_PARALLELIZE, hasher::Hasher as _, storage::Storage as MerkleStorage},
-    metadata::{Config as MConfig, Metadata},
-    mmr::{
-        self,
-        iterator::{nodes_to_pin, PeakIterator},
-        Location, Position, StandardHasher,
+    merkle::{
+        batch::MIN_TO_PARALLELIZE,
+        hasher::Hasher as _,
+        mmr::{self, iterator::PeakIterator, Location, Position, StandardHasher},
+        storage::Storage as MerkleStorage,
+        Family as _,
     },
+    metadata::{Config as MConfig, Metadata},
     qmdb::{
         any::{
             self,
@@ -27,19 +27,25 @@ use crate::{
             proof::{OperationProof, RangeProof},
         },
         operation::Operation as _,
-        Error,
     },
     Context, Persistable,
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_parallel::ThreadPool;
-use commonware_utils::{bitmap::Prunable as BitMap, sequence::prefixed_u64::U64, sync::AsyncMutex};
+use commonware_utils::{
+    bitmap::{Prunable as BitMap, Readable as BitmapReadable},
+    sequence::prefixed_u64::U64,
+    sync::AsyncMutex,
+};
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
 use rayon::prelude::*;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{error, warn};
+
+/// Convenience alias: all `current` databases use the MMR family.
+type Error = crate::qmdb::Error<mmr::Family>;
 
 /// Prefix used for the metadata key for grafted MMR pinned nodes.
 const NODE_PREFIX: u8 = 0;
@@ -58,7 +64,7 @@ pub struct Db<
 > {
     /// An authenticated database that provides the ability to prove whether a key ever had a
     /// specific value.
-    pub(super) any: any::db::Db<E, C, I, H, U>,
+    pub(super) any: any::db::Db<mmr::Family, E, C, I, H, U>,
 
     /// The bitmap over the activity status of each operation. Supports augmenting [Db] proofs in
     /// order to further prove whether a key _currently_ has a specific value.
@@ -95,10 +101,10 @@ impl<E, C, I, H, U, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     /// Return the inactivity floor location. This is the location before which all operations are
     /// known to be inactive. Operations before this point can be safely pruned.
@@ -128,7 +134,7 @@ where
         hasher: &mut H,
         proof: &RangeProof<H::Digest>,
         start_loc: Location,
-        ops: &[Operation<U>],
+        ops: &[Operation<mmr::Family, U>],
         chunks: &[[u8; N]],
         root: &H::Digest,
     ) -> bool {
@@ -141,10 +147,10 @@ impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Context,
     U: Update,
-    C: Contiguous<Item = Operation<U>>,
+    C: Contiguous<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     /// Returns a virtual [grafting::Storage] over the grafted MMR and ops MMR. For positions at or
     /// above the grafting height, returns grafted MMR node. For positions below the grafting
@@ -153,7 +159,7 @@ where
         grafting::Storage::new(
             &self.grafted_mmr,
             grafting::height::<N>(),
-            &self.any.log.mmr,
+            &self.any.log.merkle,
         )
     }
 
@@ -227,7 +233,14 @@ where
         hasher: &mut H,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(RangeProof<H::Digest>, Vec<Operation<U>>, Vec<[u8; N]>), Error> {
+    ) -> Result<
+        (
+            RangeProof<H::Digest>,
+            Vec<Operation<mmr::Family, U>>,
+            Vec<[u8; N]>,
+        ),
+        Error,
+    > {
         let storage = self.grafted_storage();
         let ops_root = self.any.log.root();
         RangeProof::new_with_ops(
@@ -248,10 +261,10 @@ impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<U>>,
+    C: Mutable<Item = Operation<mmr::Family, U>>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     /// Returns an ops-level historical proof for the specified range.
     ///
@@ -262,7 +275,7 @@ where
         historical_size: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> Result<(mmr::Proof<H::Digest>, Vec<Operation<U>>), Error> {
+    ) -> Result<(mmr::Proof<H::Digest>, Vec<Operation<mmr::Family, U>>), Error> {
         self.any
             .historical_proof(historical_size, start_loc, max_ops)
             .await
@@ -412,7 +425,7 @@ where
         let pinned_nodes = if pruned_chunks > 0 {
             let mmr_size = Location::new(pruned_chunks as u64);
             let mut pinned_nodes = Vec::new();
-            for pos in nodes_to_pin(mmr_size) {
+            for pos in mmr::Family::nodes_to_pin(mmr_size) {
                 let digest = self
                     .grafted_mmr
                     .get_node(pos)
@@ -451,12 +464,12 @@ where
             &hasher,
             status,
             &pinned_nodes,
-            &self.any.log.mmr,
+            &self.any.log.merkle,
             self.thread_pool.as_ref(),
         )
         .await?;
         let storage =
-            grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &self.any.log.mmr);
+            grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &self.any.log.merkle);
         let partial_chunk = partial_chunk(status);
         let ops_root = self.any.log.root();
         let root = compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
@@ -507,10 +520,10 @@ impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
@@ -541,10 +554,10 @@ impl<E, U, C, I, H, const N: usize> Db<E, C, I, H, U, N>
 where
     E: Context,
     U: Update + 'static,
-    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     /// Apply a changeset to the database, returning the range of written operations.
     ///
@@ -558,7 +571,7 @@ where
     /// durability.
     pub async fn apply_batch(
         &mut self,
-        batch: super::batch::Changeset<U::Key, H::Digest, Operation<U>, N>,
+        batch: super::batch::Changeset<U::Key, H::Digest, Operation<mmr::Family, U>, N>,
     ) -> Result<Range<Location>, Error> {
         // Apply inner any batch (writes ops, updates snapshot).
         let range = self.any.apply_batch(batch.inner).await?;
@@ -581,10 +594,10 @@ impl<E, U, C, I, H, const N: usize> Persistable for Db<E, C, I, H, U, N>
 where
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<mmr::Family, U>> + Persistable<Error = JournalError>,
     I: UnorderedIndex<Value = Location>,
     H: Hasher,
-    Operation<U>: Codec,
+    Operation<mmr::Family, U>: Codec,
 {
     type Error = Error;
 
@@ -603,7 +616,7 @@ where
 
 /// Returns `Some((last_chunk, next_bit))` if the bitmap has an incomplete trailing chunk, or
 /// `None` if all bits fall on complete chunk boundaries.
-pub(super) fn partial_chunk<B: super::batch::BitmapRead<N>, const N: usize>(
+pub(super) fn partial_chunk<B: BitmapReadable<N>, const N: usize>(
     bitmap: &B,
 ) -> Option<([u8; N], u64)> {
     let (last_chunk, next_bit) = bitmap.last_chunk();
@@ -852,7 +865,7 @@ pub(super) async fn init_metadata<E: Context, D: Digest>(
             return Err(Error::DataCorrupted("pruned chunks exceeds MAX_LEAVES"));
         }
         let mut pinned = Vec::new();
-        for (index, pos) in nodes_to_pin(pruned_loc).enumerate() {
+        for (index, pos) in mmr::Family::nodes_to_pin(pruned_loc).enumerate() {
             let metadata_key = U64::new(NODE_PREFIX, index as u64);
             let Some(bytes) = metadata.get(&metadata_key) else {
                 return Err(mmr::Error::MissingNode(pos).into());

@@ -232,12 +232,12 @@
 //! canonical root is the caller's responsibility; the sync engine does not perform this check.
 
 use crate::{
-    index::Unordered as UnorderedIndex,
+    index::Factory as IndexFactory,
     journal::{
         authenticated::Inner,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
-    mmr::{journaled::Config as MmrConfig, Location, StandardHasher},
+    merkle::mmr::{self, journaled::Config as MmrConfig, Location, StandardHasher},
     qmdb::{
         any::{
             self,
@@ -245,7 +245,6 @@ use crate::{
             Config as AnyConfig,
         },
         operation::Committable,
-        Error,
     },
     translator::Translator,
     Context,
@@ -258,10 +257,13 @@ use std::sync::Arc;
 pub mod batch;
 pub mod db;
 mod grafting;
+
 pub mod ordered;
 pub mod proof;
 pub(crate) mod sync;
 pub mod unordered;
+
+type Error = crate::qmdb::Error<mmr::Family>;
 
 /// Configuration for a `Current` authenticated db.
 #[derive(Clone)]
@@ -282,7 +284,7 @@ pub struct Config<T: Translator, J> {
 impl<T: Translator, J> From<Config<T, J>> for AnyConfig<T, J> {
     fn from(cfg: Config<T, J>) -> Self {
         Self {
-            mmr_config: cfg.mmr_config,
+            merkle_config: cfg.mmr_config,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
         }
@@ -296,20 +298,18 @@ pub type FixedConfig<T> = Config<T, FConfig>;
 pub type VariableConfig<T, C> = Config<T, VConfig<C>>;
 
 /// Initialize a `Current` authenticated db from the given config.
-pub(super) async fn init<E, U, H, T, I, J, const N: usize, NewIndex>(
+pub(super) async fn init<E, U, H, T, I, J, const N: usize>(
     context: E,
     config: Config<T, J::Config>,
-    new_index: NewIndex,
 ) -> Result<db::Db<E, J, I, H, U, N>, Error>
 where
     E: Context,
     U: Update + Send + Sync,
     H: Hasher,
     T: Translator,
-    I: UnorderedIndex<Value = Location>,
-    J: Inner<E, Item = Operation<U>>,
-    Operation<U>: Committable + CodecShared,
-    NewIndex: FnOnce(E, T) -> I,
+    I: IndexFactory<T, Value = Location>,
+    J: Inner<E, Item = Operation<mmr::Family, U>>,
+    Operation<mmr::Family, U>: Committable + CodecShared,
 {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {
@@ -348,7 +348,6 @@ where
                 status.set_bit(*loc, false);
             }
         },
-        new_index,
     )
     .await?;
 
@@ -358,13 +357,13 @@ where
         &hasher,
         &status,
         &pinned_nodes,
-        &any.log.mmr,
+        &any.log.merkle,
         thread_pool.as_ref(),
     )
     .await?;
 
     // Compute and cache the root.
-    let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.mmr);
+    let storage = grafting::Storage::new(&grafted_mmr, grafting::height::<N>(), &any.log.merkle);
     let partial_chunk = db::partial_chunk(&status);
     let ops_root = any.log.root();
     let root = db::compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
@@ -399,13 +398,13 @@ pub mod tests {
     pub use super::BitmapPrunedBits;
     use super::{ordered, unordered, FConfig, FixedConfig, MmrConfig, VConfig, VariableConfig};
     use crate::{
+        merkle::mmr,
         qmdb::{
             any::{
                 test::colliding_digest,
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
-            Error, Location,
         },
         translator::Translator,
     };
@@ -419,6 +418,13 @@ pub mod tests {
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use std::num::{NonZeroU16, NonZeroUsize};
     use tracing::warn;
+
+    type Error = crate::qmdb::Error<mmr::Family>;
+    type Location = mmr::Location;
+    type WriteVec<C> = Vec<(
+        <C as DbAny<mmr::Family>>::Key,
+        Option<<C as DbAny<mmr::Family>>::Value>,
+    )>;
 
     // Janky page & cache sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(88);
@@ -483,9 +489,9 @@ pub mod tests {
     }
 
     /// Commit a set of writes as a single batch.
-    async fn commit_writes<C: DbAny>(
+    async fn commit_writes<C: DbAny<mmr::Family>>(
         db: &mut C,
-        writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny>::Value>)>,
+        writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny<mmr::Family>>::Value>)>,
     ) -> Result<(), Error> {
         let mut batch = db.new_batch();
         for (k, v) in writes {
@@ -508,9 +514,9 @@ pub mod tests {
         mut db: C,
     ) -> Result<C, Error>
     where
-        C: DbAny,
+        C: DbAny<mmr::Family>,
         C::Key: TestKey,
-        <C as DbAny>::Value: TestValue,
+        <C as DbAny<mmr::Family>>::Value: TestValue,
     {
         // Log the seed with high visibility to make failures reproducible.
         warn!("rng_seed={}", rng_seed);
@@ -530,7 +536,7 @@ pub mod tests {
 
         // Randomly update / delete them. We use a delete frequency that is 1/7th of the update
         // frequency. Accumulate writes and commit periodically.
-        let mut pending: Vec<(C::Key, Option<<C as DbAny>::Value>)> = Vec::new();
+        let mut pending: WriteVec<C> = Vec::new();
         for _ in 0u64..num_elements * 10 {
             let rand_key = TestKey::from_seed(rng.next_u64() % num_elements);
             if rng.next_u32() % 7 == 0 {
@@ -556,9 +562,9 @@ pub mod tests {
         db: C,
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<C, Error>>>>
     where
-        C: DbAny + 'static,
+        C: DbAny<mmr::Family> + 'static,
         C::Key: TestKey,
-        <C as DbAny>::Value: TestValue,
+        <C as DbAny<mmr::Family>>::Value: TestValue,
     {
         Box::pin(apply_random_ops_inner::<C>(
             num_elements,
@@ -574,9 +580,9 @@ pub mod tests {
     /// The factory will be called multiple times to test reopening.
     pub fn test_build_random_close_reopen<C, F, Fut>(mut open_db: F)
     where
-        C: DbAny + 'static,
+        C: DbAny<mmr::Family> + 'static,
         C::Key: TestKey,
-        <C as DbAny>::Value: TestValue,
+        <C as DbAny<mmr::Family>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -648,9 +654,9 @@ pub mod tests {
     /// failure scenarios.
     pub fn test_simulate_write_failures<C, F, Fut>(mut open_db: F)
     where
-        C: DbAny + 'static,
+        C: DbAny<mmr::Family> + 'static,
         C::Key: TestKey,
-        <C as DbAny>::Value: TestValue,
+        <C as DbAny<mmr::Family>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -727,9 +733,9 @@ pub mod tests {
     /// with identical operations but different pruning schedules should have the same root.
     pub fn test_different_pruning_delays_same_root<C, F, Fut>(mut open_db: F)
     where
-        C: DbAny,
+        C: DbAny<mmr::Family>,
         C::Key: TestKey,
-        <C as DbAny>::Value: TestValue,
+        <C as DbAny<mmr::Family>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -746,11 +752,11 @@ pub mod tests {
 
             // Apply identical operations to both databases, but only prune one.
             // Accumulate writes between commits.
-            let mut pending_no_pruning: Vec<(C::Key, Option<<C as DbAny>::Value>)> = Vec::new();
-            let mut pending_pruning: Vec<(C::Key, Option<<C as DbAny>::Value>)> = Vec::new();
+            let mut pending_no_pruning: WriteVec<C> = Vec::new();
+            let mut pending_pruning: WriteVec<C> = Vec::new();
             for i in 0..NUM_OPERATIONS {
                 let key: C::Key = TestKey::from_seed(i);
-                let value: <C as DbAny>::Value = TestValue::from_seed(i * 1000);
+                let value: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed(i * 1000);
 
                 pending_no_pruning.push((key, Some(value.clone())));
                 pending_pruning.push((key, Some(value)));
@@ -801,9 +807,9 @@ pub mod tests {
     /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
     pub fn test_sync_persists_bitmap_pruning_boundary<C, F, Fut>(mut open_db: F)
     where
-        C: DbAny + BitmapPrunedBits + 'static,
+        C: DbAny<mmr::Family> + BitmapPrunedBits + 'static,
         C::Key: TestKey,
-        <C as DbAny>::Value: TestValue,
+        <C as DbAny<mmr::Family>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -873,9 +879,9 @@ pub mod tests {
     /// persists correctly after close and reopen.
     pub fn test_current_db_build_big<C, F, Fut>(mut open_db: F)
     where
-        C: DbAny,
+        C: DbAny<mmr::Family>,
         C::Key: TestKey,
-        <C as DbAny>::Value: TestValue,
+        <C as DbAny<mmr::Family>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -886,7 +892,8 @@ pub mod tests {
         executor.start(|context| async move {
             let mut db: C = open_db_clone(context.with_label("first"), "build-big".into()).await;
 
-            let mut map = std::collections::HashMap::<C::Key, <C as DbAny>::Value>::default();
+            let mut map =
+                std::collections::HashMap::<C::Key, <C as DbAny<mmr::Family>>::Value>::default();
 
             // All creates, updates, and deletes in one batch.
             let finalized = {
@@ -895,7 +902,7 @@ pub mod tests {
                 // Initial creates
                 for i in 0u64..ELEMENTS {
                     let k: C::Key = TestKey::from_seed(i);
-                    let v: <C as DbAny>::Value = TestValue::from_seed(i * 1000);
+                    let v: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed(i * 1000);
                     batch = batch.write(k, Some(v.clone()));
                     map.insert(k, v);
                 }
@@ -906,7 +913,7 @@ pub mod tests {
                         continue;
                     }
                     let k: C::Key = TestKey::from_seed(i);
-                    let v: <C as DbAny>::Value = TestValue::from_seed((i + 1) * 10000);
+                    let v: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed((i + 1) * 10000);
                     batch = batch.write(k, Some(v.clone()));
                     map.insert(k, v);
                 }
@@ -958,9 +965,9 @@ pub mod tests {
     /// The stale batch must be rejected without mutating the committed state.
     pub fn test_stale_changeset_side_effect_free<C, F, Fut>(mut open_db: F)
     where
-        C: DbAny,
+        C: DbAny<mmr::Family>,
         C::Key: TestKey,
-        <C as DbAny>::Value: TestValue,
+        <C as DbAny<mmr::Family>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
@@ -971,8 +978,8 @@ pub mod tests {
 
             let key1 = <C::Key as TestKey>::from_seed(1);
             let key2 = <C::Key as TestKey>::from_seed(2);
-            let value1 = <<C as DbAny>::Value as TestValue>::from_seed(10);
-            let value2 = <<C as DbAny>::Value as TestValue>::from_seed(20);
+            let value1 = <<C as DbAny<mmr::Family>>::Value as TestValue>::from_seed(10);
+            let value2 = <<C as DbAny<mmr::Family>>::Value as TestValue>::from_seed(20);
 
             let changeset_a = {
                 let mut batch = db.new_batch();
@@ -1112,9 +1119,9 @@ pub mod tests {
     // Wrapper functions for build_big tests with ordered/unordered expected values.
     fn test_ordered_build_big<C, F, Fut>(open_db: F)
     where
-        C: DbAny,
+        C: DbAny<mmr::Family>,
         C::Key: TestKey,
-        <C as DbAny>::Value: TestValue,
+        <C as DbAny<mmr::Family>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
@@ -1123,9 +1130,9 @@ pub mod tests {
 
     fn test_unordered_build_big<C, F, Fut>(open_db: F)
     where
-        C: DbAny,
+        C: DbAny<mmr::Family>,
         C::Key: TestKey,
-        <C as DbAny>::Value: TestValue,
+        <C as DbAny<mmr::Family>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {

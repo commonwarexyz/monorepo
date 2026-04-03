@@ -118,6 +118,11 @@ pub mod batch;
 pub mod iterator;
 pub mod mem;
 pub mod proof;
+cfg_if::cfg_if! {
+    if #[cfg(feature = "std")] {
+        pub mod journaled;
+    }
+}
 
 use crate::merkle;
 pub use crate::merkle::Readable;
@@ -138,7 +143,7 @@ pub type StandardHasher<H> = merkle::hasher::Standard<H>;
 pub type Error = merkle::Error<Family>;
 
 /// Marker type for the MMB family.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Family;
 
 impl merkle::Family for Family {
@@ -181,10 +186,6 @@ impl merkle::Family for Family {
 
     fn peaks(size: Position) -> impl Iterator<Item = (Position, u32)> {
         iterator::PeakIterator::new(size)
-    }
-
-    fn nodes_to_pin(leaves: Location, prune_loc: Location) -> alloc::vec::Vec<Position> {
-        iterator::nodes_to_pin(leaves, prune_loc)
     }
 
     fn children(pos: Position, height: u32) -> (Position, Position) {

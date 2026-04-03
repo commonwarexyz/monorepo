@@ -17,8 +17,8 @@ mod conformance;
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("mmr error: {0}")]
-    Mmr(anyhow::Error),
+    #[error("merkle error: {0}")]
+    Merkle(anyhow::Error),
     #[error("journal error: {0}")]
     Journal(anyhow::Error),
     #[error("runtime error: {0}")]

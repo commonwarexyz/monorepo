@@ -318,7 +318,8 @@ async fn recv_loop<DB, E>(
     client_addr: SocketAddr,
 ) where
     DB: Syncable + Send + Sync + 'static,
-    DB::Operation: Read<Cfg = ()> + Send,
+    DB::Operation: Read + Send,
+    <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Metrics + Network + Spawner,
 {
     loop {
@@ -367,7 +368,8 @@ async fn handle_client<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable + Send + Sync + 'static,
-    DB::Operation: Read<Cfg = ()> + Send,
+    DB::Operation: Read + Send,
+    <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner,
 {
     info!(client_addr = %client_addr, "client connected");
@@ -445,7 +447,8 @@ async fn run_helper<DB, E>(
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     DB: Syncable + Send + Sync + 'static,
-    DB::Operation: Read<Cfg = ()> + Send,
+    DB::Operation: Read + Send,
+    <DB::Operation as Read>::Cfg: commonware_codec::IsUnit,
     E: Storage + Clock + Metrics + Network + Spawner + RngCore + Clone,
 {
     info!("starting {} database server", DB::name());

@@ -660,14 +660,17 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok(self.inner.read().await.size);
         }
 
+        // Encode before grabbing write guard.
+        let encoded: Vec<_> = items.iter().map(|item| item.encode()).collect();
+
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
         let mut last_position = 0;
-        for item in items {
-            // Append the item to the journal.
+        for buf in &encoded {
+            // Append the pre-encoded item to the journal.
             let (section, _) = self.position_to_section(inner.size);
-            inner.journal.append(section, item).await?;
+            inner.journal.append_raw(section, buf).await?;
             last_position = inner.size;
             inner.size += 1;
 
@@ -885,18 +888,18 @@ impl<E: Context, A: CodecFixedShared> Persistable for Journal<E, A> {
 impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> for Journal<E, A> {
     type Config = Config;
 
-    async fn init<H: commonware_cryptography::Hasher>(
+    async fn init<F: crate::merkle::Family, H: commonware_cryptography::Hasher>(
         context: E,
-        mmr_cfg: crate::mmr::journaled::Config,
+        merkle_cfg: crate::merkle::journaled::Config,
         journal_cfg: Self::Config,
         rewind_predicate: fn(&A) -> bool,
     ) -> Result<
-        crate::journal::authenticated::Journal<E, Self, H>,
-        crate::journal::authenticated::Error,
+        crate::journal::authenticated::Journal<F, E, Self, H>,
+        crate::journal::authenticated::Error<F>,
     > {
-        crate::journal::authenticated::Journal::<E, Self, H>::new(
+        crate::journal::authenticated::Journal::<F, E, Self, H>::new(
             context,
-            mmr_cfg,
+            merkle_cfg,
             journal_cfg,
             rewind_predicate,
         )

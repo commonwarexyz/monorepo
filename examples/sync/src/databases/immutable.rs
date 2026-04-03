@@ -5,7 +5,10 @@ use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    mmr::{journaled::Config as MmrConfig, Location, Proof},
+    merkle::{
+        journaled::Config as MmrConfig,
+        mmr::{self, Location, Proof},
+    },
     qmdb::{
         self,
         immutable::{self, Config},
@@ -16,20 +19,20 @@ use std::{future::Future, num::NonZeroU64};
 use tracing::error;
 
 /// Database type alias.
-pub type Database<E> = immutable::Immutable<E, Key, Value, Hasher, Translator>;
+pub type Database<E> = immutable::variable::Db<mmr::Family, E, Key, Value, Hasher, Translator>;
 
 /// Operation type alias.
-pub type Operation = immutable::Operation<Key, Value>;
+pub type Operation = immutable::variable::Operation<Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
+pub fn create_config(context: &impl BufferPooler) -> Config<Translator, VConfig<((), ())>> {
     let page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
         context,
         NZU16!(2048),
         NZUsize!(10),
     );
     Config {
-        mmr: MmrConfig {
+        merkle_config: MmrConfig {
             journal_partition: "mmr-journal".into(),
             metadata_partition: "mmr-metadata".into(),
             items_per_blob: NZU64!(4096),
@@ -41,7 +44,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, ()> {
             partition: "log".into(),
             items_per_section: NZU64!(4096),
             compression: None,
-            codec_config: (),
+            codec_config: ((), ()),
             write_buffer: NZUsize!(4096),
             page_cache,
         },
@@ -93,7 +96,7 @@ where
     async fn add_operations(
         &mut self,
         operations: Vec<Self::Operation>,
-    ) -> Result<(), commonware_storage::qmdb::Error> {
+    ) -> Result<(), commonware_storage::qmdb::Error<mmr::Family>> {
         if operations.last().is_none() || !operations.last().unwrap().is_commit() {
             // Ignore bad inputs rather than return errors.
             error!("operations must end with a commit");
@@ -136,14 +139,15 @@ where
         op_count: Location,
         start_loc: Location,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error>> + Send {
+    ) -> impl Future<Output = Result<(Proof<Key>, Vec<Self::Operation>), qmdb::Error<mmr::Family>>> + Send
+    {
         self.historical_proof(op_count, start_loc, max_ops)
     }
 
     fn pinned_nodes_at(
         &self,
         loc: Location,
-    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error>> + Send {
+    ) -> impl Future<Output = Result<Vec<Key>, qmdb::Error<mmr::Family>>> + Send {
         self.pinned_nodes_at(loc)
     }
 
