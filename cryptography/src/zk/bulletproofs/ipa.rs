@@ -128,7 +128,7 @@
 //! The [Dalek crate](https://doc-internal.dalek.rs/bulletproofs/notes/inner_product_proof/index.html)
 //! was an invaluable reference when implementing and documenting this module.
 
-use crate::transcript::Transcript;
+use crate::transcript::{Summary, Transcript};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_math::algebra::{CryptoGroup, Field, Random, Space};
@@ -265,6 +265,7 @@ impl<F: Read, G: Read> Read for Claim<F, G> {
 /// The witness contains the actual vectors `a_i` and `b_i` for the inner product argument.
 ///
 /// This struct guarantees that their lengths are equal, and a power of two.
+#[derive(Clone)]
 pub struct Witness<F> {
     a: Vec<F>,
     b: Vec<F>,
@@ -326,6 +327,10 @@ impl<F: Field> Witness<F> {
 /// A proof for the inner product argument.
 pub struct Proof<F, G> {
     l_r_coms: Vec<(G, G)>,
+    /// Summary of the transcript after the public statement and all proof messages.
+    ///
+    /// This binds even zero-round exchanges to the transcript.
+    transcript_summary: Summary,
     a_final: F,
     b_final: F,
 }
@@ -333,6 +338,7 @@ pub struct Proof<F, G> {
 impl<F: Write, G: Write> Write for Proof<F, G> {
     fn write(&self, buf: &mut impl BufMut) {
         self.l_r_coms.write(buf);
+        self.transcript_summary.write(buf);
         self.a_final.write(buf);
         self.b_final.write(buf);
     }
@@ -340,7 +346,10 @@ impl<F: Write, G: Write> Write for Proof<F, G> {
 
 impl<F: EncodeSize, G: EncodeSize> EncodeSize for Proof<F, G> {
     fn encode_size(&self) -> usize {
-        self.l_r_coms.encode_size() + self.a_final.encode_size() + self.b_final.encode_size()
+        self.l_r_coms.encode_size()
+            + self.transcript_summary.encode_size()
+            + self.a_final.encode_size()
+            + self.b_final.encode_size()
     }
 }
 
@@ -358,6 +367,7 @@ impl<F: Read, G: Read> Read for Proof<F, G> {
                 buf,
                 &(RangeCfg::new(..=max_rounds), (g_cfg.clone(), g_cfg.clone())),
             )?,
+            transcript_summary: Summary::read(buf)?,
             a_final: F::read_cfg(buf, f_cfg)?,
             b_final: F::read_cfg(buf, f_cfg)?,
         })
@@ -492,7 +502,6 @@ where
     let mut b = witness.b;
     let mut g = setup.g[..witness_len].to_vec();
     let mut h = setup.h[..witness_len].to_vec();
-    let mut product = setup.product_generator.clone() * &claim.product + &claim.commitment;
     while a.len() > 1 {
         let mid = a.len() / 2;
         let (a_lo, a_hi) = a.split_at_mut(mid);
@@ -508,8 +517,8 @@ where
         l_r_coms.push((l.clone(), r.clone()));
         transcript.commit(l.encode());
         transcript.commit(r.encode());
-        let mut u = sample_challenge::<F>(transcript);
-        let mut u_inv = u.inv();
+        let u = sample_challenge::<F>(transcript);
+        let u_inv = u.inv();
 
         for (a_lo_i, a_hi_i) in a_lo.iter_mut().zip(a_hi.iter_mut()) {
             *a_lo_i *= &u;
@@ -534,22 +543,12 @@ where
             *h_lo_i += &(h_hi_i.clone() * &u_inv);
         }
         h.truncate(mid);
-
-        let u2 = {
-            u.square();
-            u
-        };
-        let u_inv2 = {
-            u_inv.square();
-            u_inv
-        };
-
-        product += &(l * &u2 + &(r * &u_inv2));
     }
     let a_final = a.pop().expect("a should not be empty");
     let b_final = b.pop().expect("b should not be empty");
     Some(Proof {
         l_r_coms,
+        transcript_summary: transcript.summarize(),
         a_final,
         b_final,
     })
@@ -652,6 +651,7 @@ where
     };
     let Proof {
         l_r_coms,
+        transcript_summary,
         a_final,
         b_final,
     } = proof;
@@ -691,6 +691,9 @@ where
         weights.push(u2);
         points.push(r);
         weights.push(u_inv2);
+    }
+    if transcript.summarize() != transcript_summary {
+        return false;
     }
 
     points.extend_from_slice(&setup.g[..claimed_len]);
@@ -732,7 +735,6 @@ where
 mod tests {
     use super::*;
     use arbitrary::{Arbitrary, Unstructured};
-    use commonware_codec::{Decode, DecodeExt};
     use commonware_invariants::minifuzz;
     use commonware_math::test::{F, G};
     use commonware_parallel::Sequential;
@@ -740,7 +742,78 @@ mod tests {
     const MAX_VECTOR_LG: u8 = 5;
     const MAX_VECTOR_LEN: usize = 1 << MAX_VECTOR_LG;
     const NUM_GENERATORS: usize = 2 * MAX_VECTOR_LEN + 1;
-    const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_IPA_MINIFUZZ";
+    const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_IPA";
+    const BAD_NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_IPA_BUT_DIFFERENT";
+
+    fn test_setup() -> Setup<G> {
+        let generators = (1..=NUM_GENERATORS)
+            .map(|i| G::generator() * &F::from(i as u8))
+            .collect::<Vec<_>>();
+        Setup::new(
+            generators[0],
+            generators[1..]
+                .chunks_exact(2)
+                .map(|chunk| (chunk[0], chunk[1])),
+        )
+    }
+
+    #[allow(dead_code)]
+    struct Prover<'a> {
+        setup: &'a Setup<G>,
+        witness: Witness<F>,
+        claim: Claim<F, G>,
+        proof: Proof<F, G>,
+        bad_namespace: bool,
+        honest: bool,
+    }
+
+    impl<'a> Prover<'a> {
+        fn new(setup: &'a Setup<G>, a: &[F], b: &[F]) -> Self {
+            let (witness, claim) =
+                Witness::new_with_claim(setup, a.iter().zip(b).map(|(&a, &b)| (a, b)))
+                    .expect("prover expects arguments to match setup");
+            let proof = prove(
+                &mut Transcript::new(NAMESPACE),
+                setup,
+                &claim,
+                witness.clone(),
+                &Sequential,
+            )
+            .expect("proving should work");
+            Self {
+                setup,
+                witness,
+                claim,
+                proof,
+                bad_namespace: false,
+                honest: true,
+            }
+        }
+
+        fn bad_namespace(&mut self) {
+            self.honest = false;
+            self.bad_namespace = true;
+        }
+
+        fn honest(&self) -> bool {
+            self.honest
+        }
+
+        fn verify(self) -> bool {
+            let ns = if self.bad_namespace {
+                BAD_NAMESPACE
+            } else {
+                NAMESPACE
+            };
+            verify(
+                &mut Transcript::new(ns),
+                self.setup,
+                &self.claim,
+                self.proof,
+                &Sequential,
+            )
+        }
+    }
 
     #[derive(Debug)]
     struct Plan {
@@ -763,44 +836,26 @@ mod tests {
     }
 
     impl Plan {
-        fn run(self, setup: &Setup<G>) -> arbitrary::Result<()> {
-            let strategy = Sequential;
-            let setup_len = setup.g().len();
-            let (witness, claim) = Witness::new_with_claim(setup, self.a.into_iter().zip(self.b))
-                .expect("plan vectors are powers of two and fit the setup");
-            let setup = <Setup<G> as Decode>::decode_cfg(setup.encode(), &(setup_len, ()))
-                .expect("setup should roundtrip");
-            let claim = <Claim<F, G> as DecodeExt<((), ())>>::decode(claim.encode())
-                .expect("claim should roundtrip");
-
-            let mut prover_transcript = Transcript::new(NAMESPACE);
-            let proof = prove(&mut prover_transcript, &setup, &claim, witness, &strategy)
-                .expect("setup is large enough and claim length matches the witness");
-            let proof = <Proof<F, G> as Decode>::decode_cfg(proof.encode(), &(setup_len, ((), ())))
-                .expect("proof should roundtrip");
-            let mut verifier_transcript = Transcript::new(NAMESPACE);
-            assert!(verify(
-                &mut verifier_transcript,
-                &setup,
-                &claim,
-                proof,
-                &strategy,
-            ));
+        fn run<'a>(self, setup: &Setup<G>, u: &mut Unstructured<'a>) -> arbitrary::Result<()> {
+            let mut prover = Prover::new(setup, &self.a, &self.b);
+            // is the prover going to be malicious at all?
+            if u.arbitrary::<bool>()? {
+                match u.arbitrary::<u8>()? {
+                    _ => prover.bad_namespace(),
+                }
+            }
+            match (prover.honest(), prover.verify()) {
+                (true, true) | (false, false) => {}
+                (true, false) => panic!("prover honest, but proof didn't verify"),
+                (false, true) => panic!("prover malicious, but proof verifies!!!"),
+            }
             Ok(())
         }
     }
 
     #[test]
-    fn test_honest_prover_convinces_honest_verifier() {
-        let generators = (1..=NUM_GENERATORS)
-            .map(|i| G::generator() * &F::from(i as u8))
-            .collect::<Vec<_>>();
-        let setup = Setup::new(
-            generators[0],
-            generators[1..]
-                .chunks_exact(2)
-                .map(|chunk| (chunk[0], chunk[1])),
-        );
-        minifuzz::test(move |u| u.arbitrary::<Plan>()?.run(&setup));
+    fn minifuzz_plan() {
+        let setup = test_setup();
+        minifuzz::test(move |u| u.arbitrary::<Plan>()?.run(&setup, u));
     }
 }
