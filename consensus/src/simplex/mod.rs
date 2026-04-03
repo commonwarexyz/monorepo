@@ -429,14 +429,14 @@ mod tests {
     use commonware_p2p::{
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
         utils::mocks::inert_channel,
-        Recipients, Sender as _,
+        Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
     };
-    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _, SeedableRng};
@@ -4803,6 +4803,17 @@ mod tests {
                     .await
                     .unwrap();
             }
+            oracle
+                .manager()
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        Set::from_iter_dedup(participants.iter().cloned()),
+                        Set::from_iter_dedup(std::slice::from_ref(&injector_pk).iter().cloned()),
+                    ),
+                )
+                .await;
+            context.sleep(Duration::from_millis(10)).await;
 
             // ========== Broadcast certificates over recovered network. ==========
 
