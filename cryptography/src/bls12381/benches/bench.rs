@@ -17,6 +17,11 @@ mod signature_verification;
 mod threshold_batch_verify_same_message;
 mod threshold_batch_verify_same_message_precomputed;
 mod threshold_recover;
+mod bte_batch_verify;
+mod bte_breakdown;
+mod bte_decrypt_all;
+mod bte_encrypt;
+mod bte_partial_decrypt;
 mod tle_decrypt;
 mod tle_encrypt;
 
@@ -40,4 +45,9 @@ criterion_main!(
     threshold_batch_verify_same_message_precomputed::benches,
     tle_encrypt::benches,
     tle_decrypt::benches,
+    bte_encrypt::benches,
+    bte_partial_decrypt::benches,
+    bte_decrypt_all::benches,
+    bte_breakdown::benches,
+    bte_batch_verify::benches,
 );
