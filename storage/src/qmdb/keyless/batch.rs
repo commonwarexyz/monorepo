@@ -52,6 +52,9 @@ where
     /// The parent batch in the chain, if any.
     pub(super) parent: Option<Weak<Self>>,
 
+    /// Total operations before this batch's own ops (DB + ancestor batches).
+    pub(super) base_size: u64,
+
     /// Total operation count after this batch.
     pub(super) total_size: u64,
 
@@ -68,6 +71,7 @@ where
         Self {
             journal_batch: self.journal_batch.clone(),
             parent: self.parent.clone(),
+            base_size: self.base_size,
             total_size: self.total_size,
             db_size: self.db_size,
         }
@@ -213,6 +217,7 @@ where
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
             parent: self.parent.as_ref().map(Arc::downgrade),
+            base_size: self.base_size,
             total_size,
             db_size: self.db_size,
         })

@@ -436,7 +436,7 @@ where
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        if batch.total_size <= db_size {
+        if db_size > batch.base_size {
             return Err(Error::StaleChangeset {
                 expected: batch.db_size,
                 actual: db_size,

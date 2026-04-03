@@ -220,6 +220,9 @@ where
     /// Location of the CommitFloor operation appended by this batch.
     pub(crate) new_last_commit_loc: Location<F>,
 
+    /// Total operations before this batch's own ops (DB + ancestor batches).
+    pub(crate) base_size: u64,
+
     /// Total operation count after this batch.
     pub(crate) total_size: u64,
 
@@ -251,6 +254,7 @@ where
             parent: self.parent.clone(),
             new_inactivity_floor_loc: self.new_inactivity_floor_loc,
             new_last_commit_loc: self.new_last_commit_loc,
+            base_size: self.base_size,
             total_size: self.total_size,
             total_active_keys: self.total_active_keys,
             db_size: self.db_size,
@@ -619,6 +623,7 @@ where
             parent: self.ancestors.first().map(Arc::downgrade),
             new_inactivity_floor_loc: floor,
             new_last_commit_loc: commit_loc,
+            base_size: self.base_size,
             total_size: *commit_loc + 1,
             total_active_keys: total_active_keys as usize,
             db_size: self.db_size,
@@ -1241,9 +1246,9 @@ where
         batch: Arc<MerkleizedBatch<F, H::Digest, U>>,
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        // Reject batches that add no new operations. Finer-grained staleness (e.g. DB rewound)
-        // is caught by the journal's merkle-level check in log.apply_batch().
-        if batch.total_size <= db_size {
+        // The DB must not have advanced past this batch's base (the point where this batch's
+        // operations begin). If it has, a batch from a different fork was committed.
+        if db_size > batch.base_size {
             return Err(crate::qmdb::Error::StaleChangeset {
                 expected: batch.db_size,
                 actual: db_size,
@@ -1329,6 +1334,7 @@ where
             parent: None,
             new_inactivity_floor_loc: self.inactivity_floor_loc,
             new_last_commit_loc: self.last_commit_loc,
+            base_size: journal_size,
             total_size: journal_size,
             total_active_keys: self.active_keys,
             db_size: journal_size,

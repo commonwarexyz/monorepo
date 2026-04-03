@@ -65,6 +65,9 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// The parent batch in the chain, if any.
     pub(super) parent: Option<Weak<Self>>,
 
+    /// Total operations before this batch's own ops (DB + ancestor batches).
+    pub(super) base_size: u64,
+
     /// Total operation count after this batch.
     pub(super) total_size: u64,
 
@@ -79,6 +82,7 @@ impl<F: Family, D: Digest, K: Key, V: ValueEncoding> Clone for MerkleizedBatch<F
             journal_batch: self.journal_batch.clone(),
             diff: Arc::clone(&self.diff),
             parent: self.parent.clone(),
+            base_size: self.base_size,
             total_size: self.total_size,
             db_size: self.db_size,
         }
@@ -183,6 +187,7 @@ where
             journal_batch: journal_merkleized,
             diff: Arc::new(diff),
             parent: self.parent.as_ref().map(Arc::downgrade),
+            base_size: self.base_size,
             total_size,
             db_size: self.db_size,
         })
@@ -265,6 +270,7 @@ where
             journal_batch: self.journal.to_merkleized_batch(),
             diff: Arc::new(BTreeMap::new()),
             parent: None,
+            base_size: journal_size,
             total_size: journal_size,
             db_size: journal_size,
         })

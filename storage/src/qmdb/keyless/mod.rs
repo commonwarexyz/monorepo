@@ -307,6 +307,7 @@ where
         Arc::new(batch::MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),
             parent: None,
+            base_size: journal_size,
             total_size: journal_size,
             db_size: journal_size,
         })
@@ -328,7 +329,7 @@ where
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, V>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        if batch.total_size <= db_size {
+        if db_size > batch.base_size {
             return Err(Error::StaleChangeset {
                 expected: batch.db_size,
                 actual: db_size,

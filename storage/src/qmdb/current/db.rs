@@ -571,13 +571,8 @@ where
         &mut self,
         batch: Arc<super::batch::MerkleizedBatch<H::Digest, U, N>>,
     ) -> Result<Range<Location>, Error> {
+        // Staleness is checked by self.any.apply_batch() below.
         let db_size = *self.any.last_commit_loc + 1;
-        if batch.inner.total_size <= db_size {
-            return Err(Error::StaleChangeset {
-                expected: batch.inner.db_size,
-                actual: db_size,
-            });
-        }
         let skip_ancestors = db_size > batch.inner.db_size;
 
         // 1. Apply inner any-layer batch.

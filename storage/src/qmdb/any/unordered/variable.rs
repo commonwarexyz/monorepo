@@ -492,6 +492,47 @@ pub(crate) mod test {
         });
     }
 
+    /// Sibling batches with different operation counts are still detected
+    /// as stale.
+    #[test_traced]
+    fn test_stale_changeset_rejected_different_sizes() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.clone()).await;
+
+            // A writes 1 key, B writes 5 keys -- different total_size.
+            let batch_a = db
+                .new_batch()
+                .write(Sha256::hash(&[1]), Some(vec![10]))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+            let batch_b = db
+                .new_batch()
+                .write(Sha256::hash(&[2]), Some(vec![20]))
+                .write(Sha256::hash(&[3]), Some(vec![30]))
+                .write(Sha256::hash(&[4]), Some(vec![40]))
+                .write(Sha256::hash(&[5]), Some(vec![50]))
+                .write(Sha256::hash(&[6]), Some(vec![60]))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            // B has more ops than A.
+            assert!(batch_b.total_size > batch_a.total_size);
+
+            // Apply A, then B must be stale.
+            db.apply_batch(batch_a).await.unwrap();
+            let result = db.apply_batch(batch_b).await;
+            assert!(
+                matches!(result, Err(Error::StaleChangeset { .. })),
+                "expected StaleChangeset for asymmetric sibling, got {result:?}"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced]
     fn test_stale_changeset_chained() {
         let executor = deterministic::Runner::default();
