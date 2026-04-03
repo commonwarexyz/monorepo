@@ -391,11 +391,100 @@ pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
 where
     Claim<F, G>: Encode,
 {
+    // Okay, let's explain the math behind how this proof system works.
+    //
+    // (Once again, https://doc-internal.dalek.rs/bulletproofs/notes/inner_product_proof/index.html,
+    // is a useful reference, inspiring much of this documentation).
+    //
+    // We'll describe the protocol as if it were interactive. We turn it into
+    // a non-interactive protocol using the venerable Fiat-Shamir transform.
+    // The Transcript abstraction helps us with that.
+    //
+    // We have vectors a_i and b_i, in our claim, we have:
+    //
+    //   P = <a_i, G_i> + <b_i, H_i>
+    //   c = <a_i, b_i>
+    //
+    // for recursion, it's convenient to have a statement about one commitment
+    // instead.
+    //
+    // We can have the verifier give us a challenge w, compressing this into:
+    //
+    //  P = <a_i, G_i> + <b_i, H_i> + c * w * Q
+    //
+    // where Q is the additional generator from our setup.
+    //
+    // For the recursion, the idea is that at each round, we have:
+    //
+    //   P_k = <a_k_i, G_k_i> + <b_k_i, H_k_i> + <a_k_i, b_k_i> w Q
+    //
+    // and our goal is to turn (P_k, a_k_i, b_k_i) into (P_(k-1), a_(k-1)_i, b_(k-1)_i)
+    // at each round, with the vectors halving in size. Eventually, we'll just
+    // have a single element, which is trivial to prove just by sending it over.
+    //
+    // Not having a good explanation for why the following trick works, let's shut
+    // up and calculate. Assume we have some folding coefficient u_k:
+    //
+    //   a_(k-1)_i := u_k    a_i + u_k^-1 a_(mid + i)
+    //   b_(k-1)_i := u_k^-1 b_i + u_k    b_(mid + i)
+    //   G_(k-1)_i := u_k^-1 G_i + u_k    G_(mid + i)
+    //   H_(k-1)_i := u_k    H_i + u_k^-1 H_(mid + i)
+    //
+    // (the new vectors are half the size, and mid is the new midpoint)
+    //
+    // then, we get:
+    //
+    //   P_(k-1) =
+    //     <u_k    a_i + u_k^-1 a_(mid + i), u_k^-1 G_i + u_k    G_(mid + i)> +
+    //     <u_k^-1 b_i + u_k    b_(mid + i), u_k    H_i + u_k^-1 H_(mid + i)> +
+    //     <u_k    a_i + u_k^-1 a_(mid + i), u_k^-1 b_i + u_k    b_(mid + i)>
+    //
+    // shutting up and calculating, we get:
+    //
+    //   <a_i, G_i> + <u_k^2  a_i, G_(mid + i)> + <u_k^-2 a_(mid + i), G_i> + <a_(mid + i), G_(mid + i)> +
+    //   <b_i, H_i> + <u_k^-2 b_i, H_(mid + i)> + <u_k^2  b_(mid + i), H_i> + <b_(mid + i), H_(mid + i)> +
+    //   <a_i, b_i> + <u_k^2  a_i, b_(mid + i)> + <u_k^-2 a_(mid + i), b_i> + <a_(mid + i), b_(mid + i)>
+    //
+    // we can group terms by coefficient, and notice that we have:
+    //
+    //           <a_i, G_i> + <a_(mid + i), G_(mid + i)> +
+    //           <b_i, H_i> + <b_(mid + i), H_(mid + i)> +
+    //           <a_i, b_i> + <a_(mid + i), b_(mid + i)> +
+    //   u_k^2  (<a_i, G_(mid + i)> + <b_(mid + i), H_i> + <a_i, b_(mid + i)>) +
+    //   u_k^-2 (<a_(mid + i), G_i> + <b_i, H_(mid + i)> + <a_(mid + i), b_i>)
+    //
+    // However, the first few lines of this are just P_k, so we have:
+    //
+    //   P_(k-1) = P_k + u_k^2 L_k + u_k^-2 R_k
+    //
+    // defining L_k and R_k as shorthand to the terms above.
+    //
+    // How do we use this fact? We have the prover calculate L_k and R_k, send
+    // them over to the verifier, who responds with a challenge u_k. We can then
+    // use that challenge to calculate the new vectors a_(k-1)_i,...
+    //
+    // The verifier can also check the provers work, by verifying:
+    //
+    //   P_k + u_k^2 L_k + u_k^-2 R_k =? P_(k-1)
+    //
+    // In fact, we don't even need to send P_(k-1) either. The prover
+    // knows what P_(k-1) needs to equal, thus determining what P_(k-2) should
+    // be, and so on, until we reach a final value P_0.
+    //
+    // For that final value, we have vectors of size 1, so we can send them over,
+    // and have the verifier check:
+    //
+    //   P_0 =? a_0 G_0 + b_0 H_0 + a_0 b_0 w B
+    //
+    // with P_0 being calculated by the verifier, from the initial generators,
+    // claim, and the challenges.
     let witness_len = witness.a.len();
     let claimed_len = 1usize.checked_shl(u32::from(claim.log_len))?;
     if claimed_len != witness_len || setup.g.len() < witness_len {
         return None;
     }
+    // At this point, we've committed to the claim we're trying to prove, so
+    // we can't pull any shenanigans by modifying the claim based on the challenges.
     transcript.commit(claim.encode());
 
     let mut l_r_coms = Vec::<(G, G)>::new();
@@ -405,11 +494,11 @@ where
     let mut h = setup.h[..witness_len].to_vec();
     let mut product = setup.product_generator.clone() * &claim.product + &claim.commitment;
     while a.len() > 1 {
-        let half_len = a.len() / 2;
-        let (a_lo, a_hi) = a.split_at_mut(half_len);
-        let (b_lo, b_hi) = b.split_at_mut(half_len);
-        let (g_lo, g_hi) = g.split_at_mut(half_len);
-        let (h_lo, h_hi) = h.split_at_mut(half_len);
+        let mid = a.len() / 2;
+        let (a_lo, a_hi) = a.split_at_mut(mid);
+        let (b_lo, b_hi) = b.split_at_mut(mid);
+        let (g_lo, g_hi) = g.split_at_mut(mid);
+        let (h_lo, h_hi) = h.split_at_mut(mid);
         let l = G::msm(g_hi, a_lo, strategy)
             + &G::msm(h_lo, b_hi, strategy)
             + &(setup.product_generator.clone() * &F::msm(a_lo, b_hi, strategy));
@@ -426,25 +515,25 @@ where
             *a_lo_i *= &u;
             *a_lo_i += &(u_inv.clone() * a_hi_i);
         }
-        a.truncate(half_len);
+        a.truncate(mid);
 
         for (b_lo_i, b_hi_i) in b_lo.iter_mut().zip(b_hi.iter_mut()) {
             *b_lo_i *= &u_inv;
             *b_lo_i += &(u.clone() * b_hi_i);
         }
-        b.truncate(half_len);
+        b.truncate(mid);
 
         for (g_lo_i, g_hi_i) in g_lo.iter_mut().zip(g_hi.iter_mut()) {
             *g_lo_i *= &u_inv;
             *g_lo_i += &(g_hi_i.clone() * &u);
         }
-        g.truncate(half_len);
+        g.truncate(mid);
 
         for (h_lo_i, h_hi_i) in h_lo.iter_mut().zip(h_hi.iter_mut()) {
             *h_lo_i *= &u;
             *h_lo_i += &(h_hi_i.clone() * &u_inv);
         }
-        h.truncate(half_len);
+        h.truncate(mid);
 
         let u2 = {
             u.square();
@@ -486,6 +575,77 @@ pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
 where
     Claim<F, G>: Encode,
 {
+    // See the prove function for some more explanation of the math.
+    // If you read that function's documentation naively, you might come under
+    // the impression that we have to naively follow the prover, folding the
+    // generators at each step, in order to produce the final value P_0, which
+    // we can then use to check that final a_0 and b_0. This is not ideal,
+    // because it's more efficient to do scalar multiplications as a batch, using
+    // an MSM. Our goal will thus be to reduce all of our work to hashing, in order
+    // to get the challenges, and a single large MSM.
+    //
+    // The final check we have is:
+    //
+    //   P_0 =? a_0 G_0 + b_0 H_0 + a_0 b_0 w Q
+    //
+    // What is P_0? Well, it must be equal to:
+    //
+    //   P_1 - u_1^2 L_1 - u_1^-2 R_1
+    //
+    // we can unravel P_1, and so, on, to get:
+    //
+    //   P_0 = P + c w Q - <u_k^2, L_k> - <u_k^-2, R_k>
+    //
+    // and that's nice and ready for an MSM. The issue is now how to figure out
+    // G_0 and H_0. Intuitively, this should be possible to do as a large MSM
+    // of the original G_i and H_i. This is because each folding step is just a linear
+    // transformation of the prior vectors. Composing these will still result in
+    // a linear transformation. We just need to figure out the weights for this.
+    //
+    // For vectors of size 1, this is trivial, the weights are just 1.
+    //
+    // Let's say we've figured out the weights for G_(k-1), what should the weights
+    // for G_k be? We want:
+    //
+    //   <g_(k-1)_j, G_(k-1)_j> = <g_k_i, G_k_i>
+    //
+    // i.e. the weights we want should produce the same result as folding, and then
+    // using the weights we know exist by induction. (If this is not easy to understand,
+    // imagine that the next layer beneath us is just the trivial layer, with one element,
+    // and a single weight equal to 1).
+    //
+    // We can expand the result of folding, to get:
+    //
+    //   <g_(k-1)_j, u_k^-1 G_k_j + u_k G_k_(mid + j)>
+    //
+    // but, this gives us the weights we need, defining:
+    //
+    //   g_k_i := u_k^{if i < mid { -1 } else { 1 }} g_(k - 1)_(i % mid)
+    //
+    // Another way of visualizing what's happening here: at each iteration, as
+    // we double the size of the weights, what we're doing is copying the existing
+    // weights, and then multiplying the left side by u_k^-1, and the right side
+    // by u_k.
+    //
+    // Here's an example progression:
+    //
+    // 1
+    //
+    // 1, 1
+    // u_1^-1, u_1
+    //
+    // u_1^-1, u_1, u_1^-1, u_1
+    // u_1^-1 u_2^-1, u_1 u_2^-1, u_1^-1 u_2, u_1 u_2
+    //
+    // Now, we don't actually need to do anything special for H, because it turns
+    // out that the weights we need are just the ones we've calculated for G, just
+    // in reverse order! To see why, note that the only difference with H is that
+    // we need to use u_k on the left, and u_k^-1 on the right. The vector we
+    // have at each step is the result of copying the previous vector, doubling its size,
+    // and then multiplying with one value and the left, and the other on the right.
+    // If we reverse this vector, the result we get is the same as if we had reversed
+    // the previous step's vector, copied it, and then multiplied with u_k on the left,
+    // and u_k^-1 on the right, which is exactly what we need to do.
     let rounds = usize::from(claim.log_len);
     let Some(claimed_len) = 1usize.checked_shl(u32::from(claim.log_len)) else {
         return false;
