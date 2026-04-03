@@ -1840,8 +1840,17 @@ mod tests {
                 }
 
                 if self.num_non_participants > 0 {
-                    let all_tracked: Set<P> = Set::from_iter_dedup(all_keys);
-                    oracle.manager().track(1, all_tracked).await;
+                    let primary_participants: Set<P> =
+                        Set::from_iter_dedup(peer_keys.iter().cloned());
+                    let secondary_non_participants: Set<P> =
+                        Set::from_iter_dedup(np_keys.iter().cloned());
+                    oracle
+                        .manager()
+                        .track(
+                            1,
+                            TrackedPeers::new(primary_participants, secondary_non_participants),
+                        )
+                        .await;
                     context.sleep(Duration::from_millis(10)).await;
                 }
 
@@ -4577,17 +4586,6 @@ mod tests {
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
                 let np = &non_participants[0];
-
-                // Re-track the non-participant as a secondary-only peer to
-                // verify reconstruction does not rely on the primary set.
-                let participants_only: Set<P> =
-                    Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone()));
-                let secondary_only = Set::from_iter_dedup([np.public_key.clone()]);
-                oracle
-                    .manager()
-                    .track(2, TrackedPeers::new(participants_only, secondary_only))
-                    .await;
-                context.sleep(Duration::from_millis(10)).await;
 
                 let leader = peers[0].public_key.clone();
                 peers[0].mailbox.proposed(round, coded_block.clone()).await;
