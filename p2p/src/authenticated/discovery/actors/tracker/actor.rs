@@ -154,18 +154,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let primary = peers.primary;
                 let secondary = peers.secondary;
 
-                // Ensure that peer sets are not too large.
+                // Ensure that the primary peer set is not too large.
                 // Panic since there is no way to recover from this.
+                //
+                // Secondary peers are not checked here because max_peer_set_size
+                // exists to cap the bitvec size, which only covers primary peers.
                 let max = self.max_peer_set_size;
                 let plen = primary.len();
                 assert!(
                     plen as u64 <= max,
                     "primary peer set too large: {plen} > {max}"
-                );
-                let slen = secondary.len();
-                assert!(
-                    slen as u64 <= max,
-                    "secondary peer set too large: {slen} > {max}"
                 );
 
                 // Attempt to update tracked peers.
@@ -429,8 +427,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "peer set too large")]
-    fn test_register_peer_set_too_large() {
+    #[should_panic(expected = "primary peer set too large")]
+    fn test_register_primary_peer_set_too_large() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
@@ -446,6 +444,33 @@ mod tests {
                 .unwrap();
             oracle.track(0, too_many_peers).await;
             // Ensure the message is processed causing the panic
+            let _ = mailbox.dialable().await;
+        });
+    }
+
+    #[test]
+    fn test_register_large_secondary_peer_set_accepted() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg_initial = default_test_config(PrivateKey::from_seed(0), Vec::new());
+            let TestHarness {
+                mut oracle,
+                cfg,
+                mut mailbox,
+                ..
+            } = setup_actor(context.clone(), cfg_initial);
+
+            // Create a secondary set larger than max_peer_set_size.
+            // This should not panic because the limit only applies to
+            // primary peers (bitvec size).
+            let large_secondary: Set<PublicKey> = (1..=cfg.max_peer_set_size + 1)
+                .map(|i| new_signer_and_pk(i).1)
+                .try_collect()
+                .unwrap();
+            let primary: Set<PublicKey> = Set::default();
+            oracle
+                .track(0, TrackedPeers::new(primary, large_secondary))
+                .await;
             let _ = mailbox.dialable().await;
         });
     }
