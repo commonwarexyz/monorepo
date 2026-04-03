@@ -25,6 +25,13 @@ struct Waiter<M> {
     responder: oneshot::Sender<M>,
 }
 
+/// Result of attempting to process a received message.
+enum InsertMessage {
+    Inserted,
+    Duplicate,
+    Untracked,
+}
+
 /// Instance of the main engine for the module.
 ///
 /// It is responsible for:
@@ -90,6 +97,12 @@ where
     /// the message once.
     counts: BTreeMap<M::Digest, usize>,
 
+    /// Latest primary peer set allowed to keep buffered messages resident.
+    ///
+    /// Before the first peer-set update arrives we preserve startup behavior and
+    /// allow buffering for any peer.
+    latest_primary_peers: Option<Set<P>>,
+
     ////////////////////////////////////////
     // Metrics
     ////////////////////////////////////////
@@ -124,6 +137,7 @@ where
             deques: BTreeMap::new(),
             items: BTreeMap::new(),
             counts: BTreeMap::new(),
+            latest_primary_peers: None,
             peer_provider: cfg.peer_provider,
             metrics,
         };
@@ -215,7 +229,7 @@ where
                 break;
             } => {
                 // Evict by latest primary only; see buffered module docs.
-                self.evict_untracked_peers(&update.latest.primary);
+                self.update_latest_primary_peers(update.latest.primary);
             },
         }
     }
@@ -272,13 +286,19 @@ where
 
     /// Handles a message that was received from a peer.
     fn handle_network(&mut self, peer: P, msg: M) {
-        if !self.insert_message(peer.clone(), msg) {
-            debug!(?peer, "message already stored");
-            self.metrics.receive.inc(Status::Dropped);
-            return;
+        match self.insert_message(peer.clone(), msg) {
+            InsertMessage::Inserted => {
+                self.metrics.receive.inc(Status::Success);
+            }
+            InsertMessage::Duplicate => {
+                debug!(?peer, "message already stored");
+                self.metrics.receive.inc(Status::Dropped);
+            }
+            InsertMessage::Untracked => {
+                debug!(?peer, "message from peer outside latest.primary not cached");
+                self.metrics.receive.inc(Status::Dropped);
+            }
         }
-
-        self.metrics.receive.inc(Status::Success);
     }
 
     ////////////////////////////////////////
@@ -287,9 +307,9 @@ where
 
     /// Inserts a message into the cache.
     ///
-    /// Returns `true` if the message was inserted, `false` if it was already present.
-    /// Updates the deque, item count, and message cache, potentially evicting an old message.
-    fn insert_message(&mut self, peer: P, msg: M) -> bool {
+    /// Waiters are notified even when a sender is no longer eligible to keep a
+    /// buffered cache entry resident.
+    fn insert_message(&mut self, peer: P, msg: M) -> InsertMessage {
         let digest = msg.digest();
 
         // Send the message to the waiters, if any
@@ -297,6 +317,10 @@ where
             for waiter in waiters {
                 self.respond_subscribe(waiter.responder, msg.clone());
             }
+        }
+
+        if !self.should_buffer_peer(&peer) {
+            return InsertMessage::Untracked;
         }
 
         // Get the relevant deque for the peer
@@ -311,7 +335,7 @@ where
                 let v = deque.remove(i).unwrap(); // Must exist
                 deque.push_front(v);
             }
-            return false;
+            return InsertMessage::Duplicate;
         };
 
         // - Insert the digest into the peer cache
@@ -337,7 +361,19 @@ where
             decrement_digest_refcount(&mut self.counts, &mut self.items, &stale);
         }
 
-        true
+        InsertMessage::Inserted
+    }
+
+    fn update_latest_primary_peers(&mut self, peers: Set<P>) {
+        self.evict_untracked_peers(&peers);
+        self.latest_primary_peers = Some(peers);
+    }
+
+    fn should_buffer_peer(&self, peer: &P) -> bool {
+        match &self.latest_primary_peers {
+            Some(primary) => primary.as_ref().contains(peer),
+            None => true,
+        }
     }
 
     fn evict_untracked_peers(&mut self, primary_peers: &Set<P>) {

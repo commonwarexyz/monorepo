@@ -317,6 +317,12 @@ where
     /// Latest union of tracked peers from the peer set subscription.
     tracked_peers: Set<P>,
 
+    /// Latest primary peers allowed to retain pre-leader shard buffers.
+    ///
+    /// Before the first peer-set update arrives we preserve startup behavior and
+    /// allow buffering for any peer.
+    latest_primary_peers: Option<Set<P>>,
+
     /// Capacity of the background receiver channel.
     background_channel_capacity: usize,
 
@@ -379,6 +385,7 @@ where
                 peer_buffer_size: config.peer_buffer_size,
                 peer_provider: config.peer_provider,
                 tracked_peers: Set::default(),
+                latest_primary_peers: None,
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
@@ -450,9 +457,7 @@ where
                 return;
             } => {
                 let all_peers = update.all.union();
-                self.peer_buffers.retain(|peer, _| {
-                    update.latest.primary.as_ref().contains(peer)
-                });
+                self.update_latest_primary_peers(update.latest.primary);
                 self.tracked_peers = all_peers;
             },
             Some(message) = self.mailbox.recv() else {
@@ -680,11 +685,28 @@ where
 
     /// Buffer a shard from a peer until a leader is known.
     fn buffer_peer_shard(&mut self, peer: P, shard: Shard<C, H>) {
+        if !self.should_buffer_peer(&peer) {
+            debug!(?peer, "pre-leader shard from peer outside latest.primary not buffered");
+            return;
+        }
         let queue = self.peer_buffers.entry(peer).or_default();
         if queue.len() >= self.peer_buffer_size.get() {
             let _ = queue.pop_front();
         }
         queue.push_back(shard);
+    }
+
+    fn update_latest_primary_peers(&mut self, peers: Set<P>) {
+        self.peer_buffers
+            .retain(|peer, _| peers.as_ref().contains(peer));
+        self.latest_primary_peers = Some(peers);
+    }
+
+    fn should_buffer_peer(&self, peer: &P) -> bool {
+        match &self.latest_primary_peers {
+            Some(primary) => primary.as_ref().contains(peer),
+            None => true,
+        }
     }
 
     /// Ingest buffered pre-leader shards for a commitment into active state.
@@ -4635,9 +4657,9 @@ mod tests {
     #[test_traced]
     fn test_peer_set_update_evicts_peer_buffers() {
         // Shards buffered before leader announcement should be evicted when
-        // the sender leaves the tracked peer set. After eviction, announcing
-        // the leader should NOT reconstruct the block (the buffered shard is
-        // gone), but sending the shard again post-leader should succeed.
+        // the sender leaves latest.primary. Even if the overlap window keeps
+        // the sender connected, fresh pre-leader shards from that peer must
+        // not recreate the buffer.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let num_peers = 10usize;
@@ -4646,7 +4668,7 @@ mod tests {
                 simulated::Config {
                     max_size: MAX_SHARD_SIZE as u32,
                     disconnect_on_block: true,
-                    tracked_peer_sets: Some(1),
+                    tracked_peer_sets: Some(2),
                 },
             );
             network.start();
@@ -4738,6 +4760,18 @@ mod tests {
                 Set::from_iter_dedup(peer_keys.iter().filter(|pk| **pk != leader_pk).cloned());
             oracle.manager().track(1, remaining).await;
             context.sleep(Duration::from_millis(10)).await;
+
+            // The retained overlap window still lets the leader reach the receiver,
+            // but this fresh pre-leader shard must not be buffered again.
+            leader_sender
+                .send(
+                    Recipients::One(receiver_pk.clone()),
+                    shard_bytes,
+                    true,
+                )
+                .await
+                .expect("send failed");
+            context.sleep(DEFAULT_LINK.latency * 2).await;
 
             // Announce the leader. Buffered shards from the leader should have been
             // evicted, so the shard will NOT be ingested.

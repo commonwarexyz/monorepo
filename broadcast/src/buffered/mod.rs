@@ -1089,6 +1089,18 @@ mod tests {
                 mailbox_b.get(msg.digest()).await.is_none(),
                 "message should be evicted: peer A is not in the latest peer set"
             );
+
+            // Peer A can still reach B through the retained overlap window, but B
+            // must not recreate A's deque after the latest.primary eviction.
+            let fresh = TestMessage::shared(b"post-eviction-latest-test");
+            let result = mailbox_a.broadcast(Recipients::All, fresh.clone()).await;
+            assert_eq!(result.await.unwrap().len(), 2);
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            assert!(
+                mailbox_b.get(fresh.digest()).await.is_none(),
+                "message should not be rebuffered after peer A left latest.primary"
+            );
         });
     }
 
