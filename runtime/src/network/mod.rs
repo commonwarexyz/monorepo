@@ -418,6 +418,12 @@ mod tests {
     }
 
     async fn test_network_canceled_send_poisons_sink<N: crate::Network>(network: N) {
+        // Windows IOCP completes TCP writes without yielding, so send
+        // cancellation cannot be easily triggered on that platform.
+        if cfg!(target_os = "windows") {
+            return;
+        }
+
         let mut listener = network
             .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
