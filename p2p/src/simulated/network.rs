@@ -159,7 +159,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
 
     // Subscribers to primary peer set updates (used by Manager::subscribe())
     #[allow(clippy::type_complexity)]
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Set<P>, (Set<P>, Set<P>))>>,
+    subscribers: Vec<mpsc::UnboundedSender<(u64, (Set<P>, Set<P>), (Set<P>, Set<P>))>>,
 
     // Subscribers to the connectable peer list (used by PeerSource for LimitedSender)
     peer_subscribers: Vec<ring::Sender<Vec<P>>>,
@@ -303,7 +303,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     self.ensure_peer_exists(public_key).await;
                     *self.secondary_refs.entry(public_key.clone()).or_insert(0) += 1;
                 }
-                self.secondary_sets.insert(id, secondary);
+                self.secondary_sets.insert(id, secondary.clone());
 
                 // Remove oldest tracked peer sets if we exceed the limit.
                 while self.primary_sets.len() > tracked_peer_sets {
@@ -341,7 +341,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // Notify all subscribers about the new peer set.
                 let notification = (
                     id,
-                    primary,
+                    (primary.clone(), secondary.clone()),
                     (self.all_primary_peers(), self.all_secondary_peers()),
                 );
                 self.subscribers
@@ -412,9 +412,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Send the latest peer set upon subscription.
                 if let Some((index, peers)) = self.primary_sets.last_key_value() {
+                    let latest_secondary =
+                        self.secondary_sets.get(index).cloned().unwrap_or_default();
                     let notification = (
                         *index,
-                        peers.clone(),
+                        (peers.clone(), latest_secondary),
                         (self.all_primary_peers(), self.all_secondary_peers()),
                     );
                     sender.send_lossy(notification);
@@ -1737,9 +1739,11 @@ mod tests {
             manager
                 .track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
                 .await;
-            let (id, new, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
+            let (id, (new_primary, new_secondary), (all_primary, all_secondary)) =
+                subscription.recv().await.unwrap();
             assert_eq!(id, 10);
-            assert_eq!(new.len(), 2);
+            assert_eq!(new_primary.len(), 2);
+            assert!(new_secondary.is_empty());
             assert_eq!(all_primary.len(), 2);
             assert!(all_secondary.is_empty());
 
@@ -1754,9 +1758,11 @@ mod tests {
             manager
                 .track(11, Set::try_from([pk4.clone()]).unwrap())
                 .await;
-            let (id, new, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
+            let (id, (new_primary, new_secondary), (all_primary, all_secondary)) =
+                subscription.recv().await.unwrap();
             assert_eq!(id, 11);
-            assert_eq!(new, Set::try_from([pk4.clone()]).unwrap());
+            assert_eq!(new_primary, Set::try_from([pk4.clone()]).unwrap());
+            assert!(new_secondary.is_empty());
             assert_eq!(all_primary, Set::try_from([pk1, pk2, pk4]).unwrap());
             assert!(all_secondary.is_empty());
         });

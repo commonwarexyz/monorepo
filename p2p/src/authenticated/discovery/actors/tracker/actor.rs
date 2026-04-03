@@ -57,7 +57,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     subscribers: Vec<
         mpsc::UnboundedSender<(
             u64,
-            Set<C::PublicKey>,
+            (Set<C::PublicKey>, Set<C::PublicKey>),
             (Set<C::PublicKey>, Set<C::PublicKey>),
         )>,
     >,
@@ -166,14 +166,18 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 assert!(len as u64 <= max, "peer set too large: {len} > {max}");
 
                 // Attempt to update tracked peers.
-                if !self.directory.track(index, primary.clone(), secondary) {
+                if !self
+                    .directory
+                    .track(index, primary.clone(), secondary.clone())
+                {
                     return;
                 }
 
                 // Notify all subscribers about the new peer set
+                let latest = (primary.clone(), secondary.clone());
                 let tracked = (self.directory.primary(), self.directory.secondary());
                 self.subscribers.retain(|subscriber| {
-                    subscriber.send_lossy((index, primary.clone(), tracked.clone()))
+                    subscriber.send_lossy((index, latest.clone(), tracked.clone()))
                 });
             }
             Message::PeerSet { index, responder } => {
@@ -186,10 +190,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
-                    let latest_set = self.directory.get_set(&latest_set_id).cloned().unwrap();
+                    let latest_primary = self.directory.get_set(&latest_set_id).cloned().unwrap();
+                    let latest_secondary = self
+                        .directory
+                        .get_secondary_set(&latest_set_id)
+                        .cloned()
+                        .unwrap_or_default();
                     sender.send_lossy((
                         latest_set_id,
-                        latest_set,
+                        (latest_primary, latest_secondary),
                         (self.directory.primary(), self.directory.secondary()),
                     ));
                 }
@@ -919,12 +928,17 @@ mod tests {
                 )
                 .await;
 
-            let (id, new, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
+            let (id, (new_primary, new_secondary), (all_primary, all_secondary)) =
+                subscription.recv().await.unwrap();
             assert_eq!(id, 0);
-            assert_eq!(new.len(), 1);
-            assert!(new.position(&primary_pk).is_some());
-            assert!(new.position(&secondary_pk).is_none());
-            assert_eq!(all_primary, new);
+            assert_eq!(new_primary.len(), 1);
+            assert!(new_primary.position(&primary_pk).is_some());
+            assert!(new_primary.position(&secondary_pk).is_none());
+            assert_eq!(
+                new_secondary,
+                Set::try_from([secondary_pk.clone()]).unwrap()
+            );
+            assert_eq!(all_primary, new_primary);
             assert_eq!(
                 all_secondary,
                 Set::try_from([secondary_pk.clone()]).unwrap()
@@ -971,11 +985,13 @@ mod tests {
                 )
                 .await;
 
-            let (id, new, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
+            let (id, (new_primary, new_secondary), (all_primary, all_secondary)) =
+                subscription.recv().await.unwrap();
             assert_eq!(id, 0);
-            assert_eq!(new.len(), 1);
-            assert!(new.position(&pk).is_some());
-            assert_eq!(all_primary, new);
+            assert_eq!(new_primary.len(), 1);
+            assert!(new_primary.position(&pk).is_some());
+            assert_eq!(new_secondary, Set::try_from([pk.clone()]).unwrap());
+            assert_eq!(all_primary, new_primary);
             assert_eq!(all_secondary, Set::try_from([pk.clone()]).unwrap());
             assert!(mailbox.acceptable(pk).await);
         });

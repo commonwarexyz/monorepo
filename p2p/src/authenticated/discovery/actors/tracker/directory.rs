@@ -279,6 +279,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.primary_sets.get(index).map(Deref::deref)
     }
 
+    /// Gets a secondary peer set by index.
+    pub fn get_secondary_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
+        self.secondary_sets.get(index)
+    }
+
     /// Returns the latest tracked primary peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
         self.primary_sets.keys().last().copied()

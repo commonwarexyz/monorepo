@@ -280,6 +280,11 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         self.primary_sets.keys().last().copied()
     }
 
+    /// Gets a secondary peer set by index.
+    pub fn get_secondary_set(&self, index: &u64) -> Option<&Set<C>> {
+        self.secondary_sets.get(index)
+    }
+
     /// Attempt to reserve a peer for the dialer.
     ///
     /// Returns `Some` on success, `None` otherwise.

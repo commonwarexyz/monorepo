@@ -438,7 +438,7 @@ where
             on_stopped => {
                 debug!("received shutdown signal, stopping shard engine");
             },
-            Some((_, _, (tracked_primary_peers, tracked_secondary_peers))) = peer_set_subscription.recv() else {
+            Some((_, (_, _), (tracked_primary_peers, tracked_secondary_peers))) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 return;
             } => {

@@ -195,7 +195,7 @@ impl<
                 self.serves.cancel_all();
             },
             // Handle peer set updates
-            Some((id, _, (primary_peers, _))) = peer_set_subscription.recv() else {
+            Some((id, (_, _), (primary_peers, _))) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 return;
             } => {
