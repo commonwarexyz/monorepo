@@ -78,20 +78,27 @@ fn main() {
     // Parse arguments
     let matches = Command::new("commonware-chat")
         .about("send encrypted messages to a group of friends")
-        .arg(Arg::new("me").long("me").required(true))
+        .arg(
+            Arg::new("me")
+                .long("me")
+                .required(true)
+                .help("Your identity in format <key>@<port> (e.g., 1@3001)")
+        )
         .arg(
             Arg::new("friends")
                 .long("friends")
                 .required(true)
                 .value_delimiter(',')
-                .value_parser(value_parser!(u64)),
+                .value_parser(value_parser!(u64))
+                .help("Comma-separated list of friend keys (e.g., 1,2,3,4)")
         )
         .arg(
             Arg::new("bootstrappers")
                 .long("bootstrappers")
                 .required(false)
                 .value_delimiter(',')
-                .value_parser(value_parser!(String)),
+                .value_parser(value_parser!(String))
+                .help("Comma-separated list of bootstrap peers in format <key>@<ip>:<port>")
         )
         .get_matches();
 
