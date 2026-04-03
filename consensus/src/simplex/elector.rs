@@ -35,6 +35,7 @@ use commonware_cryptography::{
     bls12381::primitives::variant::Variant, certificate::Scheme, Hasher, PublicKey, Sha256,
 };
 use commonware_utils::{modulo, ordered::Set};
+use core::num::NonZeroU64;
 use std::marker::PhantomData;
 
 /// Configuration for creating an [`Elector`].
@@ -53,14 +54,18 @@ pub trait Config<S: Scheme>: Clone + Default + Send + 'static {
     /// The initialized elector type.
     type Elector: Elector<S>;
 
-    /// Builds the elector with the given participants.
+    /// Builds the elector with the given participants and term length.
     ///
     /// Called internally by consensus with the correct participant set.
+    /// The `term_length` indicates how many consecutive views share the
+    /// same leader. Electors that support stable leaders use it to map
+    /// each view to its term before selecting a leader. Electors that
+    /// do not support stable leaders should panic when `term_length > 1`.
     ///
     /// # Panics
     ///
     /// Implementations should panic if `participants` is empty.
-    fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector;
+    fn build(self, participants: &Set<S::PublicKey>, term_length: NonZeroU64) -> Self::Elector;
 }
 
 /// An initialized elector that can select leaders for consensus rounds.
@@ -114,7 +119,11 @@ impl<H: Hasher> RoundRobin<H> {
 impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
     type Elector = RoundRobinElector<S>;
 
-    fn build(self, participants: &Set<S::PublicKey>) -> RoundRobinElector<S> {
+    fn build(
+        self,
+        participants: &Set<S::PublicKey>,
+        term_length: NonZeroU64,
+    ) -> RoundRobinElector<S> {
         assert!(!participants.is_empty(), "no participants");
 
         let mut permutation: Vec<Participant> = (0..participants.len())
@@ -132,6 +141,7 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
 
         RoundRobinElector {
             permutation,
+            term_length,
             _phantom: PhantomData,
         }
     }
@@ -143,13 +153,22 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
 #[derive(Clone, Debug)]
 pub struct RoundRobinElector<S: Scheme> {
     permutation: Vec<Participant>,
+    term_length: NonZeroU64,
     _phantom: PhantomData<S>,
 }
 
 impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
     fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
+        // In order to get a stable leader, use the index of the term
+        let term_start = round.view().term_start(self.term_length);
+        // Convert the first view in the term into a 1-based term number.
+        let term_idx = term_start.get().div_ceil(self.term_length.get());
+
+        // Incorporate the epoch number
         let n = self.permutation.len();
-        let idx = (round.epoch().get().wrapping_add(round.view().get())) as usize % n;
+        let idx = round.epoch().get().wrapping_add(term_idx)
+            % u64::try_from(n).expect("permutation length fits in u64");
+        let idx = usize::try_from(idx).expect("leader index fits in usize");
         self.permutation[idx]
     }
 }
@@ -193,8 +212,16 @@ where
 {
     type Elector = RandomElector<bls12381_threshold_vrf::Scheme<P, V>>;
 
-    fn build(self, participants: &Set<P>) -> RandomElector<bls12381_threshold_vrf::Scheme<P, V>> {
+    fn build(
+        self,
+        participants: &Set<P>,
+        term_length: NonZeroU64,
+    ) -> RandomElector<bls12381_threshold_vrf::Scheme<P, V>> {
         assert!(!participants.is_empty(), "no participants");
+        assert!(
+            term_length.get() == 1,
+            "random elector does not support stable leaders (term_length > 1)"
+        );
         RandomElector {
             n: participants.len() as u32,
             _phantom: PhantomData,
@@ -249,7 +276,7 @@ mod tests {
         sha256::Digest as Sha256Digest, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, Faults, N3f1, TryFromIterator};
+    use commonware_utils::{test_rng, Faults, N3f1, TryFromIterator, NZU64};
 
     const NAMESPACE: &[u8] = b"test";
 
@@ -263,7 +290,7 @@ mod tests {
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len() as u32;
         let elector: RoundRobinElector<ed25519::Scheme> =
-            RoundRobin::<Sha256>::default().build(&participants);
+            RoundRobin::<Sha256>::default().build(&participants, NZU64!(1));
         let epoch = Epoch::new(0);
 
         // Run through 3 * n views, record the sequence of leaders
@@ -286,7 +313,7 @@ mod tests {
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
         let elector: RoundRobinElector<ed25519::Scheme> =
-            RoundRobin::<Sha256>::default().build(&participants);
+            RoundRobin::<Sha256>::default().build(&participants, NZU64!(1));
 
         // Record leader for view 1 of epochs 0..n
         let leaders: Vec<_> = (0..n as u64)
@@ -306,17 +333,76 @@ mod tests {
     }
 
     #[test]
+    fn round_robin_reduces_before_casting_index() {
+        let mut rng = test_rng();
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let elector: RoundRobinElector<ed25519::Scheme> =
+            RoundRobin::<Sha256>::default().build(&participants, NZU64!(5));
+
+        let round = Round::new(Epoch::new(u64::MAX - 1), View::new(6));
+        let term_start = round.view().term_start(NZU64!(5));
+        let term_idx = term_start.get().div_ceil(5);
+        let expected = round.epoch().get().wrapping_add(term_idx) % 5;
+
+        assert_eq!(
+            elector.elect(round, None),
+            Participant::new(expected as u32)
+        );
+    }
+
+    #[test]
+    fn round_robin_uses_stable_leaders_within_terms() {
+        let mut rng = test_rng();
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let elector: RoundRobinElector<ed25519::Scheme> =
+            RoundRobin::<Sha256>::default().build(&participants, NZU64!(3));
+        let epoch = Epoch::new(0);
+
+        let leader_v1 = elector.elect(Round::new(epoch, View::new(1)), None);
+        let leader_v2 = elector.elect(Round::new(epoch, View::new(2)), None);
+        let leader_v3 = elector.elect(Round::new(epoch, View::new(3)), None);
+        let leader_v4 = elector.elect(Round::new(epoch, View::new(4)), None);
+        let leader_v5 = elector.elect(Round::new(epoch, View::new(5)), None);
+        let leader_v6 = elector.elect(Round::new(epoch, View::new(6)), None);
+
+        assert_eq!(leader_v1, leader_v2);
+        assert_eq!(leader_v1, leader_v3);
+        assert_eq!(leader_v4, leader_v5);
+        assert_eq!(leader_v4, leader_v6);
+        assert_ne!(leader_v1, leader_v4);
+    }
+
+    #[test]
+    fn round_robin_epoch_transition_shifts_stable_term_leader() {
+        let mut rng = test_rng();
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let elector: RoundRobinElector<ed25519::Scheme> =
+            RoundRobin::<Sha256>::default().build(&participants, NZU64!(3));
+
+        let leader_epoch_0 = elector.elect(Round::new(Epoch::new(0), View::new(1)), None);
+        let leader_epoch_1 = elector.elect(Round::new(Epoch::new(1), View::new(1)), None);
+        let leader_epoch_2 = elector.elect(Round::new(Epoch::new(2), View::new(1)), None);
+
+        assert_eq!(leader_epoch_0, Participant::new(1));
+        assert_eq!(leader_epoch_1, Participant::new(2));
+        assert_eq!(leader_epoch_2, Participant::new(3));
+    }
+
+    #[test]
     fn round_robin_shuffled_changes_order() {
         let mut rng = test_rng();
         let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
 
         let elector_no_seed: RoundRobinElector<ed25519::Scheme> =
-            RoundRobin::<Sha256>::default().build(&participants);
+            RoundRobin::<Sha256>::default().build(&participants, NZU64!(1));
         let elector_seed_1: RoundRobinElector<ed25519::Scheme> =
-            RoundRobin::<Sha256>::shuffled(b"seed1").build(&participants);
+            RoundRobin::<Sha256>::shuffled(b"seed1").build(&participants, NZU64!(1));
         let elector_seed_2: RoundRobinElector<ed25519::Scheme> =
-            RoundRobin::<Sha256>::shuffled(b"seed2").build(&participants);
+            RoundRobin::<Sha256>::shuffled(b"seed2").build(&participants, NZU64!(1));
 
         // Collect first 5 leaders from each
         let epoch = Epoch::new(0);
@@ -371,9 +457,9 @@ mod tests {
         let participants = Set::try_from_iter(participants).unwrap();
 
         let elector1: RoundRobinElector<ed25519::Scheme> =
-            RoundRobin::<Sha256>::shuffled(b"same_seed").build(&participants);
+            RoundRobin::<Sha256>::shuffled(b"same_seed").build(&participants, NZU64!(1));
         let elector2: RoundRobinElector<ed25519::Scheme> =
-            RoundRobin::<Sha256>::shuffled(b"same_seed").build(&participants);
+            RoundRobin::<Sha256>::shuffled(b"same_seed").build(&participants, NZU64!(1));
 
         let epoch = Epoch::new(0);
         for view in 1..=10 {
@@ -387,7 +473,7 @@ mod tests {
     fn round_robin_build_panics_on_empty_participants() {
         let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
         let _: RoundRobinElector<ed25519::Scheme> =
-            RoundRobin::<Sha256>::default().build(&participants);
+            RoundRobin::<Sha256>::default().build(&participants, NZU64!(1));
     }
 
     #[test]
@@ -397,7 +483,7 @@ mod tests {
             bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
         let n = participants.len();
-        let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let elector: RandomElector<ThresholdScheme> = Random.build(&participants, NZU64!(1));
 
         // For view 1 (no certificate), Random should behave like RoundRobin
         let leaders: Vec<_> = (0..n as u64)
@@ -425,7 +511,7 @@ mod tests {
             ..
         } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
-        let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let elector: RandomElector<ThresholdScheme> = Random.build(&participants, NZU64!(1));
         let quorum = N3f1::quorum(schemes.len()) as usize;
 
         // Create certificate for round (1, 2)
@@ -474,7 +560,17 @@ mod tests {
     #[should_panic(expected = "no participants")]
     fn random_build_panics_on_empty_participants() {
         let participants: Set<commonware_cryptography::ed25519::PublicKey> = Set::default();
-        let _: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let _: RandomElector<ThresholdScheme> = Random.build(&participants, NZU64!(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "random elector does not support stable leaders")]
+    fn random_build_panics_on_term_length_greater_than_1() {
+        let mut rng = test_rng();
+        let Fixture { participants, .. } =
+            bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let _: RandomElector<ThresholdScheme> = Random.build(&participants, NZU64!(2));
     }
 
     #[test]
@@ -484,7 +580,7 @@ mod tests {
         let Fixture { participants, .. } =
             bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
-        let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
+        let elector: RandomElector<ThresholdScheme> = Random.build(&participants, NZU64!(1));
 
         // View 2 requires a certificate
         let round = Round::new(Epoch::new(1), View::new(2));
@@ -520,7 +616,7 @@ mod tests {
 
                 // Build the shuffled elector
                 let elector: RoundRobinElector<ed25519::Scheme> =
-                    RoundRobin::<Sha256>::shuffled(&shuffle_seed).build(&participants);
+                    RoundRobin::<Sha256>::shuffled(&shuffle_seed).build(&participants, NZU64!(1));
 
                 // Encode the permutation as the commitment
                 elector.permutation.encode().to_vec()
@@ -546,7 +642,8 @@ mod tests {
                     ..
                 } = bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, n);
                 let participants = Set::try_from_iter(participants).unwrap();
-                let elector: RandomElector<ThresholdScheme> = Random.build(&participants);
+                let elector: RandomElector<ThresholdScheme> =
+                    Random.build(&participants, NZU64!(1));
                 let quorum = N3f1::quorum(schemes.len()) as usize;
 
                 // Generate deterministic round parameters

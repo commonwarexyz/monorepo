@@ -39,7 +39,9 @@
 //! Upon receiving first `notarize(c,v)` from `l`:
 //! * Cancel `t_l`
 //! * If the container's parent `c_parent` is finalized (or both notarized and certified) at `v_parent`
-//!   and we have nullifications for all views between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//!   and we have required nullification views between `v_parent` and `v` (every view from
+//!   `v_parent + 1` to the end of `v_parent`'s term, then the first view of each skipped term),
+//!   verify `c` and broadcast `notarize(c,v)`
 //!     * If verification of `c` fails, immediately broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
@@ -52,7 +54,7 @@
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
-//! * Enter `v+1`
+//! * Enter `next_term_start(v)` (equivalent to `v+1` when `term_length = 1`)
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
 //! * Mark `c` as finalized (and recursively finalize its parents)
@@ -61,7 +63,7 @@
 //! Upon `t_l` or `t_a` firing:
 //! * Broadcast `nullify(v)`
 //! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
-//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
+//!    * Rebroadcast `nullify(v)` and the certificate that advanced us into view `v`
 //!
 //! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been have been collected
 //! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
@@ -71,7 +73,8 @@
 //! ### Joining Consensus
 //!
 //! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
-//! enter `v+1`. Notarizations advance the view if-and-only-if the application certifies them.
+//! enter the corresponding successor view (`next_term_start(v)` for nullification, `v+1` for
+//! finalization). Notarizations advance the view if-and-only-if the application certifies them.
 //! This means that a new participant joining consensus will immediately jump ahead on the previous
 //! view's nullification or finalization and begin participating in consensus at the current view.
 //!
@@ -116,6 +119,9 @@
 //! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
 //!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
 //!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.
+//! * With stable leaders (`term_length > 1`), if a participant has voted `nullify(v_n)` in a term, it will not vote
+//!   `finalize(c,v_f)` for later views in that same term unless it has observed a finalization certificate at or
+//!   above `v_n`.
 //!
 //! ## Protocol Properties
 //!
@@ -125,7 +131,8 @@
 //! certificate exists for `v`. This follows directly from the protocol rules:
 //!
 //! 1. To propose in view `v+k`, the leader must reference a certified parent in some view `v_p`
-//!    and possess nullification certificates for every view between `v_p` and `v+k`.
+//!    and possess required nullification views from `v_p` to `v+k`: every view from
+//!    `v_p + 1` to the end of `v_p`'s term, then the first view of each skipped term.
 //! 2. A nullification certificate for view `v` requires `2f+1` `nullify(v)` votes.
 //! 3. An honest participant only broadcasts `nullify(v)` when a timeout fires (`t_l` or `t_a`)
 //!    or when certification fails.
@@ -337,6 +344,8 @@ pub mod mocks;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::types::{View, ViewDelta};
+#[cfg(not(target_arch = "wasm32"))]
+use core::num::NonZeroU64;
 
 /// The minimum view we are tracking both in-memory and on-disk.
 #[cfg(not(target_arch = "wasm32"))]
@@ -344,16 +353,18 @@ pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View
     last_finalized.saturating_sub(activity_timeout)
 }
 
-/// Whether or not a view is interesting to us. This is a function
-/// of both `min_active` and whether or not the view is too far
-/// in the future (based on the view we are currently in).
 #[cfg(not(target_arch = "wasm32"))]
+/// Whether or not a view is interesting to us.
+///
+/// This is a function of both `min_active` and whether `pending` is too far in
+/// the future relative to `current`.
 pub(crate) fn interesting(
     activity_timeout: ViewDelta,
     last_finalized: View,
     current: View,
     pending: View,
-    allow_future: bool,
+    allow_unbounded_future: bool,
+    term_length: NonZeroU64,
 ) -> bool {
     // If the view is genesis, skip it, genesis doesn't have votes
     if pending.is_zero() {
@@ -362,8 +373,16 @@ pub(crate) fn interesting(
     if pending < min_active(activity_timeout, last_finalized) {
         return false;
     }
-    if !allow_future && pending > current.next() {
-        return false;
+    // If we don't allow unbounded future views, we still find two future views interesting:
+    // - the next view
+    // - the first view of the next term (it may be the next view if the current view is nullified)
+    // For a term length of 1, these two views are the same
+    if !allow_unbounded_future && pending > current {
+        let next = current.next();
+        let next_term_start = current.next_term_start(term_length);
+        if pending != next && pending != next_term_start {
+            return false;
+        }
     }
     true
 }
@@ -436,7 +455,7 @@ mod tests {
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
     };
-    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16, NZU64};
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _, SeedableRng};
@@ -456,85 +475,87 @@ mod tests {
     #[test]
     fn test_interesting() {
         let activity_timeout = ViewDelta::new(10);
+        let term_length = NZU64!(10);
 
-        // Genesis view is never interesting
         assert!(!interesting(
             activity_timeout,
             View::zero(),
             View::zero(),
             View::zero(),
-            false
-        ));
-        assert!(!interesting(
-            activity_timeout,
-            View::zero(),
-            View::new(1),
-            View::zero(),
-            true
+            false,
+            term_length,
         ));
 
-        // View below min_active is not interesting
+        // Below min_active
         assert!(!interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(5), // below min_active (10)
-            false
+            View::new(5),
+            false,
+            term_length,
         ));
 
-        // View at min_active boundary is interesting
+        // At min_active boundary
         assert!(interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(10), // exactly min_active
-            false
+            View::new(10),
+            false,
+            term_length,
         ));
 
-        // Future view beyond current.next() is not interesting when allow_future is false
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            false
-        ));
-
-        // Future view beyond current.next() is interesting when allow_future is true
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            true
-        ));
-
-        // View at current.next() is interesting
+        // strict mode allows only current.next and current.next_term_start above current
         assert!(interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
             View::new(26),
-            false
+            false,
+            term_length,
         ));
-
-        // View within valid range is interesting
         assert!(interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(22),
-            false
+            View::new(31),
+            false,
+            term_length,
+        ));
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(27),
+            false,
+            term_length,
+        ));
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(34),
+            false,
+            term_length,
         ));
 
-        // When last_finalized is 0 and activity_timeout would underflow
-        // min_active saturates at 0, so view 1 should still be interesting
+        // unbounded future still respects lower bound
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(9),
+            true,
+            term_length,
+        ));
         assert!(interesting(
             activity_timeout,
-            View::zero(),
-            View::new(5),
-            View::new(1),
-            false
+            View::new(20),
+            View::new(25),
+            View::new(10_000),
+            true,
+            term_length,
         ));
     }
 
@@ -676,7 +697,7 @@ mod tests {
         let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -760,6 +781,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -925,7 +947,7 @@ mod tests {
         let n_active = 5;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -1026,6 +1048,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1088,7 +1111,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
 
         // Random restarts every x seconds
@@ -1191,6 +1214,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1288,7 +1312,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(240));
         executor.start(|mut context| async move {
@@ -1383,6 +1407,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1504,6 +1529,7 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: 4,
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1553,7 +1579,7 @@ mod tests {
         let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -1649,6 +1675,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1796,7 +1823,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -1892,6 +1919,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1984,7 +2012,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(2);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(1800));
         executor.start(|mut context| async move {
@@ -2068,6 +2096,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2196,7 +2225,7 @@ mod tests {
         let n = 10;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
         executor.start(|mut context| async move {
@@ -2280,6 +2309,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2395,7 +2425,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2488,6 +2518,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2650,7 +2681,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2751,6 +2782,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2837,7 +2869,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2938,6 +2970,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3019,7 +3052,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(10);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3114,6 +3147,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3216,7 +3250,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3317,6 +3351,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3384,7 +3419,7 @@ mod tests {
         let n = 7;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3489,6 +3524,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3580,6 +3616,7 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: 4,
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3715,7 +3752,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3815,6 +3852,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3882,7 +3920,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3979,6 +4017,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4062,11 +4101,11 @@ mod tests {
         let n = 4;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(30)));
+            .with_timeout(Some(Duration::from_secs(60)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Create simulated network
@@ -4160,6 +4199,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4222,7 +4262,7 @@ mod tests {
         let n = 10;
         let required_containers = View::new(1_000);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(cfg);
@@ -4307,6 +4347,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4479,8 +4520,9 @@ mod tests {
                 timeout_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
                 activity_timeout: ViewDelta::new(4),
-                skip_timeout: ViewDelta::new(2),
+                skip_timeout: Duration::from_secs(2),
                 fetch_concurrent: 4,
+                term_length: NZU64!(1),
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4618,7 +4660,7 @@ mod tests {
         let n = 3;
         let required_containers = View::new(10);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -4709,6 +4751,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4854,7 +4897,7 @@ mod tests {
         let quorum = quorum(n) as usize;
         assert_eq!(quorum, 7);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -5060,6 +5103,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5187,7 +5231,7 @@ mod tests {
         let n = 4;
         let namespace = b"consensus".to_vec();
         let activity_timeout = ViewDelta::new(100);
-        let skip_timeout = ViewDelta::new(50);
+        let skip_timeout = Duration::from_secs(50);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Create simulated network
@@ -5276,6 +5320,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length: NZU64!(1),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5332,6 +5377,7 @@ mod tests {
         seed: u64,
         shutdowns: usize,
         interval: ViewDelta,
+        term_length: NonZeroU64,
         mut fixture: F,
     ) -> String
     where
@@ -5342,7 +5388,7 @@ mod tests {
         // Create context
         let n = 5;
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new().with_seed(seed);
         let executor = deterministic::Runner::new(cfg);
@@ -5427,6 +5473,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5524,6 +5571,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: 4,
+                    term_length,
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5649,12 +5697,14 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
+                NZU64!(1),
                 bls12381_threshold_vrf::fixture::<MinPk, _>
             ),
             hailstorm::<_, _, Random>(
                 0,
                 10,
                 ViewDelta::new(15),
+                NZU64!(1),
                 bls12381_threshold_vrf::fixture::<MinPk, _>
             ),
         );
@@ -5668,12 +5718,14 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
+                NZU64!(1),
                 bls12381_threshold_vrf::fixture::<MinSig, _>
             ),
             hailstorm::<_, _, Random>(
                 0,
                 10,
                 ViewDelta::new(15),
+                NZU64!(1),
                 bls12381_threshold_vrf::fixture::<MinSig, _>
             ),
         );
@@ -5687,12 +5739,14 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
+                NZU64!(1),
                 bls12381_threshold_std::fixture::<MinPk, _>
             ),
             hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
+                NZU64!(1),
                 bls12381_threshold_std::fixture::<MinPk, _>
             ),
         );
@@ -5706,12 +5760,14 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
+                NZU64!(1),
                 bls12381_threshold_std::fixture::<MinSig, _>
             ),
             hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
+                NZU64!(1),
                 bls12381_threshold_std::fixture::<MinSig, _>
             ),
         );
@@ -5725,12 +5781,14 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
+                NZU64!(1),
                 bls12381_multisig::fixture::<MinPk, _>
             ),
             hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
+                NZU64!(1),
                 bls12381_multisig::fixture::<MinPk, _>
             ),
         );
@@ -5744,12 +5802,14 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
+                NZU64!(1),
                 bls12381_multisig::fixture::<MinSig, _>
             ),
             hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
+                NZU64!(1),
                 bls12381_multisig::fixture::<MinSig, _>
             ),
         );
@@ -5759,8 +5819,8 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_ed25519() {
         assert_eq!(
-            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), ed25519::fixture),
-            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), ed25519::fixture)
+            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), NZU64!(1), ed25519::fixture),
+            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), NZU64!(1), ed25519::fixture)
         );
     }
 
@@ -5768,8 +5828,17 @@ mod tests {
     #[test_traced]
     fn test_hailstorm_secp256r1() {
         assert_eq!(
-            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), secp256r1::fixture),
-            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), secp256r1::fixture)
+            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), NZU64!(1), secp256r1::fixture),
+            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), NZU64!(1), secp256r1::fixture)
+        );
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_stable_leader_ed25519() {
+        assert_eq!(
+            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), NZU64!(3), ed25519::fixture),
+            hailstorm::<_, _, RoundRobin>(0, 10, ViewDelta::new(15), NZU64!(3), ed25519::fixture)
         );
     }
 
@@ -5854,7 +5923,7 @@ mod tests {
             );
 
             let activity_timeout = ViewDelta::new(10);
-            let skip_timeout = ViewDelta::new(5);
+            let skip_timeout = Duration::from_secs(11);
             let namespace = b"consensus".to_vec();
             let link = link.clone();
             let trailing_finalizations = campaign.trailing_finalizations;
@@ -6021,6 +6090,7 @@ mod tests {
                             activity_timeout,
                             skip_timeout,
                             fetch_concurrent: 4,
+                            term_length: NZU64!(1),
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6090,6 +6160,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: 4,
+                        term_length: NZU64!(1),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),

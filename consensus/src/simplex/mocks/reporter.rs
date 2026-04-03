@@ -22,7 +22,7 @@ use commonware_utils::{
     },
     ordered::{Quorum, Set},
     sync::Mutex,
-    N3f1,
+    N3f1, NZU64,
 };
 use rand_core::CryptoRngCore;
 use std::{
@@ -75,7 +75,7 @@ where
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         // Build elector with participants
-        let elector = cfg.elector.build(&cfg.participants);
+        let elector = cfg.elector.build(&cfg.participants, NZU64!(1));
 
         Self {
             context,
