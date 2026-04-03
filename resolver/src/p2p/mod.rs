@@ -41,6 +41,10 @@
 //! sets in the provider's overlap window keeps those peers connected at the transport layer, but
 //! does not keep them eligible for new resolver traffic.
 //!
+//! Callers that still expect a key to be fetchable after a peer-set cutover must ensure the latest
+//! primary set can serve it. Overlap-only peers are treated as disposable continuity peers, not as
+//! authorities for new backfill or historical fetches after reconfiguration.
+//!
 //! This restriction applies when choosing peers for new outbound requests. If a request was
 //! already sent before a peer-set update removes that peer from `latest.primary`, its in-flight
 //! response is still accepted. Peer-set updates are therefore a routing cutover for future sends,
@@ -1978,11 +1982,15 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
 
-            // Track peer 2 as the initial primary so it is present in the overlap window once
-            // peer 3 becomes the newest primary set.
+            // Keep the requester tracked across the cutover so the fetch path itself remains
+            // active, while peer 2 is retained only through the overlap window after peer 3
+            // becomes the newest primary set.
             oracle
                 .manager()
-                .track(0, Set::try_from([peers[1].clone()]).unwrap())
+                .track(
+                    0,
+                    Set::try_from([peers[0].clone(), peers[1].clone()]).unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(100)).await;
 
@@ -2033,11 +2041,15 @@ mod tests {
 
             context.sleep(Duration::from_millis(100)).await;
 
-            // Track peer 3 as the latest primary. Peer 2 remains in the provider's overlap
-            // window (`all.primary`), but new resolver traffic should use only `latest.primary`.
+            // Track peer 3 as the latest primary while keeping the requester tracked. Peer 2
+            // remains in the provider's overlap window (`all.primary`), but new resolver traffic
+            // should use only `latest.primary`.
             oracle
                 .manager()
-                .track(1, Set::try_from([peers[2].clone()]).unwrap())
+                .track(
+                    1,
+                    Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
+                )
                 .await;
             context.sleep(Duration::from_millis(100)).await;
 
@@ -2065,6 +2077,129 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {},
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_after_cutover_relies_on_latest_primary_history() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: commonware_utils::NZUsize!(2),
+                },
+            );
+            network.start();
+
+            let schemes: Vec<PrivateKey> = [1u64, 2, 3]
+                .into_iter()
+                .map(PrivateKey::from_seed)
+                .collect();
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+            let mut schemes = schemes;
+
+            let mut connections = Vec::new();
+            for peer in &peers {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(0, Quota::per_second(RATE_LIMIT))
+                    .await
+                    .unwrap();
+                connections.push((sender, receiver));
+            }
+
+            let mut oracle = oracle;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            // Keep the requester tracked across the cutover while peer 2 remains connected only
+            // through the overlap window after the latest primary advances to peer 3.
+            oracle
+                .manager()
+                .track(
+                    0,
+                    Set::try_from([peers[0].clone(), peers[1].clone()]).unwrap(),
+                )
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            let key = Key(9);
+            let invalid_history = Bytes::from("stale overlap history");
+            let valid_history = Bytes::from("latest primary history");
+
+            let (mut cons1, mut cons_out1) = Consumer::new();
+            cons1.add_expected(key.clone(), valid_history.clone());
+
+            // Peer 1: requester.
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            // Peer 2: old primary retained only via overlap. If queried, it would be blocked for
+            // serving invalid history.
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), invalid_history);
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            // Peer 3: latest primary and the only peer that should satisfy the fetch.
+            let mut prod3 = Producer::default();
+            prod3.insert(key.clone(), valid_history.clone());
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            );
+
+            context.sleep(Duration::from_millis(100)).await;
+
+            oracle
+                .manager()
+                .track(
+                    1,
+                    Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
+                )
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            mailbox1.fetch(key.clone()).await;
+
+            let event = cons_out1.recv().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, valid_history);
+                }
+                Event::Failed(_) => panic!("fetch failed unexpectedly"),
+            }
+
+            assert!(
+                oracle.blocked().await.unwrap().is_empty(),
+                "overlap-only peers should not be queried for post-cutover history"
+            );
         });
     }
 

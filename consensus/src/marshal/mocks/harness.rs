@@ -126,10 +126,7 @@ pub fn setup_network(
     oracle
 }
 
-async fn ensure_participant_peer_set(
-    oracle: &mut Oracle<K, deterministic::Context>,
-    provider: &P,
-) {
+async fn ensure_participant_peer_set(oracle: &mut Oracle<K, deterministic::Context>, provider: &P) {
     if oracle.manager().peer_set(0).await.is_some() {
         return;
     }

@@ -375,10 +375,9 @@ where
 
     fn evict_untracked_peers(&mut self, primary_peers: &Set<P>) {
         let primary = primary_peers.as_ref();
-        for (peer, deque) in self
-            .deques
-            .extract_if(.., |peer, _| peer != &self.public_key && !primary.contains(peer))
-        {
+        for (peer, deque) in self.deques.extract_if(.., |peer, _| {
+            peer != &self.public_key && !primary.contains(peer)
+        }) {
             debug!(?peer, digests = deque.len(), "evicting disconnected peer");
             for digest in deque {
                 decrement_digest_refcount(&mut self.counts, &mut self.items, &digest);

@@ -1282,7 +1282,10 @@ mod tests {
 
             oracle
                 .manager()
-                .track(0, commonware_utils::ordered::Set::from_iter_dedup(peers.clone()))
+                .track(
+                    0,
+                    commonware_utils::ordered::Set::from_iter_dedup(peers.clone()),
+                )
                 .await;
             context.sleep(A_JIFFY).await;
 

@@ -11,7 +11,7 @@ use commonware_cryptography::{
     sha256::Digest,
     Digestible, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{simulated::Network, Recipients};
+use commonware_p2p::{simulated::Network, Manager, Recipients};
 use commonware_runtime::{deterministic, Buf, BufMut, Clock, Metrics, Quota, Runner};
 use commonware_utils::ordered::Set;
 use libfuzzer_sys::fuzz_target;

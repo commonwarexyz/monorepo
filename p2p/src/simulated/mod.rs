@@ -215,10 +215,8 @@ mod tests {
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-    async fn track_peers<I>(
-        oracle: &Oracle<PublicKey, deterministic::Context>,
-        peers: I,
-    ) where
+    async fn track_peers<I>(oracle: &Oracle<PublicKey, deterministic::Context>, peers: I)
+    where
         I: IntoIterator<Item = PublicKey>,
     {
         let mut manager = oracle.manager();
@@ -1055,10 +1053,7 @@ mod tests {
             .unwrap();
         let mut manager = oracle.manager();
         manager
-            .track(
-                index,
-                Set::from_iter_dedup([pk1.clone(), pk2.clone()]),
-            )
+            .track(index, Set::from_iter_dedup([pk1.clone(), pk2.clone()]))
             .await;
 
         // Set bandwidth limits
@@ -1581,11 +1576,7 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
-            track_peers(
-                &oracle,
-                senders.iter().cloned().chain([receiver.clone()]),
-            )
-            .await;
+            track_peers(&oracle, senders.iter().cloned().chain([receiver.clone()])).await;
 
             // Receiver has 100KB/s ingress
             oracle
@@ -1777,11 +1768,7 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
-            track_peers(
-                &oracle,
-                senders.iter().cloned().chain([receiver.clone()]),
-            )
-            .await;
+            track_peers(&oracle, senders.iter().cloned().chain([receiver.clone()])).await;
 
             // Receiver has 10KB/s ingress (can handle all 10 senders at full speed)
             oracle
@@ -1881,11 +1868,7 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
-            track_peers(
-                &oracle,
-                senders.iter().cloned().chain([receiver.clone()]),
-            )
-            .await;
+            track_peers(&oracle, senders.iter().cloned().chain([receiver.clone()])).await;
             oracle
                 .limit_bandwidth(receiver.clone(), None, Some(30_000))
                 .await
@@ -2035,11 +2018,7 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
-            track_peers(
-                &oracle,
-                senders.iter().cloned().chain([receiver.clone()]),
-            )
-            .await;
+            track_peers(&oracle, senders.iter().cloned().chain([receiver.clone()])).await;
             oracle
                 .limit_bandwidth(receiver.clone(), None, Some(30_000))
                 .await

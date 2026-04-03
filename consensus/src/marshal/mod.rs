@@ -40,6 +40,11 @@
 //! knowledge of finalized blocks, it will request the missing blocks from its peers. This ensures
 //! that the actor can catch up to the rest of the network if it falls behind.
 //!
+//! Backfill follows the latest primary peer set after reconfiguration. Once marshal advances to a
+//! newer peer set, any block or finalization that is still expected to be retrievable must be
+//! served by that newer primary set. Older overlap peers may remain connected transiently, but
+//! marshal does not rely on them for new backfill requests.
+//!
 //! ## Storage
 //!
 //! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
