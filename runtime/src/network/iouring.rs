@@ -476,11 +476,6 @@ impl Sink {
         Ok(())
     }
 
-    fn poison(&mut self) {
-        self.poisoned = true;
-        self.shutdown();
-    }
-
     fn shutdown(&self) {
         // Best-effort write-half shutdown so the peer can observe that no more
         // bytes will be sent after this sink becomes unusable.
@@ -505,6 +500,10 @@ impl crate::Sink for Sink {
             return Err(Error::Closed);
         }
 
+        // Pre-poison so that cancellation leaves the sink permanently closed
+        // rather than silently corrupted.
+        self.poisoned = true;
+
         let result = match bufs.into().try_into_single() {
             Ok(buf) => self.send_single(buf).await,
             Err(bufs) => self.send_vectored(bufs).await,
@@ -512,10 +511,13 @@ impl crate::Sink for Sink {
 
         // A failed send leaves the write half unusable.
         if result.is_err() {
-            self.poison();
+            self.shutdown();
+            return result;
         }
 
-        result
+        // Unpoison on success.
+        self.poisoned = false;
+        Ok(())
     }
 }
 
@@ -659,6 +661,10 @@ impl crate::Stream for Stream {
             return Err(Error::Closed);
         }
 
+        // Pre-poison so that cancellation leaves the stream permanently closed
+        // rather than silently corrupted.
+        self.poisoned = true;
+
         let result = async {
             // SAFETY: `len` bytes are written by the recv loop below.
             let mut owned_buf = unsafe { self.pool.alloc_len(len) };
@@ -699,9 +705,9 @@ impl crate::Stream for Stream {
         }
         .await;
 
-        // A failed recv leaves the read half unusable.
-        if result.is_err() {
-            self.poisoned = true;
+        // Unpoison on success.
+        if result.is_ok() {
+            self.poisoned = false;
         }
 
         result

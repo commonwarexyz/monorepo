@@ -31,11 +31,6 @@ impl Sink {
             .await
             .map_err(|_| Error::SendFailed)
     }
-
-    async fn poison(&mut self) {
-        self.poisoned = true;
-        let _ = self.sink.shutdown().await;
-    }
 }
 
 impl crate::Sink for Sink {
@@ -43,6 +38,10 @@ impl crate::Sink for Sink {
         if self.poisoned {
             return Err(Error::Closed);
         }
+
+        // Pre-poison so that cancellation leaves the sink permanently closed
+        // rather than silently corrupted.
+        self.poisoned = true;
 
         let write_timeout = self.write_timeout;
         let bufs = bufs.into();
@@ -60,10 +59,13 @@ impl crate::Sink for Sink {
 
         // A failed send leaves the write half unusable.
         if result.is_err() {
-            self.poison().await;
+            let _ = self.sink.shutdown().await;
+            return result;
         }
 
-        result
+        // Unpoison on success.
+        self.poisoned = false;
+        Ok(())
     }
 }
 
@@ -84,6 +86,10 @@ impl crate::Stream for Stream {
             return Err(Error::Closed);
         }
 
+        // Pre-poison so that cancellation leaves the stream permanently closed
+        // rather than silently corrupted.
+        self.poisoned = true;
+
         let recv = async {
             // SAFETY: `len` bytes are written by read_exact below.
             let mut buf = unsafe { self.pool.alloc_len(len) };
@@ -99,9 +105,9 @@ impl crate::Stream for Stream {
             .await
             .map_or(Err(Error::Timeout), identity);
 
-        // A failed recv leaves the read half unusable.
-        if result.is_err() {
-            self.poisoned = true;
+        // Unpoison on success.
+        if result.is_ok() {
+            self.poisoned = false;
         }
 
         result
