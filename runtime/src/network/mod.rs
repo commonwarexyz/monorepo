@@ -431,7 +431,7 @@ mod tests {
             // backend buffer sizes (TCP kernel buffer, mock backpressure
             // threshold) so that send blocks and can be interrupted.
             select! {
-                _ = sink.send(vec![0u8; 64 * 1024 * 1024]) => {
+                _ = sink.send(vec![0u8; 256 * 1024 * 1024]) => {
                     panic!("send should have blocked on backpressure");
                 },
                 _ = tokio::time::sleep(Duration::from_millis(5)) => {},
