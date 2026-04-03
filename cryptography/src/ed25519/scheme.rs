@@ -23,6 +23,26 @@ const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
 
+// Group order l = 2^252 + 27742317777372353535851937790883648493, little-endian.
+const L: [u8; 32] = [
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde,
+    0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x10,
+];
+
+// Returns true iff s < l (canonical scalar).
+fn is_canonical_s(s: &[u8; 32]) -> bool {
+    for i in (0..32).rev() {
+        if s[i] < L[i] {
+            return true;
+        }
+        if s[i] > L[i] {
+            return false;
+        }
+    }
+    false // s == l
+}
+
 /// Ed25519 Private Key.
 #[derive(Clone, Debug)]
 pub struct PrivateKey {
@@ -260,6 +280,10 @@ impl Read for Signature {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
+        let s: &[u8; 32] = raw[32..].try_into().unwrap();
+        if !is_canonical_s(s) {
+            return Err(CodecError::Invalid(CURVE_NAME, "non-canonical S"));
+        }
         Ok(Self { raw })
     }
 }
@@ -781,12 +805,28 @@ mod tests {
     }
 
     #[test]
-    fn test_high_s_fails() {
-        let (_, public_key, message, signature) = vector_1();
+    fn test_high_s_rejected_at_decode() {
+        let (_, _, _, signature) = vector_1();
         let mut bad_signature = signature.to_vec();
-        bad_signature[63] |= 0x80; // make S non-canonical
-        let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
-        assert!(!public_key.verify_inner(None, &message, &bad_signature));
+        bad_signature[63] |= 0x80; // set high bit of S — makes S >= 2^255 > l
+        assert!(Signature::decode(bad_signature.as_ref()).is_err());
+    }
+
+    #[test]
+    fn test_s_equal_to_l_rejected_at_decode() {
+        // S == l is not canonical (must be in [0, l-1])
+        let mut bad_signature = vec![0u8; SIGNATURE_LENGTH];
+        bad_signature[32..].copy_from_slice(&L);
+        assert!(Signature::decode(bad_signature.as_ref()).is_err());
+    }
+
+    #[test]
+    fn test_s_above_l_rejected_at_decode() {
+        // S == l + 1
+        let mut bad_signature = vec![0u8; SIGNATURE_LENGTH];
+        bad_signature[32..].copy_from_slice(&L);
+        bad_signature[32] = bad_signature[32].wrapping_add(1); // increment LSB
+        assert!(Signature::decode(bad_signature.as_ref()).is_err());
     }
 
     #[test]
