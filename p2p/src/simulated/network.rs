@@ -381,18 +381,14 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
         match message {
             ingress::Message::Track { id, peers } => {
-                let primary = peers.primary.clone();
-                let secondary = peers.secondary.clone();
                 if !self.register_tracked_peer_set(id, peers).await {
                     return;
                 }
 
                 // Notify all subscribers about the new peer set.
-                let update = PeerSetUpdate {
-                    index: id,
-                    latest: TrackedPeers::new(primary.clone(), secondary.clone()),
-                    all: self.all_tracked_peers(),
-                };
+                let update = self
+                    .latest_update()
+                    .expect("latest update missing after successful track");
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
 

@@ -9,19 +9,16 @@ use crate::{
         mailbox::UnboundedMailbox,
         Mailbox,
     },
-    PeerSetUpdate, TrackedPeers,
+    PeerSetUpdate,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     spawn_cell, Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{
-    channel::{
-        fallible::{AsyncFallibleExt, FallibleExt},
-        mpsc,
-    },
-    ordered::Set,
+use commonware_utils::channel::{
+    fallible::{AsyncFallibleExt, FallibleExt},
+    mpsc,
 };
 use rand::Rng;
 use std::{
@@ -140,18 +137,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let primary = peers.primary;
                 let secondary = peers.secondary;
 
-                // Identify peers that were added or had their addresses changed.
-                let peer_keys: Set<C::PublicKey> = primary.keys().clone();
-                let secondary_keys: Set<C::PublicKey> = secondary.keys().clone();
-                let Some((deleted_peers, changed_peers)) =
-                    self.directory.track(index, primary, secondary)
-                else {
+                // Identify peers whose existing connection state should be reset.
+                let Some(reset_peers) = self.directory.track(index, primary, secondary) else {
                     return;
                 };
 
                 // Kill connections for peers no longer in any tracked peer set
                 // or whose addresses changed.
-                for peer in deleted_peers.into_iter().chain(changed_peers) {
+                for peer in reset_peers {
                     if let Some(mut mailbox) = self.mailboxes.remove(&peer) {
                         mailbox.kill().await;
                     }
@@ -164,11 +157,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                     .await;
 
                 // Notify all subscribers about the new peer set
-                let update = PeerSetUpdate {
-                    index,
-                    latest: TrackedPeers::new(peer_keys, secondary_keys),
-                    all: self.directory.all(),
-                };
+                let update = self
+                    .directory
+                    .latest_update()
+                    .expect("latest update missing after successful track");
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
             }
@@ -289,7 +281,7 @@ mod tests {
         deterministic::{self},
         Clock, Runner,
     };
-    use commonware_utils::ordered::Map;
+    use commonware_utils::ordered::{Map, Set};
     use std::{
         net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
         time::Duration,

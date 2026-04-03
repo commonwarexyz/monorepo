@@ -150,7 +150,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Track new primary and secondary peer sets for the given index.
     ///
-    /// Returns `(deleted_peers, changed_peers)` across both updates.
+    /// Returns the peers whose connections should be reset because they were
+    /// removed from all tracked peer sets or had their address changed.
     ///
     /// Returns `None` if the index is invalid.
     ///
@@ -160,7 +161,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         index: u64,
         primaries: Map<C, Address>,
         secondaries: Map<C, Address>,
-    ) -> Option<(Vec<C>, Vec<C>)> {
+    ) -> Option<Set<C>> {
         // Check if peer set already exists
         if self.primary_sets.contains_key(&index) {
             warn!(index, "peer set already exists");
@@ -177,15 +178,14 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // Create and store new primary peer set (all peers are tracked regardless of address
         // validity).
-        let mut deleted_peers = Vec::new();
-        let mut changed_peers = Vec::new();
+        let mut reset_peers = Vec::new();
         let primary_keys = primaries.keys().clone();
         for (primary, addr) in &primaries {
             let record = match self.peers.entry(primary.clone()) {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
                     if entry.update(addr.clone()) {
-                        changed_peers.push(primary.clone());
+                        reset_peers.push(primary.clone());
                     }
                     entry
                 }
@@ -210,7 +210,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 Entry::Occupied(entry) => {
                     let entry = entry.into_mut();
                     if entry.update(addr.clone()) {
-                        changed_peers.push(secondary.clone());
+                        reset_peers.push(secondary.clone());
                     }
                     entry
                 }
@@ -233,7 +233,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 self.peers.get_mut(&primary).unwrap().decrement_primary();
                 let deleted = self.delete_if_needed(&primary);
                 if deleted {
-                    deleted_peers.push(primary);
+                    reset_peers.push(primary);
                 }
             });
             secondaries.into_iter().for_each(|secondary| {
@@ -243,17 +243,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                     .decrement_secondary();
                 let deleted = self.delete_if_needed(&secondary);
                 if deleted {
-                    deleted_peers.push(secondary);
+                    reset_peers.push(secondary);
                 }
             });
         }
 
-        let mut seen = HashSet::new();
-        deleted_peers.retain(|peer| seen.insert(peer.clone()));
-        seen.clear();
-        changed_peers.retain(|peer| seen.insert(peer.clone()));
-
-        Some((deleted_peers, changed_peers))
+        Some(Set::from_iter_dedup(reset_peers))
     }
 
     /// Update a tracked peer's address.
@@ -533,7 +528,11 @@ mod tests {
     };
     use commonware_cryptography::{ed25519, Signer};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::{hostname, ordered::Map, SystemTimeExt};
+    use commonware_utils::{
+        hostname,
+        ordered::{Map, Set},
+        SystemTimeExt,
+    };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -576,7 +575,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let (deleted, _) = directory
+            let reset_peers = directory
                 .track(
                     0,
                     [(pk_1.clone(), addr(addr_1)), (pk_2.clone(), addr(addr_2))]
@@ -586,11 +585,11 @@ mod tests {
                 )
                 .unwrap();
             assert!(
-                deleted.is_empty(),
+                reset_peers.is_empty(),
                 "No peers should be deleted on first set"
             );
 
-            let (deleted, _) = directory
+            let reset_peers = directory
                 .track(
                     1,
                     [(pk_2.clone(), addr(addr_2)), (pk_3.clone(), addr(addr_3))]
@@ -599,27 +598,33 @@ mod tests {
                     Map::default(),
                 )
                 .unwrap();
-            assert_eq!(deleted.len(), 1, "One peer should be deleted");
-            assert!(deleted.contains(&pk_1), "Deleted peer should be pk_1");
+            assert_eq!(reset_peers.len(), 1, "One peer should be reset");
+            assert!(
+                reset_peers.position(&pk_1).is_some(),
+                "Reset peer should be pk_1"
+            );
 
-            let (deleted, _) = directory
+            let reset_peers = directory
                 .track(
                     2,
                     [(pk_3.clone(), addr(addr_3))].try_into().unwrap(),
                     Map::default(),
                 )
                 .unwrap();
-            assert_eq!(deleted.len(), 1, "One peer should be deleted");
-            assert!(deleted.contains(&pk_2), "Deleted peer should be pk_2");
+            assert_eq!(reset_peers.len(), 1, "One peer should be reset");
+            assert!(
+                reset_peers.position(&pk_2).is_some(),
+                "Reset peer should be pk_2"
+            );
 
-            let (deleted, _) = directory
+            let reset_peers = directory
                 .track(
                     3,
                     [(pk_3.clone(), addr(addr_3))].try_into().unwrap(),
                     Map::default(),
                 )
                 .unwrap();
-            assert!(deleted.is_empty(), "No peers should be deleted");
+            assert!(reset_peers.is_empty(), "No peers should be reset");
         });
     }
 
@@ -764,25 +769,25 @@ mod tests {
             );
             assert!(!directory.peers.contains_key(&pk_3));
 
-            let (deleted, _) = directory
+            let reset_peers = directory
                 .track(
                     3,
                     [(my_pk.clone(), addr(my_addr))].try_into().unwrap(),
                     Map::default(),
                 )
                 .unwrap();
-            assert_eq!(deleted.len(), 1);
-            assert!(deleted.contains(&pk_2));
+            assert_eq!(reset_peers.len(), 1);
+            assert!(reset_peers.position(&pk_2).is_some());
 
-            let (deleted, _) = directory
+            let reset_peers = directory
                 .track(
                     4,
                     [(my_pk.clone(), addr(addr_3))].try_into().unwrap(),
                     Map::default(),
                 )
                 .unwrap();
-            assert_eq!(deleted.len(), 1);
-            assert!(deleted.contains(&pk_1));
+            assert_eq!(reset_peers.len(), 1);
+            assert!(reset_peers.position(&pk_1).is_some());
 
             let result = directory.track(
                 0,
@@ -817,7 +822,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let (deleted, changed) = directory
+            let reset_peers = directory
                 .track(
                     0,
                     [(pk_1.clone(), addr(primary_addr))].try_into().unwrap(),
@@ -825,8 +830,7 @@ mod tests {
                 )
                 .unwrap();
 
-            assert!(deleted.is_empty());
-            assert!(changed.is_empty());
+            assert!(reset_peers.is_empty());
             assert_eq!(directory.latest_set_index(), Some(0));
             assert_eq!(
                 directory.get_set(&0).unwrap(),
@@ -870,17 +874,16 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
-            let initial = directory
+            let initial_reset = directory
                 .track(
                     0,
                     [(pk_1.clone(), addr(old_addr))].try_into().unwrap(),
                     Map::default(),
                 )
                 .unwrap();
-            assert!(initial.0.is_empty());
-            assert!(initial.1.is_empty());
+            assert!(initial_reset.is_empty());
 
-            let (deleted, changed) = directory
+            let reset_peers = directory
                 .track(
                     1,
                     [(pk_1.clone(), addr(new_addr))].try_into().unwrap(),
@@ -888,8 +891,7 @@ mod tests {
                 )
                 .unwrap();
 
-            assert!(deleted.is_empty());
-            assert_eq!(changed, vec![pk_1.clone()]);
+            assert_eq!(reset_peers, Set::try_from([pk_1.clone()]).unwrap());
             assert_eq!(directory.latest_set_index(), Some(1));
             assert_eq!(
                 directory.get_set(&1).unwrap(),
@@ -1070,7 +1072,7 @@ mod tests {
             let mut directory = Directory::init(context, my_pk.clone(), config, releaser);
 
             // Add set with asymmetric addresses
-            let (deleted, _) = directory
+            let reset_peers = directory
                 .track(
                     0,
                     [
@@ -1082,7 +1084,7 @@ mod tests {
                     Map::default(),
                 )
                 .unwrap();
-            assert!(deleted.is_empty());
+            assert!(reset_peers.is_empty());
 
             // Verify peer 1 has correct ingress and egress
             let record_1 = directory.peers.get(&pk_1).unwrap();
@@ -1166,7 +1168,7 @@ mod tests {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             // Add set with both socket and DNS addresses
-            let (deleted, _) = directory
+            let reset_peers = directory
                 .track(
                     0,
                     [
@@ -1178,7 +1180,7 @@ mod tests {
                     Map::default(),
                 )
                 .unwrap();
-            assert!(deleted.is_empty());
+            assert!(reset_peers.is_empty());
 
             // Both peers should be tracked (for peer set consistency)
             assert!(
@@ -1230,7 +1232,7 @@ mod tests {
             let mut directory = Directory::init(context, my_pk, config, releaser);
 
             // Add set with both public and private egress IPs
-            let (deleted, _) = directory
+            let reset_peers = directory
                 .track(
                     0,
                     [
@@ -1242,7 +1244,7 @@ mod tests {
                     Map::default(),
                 )
                 .unwrap();
-            assert!(deleted.is_empty());
+            assert!(reset_peers.is_empty());
 
             // Both peers should be tracked (for peer set consistency)
             assert!(

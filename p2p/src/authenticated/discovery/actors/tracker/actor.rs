@@ -11,7 +11,7 @@ use crate::{
         },
         mailbox::UnboundedMailbox,
     },
-    PeerSetUpdate, TrackedPeers,
+    PeerSetUpdate,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
@@ -167,19 +167,15 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 );
 
                 // Attempt to update tracked peers.
-                if !self
-                    .directory
-                    .track(index, primary.clone(), secondary.clone())
-                {
+                if !self.directory.track(index, primary, secondary) {
                     return;
                 }
 
                 // Notify all subscribers about the new peer set
-                let update = PeerSetUpdate {
-                    index,
-                    latest: TrackedPeers::new(primary, secondary),
-                    all: self.directory.all(),
-                };
+                let update = self
+                    .directory
+                    .latest_update()
+                    .expect("latest update missing after successful track");
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
             }
