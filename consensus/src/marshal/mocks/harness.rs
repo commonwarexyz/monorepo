@@ -28,14 +28,14 @@ use commonware_broadcast::buffered;
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
+    certificate::{mocks::Fixture, ConstantProvider, Provider as _, Scheme as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
 };
 use commonware_p2p::{
     simulated::{self, Link, Network, Oracle},
-    Manager,
+    Manager as _, Provider as _,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner};
@@ -112,7 +112,7 @@ pub fn make_raw_block(parent: D, height: Height, timestamp: u64) -> B {
 /// Setup network for tests.
 pub fn setup_network(
     context: deterministic::Context,
-    tracked_peer_sets: Option<usize>,
+    tracked_peer_sets: NonZeroUsize,
 ) -> Oracle<K, deterministic::Context> {
     let (network, oracle) = Network::new(
         context.with_label("network"),
@@ -124,6 +124,42 @@ pub fn setup_network(
     );
     network.start();
     oracle
+}
+
+/// Setup network for tests with an initial participant peer set.
+pub async fn setup_network_with_participants<I>(
+    context: deterministic::Context,
+    tracked_peer_sets: NonZeroUsize,
+    participants: I,
+) -> Oracle<K, deterministic::Context>
+where
+    I: IntoIterator<Item = K>,
+{
+    let (network, oracle) = Network::new_with_primary_peers(
+        context.with_label("network"),
+        simulated::Config {
+            max_size: 1024 * 1024,
+            disconnect_on_block: true,
+            tracked_peer_sets,
+        },
+        participants,
+    )
+    .await;
+    network.start();
+    oracle
+}
+
+async fn ensure_participant_peer_set(oracle: &mut Oracle<K, deterministic::Context>, provider: &P) {
+    if oracle.manager().peer_set(0).await.is_some() {
+        return;
+    }
+
+    let participants = provider
+        .all()
+        .expect("constant provider must expose a scheme")
+        .participants()
+        .clone();
+    oracle.manager().track(0, participants).await;
 }
 
 /// Setup network links between peers.
@@ -334,6 +370,7 @@ impl TestHarness for StandardHarness {
         max_pending_acks: NonZeroUsize,
         application: Application<Self::ApplicationBlock>,
     ) -> ValidatorSetup<Self> {
+        ensure_participant_peer_set(oracle, &provider).await;
         let config = Config {
             provider,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
@@ -350,7 +387,6 @@ impl TestHarness for StandardHarness {
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
-
         let control = oracle.control(validator.clone());
         let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
@@ -1114,6 +1150,7 @@ impl TestHarness for CodingHarness {
             strategy: Sequential,
         };
 
+        ensure_participant_peer_set(oracle, &provider).await;
         let control = oracle.control(validator.clone());
         let backfill = control.register(1, TEST_QUOTA).await.unwrap();
         let resolver_cfg = resolver::Config {
@@ -1474,20 +1511,20 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             .with_timeout(Some(H::finalize_timeout())),
     );
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), Some(3));
         let Fixture {
             participants,
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle = setup_network_with_participants(
+            context.clone(),
+            commonware_utils::NZUsize!(3),
+            participants.clone(),
+        )
+        .await;
 
         let mut applications = BTreeMap::new();
         let mut handles = Vec::new();
-
-        let mut manager = oracle.manager();
-        manager
-            .track(0, participants.clone().try_into().unwrap())
-            .await;
 
         for (i, validator) in participants.iter().enumerate() {
             let setup = H::setup_validator(
@@ -1613,7 +1650,7 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
             .with_timeout(Some(Duration::from_secs(120))),
     );
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -1704,7 +1741,7 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
             .with_timeout(Some(Duration::from_secs(120))),
     );
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -1802,20 +1839,20 @@ pub fn sync_height_floor<H: TestHarness>() {
             .with_timeout(Some(Duration::from_secs(300))),
     );
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), Some(3));
         let Fixture {
             participants,
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle = setup_network_with_participants(
+            context.clone(),
+            commonware_utils::NZUsize!(3),
+            participants.clone(),
+        )
+        .await;
 
         let mut applications = BTreeMap::new();
         let mut handles = Vec::new();
-
-        let mut manager = oracle.manager();
-        manager
-            .track(0, participants.clone().try_into().unwrap())
-            .await;
 
         // Skip first validator
         for (i, validator) in participants.iter().enumerate().skip(1) {
@@ -1966,7 +2003,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         deterministic::Config::new().with_timeout(Some(Duration::from_secs(120))),
     );
     runner.start(|mut context| async move {
-        let oracle = setup_network(context.clone(), None);
+        let oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -2140,7 +2177,6 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
             .with_timeout(Some(Duration::from_secs(120))),
     );
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), Some(1));
         let Fixture {
             participants,
             schemes,
@@ -2150,9 +2186,12 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         let victim = participants[0].clone();
         let attacker = participants[1].clone();
         let peers = vec![victim.clone(), attacker.clone()];
-
-        let mut manager = oracle.manager();
-        manager.track(0, peers.clone().try_into().unwrap()).await;
+        let mut oracle = setup_network_with_participants(
+            context.clone(),
+            commonware_utils::NZUsize!(1),
+            peers.clone(),
+        )
+        .await;
 
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let (mut victim_mailbox, victim_extra, _victim_application) = H::setup_prunable_validator(
@@ -2260,7 +2299,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
 pub fn subscribe_basic_block_delivery<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -2332,7 +2371,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
 pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -2423,7 +2462,7 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
 pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -2505,7 +2544,7 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
 pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -2710,7 +2749,7 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
 pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -2792,7 +2831,7 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
 pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -2865,7 +2904,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
 pub fn get_block_by_height_and_latest<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -2955,7 +2994,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
 pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -3015,7 +3054,7 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
 pub fn get_finalization_by_height<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -3098,18 +3137,17 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             .with_timeout(Some(Duration::from_secs(60))),
     );
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), Some(3));
         let Fixture {
             participants,
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-
-        // Register the initial peer set
-        let mut manager = oracle.manager();
-        manager
-            .track(0, participants.clone().try_into().unwrap())
-            .await;
+        let mut oracle = setup_network_with_participants(
+            context.clone(),
+            commonware_utils::NZUsize!(3),
+            participants.clone(),
+        )
+        .await;
 
         // Set up two validators
         let setup0 = H::setup_validator(
@@ -3212,7 +3250,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
 pub fn ancestry_stream<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -3279,7 +3317,7 @@ pub fn ancestry_stream<H: TestHarness>() {
 pub fn finalize_same_height_different_views<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -3407,7 +3445,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
 pub fn init_processed_height<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,
@@ -3491,7 +3529,7 @@ pub fn init_processed_height<H: TestHarness>() {
 pub fn broadcast_caches_block<H: TestHarness>() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
-        let mut oracle = setup_network(context.clone(), None);
+        let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
         let Fixture {
             participants,
             schemes,

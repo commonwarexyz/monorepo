@@ -217,8 +217,70 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
     }
 
+    /// Notification sent to subscribers when a peer set changes.
+    #[derive(Clone, Debug)]
+    pub struct PeerSetUpdate<P: PublicKey> {
+        /// The index of the peer set that changed.
+        pub index: u64,
+        /// The primary and secondary peers in the new set.
+        pub latest: TrackedPeers<P>,
+        /// Union of all currently tracked primary and secondary peers.
+        pub all: TrackedPeers<P>,
+    }
+
     /// Alias for the subscription type returned by [`Provider::subscribe`].
-    pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)>;
+    pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<PeerSetUpdate<P>>;
+
+    /// Primary and secondary peers registered together for [`Manager::track`].
+    #[derive(Clone, Debug)]
+    pub struct TrackedPeers<P: PublicKey> {
+        pub primary: Set<P>,
+        pub secondary: Set<P>,
+    }
+
+    impl<P: PublicKey> TrackedPeers<P> {
+        pub const fn new(primary: Set<P>, secondary: Set<P>) -> Self {
+            Self { primary, secondary }
+        }
+
+        pub fn primary(primary: Set<P>) -> Self {
+            Self::new(primary, Set::default())
+        }
+
+        /// Returns the deduplicated union of primary and secondary peers.
+        pub fn union(self) -> Set<P> {
+            Set::from_iter_dedup(self.primary.into_iter().chain(self.secondary))
+        }
+    }
+
+    impl<P: PublicKey> From<Set<P>> for TrackedPeers<P> {
+        fn from(primary: Set<P>) -> Self {
+            Self::primary(primary)
+        }
+    }
+
+    /// Primary and secondary peers registered together for [`AddressableManager::track`].
+    #[derive(Clone, Debug)]
+    pub struct AddressableTrackedPeers<P: PublicKey> {
+        pub primary: Map<P, Address>,
+        pub secondary: Map<P, Address>,
+    }
+
+    impl<P: PublicKey> AddressableTrackedPeers<P> {
+        pub const fn new(primary: Map<P, Address>, secondary: Map<P, Address>) -> Self {
+            Self { primary, secondary }
+        }
+
+        pub fn primary(primary: Map<P, Address>) -> Self {
+            Self::new(primary, Map::default())
+        }
+    }
+
+    impl<P: PublicKey> From<Map<P, Address>> for AddressableTrackedPeers<P> {
+        fn from(primary: Map<P, Address>) -> Self {
+            Self::primary(primary)
+        }
+    }
 
     /// Interface for reading peer set information.
     pub trait Provider: Debug + Clone + Send + 'static {
@@ -233,11 +295,11 @@ stability_scope!(BETA {
 
         /// Subscribe to notifications when new peer sets are added.
         ///
-        /// Returns a receiver that will receive tuples of:
-        /// - The peer set ID
-        /// - The peers in the new set
-        /// - All currently tracked peers (union of recent peer sets)
-        #[allow(clippy::type_complexity)]
+        /// Returns a receiver of [`PeerSetUpdate`] notifications. The aggregate
+        /// primary and secondary sets preserve role information. If a peer is
+        /// tracked as both primary and secondary, it will appear in both sets.
+        /// Callers that need a deduplicated recipient list should union the sets
+        /// explicitly.
         fn subscribe(
             &mut self,
         ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + Send;
@@ -245,36 +307,47 @@ stability_scope!(BETA {
 
     /// Interface for managing peer set membership (where peer addresses are not known).
     pub trait Manager: Provider {
-        /// Track a peer set with the given ID and peers.
+        /// Track a primary peer set and secondary peers with the given ID.
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
         /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
         ///
         /// For good connectivity, all peers must track the same peer sets at the same ID.
-        fn track(
+        ///
+        /// Callers may pass either a bare [`Set`] (registering only primary peers)
+        /// or a [`TrackedPeers`] value containing both primary and secondary peers.
+        fn track<R>(
             &mut self,
             id: u64,
-            peers: Set<Self::PublicKey>,
-        ) -> impl Future<Output = ()> + Send;
+            peers: R,
+        ) -> impl Future<Output = ()> + Send
+        where
+            R: Into<TrackedPeers<Self::PublicKey>> + Send;
     }
 
     /// Interface for managing peer set membership (where peer addresses are known).
     pub trait AddressableManager: Provider {
-        /// Track a peer set with the given ID and peer<PublicKey, Address> pairs.
+        /// Track a primary peer set and secondary peers with the given ID.
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
         /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
         ///
         /// For good connectivity, all peers must track the same peer sets at the same ID.
-        fn track(
+        ///
+        /// Callers may pass either a bare [`Map`] (registering only primary peers)
+        /// or an [`AddressableTrackedPeers`] value containing both primary and
+        /// secondary peers.
+        fn track<R>(
             &mut self,
             id: u64,
-            peers: Map<Self::PublicKey, Address>,
-        ) -> impl Future<Output = ()> + Send;
+            peers: R,
+        ) -> impl Future<Output = ()> + Send
+        where
+            R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send;
 
         /// Update addresses for multiple peers without creating a new peer set.
         ///
-        /// For each peer that is tracked and has a changed address:
+        /// For each primary or secondary peer with a changed address:
         /// - Any existing connection to the peer is severed (it was on the old IP)
         /// - The listener's allowed IPs are updated to reflect the new egress IP
         /// - Future connections will use the new address

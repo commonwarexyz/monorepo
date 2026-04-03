@@ -20,6 +20,9 @@
 //! list of authorized `PublicKey`s (`(u64, Vec<PublicKey>)`). Based on this shared knowledge, each
 //! peer can construct a sorted bit vector message (`BitVec`) representing its knowledge of the
 //! dialable addresses [std::net::SocketAddr] for the peers in that set.
+//! Registration happens via [`Manager::track`](crate::Manager::track), which accepts either a bare
+//! primary-peer set or a [`TrackedPeers`](crate::TrackedPeers) value containing both primary and
+//! secondary peers.
 //! The `BitVec` message contains:
 //! - `index`: The `u64` index the bit vector applies to.
 //! - `bits`: The bit vector itself, where a '1' signifies knowledge of the corresponding
@@ -42,6 +45,8 @@
 //! tracking multiple peer sets concurrently (up to `tracked_peer_sets`), each identified by its
 //! `index`. This is useful, for instance, during transitions like distributed key generation
 //! (DKG) where connections to both old and new peer sets are needed simultaneously.
+//! Secondary peers are connectable, but they are excluded from peer-set subscriptions and the
+//! gossip bit-vector namespace used for primary peer sets.
 //!
 //! Upon receiving a `BitVec` message, a peer compares it against its own knowledge for the same
 //! index. If the receiving peer knows addresses that the sender marked as '0' (unknown), it
@@ -153,7 +158,7 @@
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner};
-//! use commonware_utils::NZU32;
+//! use commonware_utils::{ordered::Set, NZU32};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
 //! // Configure context
@@ -206,7 +211,12 @@
 //!     //
 //!     // In production, this would be updated as new peer sets are created (like when
 //!     // the composition of a validator set changes).
-//!     oracle.track(0, [signer.public_key(), peer1, peer2, peer3].try_into().unwrap()).await;
+//!     oracle
+//!         .track(
+//!             0,
+//!             Set::try_from([signer.public_key(), peer1, peer2, peer3]).unwrap(),
+//!         )
+//!         .await;
 //!
 //!     // Register some channel
 //!     const MAX_MESSAGE_BACKLOG: usize = 128;
@@ -347,7 +357,9 @@ mod tests {
             let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
             // Register peers
-            oracle.track(0, addresses.clone().try_into().unwrap()).await;
+            oracle
+                .track(0, Set::try_from(addresses.clone()).unwrap())
+                .await;
 
             // Register basic application
             let (mut sender, mut receiver) =
@@ -587,18 +599,24 @@ mod tests {
 
                 // Register peers at separate indices
                 oracle
-                    .track(0, [addresses[0].clone()].try_into().unwrap())
+                    .track(0, Set::try_from([addresses[0].clone()]).unwrap())
                     .await;
                 oracle
                     .track(
                         1,
-                        [addresses[1].clone(), addresses[2].clone()]
-                            .try_into()
-                            .unwrap(),
+                        Set::try_from([addresses[1].clone(), addresses[2].clone()]).unwrap(),
                     )
                     .await;
                 oracle
-                    .track(2, addresses.iter().skip(2).cloned().try_collect().unwrap())
+                    .track(
+                        2,
+                        addresses
+                            .iter()
+                            .skip(2)
+                            .cloned()
+                            .try_collect::<Set<_>>()
+                            .unwrap(),
+                    )
                     .await;
 
                 // Register basic application
@@ -725,7 +743,7 @@ mod tests {
             );
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer_0"), config0);
             oracle0
-                .track(0, addresses.clone().try_into().unwrap())
+                .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
             let (mut sender0, _receiver0) =
                 network0.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
@@ -741,7 +759,7 @@ mod tests {
             );
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer_1"), config1);
             oracle1
-                .track(0, addresses.clone().try_into().unwrap())
+                .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
             let (_sender1, _receiver1) =
                 network1.register(0, Quota::per_minute(NZU32!(1)), DEFAULT_MESSAGE_BACKLOG);
@@ -815,10 +833,12 @@ mod tests {
                 .try_collect()
                 .unwrap();
             oracle.track(10, set10.clone()).await;
-            let (id, new, all) = subscription.recv().await.unwrap();
-            assert_eq!(id, 10);
-            assert_eq!(new, set10);
-            assert_eq!(all, set10);
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 10);
+            assert_eq!(update.latest.primary, set10);
+            assert!(update.latest.secondary.is_empty());
+            assert_eq!(update.all.primary, set10);
+            assert!(update.all.secondary.is_empty());
 
             // Register old peer sets (ignored)
             let set9: Set<_> = peers_and_sks
@@ -837,15 +857,17 @@ mod tests {
                 .try_collect()
                 .unwrap();
             oracle.track(11, set11.clone()).await;
-            let (id, new, all) = subscription.recv().await.unwrap();
-            assert_eq!(id, 11);
-            assert_eq!(new, set11);
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 11);
+            assert_eq!(update.latest.primary, set11);
+            assert!(update.latest.secondary.is_empty());
             let all_keys: Set<_> = set10
                 .into_iter()
                 .chain(set11.into_iter())
                 .try_collect()
                 .unwrap();
-            assert_eq!(all, all_keys);
+            assert_eq!(update.all.primary, all_keys);
+            assert!(update.all.secondary.is_empty());
         });
     }
 
@@ -889,7 +911,9 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 // Register peer set
-                oracle.track(0, addresses.clone().try_into().unwrap()).await;
+                oracle
+                    .track(0, Set::try_from(addresses.clone()).unwrap())
+                    .await;
 
                 let (mut sender, mut receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1052,28 +1076,30 @@ mod tests {
             oracle.track(1, peer_set.clone()).await;
 
             // Receive subscription notification
-            let (id, new, all) = subscription.recv().await.unwrap();
-            assert_eq!(id, 1);
-            assert_eq!(new.len(), 1);
-            assert_eq!(all.len(), 1);
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 1);
+            assert_eq!(update.latest.primary.len(), 1);
+            assert!(update.latest.secondary.is_empty());
+            assert_eq!(update.all.primary.len(), 1);
+            assert!(update.all.secondary.is_empty());
 
-            // Self should NOT be in the new set
+            // Self should NOT be in the latest set
             assert!(
-                new.position(&self_pk).is_none(),
-                "new set should not include self"
+                update.latest.primary.position(&self_pk).is_none(),
+                "latest set should not include self"
             );
             assert!(
-                new.position(&other_pk).is_some(),
-                "new set should include other"
+                update.latest.primary.position(&other_pk).is_some(),
+                "latest set should include other"
             );
 
             // Self should NOT be in the tracked set (not registered)
             assert!(
-                all.position(&self_pk).is_none(),
+                update.all.primary.position(&self_pk).is_none(),
                 "tracked peers should not include self"
             );
             assert!(
-                all.position(&other_pk).is_some(),
+                update.all.primary.position(&other_pk).is_some(),
                 "tracked peers should include other"
             );
 
@@ -1082,28 +1108,30 @@ mod tests {
             oracle.track(2, peer_set.clone()).await;
 
             // Receive subscription notification
-            let (id, new, all) = subscription.recv().await.unwrap();
-            assert_eq!(id, 2);
-            assert_eq!(new.len(), 2);
-            assert_eq!(all.len(), 2);
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 2);
+            assert_eq!(update.latest.primary.len(), 2);
+            assert!(update.latest.secondary.is_empty());
+            assert_eq!(update.all.primary.len(), 2);
+            assert!(update.all.secondary.is_empty());
 
-            // Both peers should be in the new set
+            // Both peers should be in the latest set
             assert!(
-                new.position(&self_pk).is_some(),
-                "new set should include self"
+                update.latest.primary.position(&self_pk).is_some(),
+                "latest set should include self"
             );
             assert!(
-                new.position(&other_pk).is_some(),
-                "new set should include other"
+                update.latest.primary.position(&other_pk).is_some(),
+                "latest set should include other"
             );
 
             // Both peers should be in the tracked set
             assert!(
-                all.position(&self_pk).is_some(),
+                update.all.primary.position(&self_pk).is_some(),
                 "tracked peers should include self"
             );
             assert!(
-                all.position(&other_pk).is_some(),
+                update.all.primary.position(&other_pk).is_some(),
                 "tracked peers should include other"
             );
         });
@@ -1157,7 +1185,9 @@ mod tests {
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
 
                 // Register peers
-                oracle.track(0, addresses.clone().try_into().unwrap()).await;
+                oracle
+                    .track(0, Set::try_from(addresses.clone()).unwrap())
+                    .await;
 
                 // Register channel
                 let (mut sender, mut receiver) =
@@ -1255,7 +1285,7 @@ mod tests {
             let config0 = Config::test(peer0.clone(), socket0, vec![], 1_024 * 1_024);
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer_0"), config0);
             oracle0
-                .track(0, addresses.clone().try_into().unwrap())
+                .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
             let (mut sender0, mut receiver0) =
                 network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1276,7 +1306,7 @@ mod tests {
             );
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer_1"), config1);
             oracle1
-                .track(0, addresses.clone().try_into().unwrap())
+                .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
             let (mut sender1, mut receiver1) =
                 network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1393,7 +1423,9 @@ mod tests {
                     1_024 * 1_024,
                 );
                 let (mut network, mut oracle) = Network::new(context.with_label("network"), config);
-                oracle.track(0, addresses.clone().try_into().unwrap()).await;
+                oracle
+                    .track(0, Set::try_from(addresses.clone()).unwrap())
+                    .await;
                 let (mut sender, mut receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
                 network.start();
@@ -1494,7 +1526,7 @@ mod tests {
             config0.allow_private_ips = true;
             let (mut network0, mut oracle0) = Network::new(context.with_label("peer_0"), config0);
             oracle0
-                .track(0, addresses.clone().try_into().unwrap())
+                .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
             let (_sender0, mut receiver0) =
                 network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1512,7 +1544,7 @@ mod tests {
             config1.allow_private_ips = false; // This should prevent dialing the private IP
             let (mut network1, mut oracle1) = Network::new(context.with_label("peer_1"), config1);
             oracle1
-                .track(0, addresses.clone().try_into().unwrap())
+                .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
             let (mut sender1, _receiver1) =
                 network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1592,7 +1624,7 @@ mod tests {
                 let (mut network0, mut oracle0) =
                     Network::new(context.with_label("peer_0"), config0);
                 oracle0
-                    .track(0, addresses.clone().try_into().unwrap())
+                    .track(0, Set::try_from(addresses.clone()).unwrap())
                     .await;
                 let (_sender0, mut receiver0) =
                     network0.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1610,7 +1642,7 @@ mod tests {
                 let (mut network1, mut oracle1) =
                     Network::new(context.with_label("peer_1"), config1);
                 oracle1
-                    .track(0, addresses.clone().try_into().unwrap())
+                    .track(0, Set::try_from(addresses.clone()).unwrap())
                     .await;
                 let (mut sender1, _receiver1) =
                     network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1685,7 +1717,9 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 // Register peer set
-                oracle.track(0, addresses.clone().try_into().unwrap()).await;
+                oracle
+                    .track(0, Set::try_from(addresses.clone()).unwrap())
+                    .await;
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1759,7 +1793,9 @@ mod tests {
                         Network::new(peer_context.with_label("network"), config);
 
                     // Register peer set
-                    oracle.track(0, addresses.clone().try_into().unwrap()).await;
+                    oracle
+                        .track(0, Set::try_from(addresses.clone()).unwrap())
+                        .await;
 
                     let (sender, receiver) = network.register(
                         0,
@@ -1871,7 +1907,9 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 // Register peer set
-                oracle.track(0, addresses.clone().try_into().unwrap()).await;
+                oracle
+                    .track(0, Set::try_from(addresses.clone()).unwrap())
+                    .await;
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -1947,7 +1985,9 @@ mod tests {
                     Network::new(peer_context.with_label("network"), config);
 
                 // Register peer set
-                oracle.track(0, addresses.clone().try_into().unwrap()).await;
+                oracle
+                    .track(0, Set::try_from(addresses.clone()).unwrap())
+                    .await;
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -2046,7 +2086,9 @@ mod tests {
                 let (mut network, mut oracle) =
                     Network::new(peer_context.with_label("network"), config);
 
-                oracle.track(0, addresses.clone().try_into().unwrap()).await;
+                oracle
+                    .track(0, Set::try_from(addresses.clone()).unwrap())
+                    .await;
 
                 let (sender, receiver) =
                     network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -2121,7 +2163,9 @@ mod tests {
             let (mut network, mut oracle) =
                 Network::new(peer_context.with_label("network"), config);
 
-            oracle.track(0, addresses.clone().try_into().unwrap()).await;
+            oracle
+                .track(0, Set::try_from(addresses.clone()).unwrap())
+                .await;
 
             let (sender, receiver) =
                 network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
@@ -2217,7 +2261,7 @@ mod tests {
             network0.start();
 
             oracle0
-                .track(0, addresses.clone().try_into().unwrap())
+                .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
 
             // Wait for connection attempts.
@@ -2242,7 +2286,7 @@ mod tests {
                 network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();
 
-            oracle1.track(0, addresses.try_into().unwrap()).await;
+            oracle1.track(0, Set::try_from(addresses).unwrap()).await;
 
             // Wait for connections to be made.
             context.sleep(Duration::from_secs(30)).await;
@@ -2318,10 +2362,10 @@ mod tests {
             network2.start();
 
             oracle0
-                .track(0, addresses.clone().try_into().unwrap())
+                .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
             oracle2
-                .track(0, addresses.clone().try_into().unwrap())
+                .track(0, Set::try_from(addresses.clone()).unwrap())
                 .await;
 
             // Wait for initial connections.
@@ -2355,7 +2399,7 @@ mod tests {
                 network1.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
             network1.start();
 
-            oracle1.track(0, addresses.try_into().unwrap()).await;
+            oracle1.track(0, Set::try_from(addresses).unwrap()).await;
 
             // Wait for full connectivity to peer 1.
             context.sleep(Duration::from_secs(30)).await;

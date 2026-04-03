@@ -8,16 +8,19 @@ use crate::{
             types::{self, Info},
         },
     },
-    Ingress,
+    Ingress, PeerSetUpdate, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     telemetry::metrics::status::GaugeExt, Clock, Metrics as RuntimeMetrics, Spawner,
 };
-use commonware_utils::{ordered::Set as OrderedSet, PrioritySet, SystemTimeExt, TryCollect};
+#[cfg(test)]
+use commonware_utils::TryCollect;
+use commonware_utils::{ordered::Set as OrderedSet, PrioritySet, SystemTimeExt};
 use rand::{seq::IteratorRandom, Rng};
 use std::{
     collections::{BTreeMap, HashMap},
+    num::NonZeroUsize,
     ops::Deref,
     time::{Duration, SystemTime},
 };
@@ -32,7 +35,7 @@ pub struct Config {
     pub allow_dns: bool,
 
     /// The maximum number of peer sets to track.
-    pub max_sets: usize,
+    pub max_sets: NonZeroUsize,
 
     /// The minimum number of times we should fail to dial a peer before attempting to ask other
     /// peers for its peer info again.
@@ -57,7 +60,7 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     allow_dns: bool,
 
     /// The maximum number of peer sets to track.
-    max_sets: usize,
+    max_sets: NonZeroUsize,
 
     /// The minimum number of times we should fail to dial a peer before attempting to ask other
     /// peers for its peer info again.
@@ -73,8 +76,11 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// The records of all peers.
     peers: HashMap<C, Record<C>>,
 
-    /// The peer sets
-    sets: BTreeMap<u64, Set<C>>,
+    /// Primary peer sets indexed by their ID.
+    primary_sets: BTreeMap<u64, Set<C>>,
+
+    /// Secondary peer sets indexed by their ID.
+    secondary_sets: BTreeMap<u64, OrderedSet<C>>,
 
     /// Tracks blocked peers and their unblock time. This is the source of truth for
     /// whether a peer is blocked, persisting even if the peer record is deleted.
@@ -122,7 +128,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             block_duration: cfg.block_duration,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
             peers,
-            sets: BTreeMap::new(),
+            primary_sets: BTreeMap::new(),
+            secondary_sets: BTreeMap::new(),
             blocked: PrioritySet::new(),
             releaser,
             metrics,
@@ -146,9 +153,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             record.dial_failure(ingress);
         }
 
-        // We may have to update the sets.
+        // We may have to update the primary sets.
         let want = record.want(self.dial_fail_limit);
-        for set in self.sets.values_mut() {
+        for set in self.primary_sets.values_mut() {
             set.update(peer, !want);
         }
         self.delete_if_needed(peer);
@@ -172,9 +179,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .get_or_create(&metrics::Peer::new(peer))
             .try_set(self.context.current().epoch_millis());
 
-        // We may have to update the sets.
+        // We may have to update the primary sets.
         let want = record.want(self.dial_fail_limit);
-        for set in self.sets.values_mut() {
+        for set in self.primary_sets.values_mut() {
             set.update(peer, !want);
         }
     }
@@ -199,64 +206,103 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 .get_or_create(&metrics::Peer::new(&peer))
                 .inc();
 
-            // We may have to update the sets.
+            // We may have to update the primary sets.
             let want = record.want(self.dial_fail_limit);
-            for set in self.sets.values_mut() {
+            for set in self.primary_sets.values_mut() {
                 set.update(&peer, !want);
             }
             debug!(?peer, "updated peer record");
         }
     }
 
-    /// Stores a new peer set.
-    pub fn add_set(&mut self, index: u64, peers: OrderedSet<C>) -> bool {
+    /// Track new primary and secondary peer sets for the given index.
+    pub fn track(
+        &mut self,
+        index: u64,
+        primaries: OrderedSet<C>,
+        secondaries: OrderedSet<C>,
+    ) -> bool {
         // Check if peer set already exists
-        if self.sets.contains_key(&index) {
+        if self.primary_sets.contains_key(&index) {
             warn!(index, "peer set already exists");
             return false;
         }
 
         // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.sets.last_key_value() {
+        if let Some((last, _)) = self.primary_sets.last_key_value() {
             if index <= *last {
                 warn!(?index, ?last, "index must monotonically increase");
                 return false;
             }
         }
 
-        // Create and store new peer set
-        let mut set = Set::new(peers.clone());
-        for peer in peers.iter() {
-            let record = self.peers.entry(peer.clone()).or_insert_with(|| {
+        // Create and store new primary peer set.
+        let mut primary_set = Set::new(primaries.clone());
+        for primary in primaries.iter() {
+            let record = self.peers.entry(primary.clone()).or_insert_with(|| {
                 self.metrics.tracked.inc();
                 Record::unknown()
             });
-            record.increment();
-            set.update(peer, !record.want(self.dial_fail_limit));
+            record.increment_primary();
+            primary_set.update(primary, !record.want(self.dial_fail_limit));
         }
-        self.sets.insert(index, set);
+        self.primary_sets.insert(index, primary_set);
 
-        // Remove oldest entries if necessary
-        while self.sets.len() > self.max_sets {
-            let (index, set) = self.sets.pop_first().unwrap();
-            debug!(index, "removed oldest peer set");
-            set.into_iter().for_each(|peer| {
-                self.peers.get_mut(peer).unwrap().decrement();
-                self.delete_if_needed(peer);
+        // Create and store new secondary peer set.
+        for secondary in secondaries.iter() {
+            let record = self.peers.entry(secondary.clone()).or_insert_with(|| {
+                self.metrics.tracked.inc();
+                Record::unknown()
+            });
+            record.increment_secondary();
+        }
+        self.secondary_sets.insert(index, secondaries);
+
+        // Remove oldest tracked peer sets if necessary.
+        while self.primary_sets.len() > self.max_sets.get() {
+            let (primary_index, primary_set) = self.primary_sets.pop_first().unwrap();
+            let (secondary_index, secondary_set) = self.secondary_sets.pop_first().unwrap();
+            assert_eq!(primary_index, secondary_index);
+            debug!(index = primary_index, "removed oldest tracked peer sets");
+            primary_set.into_iter().for_each(|primary| {
+                self.peers.get_mut(primary).unwrap().decrement_primary();
+                self.delete_if_needed(primary);
+            });
+            secondary_set.iter().for_each(|secondary| {
+                self.peers.get_mut(secondary).unwrap().decrement_secondary();
+                self.delete_if_needed(secondary);
             });
         }
 
         true
     }
 
-    /// Gets a peer set by index.
+    /// Gets a primary peer set by index.
     pub fn get_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
-        self.sets.get(index).map(Deref::deref)
+        self.primary_sets.get(index).map(Deref::deref)
     }
 
-    /// Returns the latest peer set index.
+    /// Gets a secondary peer set by index.
+    pub fn get_secondary_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
+        self.secondary_sets.get(index)
+    }
+
+    /// Returns the latest tracked primary peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
-        self.sets.keys().last().copied()
+        self.primary_sets.keys().last().copied()
+    }
+
+    /// Returns a [`PeerSetUpdate`] for the latest tracked peer set, if any.
+    pub fn latest_update(&self) -> Option<PeerSetUpdate<C>> {
+        let index = self.latest_set_index()?;
+        Some(PeerSetUpdate {
+            index,
+            latest: TrackedPeers::new(
+                self.get_set(&index).cloned().unwrap(),
+                self.get_secondary_set(&index).cloned().unwrap_or_default(),
+            ),
+            all: self.all(),
+        })
     }
 
     /// Attempt to reserve a peer for the dialer.
@@ -276,7 +322,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns a [types::BitVec] for a random peer set.
     pub fn get_random_bit_vec(&mut self) -> Option<types::BitVec> {
-        let (&index, set) = self.sets.iter().choose(&mut self.context)?;
+        let (&index, set) = self.primary_sets.iter().choose(&mut self.context)?;
         Some(types::BitVec {
             index,
             bits: set.knowledge(),
@@ -293,7 +339,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to block a peer for the configured duration, updating the metrics accordingly.
     ///
     /// Peers can be blocked even if they don't have a record yet. The block will be applied
-    /// when they are added to a peer set via `add_set`.
+    /// when they are later tracked in a peer set.
     pub fn block(&mut self, peer: &C) {
         // Already blocked
         if self.is_blocked(peer) {
@@ -318,14 +364,22 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Getters ----------
 
-    /// Returns all peers that are part of at least one peer set.
-    pub fn tracked(&self) -> OrderedSet<C> {
-        self.peers
-            .iter()
-            .filter(|(_, r)| r.sets() > 0)
-            .map(|(k, _)| k.clone())
-            .try_collect()
-            .expect("HashMap keys are unique")
+    /// Returns all peers across all tracked primary and secondary peer sets.
+    pub fn all(&self) -> TrackedPeers<C> {
+        let mut primary = Vec::new();
+        let mut secondary = Vec::new();
+        for (k, record) in &self.peers {
+            if record.primary_sets() > 0 {
+                primary.push(k.clone());
+            }
+            if record.secondary_sets() > 0 {
+                secondary.push(k.clone());
+            }
+        }
+        TrackedPeers::new(
+            OrderedSet::from_iter_dedup(primary),
+            OrderedSet::from_iter_dedup(secondary),
+        )
     }
 
     /// Returns the sharable information for a given peer.
@@ -337,7 +391,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `None` if the bit vector is malformed.
     pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::Info<C>>> {
-        let Some(set) = self.sets.get(&bit_vec.index) else {
+        let Some(set) = self.primary_sets.get(&bit_vec.index) else {
             // Don't consider unknown indices as errors, just ignore them.
             debug!(index = bit_vec.index, "requested peer set not found");
             return Some(vec![]);
@@ -425,7 +479,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             // Update knowledge bitmaps
             if let Some(record) = self.peers.get(&peer) {
                 let want = record.want(self.dial_fail_limit);
-                for set in self.sets.values_mut() {
+                for set in self.primary_sets.values_mut() {
                     set.update(&peer, !want);
                 }
             }
@@ -505,7 +559,7 @@ mod tests {
     use crate::authenticated::{discovery::types, mailbox::UnboundedMailbox};
     use commonware_cryptography::{secp256r1::standard::PrivateKey, Signer};
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::{bitmap::BitMap, SystemTimeExt};
+    use commonware_utils::{bitmap::BitMap, ordered::Set as OrderedSet, SystemTimeExt};
     use std::net::SocketAddr;
 
     const NAMESPACE: &[u8] = b"test";
@@ -545,7 +599,7 @@ mod tests {
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -579,6 +633,51 @@ mod tests {
     }
 
     #[test]
+    fn test_secondary_sets_remain_tracked_until_eviction() {
+        let runtime = deterministic::Runner::default();
+        let signer = PrivateKey::from_seed(0);
+        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let (tx, _rx) = UnboundedMailbox::new();
+        let releaser = Releaser::new(tx);
+        let config = Config {
+            allow_private_ips: false,
+            allow_dns: true,
+            max_sets: commonware_utils::NZUsize!(2),
+            dial_fail_limit: 1,
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+        let primary_0 = PrivateKey::from_seed(1).public_key();
+        let primary_1 = PrivateKey::from_seed(2).public_key();
+        let primary_2 = PrivateKey::from_seed(3).public_key();
+        let secondary_0 = PrivateKey::from_seed(4).public_key();
+        let secondary_1 = PrivateKey::from_seed(5).public_key();
+
+        runtime.start(|context| async move {
+            let mut directory = Directory::init(context, vec![], my_info, config, releaser);
+
+            assert!(directory.track(
+                0,
+                [primary_0].try_into().unwrap(),
+                [secondary_0.clone()].try_into().unwrap(),
+            ));
+            assert!(directory.eligible(&secondary_0));
+
+            assert!(directory.track(
+                1,
+                [primary_1].try_into().unwrap(),
+                [secondary_1.clone()].try_into().unwrap(),
+            ));
+            assert!(directory.eligible(&secondary_0));
+            assert!(directory.eligible(&secondary_1));
+
+            assert!(directory.track(2, [primary_2].try_into().unwrap(), OrderedSet::default()));
+            assert!(!directory.peers.contains_key(&secondary_0));
+            assert!(directory.eligible(&secondary_1));
+        });
+    }
+
+    #[test]
     fn test_block_nonexistent_peer_then_add_to_set() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
@@ -590,7 +689,7 @@ mod tests {
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -621,18 +720,18 @@ mod tests {
                 "Peer should not be in peers yet"
             );
 
-            // Now add the peer to a set
+            // Now track the peer in a set
             let peer_set: OrderedSet<_> = [unknown_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
 
             // Peer should now be in peers and blocked (via PrioritySet)
             assert!(
                 directory.peers.contains_key(&unknown_pk),
-                "Peer should be in peers after add_set"
+                "Peer should be in peers after tracking"
             );
             assert!(
                 directory.blocked.contains(&unknown_pk),
-                "Peer should be blocked after add_set"
+                "Peer should be blocked after tracking"
             );
 
             // Peer should not be eligible
@@ -675,7 +774,7 @@ mod tests {
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration: Duration::from_secs(100),
@@ -686,7 +785,7 @@ mod tests {
         runtime.start(|context| async move {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
             let peer_set = [pk_1.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
 
             let _reservation = directory.listen(&pk_1).expect("peer should reserve");
             let connected_at: i64 = context.current().epoch_millis().try_into().unwrap();
@@ -720,7 +819,7 @@ mod tests {
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -732,7 +831,7 @@ mod tests {
             // Register a peer
             let peer_set: OrderedSet<_> =
                 [registered_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
             assert!(
                 directory
                     .metrics
@@ -819,7 +918,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -830,7 +929,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
 
             // Block the peer
             directory.block(&peer_pk);
@@ -885,7 +984,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -896,7 +995,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
 
             // Block the peer
             directory.block(&peer_pk);
@@ -960,7 +1059,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 1, // Only keep 1 set so we can evict peers
+            max_sets: commonware_utils::NZUsize!(1), // Only keep 1 set so we can evict peers
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -981,7 +1080,7 @@ mod tests {
 
             // Add pk_1 and block it
             let peer_set: OrderedSet<_> = [pk_1.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
             directory.block(&pk_1);
             assert!(directory.blocked.contains(&pk_1));
             assert!(
@@ -996,7 +1095,7 @@ mod tests {
             // Add a new set that evicts pk_1 (max_sets=1)
             // The blocked metric should remain since the block persists
             let peer_set_2: OrderedSet<_> = [pk_2.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(1, peer_set_2);
+            directory.track(1, peer_set_2, OrderedSet::default());
             assert!(
                 !directory.peers.contains_key(&pk_1),
                 "pk_1 should be removed"
@@ -1012,7 +1111,7 @@ mod tests {
 
             // Re-add pk_1 - should still be blocked because block persists
             let peer_set_3: OrderedSet<_> = [pk_1.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(2, peer_set_3);
+            directory.track(2, peer_set_3, OrderedSet::default());
             assert!(
                 directory.blocked.contains(&pk_1),
                 "Re-added pk_1 should still be blocked"
@@ -1060,7 +1159,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1074,7 +1173,7 @@ mod tests {
                 .into_iter()
                 .try_collect()
                 .unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
             assert_eq!(directory.blocked(), 0);
 
             // Block all three peers
@@ -1141,7 +1240,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1152,7 +1251,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
 
             // Update with peer info so it has a dialable address
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
@@ -1198,7 +1297,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1209,7 +1308,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
 
             // Update with peer info
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
@@ -1254,7 +1353,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1265,7 +1364,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
 
             // Peer should be eligible before blocking
             assert!(
@@ -1307,7 +1406,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1318,7 +1417,7 @@ mod tests {
 
             // Add peer to a set
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
 
             // Update with peer info
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
@@ -1375,7 +1474,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1441,7 +1540,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(100),
             block_duration,
@@ -1455,7 +1554,7 @@ mod tests {
                 .into_iter()
                 .try_collect()
                 .unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
 
             // Update with peer info for both (use timestamp 0 to pass the epoch_millis filter)
             let peer_info_1 = types::Info::sign(&peer_signer_1, NAMESPACE, test_socket(), 0);
@@ -1520,7 +1619,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
@@ -1530,7 +1629,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
@@ -1572,7 +1671,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: cooldown,
             block_duration: Duration::from_secs(100),
@@ -1582,7 +1681,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
@@ -1613,7 +1712,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(200),
             block_duration: Duration::from_secs(100),
@@ -1641,7 +1740,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(200),
             block_duration,
@@ -1651,7 +1750,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
@@ -1678,7 +1777,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(200),
             block_duration,
@@ -1688,7 +1787,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
@@ -1729,7 +1828,7 @@ mod tests {
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
-            max_sets: 3,
+            max_sets: commonware_utils::NZUsize!(3),
             dial_fail_limit: 1,
             peer_connection_cooldown: Duration::from_millis(200),
             block_duration,
@@ -1739,7 +1838,7 @@ mod tests {
             let mut directory = Directory::init(context.clone(), vec![], my_info, config, releaser);
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
-            directory.add_set(0, peer_set);
+            directory.track(0, peer_set, OrderedSet::default());
             let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 

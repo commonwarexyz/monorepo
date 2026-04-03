@@ -348,7 +348,8 @@ where
             // Peers exist but all sends failed - use retry timeout
             self.context.current() + self.retry_timeout
         } else {
-            // No eligible peers - wait for external changes
+            // No eligible peers yet. The engine still keeps polling; this just defers the next
+            // outbound attempt until some external change (like a peer set update) clears it.
             self.context.current().saturating_add_ext(Duration::MAX)
         });
     }
@@ -461,6 +462,10 @@ where
     /// "no data" responses (peer might get data later). On valid data response, caller
     /// should call `clear_targets()`. On invalid data, caller should block the peer which
     /// removes them from all target sets.
+    ///
+    /// Note that this matches responses against the peer a request was already sent to. A later
+    /// `reconcile()` call may remove that peer from the candidate pool for future sends, but it
+    /// does not retroactively invalidate the in-flight request.
     pub fn pop_by_id(&mut self, id: ID, peer: &P, has_response: bool) -> Option<Key> {
         // Confirm ID exists and is for the peer
         let req = self.requests.get(&id)?;
@@ -491,7 +496,10 @@ where
         Some(req.key)
     }
 
-    /// Reconciles the list of peers that can be used to fetch data.
+    /// Reconciles the list of peers that can be used to fetch future requests.
+    ///
+    /// Active requests are intentionally preserved. A peer-set update is treated as a cutover for
+    /// new outbound sends, not as a cancellation of responses already in flight.
     pub fn reconcile(&mut self, keep: &[P]) {
         self.participants.reconcile(keep, self.initial.as_millis());
 

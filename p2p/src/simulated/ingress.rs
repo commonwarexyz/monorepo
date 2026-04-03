@@ -1,5 +1,8 @@
 use super::{Error, Receiver, Sender};
-use crate::{authenticated::UnboundedMailbox, Address, Channel, PeerSetSubscription};
+use crate::{
+    authenticated::UnboundedMailbox, Address, AddressableTrackedPeers, Channel,
+    PeerSetSubscription, TrackedPeers,
+};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Quota};
 use commonware_utils::{
@@ -19,7 +22,7 @@ pub enum Message<P: PublicKey, E: Clock> {
     },
     Track {
         id: u64,
-        peers: Set<P>,
+        peers: TrackedPeers<P>,
     },
     PeerSet {
         id: u64,
@@ -243,7 +246,7 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
     }
 
     /// Set the peers for a given id.
-    fn track(&self, id: u64, peers: Set<P>) {
+    fn track(&self, id: u64, peers: TrackedPeers<P>) {
         self.sender.0.send_lossy(Message::Track { id, peers });
     }
 
@@ -304,8 +307,11 @@ impl<P: PublicKey, E: Clock> crate::Provider for Manager<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> crate::Manager for Manager<P, E> {
-    async fn track(&mut self, id: u64, peers: Set<Self::PublicKey>) {
-        self.oracle.track(id, peers);
+    async fn track<R>(&mut self, id: u64, peers: R)
+    where
+        R: Into<TrackedPeers<Self::PublicKey>> + Send,
+    {
+        self.oracle.track(id, peers.into());
     }
 }
 
@@ -350,9 +356,16 @@ impl<P: PublicKey, E: Clock> crate::Provider for SocketManager<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
-    async fn track(&mut self, id: u64, peers: Map<Self::PublicKey, Address>) {
+    async fn track<R>(&mut self, id: u64, peers: R)
+    where
+        R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send,
+    {
         // Ignore all addresses (simulated network doesn't use them)
-        self.oracle.track(id, peers.into_keys());
+        let peers = peers.into();
+        self.oracle.track(
+            id,
+            TrackedPeers::new(peers.primary.into_keys(), peers.secondary.into_keys()),
+        );
     }
 
     async fn overwrite(&mut self, _peers: Map<Self::PublicKey, Address>) {

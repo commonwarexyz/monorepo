@@ -35,6 +35,25 @@
 //! These modifications only apply to in-progress fetches. Once a fetch completes (success, cancel,
 //! or blocked peer), the targets for that key are cleared automatically.
 //!
+//! # Peer Selection
+//!
+//! Outbound fetches are reconciled against the latest primary peer set only. Retaining older peer
+//! sets in the provider's overlap window keeps those peers connected at the transport layer, but
+//! does not keep them eligible for new resolver traffic.
+//!
+//! Callers that still expect a key to be fetchable after a peer-set cutover must ensure the latest
+//! primary set can serve it. Overlap-only peers are treated as disposable continuity peers, not as
+//! authorities for new backfill or historical fetches after reconfiguration.
+//!
+//! This restriction applies when choosing peers for new outbound requests. If a request was
+//! already sent before a peer-set update removes that peer from `latest.primary`, its in-flight
+//! response is still accepted. Peer-set updates are therefore a routing cutover for future sends,
+//! not a retroactive invalidation of responses already on the wire.
+//!
+//! [`Resolver::fetch_targeted`](crate::Resolver::fetch_targeted) can narrow the current primary set
+//! further, but it does not bypass that latest-primary filter. Explicit targets that are no longer
+//! in the latest primary set are ignored until they become primary again.
+//!
 //! # Performance Considerations
 //!
 //! The peer supports arbitrarily many concurrent fetch requests, but resource usage generally
@@ -81,10 +100,10 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
         simulated::{Link, Network, Oracle, Receiver, Sender},
-        Blocker, Manager, Provider,
+        Blocker, Manager as _, Provider, TrackedPeers,
     };
     use commonware_runtime::{count_running_tasks, deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{non_empty_vec, NZU32};
+    use commonware_utils::{non_empty_vec, ordered::Set, NZU32};
     use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
     const MAILBOX_SIZE: usize = 1024;
@@ -137,7 +156,7 @@ mod tests {
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
-                tracked_peer_sets: Some(3),
+                tracked_peer_sets: commonware_utils::NZUsize!(3),
             },
         );
         network.start();
@@ -148,7 +167,9 @@ mod tests {
             .collect();
         let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
         let mut manager = oracle.manager();
-        manager.track(0, peers.clone().try_into().unwrap()).await;
+        manager
+            .track(0, Set::try_from(peers.clone()).unwrap())
+            .await;
 
         let mut connections = Vec::new();
         for peer in &peers {
@@ -411,6 +432,94 @@ mod tests {
                 Event::Success(_, _) => {
                     panic!("Fetch should have failed due to no peers")
                 }
+            }
+        });
+    }
+
+    /// Tests that fetches issued before the first peer set arrives stay pending and complete once
+    /// the initial update is tracked.
+    #[test_traced]
+    fn test_fetch_before_initial_peer_set_waits_for_update() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut schemes = [1_u64, 2]
+                .into_iter()
+                .map(PrivateKey::from_seed)
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+
+            let mut connections = Vec::new();
+            for peer in &peers {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(0, Quota::per_second(RATE_LIMIT))
+                    .await
+                    .unwrap();
+                connections.push((sender, receiver));
+            }
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(2);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 2"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            mailbox1.fetch(key.clone()).await;
+
+            select! {
+                event = cons_out1.recv() => {
+                    panic!("fetch should wait for the initial peer set, got {event:?}");
+                },
+                _ = context.sleep(Duration::from_millis(200)) => {}
+            };
+
+            oracle
+                .manager()
+                .track(0, Set::try_from(peers.clone()).unwrap())
+                .await;
+
+            let event = cons_out1.recv().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, Bytes::from("data for key 2"));
+                }
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
             }
         });
     }
@@ -1728,6 +1837,440 @@ mod tests {
                     assert_eq!(value, data);
                 }
                 Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_uses_primary_peers_only() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let schemes: Vec<PrivateKey> = [1u64, 2, 3]
+                .into_iter()
+                .map(PrivateKey::from_seed)
+                .collect();
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+            let mut schemes = schemes;
+
+            let mut connections = Vec::new();
+            for peer in &peers {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(0, Quota::per_second(RATE_LIMIT))
+                    .await
+                    .unwrap();
+                connections.push((sender, receiver));
+            }
+
+            // Topology: peer 1 (requester) linked to peers 2 and 3.
+            // Peer 2 is primary (no data), peer 3 is secondary (has data).
+            // Fetch should only query primary peers, so the request must time out.
+            let mut oracle = oracle;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            oracle
+                .manager()
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        Set::try_from([peers[1].clone()]).unwrap(),
+                        Set::try_from([peers[2].clone()]).unwrap(),
+                    ),
+                )
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            let key = Key(1);
+            let data = Bytes::from("secondary only data");
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            // Peer 1: the requester, has no data.
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            // Peer 2: primary, has no data.
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                Producer::default(),
+            );
+
+            // Peer 3: secondary, has the data. Should not be queried.
+            let mut prod3 = Producer::default();
+            prod3.insert(key.clone(), data);
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            );
+
+            // Fetch should time out because the only peer with data (peer 3)
+            // is secondary and won't be queried.
+            mailbox1.fetch(key.clone()).await;
+
+            select! {
+                event = cons_out1.recv() => {
+                    panic!("fetch should not succeed from a secondary peer, got: {event:?}");
+                },
+                _ = context.sleep(Duration::from_secs(2)) => {},
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_uses_latest_primary_set_only() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: commonware_utils::NZUsize!(2),
+                },
+            );
+            network.start();
+
+            let schemes: Vec<PrivateKey> = [1u64, 2, 3]
+                .into_iter()
+                .map(PrivateKey::from_seed)
+                .collect();
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+            let mut schemes = schemes;
+
+            let mut connections = Vec::new();
+            for peer in &peers {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(0, Quota::per_second(RATE_LIMIT))
+                    .await
+                    .unwrap();
+                connections.push((sender, receiver));
+            }
+
+            let mut oracle = oracle;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            // Keep the requester tracked across the cutover so the fetch path itself remains
+            // active, while peer 2 is retained only through the overlap window after peer 3
+            // becomes the newest primary set.
+            oracle
+                .manager()
+                .track(
+                    0,
+                    Set::try_from([peers[0].clone(), peers[1].clone()]).unwrap(),
+                )
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            let key = Key(7);
+            let targeted_key = Key(8);
+            let data = Bytes::from("old primary data");
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            // Peer 1: requester.
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            // Peer 2: old primary, still retained in `all.primary`, has the data.
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+            prod2.insert(targeted_key.clone(), data);
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            // Peer 3: latest primary, has no data.
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                Producer::default(),
+            );
+
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Track peer 3 as the latest primary while keeping the requester tracked. Peer 2
+            // remains in the provider's overlap window (`all.primary`), but new resolver traffic
+            // should use only `latest.primary`.
+            oracle
+                .manager()
+                .track(
+                    1,
+                    Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
+                )
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            mailbox1.fetch(key).await;
+
+            select! {
+                event = cons_out1.recv() => {
+                    panic!(
+                        "fetch should not succeed from an old primary retained only in the overlap window, got: {event:?}"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            }
+
+            // Explicit targets still respect the latest-primary filter.
+            mailbox1
+                .fetch_targeted(targeted_key, non_empty_vec![peers[1].clone()])
+                .await;
+
+            select! {
+                event = cons_out1.recv() => {
+                    panic!(
+                        "targeted fetch should not bypass the latest-primary filter, got: {event:?}"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_after_cutover_relies_on_latest_primary_history() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: commonware_utils::NZUsize!(2),
+                },
+            );
+            network.start();
+
+            let schemes: Vec<PrivateKey> = [1u64, 2, 3]
+                .into_iter()
+                .map(PrivateKey::from_seed)
+                .collect();
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+            let mut schemes = schemes;
+
+            let mut connections = Vec::new();
+            for peer in &peers {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(0, Quota::per_second(RATE_LIMIT))
+                    .await
+                    .unwrap();
+                connections.push((sender, receiver));
+            }
+
+            let mut oracle = oracle;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            // Keep the requester tracked across the cutover while peer 2 remains connected only
+            // through the overlap window after the latest primary advances to peer 3.
+            oracle
+                .manager()
+                .track(
+                    0,
+                    Set::try_from([peers[0].clone(), peers[1].clone()]).unwrap(),
+                )
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            let key = Key(9);
+            let invalid_history = Bytes::from("stale overlap history");
+            let valid_history = Bytes::from("latest primary history");
+
+            let (mut cons1, mut cons_out1) = Consumer::new();
+            cons1.add_expected(key.clone(), valid_history.clone());
+
+            // Peer 1: requester.
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            // Peer 2: old primary retained only via overlap. If queried, it would be blocked for
+            // serving invalid history.
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), invalid_history);
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            // Peer 3: latest primary and the only peer that should satisfy the fetch.
+            let mut prod3 = Producer::default();
+            prod3.insert(key.clone(), valid_history.clone());
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod3,
+            );
+
+            context.sleep(Duration::from_millis(100)).await;
+
+            oracle
+                .manager()
+                .track(
+                    1,
+                    Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
+                )
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            mailbox1.fetch(key.clone()).await;
+
+            let event = cons_out1.recv().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, valid_history);
+                }
+                Event::Failed(_) => panic!("fetch failed unexpectedly"),
+            }
+
+            assert!(
+                oracle.blocked().await.unwrap().is_empty(),
+                "overlap-only peers should not be queried for post-cutover history"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_secondary_peer_requests_are_served() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+
+            // Topology: peer 1 is primary (has data), peer 2 is secondary (requester).
+            // Verifies that a primary peer serves requests from secondary peers
+            // (i.e. secondary peers can't fetch via broadcast, but their direct
+            // requests are still answered).
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            oracle
+                .manager()
+                .track(
+                    1,
+                    TrackedPeers::new(
+                        Set::try_from([peers[0].clone()]).unwrap(),
+                        Set::try_from([peers[1].clone()]).unwrap(),
+                    ),
+                )
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            let key = Key(9);
+            let data = Bytes::from("served to secondary");
+
+            // Peer 1: primary, has the data.
+            let mut prod1 = Producer::default();
+            prod1.insert(key.clone(), data.clone());
+
+            let scheme = schemes.remove(0);
+            let _mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod1,
+            );
+
+            // Peer 2: secondary, uses fetch_targeted to explicitly request from peer 1.
+            let (mut cons2, mut cons_out2) = Consumer::new();
+            cons2.add_expected(key.clone(), data.clone());
+            let scheme = schemes.remove(0);
+            let mut mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons2,
+                Producer::default(),
+            );
+
+            mailbox2
+                .fetch_targeted(key.clone(), non_empty_vec![peers[0].clone()])
+                .await;
+
+            let event = cons_out2.recv().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, data);
+                }
+                Event::Failed(_) => panic!("secondary peer request should have been served"),
             }
         });
     }

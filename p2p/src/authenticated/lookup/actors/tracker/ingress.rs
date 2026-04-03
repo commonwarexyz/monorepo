@@ -7,7 +7,7 @@ use crate::{
         Mailbox,
     },
     types::Address,
-    Ingress, PeerSetSubscription,
+    AddressableTrackedPeers, Ingress, PeerSetSubscription,
 };
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
@@ -21,7 +21,10 @@ use std::net::IpAddr;
 pub enum Message<C: PublicKey> {
     // ---------- Used by oracle ----------
     /// Register a peer set at a given index.
-    Register { index: u64, peers: Map<C, Address> },
+    Register {
+        index: u64,
+        peers: AddressableTrackedPeers<C>,
+    },
 
     /// Update addresses for multiple peers without creating a new peer set.
     Overwrite { peers: Map<C, Address> },
@@ -227,8 +230,14 @@ impl<C: PublicKey> crate::Provider for Oracle<C> {
 }
 
 impl<C: PublicKey> crate::AddressableManager for Oracle<C> {
-    async fn track(&mut self, index: u64, peers: Map<Self::PublicKey, Address>) {
-        self.sender.0.send_lossy(Message::Register { index, peers });
+    async fn track<R>(&mut self, index: u64, peers: R)
+    where
+        R: Into<AddressableTrackedPeers<Self::PublicKey>> + Send,
+    {
+        self.sender.0.send_lossy(Message::Register {
+            index,
+            peers: peers.into(),
+        });
     }
 
     async fn overwrite(&mut self, peers: Map<Self::PublicKey, Address>) {

@@ -7,12 +7,16 @@ use commonware_macros::select_loop;
 use commonware_p2p::{
     simulated::{Config, Link, Network, Receiver, Sender},
     utils::codec::{wrap, WrappedReceiver, WrappedSender},
+    Manager as _,
 };
 use commonware_runtime::{
     deterministic, BufferPool, BufferPooler, Clock, Handle, Metrics, Network as RNetwork, Quota,
     Runner, Spawner,
 };
-use commonware_utils::channel::{mpsc, oneshot};
+use commonware_utils::{
+    channel::{mpsc, oneshot},
+    ordered::Set,
+};
 use estimator::{
     calculate_proposer_region, calculate_threshold, count_peers, crate_version, get_latency_data,
     mean, median, parse_task, std_dev, Command, Distribution, Latencies, RegionConfig,
@@ -300,7 +304,7 @@ async fn run_simulation_logic<C: Spawner + BufferPooler + Clock + Metrics + RNet
         Config {
             max_size: u32::MAX,
             disconnect_on_block: true,
-            tracked_peer_sets: None,
+            tracked_peer_sets: commonware_utils::NZUsize!(1),
         },
     );
     network.start();
@@ -369,6 +373,18 @@ async fn setup_network_identities<C: Clock>(
             .await
             .unwrap();
     }
+
+    oracle
+        .manager()
+        .track(
+            0,
+            Set::from_iter_dedup(
+                identities
+                    .iter()
+                    .map(|(identity, _, _, _)| identity.clone()),
+            ),
+        )
+        .await;
 
     identities
 }

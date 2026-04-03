@@ -310,7 +310,7 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut oracle = setup_network(context.clone(), None);
+                let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
                 let Fixture {
                     participants,
                     schemes,
@@ -388,7 +388,7 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut oracle = setup_network(context.clone(), None);
+                let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
                 let Fixture {
                     participants,
                     schemes,
@@ -521,7 +521,7 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut oracle = setup_network(context.clone(), None);
+                let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
                 let Fixture {
                     participants,
                     schemes,
@@ -656,7 +656,7 @@ mod tests {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut oracle = setup_network(context.clone(), None);
+                let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
                 let Fixture {
                     participants,
                     schemes,

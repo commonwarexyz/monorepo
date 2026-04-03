@@ -104,7 +104,7 @@ pub struct Config<C: Signer> {
     /// been evicted and/or to communicate with peers in a future
     /// set (if we, for example, are trying to do a reshare of a threshold
     /// key).
-    pub tracked_peer_sets: usize,
+    pub tracked_peer_sets: NonZeroUsize,
 
     /// Maximum number of peers to track in a single peer set.
     ///
@@ -162,7 +162,7 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(64)),
             dial_frequency: Duration::from_secs(1),
             dial_fail_limit: 2,
-            tracked_peer_sets: 4,
+            tracked_peer_sets: NZUsize!(4),
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(50),
             peer_gossip_max_count: 32,
@@ -205,7 +205,7 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(128)),
             dial_frequency: Duration::from_millis(500),
             dial_fail_limit: 1,
-            tracked_peer_sets: 4,
+            tracked_peer_sets: NZUsize!(4),
             max_peer_set_size: 1 << 16, // 2^16
             gossip_bit_vec_frequency: Duration::from_secs(5),
             peer_gossip_max_count: 32,
@@ -241,7 +241,7 @@ impl<C: Signer> Config<C> {
             allowed_handshake_rate_per_subnet: Quota::per_second(NZU32!(256)),
             dial_frequency: Duration::from_millis(200),
             dial_fail_limit: 1,
-            tracked_peer_sets: 4,
+            tracked_peer_sets: NZUsize!(4),
             max_peer_set_size: 1 << 8, // 2^8
             gossip_bit_vec_frequency: Duration::from_secs(1),
             peer_gossip_max_count: 32,

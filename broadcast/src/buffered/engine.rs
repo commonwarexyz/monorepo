@@ -90,6 +90,9 @@ where
     /// the message once.
     counts: BTreeMap<M::Digest, usize>,
 
+    /// Latest primary peer set allowed to keep buffered messages resident.
+    latest_primary_peers: Set<P>,
+
     ////////////////////////////////////////
     // Metrics
     ////////////////////////////////////////
@@ -124,6 +127,7 @@ where
             deques: BTreeMap::new(),
             items: BTreeMap::new(),
             counts: BTreeMap::new(),
+            latest_primary_peers: Set::default(),
             peer_provider: cfg.peer_provider,
             metrics,
         };
@@ -147,6 +151,9 @@ where
             network.0,
             network.1,
         );
+        // Subscribe immediately, but keep draining mailbox and network traffic even if no peer set
+        // has been tracked yet. Remote senders are gated at insertion time, so polling here avoids
+        // unnecessary backpressure without making pre-peer-set traffic resident.
         let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {
@@ -182,6 +189,13 @@ where
                     self.handle_get(digest, responder);
                 }
             },
+            Some(update) = peer_set_subscription.recv() else {
+                debug!("peer set subscription closed");
+                break;
+            } => {
+                // Evict by latest primary only; see buffered module docs.
+                self.update_latest_primary_peers(update.latest.primary);
+            },
             // Handle incoming messages
             msg = receiver.recv() => {
                 // Error handling
@@ -210,12 +224,6 @@ where
                     .inc();
                 self.handle_network(peer, msg);
             },
-            Some((_, _, tracked_peers)) = peer_set_subscription.recv() else {
-                debug!("peer set subscription closed");
-                break;
-            } => {
-                self.evict_untracked_peers(&tracked_peers);
-            },
         }
     }
 
@@ -232,7 +240,8 @@ where
         responder: oneshot::Sender<Vec<P>>,
     ) {
         // Store the message, continue even if it was already stored
-        let _ = self.insert_message(self.public_key.clone(), msg.clone());
+        let digest = msg.digest();
+        self.insert_message(self.public_key.clone(), digest, msg.clone());
 
         // Broadcast the message to the network
         let sent_to = sender
@@ -271,13 +280,26 @@ where
 
     /// Handles a message that was received from a peer.
     fn handle_network(&mut self, peer: P, msg: M) {
-        if !self.insert_message(peer.clone(), msg) {
-            debug!(?peer, "message already stored");
-            self.metrics.receive.inc(Status::Dropped);
+        let digest = msg.digest();
+        let tracked =
+            peer == self.public_key || self.latest_primary_peers.position(&peer).is_some();
+        let duplicate = tracked
+            && self
+                .deques
+                .get(&peer)
+                .is_some_and(|deque| deque.iter().any(|cached| cached == &digest));
+
+        if self.insert_message(peer.clone(), digest, msg) {
+            self.metrics.receive.inc(Status::Success);
             return;
         }
 
-        self.metrics.receive.inc(Status::Success);
+        if duplicate {
+            debug!(?peer, "message already stored");
+        } else {
+            debug!(?peer, "message from peer outside latest.primary not cached");
+        }
+        self.metrics.receive.inc(Status::Dropped);
     }
 
     ////////////////////////////////////////
@@ -286,16 +308,18 @@ where
 
     /// Inserts a message into the cache.
     ///
-    /// Returns `true` if the message was inserted, `false` if it was already present.
-    /// Updates the deque, item count, and message cache, potentially evicting an old message.
-    fn insert_message(&mut self, peer: P, msg: M) -> bool {
-        let digest = msg.digest();
-
+    /// Waiters are notified even when a sender is no longer eligible to keep a
+    /// buffered cache entry resident.
+    fn insert_message(&mut self, peer: P, digest: M::Digest, msg: M) -> bool {
         // Send the message to the waiters, if any
         if let Some(waiters) = self.waiters.remove(&digest) {
             for waiter in waiters {
                 self.respond_subscribe(waiter.responder, msg.clone());
             }
+        }
+
+        if peer != self.public_key && self.latest_primary_peers.position(&peer).is_none() {
+            return false;
         }
 
         // Get the relevant deque for the peer
@@ -339,17 +363,16 @@ where
         true
     }
 
-    fn evict_untracked_peers(&mut self, tracked_peers: &Set<P>) {
-        let tracked = tracked_peers.as_ref();
-        for (peer, deque) in self
-            .deques
-            .extract_if(.., |peer, _| !tracked.contains(peer))
-        {
+    fn update_latest_primary_peers(&mut self, peers: Set<P>) {
+        for (peer, deque) in self.deques.extract_if(.., |peer, _| {
+            peer != &self.public_key && peers.position(peer).is_none()
+        }) {
             debug!(?peer, digests = deque.len(), "evicting disconnected peer");
             for digest in deque {
                 decrement_digest_refcount(&mut self.counts, &mut self.items, &digest);
             }
         }
+        self.latest_primary_peers = peers;
     }
 
     ////////////////////////////////////////

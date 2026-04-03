@@ -161,6 +161,9 @@ impl<
             network.0,
             network.1,
         );
+        // Subscribe immediately, but do not stall startup waiting for the first peer set. Pending
+        // fetches park inside the fetcher until reconcile() installs eligible peers, while the
+        // actor continues draining mailbox and network traffic.
         let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {
@@ -195,15 +198,16 @@ impl<
                 self.serves.cancel_all();
             },
             // Handle peer set updates
-            Some((id, _, all)) = peer_set_subscription.recv() else {
+            Some(update) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 return;
             } => {
-                // Instead of directing our requests to exclusively the latest set (which may still be syncing, we
-                // reconcile with all tracked peers).
-                if self.last_peer_set_id < Some(id) {
-                    self.last_peer_set_id = Some(id);
-                    self.fetcher.reconcile(all.as_ref());
+                if self.last_peer_set_id < Some(update.index) {
+                    self.last_peer_set_id = Some(update.index);
+                    // Only `latest.primary` participates in future outbound fetch selection; see
+                    // `crate::p2p` peer selection docs. Requests already in flight are left alone
+                    // and may still complete from the peer they were sent to.
+                    self.fetcher.reconcile(update.latest.primary.as_ref());
                 }
             },
             // Handle active deadline

@@ -111,7 +111,7 @@ fn fuzz(input: FuzzInput) {
     let p2p_cfg = simulated::Config {
         max_size: MAX_MSG_SIZE,
         disconnect_on_block: false,
-        tracked_peer_sets: None,
+        tracked_peer_sets: commonware_utils::NZUsize!(1),
     };
 
     let executor = deterministic::Runner::seeded(input.seed);
@@ -124,7 +124,12 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Create the simulated network and oracle for controlling it
-        let (network, oracle) = simulated::Network::new(context.with_label("network"), p2p_cfg);
+        let (network, oracle) = simulated::Network::new_with_primary_peers(
+            context.with_label("network"),
+            p2p_cfg,
+            peer_pks.iter().cloned(),
+        )
+        .await;
         let _network_handle = network.start();
 
         // Track registered channels: (peer_idx, channel_id) -> (sender, receiver)

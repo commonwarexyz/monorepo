@@ -213,22 +213,23 @@ async fn setup_network<P: simplex::Simplex>(
     Vec<P::Scheme>,
     HashMap<Ed25519PublicKey, NetworkChannels>,
 ) {
-    let (network, mut oracle) = Network::new(
-        context.with_label("network"),
-        NetworkConfig {
-            max_size: 1024 * 1024,
-            disconnect_on_block: false,
-            tracked_peer_sets: None,
-        },
-    );
-    network.start();
-
     let Fixture {
         participants,
         schemes,
         verifier: _,
         ..
     } = P::fixture(context, NAMESPACE, input.configuration.n);
+    let (network, mut oracle) = Network::new_with_primary_peers(
+        context.with_label("network"),
+        NetworkConfig {
+            max_size: 1024 * 1024,
+            disconnect_on_block: false,
+            tracked_peer_sets: commonware_utils::NZUsize!(1),
+        },
+        participants.clone(),
+    )
+    .await;
+    network.start();
 
     let registrations = register(&mut oracle, &participants).await;
 
