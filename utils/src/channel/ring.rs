@@ -43,6 +43,17 @@ use thiserror::Error;
 #[error("channel closed")]
 pub struct ChannelClosed;
 
+/// Error returned by [`Receiver::try_recv`].
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum TryRecvError {
+    /// The channel currently has no buffered items, but senders still exist.
+    #[error("channel empty")]
+    Empty,
+    /// The channel is empty and all senders have been dropped.
+    #[error("channel closed")]
+    Disconnected,
+}
+
 #[derive(Debug)]
 struct Shared<T: Send + Sync> {
     buffer: VecDeque<T>,
@@ -162,6 +173,25 @@ impl<T: Send + Sync> Sink<T> for Sender<T> {
 #[derive(Debug)]
 pub struct Receiver<T: Send + Sync> {
     shared: Arc<Mutex<Shared<T>>>,
+}
+
+impl<T: Send + Sync> Receiver<T> {
+    /// Receives the next item from the channel.
+    pub async fn recv(&mut self) -> Option<T> {
+        futures::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
+    }
+
+    /// Attempts to receive an item without waiting.
+    pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        let mut shared = self.shared.lock();
+        if let Some(item) = shared.buffer.pop_front() {
+            return Ok(item);
+        }
+        if shared.sender_count == 0 {
+            return Err(TryRecvError::Disconnected);
+        }
+        Err(TryRecvError::Empty)
+    }
 }
 
 impl<T: Send + Sync> Stream for Receiver<T> {
