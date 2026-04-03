@@ -217,9 +217,11 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
     }
 
+    /// Primary and secondary peer sets grouped together.
+    pub type PeerSets<P> = (Set<P>, Set<P>);
+
     /// Alias for the subscription type returned by [`Provider::subscribe`].
-    pub type PeerSetSubscription<P> =
-        mpsc::UnboundedReceiver<(u64, (Set<P>, Set<P>), (Set<P>, Set<P>))>;
+    pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<(u64, PeerSets<P>, PeerSets<P>)>;
 
     /// Primary and secondary peers registered together for [`Manager::track`].
     #[derive(Clone, Debug)]

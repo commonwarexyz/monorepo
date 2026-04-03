@@ -1,6 +1,6 @@
 //! Utility functions for exchanging messages with many peers.
 
-use crate::Provider;
+use crate::{PeerSets, Provider};
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
     channel::{
@@ -22,7 +22,7 @@ pub struct StaticProvider<P: PublicKey> {
     id: u64,
     peers: Set<P>,
     #[allow(clippy::type_complexity)]
-    senders: Vec<UnboundedSender<(u64, (Set<P>, Set<P>), (Set<P>, Set<P>))>>,
+    senders: Vec<UnboundedSender<(u64, PeerSets<P>, PeerSets<P>)>>,
 }
 
 impl<P: PublicKey> StaticProvider<P> {
@@ -44,7 +44,7 @@ impl<P: PublicKey> Provider for StaticProvider<P> {
         Some(self.peers.clone())
     }
 
-    async fn subscribe(&mut self) -> UnboundedReceiver<(u64, (Set<P>, Set<P>), (Set<P>, Set<P>))> {
+    async fn subscribe(&mut self) -> UnboundedReceiver<(u64, PeerSets<P>, PeerSets<P>)> {
         let (sender, receiver) = mpsc::unbounded_channel();
         sender.send_lossy((
             self.id,

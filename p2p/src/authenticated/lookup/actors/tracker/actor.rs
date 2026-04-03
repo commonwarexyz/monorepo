@@ -3,10 +3,13 @@ use super::{
     ingress::{Message, Oracle},
     Config,
 };
-use crate::authenticated::{
-    lookup::actors::{peer, tracker::ingress::Releaser},
-    mailbox::UnboundedMailbox,
-    Mailbox,
+use crate::{
+    authenticated::{
+        lookup::actors::{peer, tracker::ingress::Releaser},
+        mailbox::UnboundedMailbox,
+        Mailbox,
+    },
+    PeerSets,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
@@ -52,13 +55,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
 
     /// Subscribers to peer set updates.
     #[allow(clippy::type_complexity)]
-    subscribers: Vec<
-        mpsc::UnboundedSender<(
-            u64,
-            (Set<C::PublicKey>, Set<C::PublicKey>),
-            (Set<C::PublicKey>, Set<C::PublicKey>),
-        )>,
-    >,
+    subscribers: Vec<mpsc::UnboundedSender<(u64, PeerSets<C::PublicKey>, PeerSets<C::PublicKey>)>>,
 }
 
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {

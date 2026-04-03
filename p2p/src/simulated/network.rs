@@ -9,7 +9,7 @@ use super::{
 use crate::{
     authenticated::UnboundedMailbox,
     utils::limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
-    Channel, Message, Recipients, UnlimitedSender as _,
+    Channel, Message, PeerSets, Recipients, UnlimitedSender as _,
 };
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
@@ -159,7 +159,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
 
     // Subscribers to primary peer set updates (used by Manager::subscribe())
     #[allow(clippy::type_complexity)]
-    subscribers: Vec<mpsc::UnboundedSender<(u64, (Set<P>, Set<P>), (Set<P>, Set<P>))>>,
+    subscribers: Vec<mpsc::UnboundedSender<(u64, PeerSets<P>, PeerSets<P>)>>,
 
     // Subscribers to the connectable peer list (used by PeerSource for LimitedSender)
     peer_subscribers: Vec<ring::Sender<Vec<P>>>,
@@ -339,7 +339,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
 
                 // Notify all subscribers about the new peer set.
-                let notification = (
+                let notification: (u64, PeerSets<P>, PeerSets<P>) = (
                     id,
                     (primary.clone(), secondary.clone()),
                     (self.all_primary_peers(), self.all_secondary_peers()),
