@@ -928,17 +928,17 @@ mod tests {
                 )
                 .await;
 
-            let (id, (new_primary, new_secondary), (all_primary, all_secondary)) =
+            let (id, (latest_primary, latest_secondary), (all_primary, all_secondary)) =
                 subscription.recv().await.unwrap();
             assert_eq!(id, 0);
-            assert_eq!(new_primary.len(), 1);
-            assert!(new_primary.position(&primary_pk).is_some());
-            assert!(new_primary.position(&secondary_pk).is_none());
+            assert_eq!(latest_primary.len(), 1);
+            assert!(latest_primary.position(&primary_pk).is_some());
+            assert!(latest_primary.position(&secondary_pk).is_none());
             assert_eq!(
-                new_secondary,
+                latest_secondary,
                 Set::try_from([secondary_pk.clone()]).unwrap()
             );
-            assert_eq!(all_primary, new_primary);
+            assert_eq!(all_primary, latest_primary);
             assert_eq!(
                 all_secondary,
                 Set::try_from([secondary_pk.clone()]).unwrap()
@@ -985,13 +985,13 @@ mod tests {
                 )
                 .await;
 
-            let (id, (new_primary, new_secondary), (all_primary, all_secondary)) =
+            let (id, (latest_primary, latest_secondary), (all_primary, all_secondary)) =
                 subscription.recv().await.unwrap();
             assert_eq!(id, 0);
-            assert_eq!(new_primary.len(), 1);
-            assert!(new_primary.position(&pk).is_some());
-            assert_eq!(new_secondary, Set::try_from([pk.clone()]).unwrap());
-            assert_eq!(all_primary, new_primary);
+            assert_eq!(latest_primary.len(), 1);
+            assert!(latest_primary.position(&pk).is_some());
+            assert_eq!(latest_secondary, Set::try_from([pk.clone()]).unwrap());
+            assert_eq!(all_primary, latest_primary);
             assert_eq!(all_secondary, Set::try_from([pk.clone()]).unwrap());
             assert!(mailbox.acceptable(pk).await);
         });

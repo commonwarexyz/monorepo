@@ -1739,11 +1739,11 @@ mod tests {
             manager
                 .track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
                 .await;
-            let (id, (new_primary, new_secondary), (all_primary, all_secondary)) =
+            let (id, (latest_primary, latest_secondary), (all_primary, all_secondary)) =
                 subscription.recv().await.unwrap();
             assert_eq!(id, 10);
-            assert_eq!(new_primary.len(), 2);
-            assert!(new_secondary.is_empty());
+            assert_eq!(latest_primary.len(), 2);
+            assert!(latest_secondary.is_empty());
             assert_eq!(all_primary.len(), 2);
             assert!(all_secondary.is_empty());
 
@@ -1758,11 +1758,11 @@ mod tests {
             manager
                 .track(11, Set::try_from([pk4.clone()]).unwrap())
                 .await;
-            let (id, (new_primary, new_secondary), (all_primary, all_secondary)) =
+            let (id, (latest_primary, latest_secondary), (all_primary, all_secondary)) =
                 subscription.recv().await.unwrap();
             assert_eq!(id, 11);
-            assert_eq!(new_primary, Set::try_from([pk4.clone()]).unwrap());
-            assert!(new_secondary.is_empty());
+            assert_eq!(latest_primary, Set::try_from([pk4.clone()]).unwrap());
+            assert!(latest_secondary.is_empty());
             assert_eq!(all_primary, Set::try_from([pk1, pk2, pk4]).unwrap());
             assert!(all_secondary.is_empty());
         });

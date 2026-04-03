@@ -1078,22 +1078,22 @@ mod tests {
             oracle.track(1, peer_set.clone()).await;
 
             // Receive subscription notification
-            let (id, (new_primary, new_secondary), (all_primary, all_secondary)) =
+            let (id, (latest_primary, latest_secondary), (all_primary, all_secondary)) =
                 subscription.recv().await.unwrap();
             assert_eq!(id, 1);
-            assert_eq!(new_primary.len(), 1);
-            assert!(new_secondary.is_empty());
+            assert_eq!(latest_primary.len(), 1);
+            assert!(latest_secondary.is_empty());
             assert_eq!(all_primary.len(), 1);
             assert!(all_secondary.is_empty());
 
-            // Self should NOT be in the new set
+            // Self should NOT be in the latest set
             assert!(
-                new_primary.position(&self_pk).is_none(),
-                "new set should not include self"
+                latest_primary.position(&self_pk).is_none(),
+                "latest set should not include self"
             );
             assert!(
-                new_primary.position(&other_pk).is_some(),
-                "new set should include other"
+                latest_primary.position(&other_pk).is_some(),
+                "latest set should include other"
             );
 
             // Self should NOT be in the tracked set (not registered)
@@ -1111,22 +1111,22 @@ mod tests {
             oracle.track(2, peer_set.clone()).await;
 
             // Receive subscription notification
-            let (id, (new_primary, new_secondary), (all_primary, all_secondary)) =
+            let (id, (latest_primary, latest_secondary), (all_primary, all_secondary)) =
                 subscription.recv().await.unwrap();
             assert_eq!(id, 2);
-            assert_eq!(new_primary.len(), 2);
-            assert!(new_secondary.is_empty());
+            assert_eq!(latest_primary.len(), 2);
+            assert!(latest_secondary.is_empty());
             assert_eq!(all_primary.len(), 2);
             assert!(all_secondary.is_empty());
 
-            // Both peers should be in the new set
+            // Both peers should be in the latest set
             assert!(
-                new_primary.position(&self_pk).is_some(),
-                "new set should include self"
+                latest_primary.position(&self_pk).is_some(),
+                "latest set should include self"
             );
             assert!(
-                new_primary.position(&other_pk).is_some(),
-                "new set should include other"
+                latest_primary.position(&other_pk).is_some(),
+                "latest set should include other"
             );
 
             // Both peers should be in the tracked set
