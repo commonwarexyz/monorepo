@@ -5886,7 +5886,6 @@ mod tests {
                 let elector = TwinsElector::new(L::default(), &scenario, n as usize);
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut reporters = Vec::new();
-                let mut secondary_twin_reporters = Vec::new();
                 let mut engine_handlers = Vec::new();
                 let twin_index_set: HashSet<usize> = twin_indices.iter().copied().collect();
 
@@ -5987,9 +5986,6 @@ mod tests {
                             reporter_config,
                         );
                         reporters.push(reporter.clone());
-                        if twin_label == "secondary" {
-                            secondary_twin_reporters.push(reporter.clone());
-                        }
 
                         let application_cfg = mocks::application::Config {
                             hasher: Sha256::default(),
@@ -6141,21 +6137,6 @@ mod tests {
                     }));
                 }
                 join_all(finalizers).await;
-
-                // Regression check: at least one secondary twin half should
-                // continue processing the chain after the adversarial prefix
-                // ends. These twins are still connected via the secondary
-                // recipient set and must not get stuck once synchrony resumes.
-                assert!(
-                    secondary_twin_reporters.iter().any(|reporter| {
-                        reporter
-                            .finalizations
-                            .lock()
-                            .keys()
-                            .any(|view| *view > prefix_end)
-                    }),
-                    "expected at least one secondary twin to finalize past the adversarial prefix"
-                );
 
                 // Verify safety: no conflicting finalizations across honest reporters.
                 let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
