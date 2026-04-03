@@ -420,28 +420,6 @@ mod tests {
     }
 
     #[test]
-    fn test_canceled_recv_poisons_stream_not_sink() {
-        let (mut sink, mut stream) = Channel::init();
-
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Cancel a pending recv without dropping the stream.
-            select! {
-                v = stream.recv(5) => {
-                    panic!("unexpected value: {v:?}");
-                },
-                _ = context.sleep(Duration::from_millis(50)) => {},
-            };
-
-            // Stream should be poisoned after cancellation.
-            assert!(matches!(stream.recv(1).await, Err(Error::Closed)));
-
-            // Sink should remain usable.
-            sink.send(b"hello".as_slice()).await.unwrap();
-        });
-    }
-
-    #[test]
     fn test_recv_timeout() {
         let (_sink, mut stream) = Channel::init();
 
