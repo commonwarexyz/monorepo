@@ -72,9 +72,9 @@ mod tests {
             mocks::{
                 harness::{
                     self, default_leader, genesis_commitment, make_coding_block, setup_network,
-                    setup_network_links, CodingB, CodingCtx, CodingHarness, TestHarness,
-                    BLOCKS_PER_EPOCH, LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, UNRELIABLE_LINK,
-                    V,
+                    setup_network_links, setup_network_with_participants, CodingB, CodingCtx,
+                    CodingHarness, TestHarness, BLOCKS_PER_EPOCH, LINK, NAMESPACE, NUM_VALIDATORS,
+                    QUORUM, S, UNRELIABLE_LINK, V,
                 },
                 verifying::MockVerifyingApp,
             },
@@ -91,10 +91,9 @@ mod tests {
         Committable, Digestible, Hasher as _,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::Manager as _;
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Runner};
-    use commonware_utils::{ordered::Set, NZU16};
+    use commonware_utils::NZU16;
     use std::time::Duration;
 
     #[test_group("slow")]
@@ -1415,12 +1414,17 @@ mod tests {
         // the block unless V::commitment(block) matches the finalization payload.
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut oracle = setup_network(context.clone(), commonware_utils::NZUsize!(1));
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.clone(),
+                commonware_utils::NZUsize!(1),
+                participants[..2].iter().cloned(),
+            )
+            .await;
 
             let coding_config_a = coding_config_for_participants(NUM_VALIDATORS as u16);
             // Same total shards (4) but different min/extra split produces a different
@@ -1446,10 +1450,6 @@ mod tests {
             .await;
 
             setup_network_links(&mut oracle, &participants[..2], LINK).await;
-            oracle
-                .manager()
-                .track(0, Set::try_from(participants[..2].to_vec()).unwrap())
-                .await;
 
             let mut v0_mailbox = v0_setup.mailbox;
             let v1_mailbox = v1_setup.mailbox;

@@ -68,7 +68,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{Config as NConfig, Link, Network},
+        simulated::{Config as NConfig, Link, Network, Oracle},
         Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
@@ -106,6 +106,27 @@ mod tests {
 
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    async fn start_test_network_with_primary_peers<I>(
+        context: deterministic::Context,
+        peers: I,
+    ) -> Oracle<PublicKey, deterministic::Context>
+    where
+        I: IntoIterator<Item = PublicKey>,
+    {
+        let (network, oracle) = Network::new_with_primary_peers(
+            context.with_label("network"),
+            NConfig {
+                max_size: 1024 * 1024,
+                disconnect_on_block: true,
+                tracked_peer_sets: commonware_utils::NZUsize!(1),
+            },
+            peers,
+        )
+        .await;
+        network.start();
+        oracle
+    }
 
     async fn track_test_peers(
         context: &mut deterministic::Context,
@@ -180,17 +201,6 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
@@ -198,7 +208,11 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle = start_test_network_with_primary_peers(
+                context.clone(),
+                participants.clone(),
+            )
+            .await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -253,8 +267,14 @@ mod tests {
                 .add_link(injector_pk.clone(), me.clone(), link)
                 .await
                 .unwrap();
-            track_test_peers(&mut context, &oracle, 1, &participants, &[injector_pk.clone()])
-                .await;
+            track_test_peers(
+                &mut context,
+                &oracle,
+                1,
+                &participants,
+                std::slice::from_ref(&injector_pk),
+            )
+            .await;
 
             // Start the batcher
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
@@ -352,16 +372,6 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network.
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Get participants.
             let Fixture {
                 participants,
@@ -369,7 +379,11 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle = start_test_network_with_primary_peers(
+                context.clone(),
+                participants.clone(),
+            )
+            .await;
 
             // Setup reporter mock.
             let reporter_cfg = mocks::reporter::Config {
@@ -424,8 +438,14 @@ mod tests {
                 .add_link(injector_pk.clone(), me.clone(), link)
                 .await
                 .unwrap();
-            track_test_peers(&mut context, &oracle, 1, &participants, &[injector_pk.clone()])
-                .await;
+            track_test_peers(
+                &mut context,
+                &oracle,
+                1,
+                &participants,
+                std::slice::from_ref(&injector_pk),
+            )
+            .await;
 
             // Start the batcher.
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
@@ -515,17 +535,6 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
@@ -533,7 +542,11 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle = start_test_network_with_primary_peers(
+                context.clone(),
+                participants.clone(),
+            )
+            .await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -676,23 +689,14 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone()).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -870,23 +874,14 @@ mod tests {
         let epoch = Epoch::new(101);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -1112,23 +1107,14 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -1207,7 +1193,7 @@ mod tests {
                 &oracle,
                 1,
                 &participants,
-                &[injector_pk.clone()],
+                std::slice::from_ref(&injector_pk),
             )
             .await;
 
@@ -1350,23 +1336,14 @@ mod tests {
         let epoch = Epoch::new(444);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -1427,7 +1404,7 @@ mod tests {
                 &oracle,
                 1,
                 &participants,
-                &[injector_pk.clone()],
+                std::slice::from_ref(&injector_pk),
             )
             .await;
 
@@ -1539,23 +1516,14 @@ mod tests {
         let epoch = Epoch::new(444);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -1778,23 +1746,14 @@ mod tests {
         let epoch = Epoch::new(555);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -1991,17 +1950,6 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
@@ -2009,7 +1957,11 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle = start_test_network_with_primary_peers(
+                context.clone(),
+                participants.clone(),
+            )
+            .await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -2077,8 +2029,14 @@ mod tests {
                 .add_link(injector_pk.clone(), me.clone(), link.clone())
                 .await
                 .unwrap();
-            track_test_peers(&mut context, &oracle, 1, &participants, &[injector_pk.clone()])
-                .await;
+            track_test_peers(
+                &mut context,
+                &oracle,
+                1,
+                &participants,
+                std::slice::from_ref(&injector_pk),
+            )
+            .await;
 
             // Start the batcher
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
@@ -2190,17 +2148,6 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
@@ -2208,7 +2155,11 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle = start_test_network_with_primary_peers(
+                context.clone(),
+                participants.clone(),
+            )
+            .await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -2406,17 +2357,6 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
@@ -2424,7 +2364,11 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle = start_test_network_with_primary_peers(
+                context.clone(),
+                participants.clone(),
+            )
+            .await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -2539,17 +2483,6 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
@@ -2557,7 +2490,11 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle = start_test_network_with_primary_peers(
+                context.clone(),
+                participants.clone(),
+            )
+            .await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -2675,17 +2612,6 @@ mod tests {
         let skip_timeout = 5u64;
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
@@ -2693,7 +2619,11 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle = start_test_network_with_primary_peers(
+                context.clone(),
+                participants.clone(),
+            )
+            .await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -2839,23 +2769,14 @@ mod tests {
         let skip_timeout = 5u64;
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -2973,23 +2894,17 @@ mod tests {
         let skip_timeout = 5u64;
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle = start_test_network_with_primary_peers(
+                context.clone(),
+                participants.clone(),
+            )
+            .await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -3123,23 +3038,14 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -3261,23 +3167,14 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -3397,17 +3294,6 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
@@ -3415,7 +3301,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone()).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -3601,17 +3488,6 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Get participants
             let Fixture {
                 participants,
@@ -3619,7 +3495,11 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle = start_test_network_with_primary_peers(
+                context.clone(),
+                participants.clone(),
+            )
+            .await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -3861,23 +3741,14 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -4082,23 +3953,14 @@ mod tests {
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
-            let (network, oracle) = Network::new(
-                context.with_label("network"),
-                NConfig {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+            let oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone()).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),

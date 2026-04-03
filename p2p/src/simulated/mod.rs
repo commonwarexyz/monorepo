@@ -599,26 +599,22 @@ mod tests {
     fn test_add_link_before_channel_registration() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Create peers
+            let pk1 = PrivateKey::from_seed(0).public_key();
+            let pk2 = PrivateKey::from_seed(1).public_key();
+
             // Create simulated network
-            let (network, oracle) = Network::new(
+            let (network, oracle) = Network::new_with_primary_peers(
                 context.with_label("network"),
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
                     tracked_peer_sets: commonware_utils::NZUsize!(3),
                 },
-            );
+                [pk1.clone(), pk2.clone()],
+            )
+            .await;
             network.start();
-
-            // Create peers
-            let pk1 = PrivateKey::from_seed(0).public_key();
-            let pk2 = PrivateKey::from_seed(1).public_key();
-
-            // Register peer set
-            let mut manager = oracle.manager();
-            manager
-                .track(0, Set::try_from(vec![pk1.clone(), pk2.clone()]).unwrap())
-                .await;
 
             // Add link
             oracle
@@ -3194,18 +3190,17 @@ mod tests {
                 tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
-            let (network, oracle) = Network::new(network_context.clone(), cfg);
-            network.start();
-
             // Create two public keys
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
-            // Register the peer set
-            let mut manager = oracle.manager();
-            manager
-                .track(0, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
-                .await;
+            let (network, oracle) = Network::new_with_primary_peers(
+                network_context.clone(),
+                cfg,
+                [pk1.clone(), pk2.clone()],
+            )
+            .await;
+            network.start();
 
             // Register with a very restrictive quota: 1 message per second
             let restrictive_quota = Quota::per_second(NZU32!(1));
@@ -3277,18 +3272,18 @@ mod tests {
                 tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
-            let (network, oracle) = Network::new(network_context.clone(), cfg);
-            let handle = network.start();
-
             // Create peers
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
-            // Register peer set
+            let (network, oracle) = Network::new_with_primary_peers(
+                network_context.clone(),
+                cfg,
+                [pk1.clone(), pk2.clone()],
+            )
+            .await;
+            let handle = network.start();
             let mut manager = oracle.manager();
-            manager
-                .track(0, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
-                .await;
 
             // Register channels
             let control1 = oracle.control(pk1.clone());
@@ -3350,18 +3345,14 @@ mod tests {
                 tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
-            let (network, oracle) = Network::new(network_context, cfg);
-            let handle = network.start();
-
             // Create peers
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
 
-            // Register peer set
-            let mut manager = oracle.manager();
-            manager
-                .track(0, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
-                .await;
+            let (network, oracle) =
+                Network::new_with_primary_peers(network_context, cfg, [pk1.clone(), pk2.clone()])
+                    .await;
+            let handle = network.start();
 
             // Register channels
             let control1 = oracle.control(pk1.clone());
