@@ -288,6 +288,14 @@ impl BufferPoolConfig {
         self
     }
 
+    /// Returns true if thread-local caching is enabled.
+    pub const fn thread_cache_enabled(&self) -> bool {
+        matches!(
+            self.thread_cache_config,
+            BufferPoolThreadCacheConfig::Fixed(_) | BufferPoolThreadCacheConfig::ForParallelism(_)
+        )
+    }
+
     /// Validates the configuration, panicking on invalid values.
     ///
     /// # Panics
