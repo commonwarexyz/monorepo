@@ -68,12 +68,13 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
+        Manager as _,
         simulated::{Config as NConfig, Link, Network},
-        Recipients, Sender as _,
+        Recipients, Sender as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
-    use commonware_utils::{channel::mpsc, sync::Mutex};
+    use commonware_utils::{channel::mpsc, ordered::Set, sync::Mutex};
     use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
     type Broadcasts = Arc<Mutex<Vec<(Sha256Digest, Round, Vec<PublicKey>)>>>;
@@ -106,6 +107,26 @@ mod tests {
 
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    async fn track_test_peers(
+        context: &mut deterministic::Context,
+        oracle: &commonware_p2p::simulated::Oracle<PublicKey, deterministic::Context>,
+        id: u64,
+        primary: &[PublicKey],
+        secondary: &[PublicKey],
+    ) {
+        oracle
+            .manager()
+            .track(
+                id,
+                TrackedPeers::new(
+                    Set::from_iter_dedup(primary.iter().cloned()),
+                    Set::from_iter_dedup(secondary.iter().cloned()),
+                ),
+            )
+            .await;
+        context.sleep(Duration::from_millis(10)).await;
+    }
 
     fn build_notarization<S: Scheme<Sha256Digest>>(
         schemes: &[S],
@@ -178,6 +199,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -231,6 +254,8 @@ mod tests {
                 .add_link(injector_pk.clone(), me.clone(), link)
                 .await
                 .unwrap();
+            track_test_peers(&mut context, &oracle, 1, &participants, &[injector_pk.clone()])
+                .await;
 
             // Start the batcher
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
@@ -345,6 +370,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+
             // Setup reporter mock.
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -398,6 +425,8 @@ mod tests {
                 .add_link(injector_pk.clone(), me.clone(), link)
                 .await
                 .unwrap();
+            track_test_peers(&mut context, &oracle, 1, &participants, &[injector_pk.clone()])
+                .await;
 
             // Start the batcher.
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
@@ -504,6 +533,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -661,6 +692,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -853,6 +886,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -1094,6 +1129,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
@@ -1166,6 +1203,8 @@ mod tests {
                 .add_link(injector_pk.clone(), me.clone(), link.clone())
                 .await
                 .unwrap();
+            track_test_peers(&mut context, &oracle, 1, &participants, &[injector_pk.clone()])
+                .await;
 
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
@@ -1322,6 +1361,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
@@ -1376,6 +1417,8 @@ mod tests {
                 .add_link(injector_pk.clone(), me.clone(), link)
                 .await
                 .unwrap();
+            track_test_peers(&mut context, &oracle, 1, &participants, &[injector_pk.clone()])
+                .await;
 
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
@@ -1500,6 +1543,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -1738,6 +1783,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
@@ -1951,6 +1998,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -2017,6 +2066,8 @@ mod tests {
                 .add_link(injector_pk.clone(), me.clone(), link.clone())
                 .await
                 .unwrap();
+            track_test_peers(&mut context, &oracle, 1, &participants, &[injector_pk.clone()])
+                .await;
 
             // Start the batcher
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
@@ -2145,6 +2196,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -2360,6 +2413,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -2490,6 +2545,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -2624,6 +2681,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -2785,6 +2844,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
@@ -2916,6 +2977,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
@@ -3065,6 +3128,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
@@ -3201,6 +3266,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
@@ -3336,6 +3403,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -3538,6 +3607,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
 
             // Setup reporter mock
             let reporter_cfg = mocks::reporter::Config {
@@ -3795,6 +3866,8 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
+
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),
                 scheme: schemes[0].clone(),
@@ -4013,6 +4086,8 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            track_test_peers(&mut context, &oracle, 0, &participants, &[]).await;
 
             let reporter_cfg = mocks::reporter::Config {
                 participants: schemes[0].participants().clone(),

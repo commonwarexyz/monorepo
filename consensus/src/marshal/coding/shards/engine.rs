@@ -2605,6 +2605,17 @@ mod tests {
                     )
                     .await
                     .expect("link should be added");
+                oracle
+                    .manager()
+                    .track(
+                        2,
+                        TrackedPeers::new(
+                            Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
+                            Set::from_iter_dedup([non_participant_pk.clone()]),
+                        ),
+                    )
+                    .await;
+                context.sleep(Duration::from_millis(10)).await;
 
                 peers[2]
                     .mailbox
@@ -2627,7 +2638,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_buffered_shard_from_non_participant_blocks_peer() {
+    fn test_preleader_shard_from_non_participant_is_not_buffered() {
         let fixture = Fixture::<C>::default();
         fixture.start(
             |config, context, oracle, peers, _, coding_config| async move {
@@ -2655,10 +2666,25 @@ mod tests {
                     )
                     .await
                     .expect("link should be added");
+                oracle
+                    .manager()
+                    .track(
+                        2,
+                        TrackedPeers::new(
+                            Set::from_iter_dedup(peers.iter().map(|peer| peer.public_key.clone())),
+                            Set::from_iter_dedup([non_participant_pk.clone()]),
+                        ),
+                    )
+                    .await;
+                context.sleep(Duration::from_millis(10)).await;
 
                 let peer2_index = peers[2].index.get() as u16;
                 let shard = coded_block.shard(peer2_index).expect("missing shard");
                 let shard_bytes = shard.encode();
+                let mut shard_sub = peers[2]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment)
+                    .await;
 
                 non_participant_sender
                     .send(Recipients::One(receiver_pk), shard_bytes, true)
@@ -2672,7 +2698,18 @@ mod tests {
                     .await;
                 context.sleep(config.link.latency * 2).await;
 
-                assert_blocked(&oracle, &peers[2].public_key, &non_participant_pk).await;
+                let blocked = oracle.blocked().await.unwrap();
+                let non_participant_blocked = blocked
+                    .iter()
+                    .any(|(a, b)| a == &peers[2].public_key && b == &non_participant_pk);
+                assert!(
+                    !non_participant_blocked,
+                    "non-participant should not be blocked when its pre-leader shard is ignored"
+                );
+                assert!(
+                    matches!(shard_sub.try_recv(), Err(TryRecvError::Empty)),
+                    "pre-leader shard from non-participant should not be buffered"
+                );
             },
         );
     }
