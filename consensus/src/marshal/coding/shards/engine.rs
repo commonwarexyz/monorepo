@@ -4585,7 +4585,6 @@ mod tests {
                 let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
                 let commitment = coded_block.commitment();
                 let round = Round::new(Epoch::zero(), View::new(1));
-                let np = &non_participants[0];
 
                 let leader = peers[0].public_key.clone();
                 peers[0].mailbox.proposed(round, coded_block.clone()).await;
@@ -4601,6 +4600,7 @@ mod tests {
 
                 // Non-participant discovers the leader after shards are already
                 // propagating through the network.
+                let np = &non_participants[0];
                 let block_sub = np.mailbox.subscribe(commitment).await;
                 np.mailbox
                     .discovered(commitment, leader.clone(), round)
