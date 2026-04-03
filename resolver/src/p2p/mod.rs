@@ -1765,11 +1765,13 @@ mod tests {
                 connections.push((sender, receiver));
             }
 
+            // Topology: peer 1 (requester) linked to peers 2 and 3.
+            // Peer 2 is primary (no data), peer 3 is secondary (has data).
+            // Fetch should only query primary peers, so the request must time out.
             let mut oracle = oracle;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
 
-            // Peer 2 is primary, peer 3 is secondary.
             oracle
                 .manager()
                 .track(
@@ -1787,6 +1789,7 @@ mod tests {
 
             let (cons1, mut cons_out1) = Consumer::new();
 
+            // Peer 1: the requester, has no data.
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
@@ -1798,6 +1801,7 @@ mod tests {
                 Producer::default(),
             );
 
+            // Peer 2: primary, has no data.
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
@@ -1809,6 +1813,7 @@ mod tests {
                 Producer::default(),
             );
 
+            // Peer 3: secondary, has the data. Should not be queried.
             let mut prod3 = Producer::default();
             prod3.insert(key.clone(), data);
             let scheme = schemes.remove(0);
@@ -1822,6 +1827,8 @@ mod tests {
                 prod3,
             );
 
+            // Fetch should time out because the only peer with data (peer 3)
+            // is secondary and won't be queried.
             mailbox1.fetch(key.clone()).await;
 
             select! {
@@ -1840,9 +1847,12 @@ mod tests {
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
 
+            // Topology: peer 1 is primary (has data), peer 2 is secondary (requester).
+            // Verifies that a primary peer serves requests from secondary peers
+            // (i.e. secondary peers can't fetch via broadcast, but their direct
+            // requests are still answered).
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
-            // Peer 1 is primary, peer 2 is secondary.
             oracle
                 .manager()
                 .track(
@@ -1858,6 +1868,7 @@ mod tests {
             let key = Key(9);
             let data = Bytes::from("served to secondary");
 
+            // Peer 1: primary, has the data.
             let mut prod1 = Producer::default();
             prod1.insert(key.clone(), data.clone());
 
@@ -1872,6 +1883,7 @@ mod tests {
                 prod1,
             );
 
+            // Peer 2: secondary, uses fetch_targeted to explicitly request from peer 1.
             let (mut cons2, mut cons_out2) = Consumer::new();
             cons2.add_expected(key.clone(), data.clone());
             let scheme = schemes.remove(0);
