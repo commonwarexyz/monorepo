@@ -261,7 +261,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         while self.primary_sets.len() > self.max_sets {
             let (primary_index, primary_set) = self.primary_sets.pop_first().unwrap();
             let (secondary_index, secondary_set) = self.secondary_sets.pop_first().unwrap();
-            debug_assert_eq!(primary_index, secondary_index);
+            assert_eq!(primary_index, secondary_index);
             debug!(index = primary_index, "removed oldest tracked peer sets");
             primary_set.into_iter().for_each(|primary| {
                 self.peers.get_mut(primary).unwrap().decrement_primary();
