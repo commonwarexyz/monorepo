@@ -1862,20 +1862,17 @@ mod tests {
                     });
                 }
 
-                if self.num_non_participants > 0 {
-                    let primary_participants: Set<P> =
-                        Set::from_iter_dedup(peer_keys.iter().cloned());
-                    let secondary_non_participants: Set<P> =
-                        Set::from_iter_dedup(np_keys.iter().cloned());
-                    oracle
-                        .manager()
-                        .track(
-                            1,
-                            TrackedPeers::new(primary_participants, secondary_non_participants),
-                        )
-                        .await;
-                    context.sleep(Duration::from_millis(10)).await;
-                }
+                let primary_participants: Set<P> = Set::from_iter_dedup(peer_keys.iter().cloned());
+                let secondary_non_participants: Set<P> =
+                    Set::from_iter_dedup(np_keys.iter().cloned());
+                oracle
+                    .manager()
+                    .track(
+                        1,
+                        TrackedPeers::new(primary_participants, secondary_non_participants),
+                    )
+                    .await;
+                context.sleep(Duration::from_millis(10)).await;
 
                 f(
                     self,
