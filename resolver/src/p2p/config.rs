@@ -14,7 +14,11 @@ pub struct Config<
     Con: Consumer<Key = Key, Value = Bytes, Failure = ()>,
     Pro: Producer<Key = Key>,
 > {
-    /// Manages the current set of peers
+    /// Manages the current set of peers.
+    ///
+    /// Outbound fetches use only the latest primary peer set from this provider.
+    /// Older tracked sets may remain connected for overlap-window purposes, but
+    /// they are not eligible for new resolver requests.
     pub peer_provider: D,
 
     /// The blocker that will be used to block peers that send invalid responses

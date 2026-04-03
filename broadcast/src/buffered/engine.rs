@@ -214,6 +214,9 @@ where
                 debug!("peer set subscription closed");
                 break;
             } => {
+                // Buffered caches are keyed to the newest primary set rather than the aggregate
+                // overlap window. Once a sender leaves `latest.primary`, stop retaining its deque
+                // even if transport tracking still keeps the peer connected.
                 self.evict_untracked_peers(&update.latest.primary);
             },
         }

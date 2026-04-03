@@ -35,6 +35,16 @@
 //! These modifications only apply to in-progress fetches. Once a fetch completes (success, cancel,
 //! or blocked peer), the targets for that key are cleared automatically.
 //!
+//! # Peer Selection
+//!
+//! Outbound fetches are reconciled against the latest primary peer set only. Retaining older peer
+//! sets in the provider's overlap window keeps those peers connected at the transport layer, but
+//! does not keep them eligible for new resolver traffic.
+//!
+//! [`Resolver::fetch_targeted`](crate::Resolver::fetch_targeted) can narrow the current primary set
+//! further, but it does not bypass that latest-primary filter. Explicit targets that are no longer
+//! in the latest primary set are ignored until they become primary again.
+//!
 //! # Performance Considerations
 //!
 //! The peer supports arbitrarily many concurrent fetch requests, but resource usage generally
@@ -1836,6 +1846,131 @@ mod tests {
                     panic!("fetch should not succeed from a secondary peer, got: {event:?}");
                 },
                 _ = context.sleep(Duration::from_secs(2)) => {},
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_fetch_uses_latest_primary_set_only() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(2),
+                },
+            );
+            network.start();
+
+            let schemes: Vec<PrivateKey> = [1u64, 2, 3]
+                .into_iter()
+                .map(PrivateKey::from_seed)
+                .collect();
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+            let mut schemes = schemes;
+
+            let mut connections = Vec::new();
+            for peer in &peers {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(0, Quota::per_second(RATE_LIMIT))
+                    .await
+                    .unwrap();
+                connections.push((sender, receiver));
+            }
+
+            let mut oracle = oracle;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            // Track peer 2 as the initial primary so it is present in the overlap window once
+            // peer 3 becomes the newest primary set.
+            oracle
+                .manager()
+                .track(0, Set::try_from([peers[1].clone()]).unwrap())
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            let key = Key(7);
+            let targeted_key = Key(8);
+            let data = Bytes::from("old primary data");
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            // Peer 1: requester.
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            // Peer 2: old primary, still retained in `all.primary`, has the data.
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), data.clone());
+            prod2.insert(targeted_key.clone(), data);
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            // Peer 3: latest primary, has no data.
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                Producer::default(),
+            );
+
+            context.sleep(Duration::from_millis(100)).await;
+
+            // Track peer 3 as the latest primary. Peer 2 remains in the provider's overlap
+            // window (`all.primary`), but new resolver traffic should use only `latest.primary`.
+            oracle
+                .manager()
+                .track(1, Set::try_from([peers[2].clone()]).unwrap())
+                .await;
+            context.sleep(Duration::from_millis(100)).await;
+
+            mailbox1.fetch(key).await;
+
+            select! {
+                event = cons_out1.recv() => {
+                    panic!(
+                        "fetch should not succeed from an old primary retained only in the overlap window, got: {event:?}"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            }
+
+            // Explicit targets still respect the latest-primary filter.
+            mailbox1
+                .fetch_targeted(targeted_key, non_empty_vec![peers[1].clone()])
+                .await;
+
+            select! {
+                event = cons_out1.recv() => {
+                    panic!(
+                        "targeted fetch should not bypass the latest-primary filter, got: {event:?}"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {},
             }
         });
     }

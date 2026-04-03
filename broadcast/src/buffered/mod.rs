@@ -18,6 +18,15 @@
 //! other peers in the network in a best-effort manner. It also has a method to request a message by
 //! digest. The engine will return the message immediately if it is in the cache, or wait for it to
 //! be received over the network if it is not.
+//!
+//! # Peer Set Updates
+//!
+//! Per-sender caches are retained only for peers in the latest primary set. If the transport keeps
+//! an overlap window of older peer sets, those peers may still remain connected, but their
+//! buffered-message deque is evicted as soon as they leave `latest.primary`.
+//!
+//! Messages referenced by multiple senders stay cached until the last tracked sender deque that
+//! contains them is evicted.
 
 mod config;
 pub use config::Config;
@@ -969,7 +978,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_peer_set_update_evicts_peers_not_in_latest_set() {
+    fn test_peer_set_update_evicts_peers_not_in_latest_set_even_if_still_tracked() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             // Use tracked_peer_sets=2 so old sets are retained in the window.
@@ -1067,8 +1076,8 @@ mod tests {
             );
 
             // Track set 1 with only [B, C]. With tracked_peer_sets=2, both
-            // sets 0 and 1 are retained, so A is still in `all.primary`. But
-            // the latest set excludes A, so A's deque should be evicted.
+            // sets 0 and 1 are retained, so A is still in `all.primary`. Buffered caches follow
+            // `latest.primary`, though, so A's deque should be evicted immediately.
             let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![
                 peer_b.clone(),
                 peer_c.clone(),
