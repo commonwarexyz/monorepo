@@ -5,7 +5,7 @@ use commonware_codec::{
 use commonware_cryptography::Digest;
 use commonware_runtime::{Buf, BufMut};
 use commonware_storage::{
-    mmr::{Location, Proof},
+    mmr::{self, Location, Proof},
     qmdb::sync::Target,
 };
 use std::num::NonZeroU64;
@@ -51,7 +51,7 @@ where
     D: Digest,
 {
     pub request_id: RequestId,
-    pub target: Target<D>,
+    pub target: Target<mmr::Family, D>,
 }
 
 /// Messages that can be sent over the wire.
@@ -334,7 +334,7 @@ where
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let request_id = RequestId::read_cfg(buf, &())?;
-        let target = Target::<D>::read_cfg(buf, &())?;
+        let target = Target::<mmr::Family, D>::read_cfg(buf, &())?;
         Ok(Self { request_id, target })
     }
 }
