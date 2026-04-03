@@ -46,6 +46,7 @@ pub(super) struct ClearSet<const N: usize> {
 }
 
 impl<const N: usize> ClearSet<N> {
+    /// Create a clear set with a given capacity.
     fn with_capacity(capacity: usize) -> Self {
         Self {
             locations: Vec::with_capacity(capacity),
@@ -53,6 +54,7 @@ impl<const N: usize> ClearSet<N> {
         }
     }
 
+    /// Push a location to the clear set.
     fn push(&mut self, loc: Location) {
         self.locations.push(loc);
 
@@ -62,6 +64,7 @@ impl<const N: usize> ClearSet<N> {
         chunk[rel / 8] |= 1 << (rel % 8);
     }
 
+    /// Merge another clear set into this one.
     fn merge(&mut self, other: &Self) {
         self.locations.extend_from_slice(&other.locations);
         for (&idx, other_mask) in &other.masks {
@@ -72,6 +75,7 @@ impl<const N: usize> ClearSet<N> {
         }
     }
 
+    /// Return the number of locations in the clear set.
     const fn len(&self) -> usize {
         self.locations.len()
     }
@@ -80,10 +84,12 @@ impl<const N: usize> ClearSet<N> {
         self.locations.is_empty()
     }
 
+    /// Return the locations in the clear set.
     fn locations(&self) -> &[Location] {
         &self.locations
     }
 
+    /// Return the mask for the given chunk index.
     fn mask(&self, idx: usize) -> Option<&[u8; N]> {
         self.masks.get(&idx)
     }
