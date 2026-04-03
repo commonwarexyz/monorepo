@@ -158,6 +158,9 @@ where
             network.0,
             network.1,
         );
+        // Subscribe immediately, but keep draining mailbox and network traffic even if no peer set
+        // has been tracked yet. Remote senders are gated at insertion time, so polling here avoids
+        // unnecessary backpressure without making pre-peer-set traffic resident.
         let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {

@@ -348,7 +348,8 @@ where
             // Peers exist but all sends failed - use retry timeout
             self.context.current() + self.retry_timeout
         } else {
-            // No eligible peers - wait for external changes
+            // No eligible peers yet. The engine still keeps polling; this just defers the next
+            // outbound attempt until some external change (like a peer set update) clears it.
             self.context.current().saturating_add_ext(Duration::MAX)
         });
     }

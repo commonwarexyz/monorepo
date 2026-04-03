@@ -427,6 +427,94 @@ mod tests {
         });
     }
 
+    /// Tests that fetches issued before the first peer set arrives stay pending and complete once
+    /// the initial update is tracked.
+    #[test_traced]
+    fn test_fetch_before_initial_peer_set_waits_for_update() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (network, mut oracle) = Network::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut schemes = [1_u64, 2]
+                .into_iter()
+                .map(PrivateKey::from_seed)
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+            let peers: Vec<PublicKey> = schemes.iter().map(|s| s.public_key()).collect();
+
+            let mut connections = Vec::new();
+            for peer in &peers {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(0, Quota::per_second(RATE_LIMIT))
+                    .await
+                    .unwrap();
+                connections.push((sender, receiver));
+            }
+
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(2);
+            let mut prod2 = Producer::default();
+            prod2.insert(key.clone(), Bytes::from("data for key 2"));
+
+            let (cons1, mut cons_out1) = Consumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                Consumer::dummy(),
+                prod2,
+            );
+
+            mailbox1.fetch(key.clone()).await;
+
+            select! {
+                event = cons_out1.recv() => {
+                    panic!("fetch should wait for the initial peer set, got {event:?}");
+                },
+                _ = context.sleep(Duration::from_millis(200)) => {}
+            };
+
+            oracle
+                .manager()
+                .track(0, Set::try_from(peers.clone()).unwrap())
+                .await;
+
+            let event = cons_out1.recv().await.unwrap();
+            match event {
+                Event::Success(key_actual, value) => {
+                    assert_eq!(key_actual, key);
+                    assert_eq!(value, Bytes::from("data for key 2"));
+                }
+                Event::Failed(_) => panic!("Fetch failed unexpectedly"),
+            }
+        });
+    }
+
     /// Tests that concurrent fetch requests are handled correctly.
     /// Also tests that the peer can recover from having no peers available.
     /// Also tests that the peer can get data from multiple peers that have different sets of data.

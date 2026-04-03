@@ -161,6 +161,9 @@ impl<
             network.0,
             network.1,
         );
+        // Subscribe immediately, but do not stall startup waiting for the first peer set. Pending
+        // fetches park inside the fetcher until reconcile() installs eligible peers, while the
+        // actor continues draining mailbox and network traffic.
         let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {

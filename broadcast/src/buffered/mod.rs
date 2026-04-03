@@ -1199,6 +1199,103 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_engine_starts_before_initial_peer_set_and_applies_later_update() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut schemes = (0..2)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+            let peers: Vec<PublicKey> = schemes.iter().map(|c| c.public_key()).collect();
+            let peer_a = peers[0].clone();
+            let peer_b = peers[1].clone();
+
+            let mut registrations: Registrations = BTreeMap::new();
+            for peer in &peers {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                registrations.insert(peer.clone(), (sender, receiver));
+            }
+
+            let link = Link {
+                latency: NETWORK_SPEED,
+                jitter: Duration::ZERO,
+                success_rate: 1.0,
+            };
+            for p1 in &peers {
+                for p2 in &peers {
+                    if p1 != p2 {
+                        oracle
+                            .add_link(p1.clone(), p2.clone(), link.clone())
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+
+            let mut mailboxes = BTreeMap::new();
+            for (peer, network) in registrations {
+                let ctx = context.with_label(&format!("peer_{}", peer));
+                let config = Config {
+                    public_key: peer.clone(),
+                    mailbox_size: 1024,
+                    deque_size: CACHE_SIZE,
+                    priority: false,
+                    codec_config: RangeCfg::from(..),
+                    peer_provider: oracle.manager(),
+                };
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                mailboxes.insert(peer, mailbox);
+                engine.start(network);
+            }
+
+            let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
+            let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
+
+            let before = TestMessage::shared(b"before-initial-peer-set");
+            let result = mailbox_a.broadcast(Recipients::All, before.clone()).await;
+            assert_eq!(result.await.unwrap().len(), 0);
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            assert_eq!(
+                mailbox_a.get(before.digest()).await,
+                Some(before.clone()),
+                "local broadcasts should not wait for the first peer set"
+            );
+            assert!(
+                mailbox_b.get(before.digest()).await.is_none(),
+                "remote peers should not cache messages before the first peer set arrives"
+            );
+
+            oracle
+                .manager()
+                .track(0, commonware_utils::ordered::Set::from_iter_dedup(peers.clone()))
+                .await;
+            context.sleep(A_JIFFY).await;
+
+            let after = TestMessage::shared(b"after-initial-peer-set");
+            let result = mailbox_a.broadcast(Recipients::All, after.clone()).await;
+            assert_eq!(result.await.unwrap().len(), 1);
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            assert_eq!(mailbox_b.get(after.digest()).await, Some(after));
+        });
+    }
+
+    #[test_traced]
     fn test_peer_set_update_preserves_shared_messages() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
