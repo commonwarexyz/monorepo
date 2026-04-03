@@ -204,7 +204,9 @@ impl<
             } => {
                 if self.last_peer_set_id < Some(update.index) {
                     self.last_peer_set_id = Some(update.index);
-                    // Only `latest.primary` participates; see `crate::p2p` peer selection docs.
+                    // Only `latest.primary` participates in future outbound fetch selection; see
+                    // `crate::p2p` peer selection docs. Requests already in flight are left alone
+                    // and may still complete from the peer they were sent to.
                     self.fetcher.reconcile(update.latest.primary.as_ref());
                 }
             },

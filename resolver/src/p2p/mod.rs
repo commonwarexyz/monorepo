@@ -41,6 +41,11 @@
 //! sets in the provider's overlap window keeps those peers connected at the transport layer, but
 //! does not keep them eligible for new resolver traffic.
 //!
+//! This restriction applies when choosing peers for new outbound requests. If a request was
+//! already sent before a peer-set update removes that peer from `latest.primary`, its in-flight
+//! response is still accepted. Peer-set updates are therefore a routing cutover for future sends,
+//! not a retroactive invalidation of responses already on the wire.
+//!
 //! [`Resolver::fetch_targeted`](crate::Resolver::fetch_targeted) can narrow the current primary set
 //! further, but it does not bypass that latest-primary filter. Explicit targets that are no longer
 //! in the latest primary set are ignored until they become primary again.
