@@ -5,7 +5,7 @@
 
 use crate::transcript::Transcript;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, Write};
+use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_math::algebra::{CryptoGroup, Field, Random, Space};
 use commonware_parallel::Strategy;
 
@@ -104,18 +104,24 @@ impl<G> Setup<G> {
 pub struct Claim<F, G> {
     pub commitment: G,
     pub product: F,
+    /// The claimed vector length, stored as `log2(len)`.
+    ///
+    /// Inner product arguments require power-of-two vector lengths, so storing
+    /// the logarithm is enough to recover the full claimed length.
+    pub log_len: u8,
 }
 
 impl<F: Write, G: Write> Write for Claim<F, G> {
     fn write(&self, buf: &mut impl BufMut) {
         self.commitment.write(buf);
         self.product.write(buf);
+        self.log_len.write(buf);
     }
 }
 
 impl<F: EncodeSize, G: EncodeSize> EncodeSize for Claim<F, G> {
     fn encode_size(&self) -> usize {
-        self.commitment.encode_size() + self.product.encode_size()
+        self.commitment.encode_size() + self.product.encode_size() + self.log_len.encode_size()
     }
 }
 
@@ -126,6 +132,7 @@ impl<F: Read, G: Read> Read for Claim<F, G> {
         Ok(Self {
             commitment: G::read_cfg(buf, g_cfg)?,
             product: F::read_cfg(buf, f_cfg)?,
+            log_len: u8::read(buf)?,
         })
     }
 }
@@ -184,6 +191,7 @@ impl<F: Field> Witness<F> {
             Claim {
                 commitment,
                 product,
+                log_len: witness.a.len().ilog2() as u8,
             }
         };
         Some((witness, claim))
@@ -244,24 +252,31 @@ fn sample_challenge<F: Field + Random>(transcript: &Transcript) -> F {
 ///
 /// We also take in a transcript, allowing us to tie in this proof to a specific context.
 /// This is useful when using this argument in the context of a larger proof.
+///
+/// This returns `None` if the setup is too short for the witness, or if the
+/// claim's vector length does not match the witness length.
 pub fn prove<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     transcript: &mut Transcript,
     setup: &Setup<G>,
     claim: &Claim<F, G>,
     witness: Witness<F>,
     strategy: &impl Strategy,
-) -> Proof<F, G>
+) -> Option<Proof<F, G>>
 where
     Claim<F, G>: Encode,
 {
-    assert_eq!(setup.g.len(), witness.a.len());
+    let witness_len = witness.a.len();
+    let claimed_len = 1usize.checked_shl(u32::from(claim.log_len))?;
+    if claimed_len != witness_len || setup.g.len() < witness_len {
+        return None;
+    }
     transcript.commit(claim.encode());
 
     let mut l_r_coms = Vec::<(G, G)>::new();
     let mut a = witness.a;
     let mut b = witness.b;
-    let mut g = setup.g.clone();
-    let mut h = setup.h.clone();
+    let mut g = setup.g[..witness_len].to_vec();
+    let mut h = setup.h[..witness_len].to_vec();
     let mut product = setup.product_generator.clone() * &claim.product + &claim.commitment;
     while a.len() > 1 {
         let half_len = a.len() / 2;
@@ -318,11 +333,11 @@ where
     }
     let a_final = a.pop().expect("a should not be empty");
     let b_final = b.pop().expect("b should not be empty");
-    Proof {
+    Some(Proof {
         l_r_coms,
         a_final,
         b_final,
-    }
+    })
 }
 
 /// Check a [`Proof`], relative to a [`Claim`] and [`Setup`].
@@ -345,10 +360,10 @@ pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
 where
     Claim<F, G>: Encode,
 {
-    assert!(setup.g.len().is_power_of_two());
-    transcript.commit(claim.encode());
-
-    let rounds = setup.g.len().ilog2() as usize;
+    let rounds = usize::from(claim.log_len);
+    let Some(claimed_len) = 1usize.checked_shl(u32::from(claim.log_len)) else {
+        return false;
+    };
     let Proof {
         l_r_coms,
         a_final,
@@ -357,11 +372,15 @@ where
     if l_r_coms.len() != rounds {
         return false;
     }
+    if setup.g.len() < claimed_len || setup.h.len() < claimed_len {
+        return false;
+    }
+    transcript.commit(claim.encode());
 
     // We reduce verification down to one MSM which needs to equal 0:
     // commitment + product * U + sum(u_i^2 * L_i + u_i^-2 * R_i)
     // - a_final * g_final - b_final * h_final - a_final * b_final * U = 0.
-    let capacity = setup.g.len() + setup.h.len() + 2 * rounds + 1;
+    let capacity = 2 * claimed_len + 2 * rounds + 1;
     let mut points = Vec::<G>::with_capacity(capacity);
     let mut weights = Vec::<F>::with_capacity(capacity);
     let mut us = Vec::<(F, F)>::with_capacity(rounds);
@@ -388,8 +407,8 @@ where
         weights.push(u_inv2);
     }
 
-    points.extend_from_slice(&setup.g);
-    points.extend_from_slice(&setup.h);
+    points.extend_from_slice(&setup.g[..claimed_len]);
+    points.extend_from_slice(&setup.h[..claimed_len]);
     points.push(setup.product_generator.clone());
 
     let g_h_weights_start = weights.len();
@@ -458,27 +477,20 @@ mod tests {
     }
 
     impl Plan {
-        fn run(self, generators: &[G]) -> arbitrary::Result<()> {
+        fn run(self, setup: &Setup<G>) -> arbitrary::Result<()> {
             let strategy = Sequential;
-            let len = self.a.len();
-
-            let setup = Setup::new(
-                generators[0],
-                generators[1..]
-                    .chunks_exact(2)
-                    .take(len)
-                    .map(|chunk| (chunk[0], chunk[1])),
-            );
-            let (witness, claim) = Witness::new_with_claim(&setup, self.a.into_iter().zip(self.b))
+            let setup_len = setup.g().len();
+            let (witness, claim) = Witness::new_with_claim(setup, self.a.into_iter().zip(self.b))
                 .expect("plan vectors are powers of two and fit the setup");
-            let setup = <Setup<G> as Decode>::decode_cfg(setup.encode(), &(len, ()))
+            let setup = <Setup<G> as Decode>::decode_cfg(setup.encode(), &(setup_len, ()))
                 .expect("setup should roundtrip");
             let claim = <Claim<F, G> as DecodeExt<((), ())>>::decode(claim.encode())
                 .expect("claim should roundtrip");
 
             let mut prover_transcript = Transcript::new(NAMESPACE);
-            let proof = prove(&mut prover_transcript, &setup, &claim, witness, &strategy);
-            let proof = <Proof<F, G> as Decode>::decode_cfg(proof.encode(), &(len, ((), ())))
+            let proof = prove(&mut prover_transcript, &setup, &claim, witness, &strategy)
+                .expect("setup is large enough and claim length matches the witness");
+            let proof = <Proof<F, G> as Decode>::decode_cfg(proof.encode(), &(setup_len, ((), ())))
                 .expect("proof should roundtrip");
             let mut verifier_transcript = Transcript::new(NAMESPACE);
             assert!(verify(
@@ -493,10 +505,16 @@ mod tests {
     }
 
     #[test]
-    fn test_honest_prover_convince_honest_verifier() {
+    fn test_honest_prover_convinces_honest_verifier() {
         let generators = (1..=NUM_GENERATORS)
             .map(|i| G::generator() * &F::from(i as u8))
             .collect::<Vec<_>>();
-        minifuzz::test(move |u| u.arbitrary::<Plan>()?.run(&generators));
+        let setup = Setup::new(
+            generators[0],
+            generators[1..]
+                .chunks_exact(2)
+                .map(|chunk| (chunk[0], chunk[1])),
+        );
+        minifuzz::test(move |u| u.arbitrary::<Plan>()?.run(&setup));
     }
 }
