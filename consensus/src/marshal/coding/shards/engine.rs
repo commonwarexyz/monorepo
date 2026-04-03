@@ -129,6 +129,11 @@
 //! is known, buffered shards for that commitment are ingested into the active
 //! state machine._
 //!
+//! _Per-peer buffers are retained only for senders in the latest primary peer
+//! set, matching [`commonware_broadcast::buffered`]. Peers present only in
+//! older overlap sets or only as secondary in the latest set are evicted from
+//! those queues even if they remain in the aggregate membership set._
+//!
 //! [`Discovered`]: super::Message::Discovered
 
 use super::{
@@ -252,8 +257,10 @@ where
     /// capacity.
     pub background_channel_capacity: usize,
 
-    /// Provider for peer set information. Per-peer shard buffers
-    /// are freed when a peer leaves all tracked peer sets.
+    /// Provider for peer set information. Pre-leader shards are buffered per peer
+    /// only while that peer appears in [`PeerSetUpdate::latest`] primary set,
+    /// matching [`commonware_broadcast::buffered::Engine`]. Broadcast delivery
+    /// uses the aggregate [`PeerSetUpdate::all`] union.
     pub peer_provider: D,
 }
 
@@ -443,8 +450,9 @@ where
                 return;
             } => {
                 let all_peers = update.all.union();
-                self.peer_buffers
-                    .retain(|peer, _| all_peers.as_ref().contains(peer));
+                self.peer_buffers.retain(|peer, _| {
+                    update.latest.primary.as_ref().contains(peer)
+                });
                 self.tracked_peers = all_peers;
             },
             Some(message) = self.mailbox.recv() else {
@@ -1486,7 +1494,7 @@ mod tests {
         marshal::{
             coding::types::coding_config_for_participants, mocks::block::Block as MockBlock,
         },
-        types::{Height, View},
+        types::{Epoch, Height, View},
     };
     use bytes::Bytes;
     use commonware_codec::Encode;
@@ -4751,6 +4759,194 @@ mod tests {
             assert!(
                 mailbox.get(commitment).await.is_none(),
                 "block should not reconstruct from evicted buffers"
+            );
+        });
+    }
+
+    /// If the evicted node leaves [`PeerSetUpdate::latest.primary`], it
+    /// must still reconstruct once the leader is discovered, as long as enough
+    /// buffered shards came from peers that remain in `latest.primary`.
+    ///
+    /// This does not rely on a self-buffered shard or a leader-delivered shard:
+    /// reconstruction should succeed from the remaining buffered peer shards
+    /// alone.
+    #[test_traced]
+    fn test_evicted_node_still_reconstructs_from_buffered_peer_shards() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let num_peers = 10usize;
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(2),
+                },
+            );
+            network.start();
+
+            let mut private_keys = (0..num_peers)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            private_keys.sort_by_key(|s| s.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
+            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+
+            // Evicted node is peer 1; peer 1 is later removed from latest.primary.
+            let receiver_idx = 1usize;
+            let receiver_pk = peer_keys[receiver_idx].clone();
+            let leader_pk = peer_keys[0].clone();
+            let peer2_pk = peer_keys[2].clone();
+            let peer4_pk = peer_keys[4].clone();
+            let peer5_pk = peer_keys[5].clone();
+            let peer6_pk = peer_keys[6].clone();
+
+            let receiver_control = oracle.control(receiver_pk.clone());
+            let (evicted_sender, evicted_receiver) = receiver_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            let peer2_control = oracle.control(peer2_pk.clone());
+            let (mut peer2_sender, _peer2_receiver) = peer2_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            let peer4_control = oracle.control(peer4_pk.clone());
+            let (mut peer4_sender, _peer4_receiver) = peer4_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            let peer5_control = oracle.control(peer5_pk.clone());
+            let (mut peer5_sender, _peer5_receiver) = peer5_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            let peer6_control = oracle.control(peer6_pk.clone());
+            let (mut peer6_sender, _peer6_receiver) = peer6_control
+                .register(0, TEST_QUOTA)
+                .await
+                .expect("registration should succeed");
+
+            for sender in [&peer2_pk, &peer4_pk, &peer5_pk, &peer6_pk] {
+                oracle
+                    .add_link(sender.clone(), receiver_pk.clone(), DEFAULT_LINK)
+                    .await
+                    .expect("link should be added");
+            }
+
+            oracle.manager().track(0, participants.clone()).await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            let scheme = Scheme::signer(
+                SCHEME_NAMESPACE,
+                participants.clone(),
+                private_keys[receiver_idx].clone(),
+            )
+            .expect("signer scheme should be created");
+
+            let config: Config<_, _, _, _, C, _, _, _> = Config {
+                scheme_provider: MultiEpochProvider::single(scheme),
+                blocker: receiver_control.clone(),
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: (),
+                strategy: STRATEGY,
+                mailbox_size: 1024,
+                peer_buffer_size: NZUsize!(64),
+                background_channel_capacity: 1024,
+                peer_provider: oracle.manager(),
+            };
+
+            let (engine, mailbox) = ShardEngine::new(context.with_label("evicted"), config);
+            engine.start((evicted_sender, evicted_receiver));
+
+            let coding_config = coding_config_for_participants(num_peers as u16);
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
+            let commitment = coded_block.commitment();
+
+            let peer2_shard = coded_block.shard(2).expect("missing shard 2").encode();
+            let peer4_shard = coded_block.shard(4).expect("missing shard 4").encode();
+            let peer5_shard = coded_block.shard(5).expect("missing shard 5").encode();
+            let peer6_shard = coded_block.shard(6).expect("missing shard 6").encode();
+
+            let block_sub = mailbox.subscribe(commitment).await;
+
+            // Buffer four peer shards before the leader is discovered.
+            peer2_sender
+                .send(
+                    Recipients::One(receiver_pk.clone()),
+                    peer2_shard,
+                    true,
+                )
+                .await
+                .expect("send failed");
+            peer4_sender
+                .send(
+                    Recipients::One(receiver_pk.clone()),
+                    peer4_shard,
+                    true,
+                )
+                .await
+                .expect("send failed");
+            peer5_sender
+                .send(
+                    Recipients::One(receiver_pk.clone()),
+                    peer5_shard,
+                    true,
+                )
+                .await
+                .expect("send failed");
+            peer6_sender
+                .send(
+                    Recipients::One(receiver_pk.clone()),
+                    peer6_shard,
+                    true,
+                )
+                .await
+                .expect("send failed");
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+
+            let latest_primary: Set<P> = Set::from_iter_dedup(
+                peer_keys
+                    .iter()
+                    .filter(|pk| **pk != receiver_pk)
+                    .cloned(),
+            );
+            oracle.manager().track(1, latest_primary).await;
+            context.sleep(Duration::from_millis(10)).await;
+
+            mailbox
+                .discovered(
+                    commitment,
+                    leader_pk.clone(),
+                    Round::new(Epoch::zero(), View::new(1)),
+                )
+                .await;
+
+            select! {
+                _ = block_sub => {},
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("block subscription did not resolve after leader discovery");
+                },
+            }
+
+            context.sleep(DEFAULT_LINK.latency * 2).await;
+            let block = mailbox.get(commitment).await;
+            assert!(
+                block.is_some(),
+                "evicted node should reconstruct from buffered shards sent by remaining latest.primary peers"
+            );
+            assert_eq!(block.unwrap().commitment(), commitment);
+
+            assert!(
+                oracle.blocked().await.unwrap().is_empty(),
+                "no peer should be blocked when overlapping shards are valid"
             );
         });
     }
