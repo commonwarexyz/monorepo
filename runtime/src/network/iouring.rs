@@ -303,11 +303,14 @@ impl crate::Listener for Listener {
 
 /// Implementation of [crate::Sink] for an io-uring [Network].
 pub struct Sink {
+    /// Shared socket descriptor backing this sink half.
     fd: Arc<OwnedFd>,
     /// Used to submit send operations to the io_uring event loop.
     submitter: iouring::Submitter,
     /// Timeout budget for a top-level send call.
     timeout: Duration,
+    /// Tracks whether a previous send failure has made this sink unusable.
+    poisoned: bool,
 }
 
 impl Sink {
@@ -316,6 +319,7 @@ impl Sink {
             fd,
             submitter,
             timeout,
+            poisoned: false,
         }
     }
 
@@ -471,14 +475,49 @@ impl Sink {
 
         Ok(())
     }
+
+    fn shutdown(&self) {
+        // Best-effort write-half shutdown so the peer can observe that no more
+        // bytes will be sent after this sink becomes unusable.
+        //
+        // SAFETY: `self.fd` owns a live socket descriptor for the lifetime of
+        // the sink. `shutdown` does not take ownership of the descriptor.
+        unsafe {
+            libc::shutdown(self.fd.as_raw_fd(), libc::SHUT_WR);
+        }
+    }
+}
+
+impl Drop for Sink {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
 
 impl crate::Sink for Sink {
     async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        match bufs.into().try_into_single() {
+        if self.poisoned {
+            return Err(Error::Closed);
+        }
+
+        // Pre-poison so that cancellation leaves the sink permanently closed
+        // rather than silently corrupted.
+        self.poisoned = true;
+
+        let result = match bufs.into().try_into_single() {
             Ok(buf) => self.send_single(buf).await,
             Err(bufs) => self.send_vectored(bufs).await,
+        };
+
+        // A failed send leaves the write half unusable.
+        if result.is_err() {
+            self.shutdown();
+            return result;
         }
+
+        // Unpoison on success.
+        self.poisoned = false;
+        Ok(())
     }
 }
 
@@ -487,11 +526,14 @@ impl crate::Sink for Sink {
 /// Uses an internal buffer to reduce syscall overhead. Multiple small reads
 /// can be satisfied from the buffer without additional network operations.
 pub struct Stream {
+    /// Shared socket descriptor backing this stream half.
     fd: Arc<OwnedFd>,
     /// Used to submit recv operations to the io_uring event loop.
     submitter: iouring::Submitter,
     /// Timeout budget for a top-level recv call.
     timeout: Duration,
+    /// Tracks whether a previous recv failure has made this stream unusable.
+    poisoned: bool,
     /// Internal read buffer.
     buffer: IoBufMut,
     /// Current read position in the buffer.
@@ -514,6 +556,7 @@ impl Stream {
             fd,
             submitter,
             timeout,
+            poisoned: false,
             buffer: IoBufMut::with_capacity(buffer_capacity),
             buffer_pos: 0,
             buffer_len: 0,
@@ -614,42 +657,60 @@ impl Stream {
 
 impl crate::Stream for Stream {
     async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
-        // SAFETY: `len` bytes are written by the recv loop below.
-        let mut owned_buf = unsafe { self.pool.alloc_len(len) };
-        let mut bytes_received = 0;
-        let deadline = Instant::now() + self.timeout;
-
-        while bytes_received < len {
-            // First drain any buffered data
-            let buffered = self.buffer_len - self.buffer_pos;
-            if buffered > 0 {
-                let to_copy = std::cmp::min(buffered, len - bytes_received);
-                owned_buf.as_mut()[bytes_received..bytes_received + to_copy].copy_from_slice(
-                    &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + to_copy],
-                );
-                self.buffer_pos += to_copy;
-                bytes_received += to_copy;
-                continue;
-            }
-
-            let remaining = len - bytes_received;
-
-            // Skip internal buffer if disabled, or if the read is large enough
-            // to fill the buffer and immediately drain it
-            let buffer_capacity = self.buffer.capacity();
-            if buffer_capacity == 0 || remaining >= buffer_capacity {
-                let (returned_buf, result) = self
-                    .submit_recv(owned_buf, bytes_received, remaining, deadline)
-                    .await;
-                owned_buf = returned_buf;
-                bytes_received += result?;
-            } else {
-                // Fill internal buffer, then loop will copy
-                self.fill_buffer(deadline).await?;
-            }
+        if self.poisoned {
+            return Err(Error::Closed);
         }
 
-        Ok(IoBufs::from(owned_buf.freeze()))
+        // Pre-poison so that cancellation leaves the stream permanently closed
+        // rather than silently corrupted.
+        self.poisoned = true;
+
+        let result = async {
+            // SAFETY: `len` bytes are written by the recv loop below.
+            let mut owned_buf = unsafe { self.pool.alloc_len(len) };
+            let mut bytes_received = 0;
+            let deadline = Instant::now() + self.timeout;
+
+            while bytes_received < len {
+                // First drain any buffered data
+                let buffered = self.buffer_len - self.buffer_pos;
+                if buffered > 0 {
+                    let to_copy = std::cmp::min(buffered, len - bytes_received);
+                    owned_buf.as_mut()[bytes_received..bytes_received + to_copy].copy_from_slice(
+                        &self.buffer.as_ref()[self.buffer_pos..self.buffer_pos + to_copy],
+                    );
+                    self.buffer_pos += to_copy;
+                    bytes_received += to_copy;
+                    continue;
+                }
+
+                let remaining = len - bytes_received;
+
+                // Skip internal buffer if disabled, or if the read is large enough
+                // to fill the buffer and immediately drain it
+                let buffer_capacity = self.buffer.capacity();
+                if buffer_capacity == 0 || remaining >= buffer_capacity {
+                    let (returned_buf, inner_result) = self
+                        .submit_recv(owned_buf, bytes_received, remaining, deadline)
+                        .await;
+                    owned_buf = returned_buf;
+                    bytes_received += inner_result?;
+                } else {
+                    // Fill internal buffer, then loop will copy
+                    self.fill_buffer(deadline).await?;
+                }
+            }
+
+            Ok(IoBufs::from(owned_buf.freeze()))
+        }
+        .await;
+
+        // Unpoison on success.
+        if result.is_ok() {
+            self.poisoned = false;
+        }
+
+        result
     }
 
     fn peek(&self, max_len: usize) -> &[u8] {
@@ -692,8 +753,15 @@ mod tests {
     #[tokio::test]
     async fn test_trait() {
         tests::test_network_trait(|| {
-            Network::start(Config::default(), &mut Registry::default(), test_pool())
-                .expect("Failed to start io_uring")
+            Network::start(
+                Config {
+                    read_write_timeout: Duration::from_millis(100),
+                    ..Default::default()
+                },
+                &mut Registry::default(),
+                test_pool(),
+            )
+            .expect("Failed to start io_uring")
         })
         .await;
     }

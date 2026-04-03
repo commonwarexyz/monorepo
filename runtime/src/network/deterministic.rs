@@ -1,4 +1,4 @@
-use crate::{mocks, Error, IoBufs};
+use crate::{mocks, Error};
 use commonware_utils::{channel::mpsc, sync::Mutex};
 use std::{
     collections::HashMap,
@@ -11,30 +11,10 @@ use std::{
 const EPHEMERAL_PORT_RANGE: Range<u16> = 32768..61000;
 
 /// Implementation of [crate::Sink] for a deterministic [Network].
-pub struct Sink {
-    sender: mocks::Sink,
-}
-
-impl crate::Sink for Sink {
-    async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.sender.send(bufs).await.map_err(|_| Error::SendFailed)
-    }
-}
+pub type Sink = mocks::Sink;
 
 /// Implementation of [crate::Stream] for a deterministic [Network].
-pub struct Stream {
-    receiver: mocks::Stream,
-}
-
-impl crate::Stream for Stream {
-    async fn recv(&mut self, len: usize) -> Result<IoBufs, Error> {
-        self.receiver.recv(len).await.map_err(|_| Error::RecvFailed)
-    }
-
-    fn peek(&self, max_len: usize) -> &[u8] {
-        self.receiver.peek(max_len)
-    }
-}
+pub type Stream = mocks::Stream;
 
 /// Implementation of [crate::Listener] for a deterministic [Network].
 pub struct Listener {
@@ -48,7 +28,7 @@ impl crate::Listener for Listener {
 
     async fn accept(&mut self) -> Result<(SocketAddr, Self::Sink, Self::Stream), Error> {
         let (socket, sender, receiver) = self.listener.recv().await.ok_or(Error::ReadFailed)?;
-        Ok((socket, Sink { sender }, Stream { receiver }))
+        Ok((socket, sender, receiver))
     }
 
     fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
@@ -134,14 +114,7 @@ impl crate::Network for Network {
         sender
             .send((dialer, dialer_sender, listener_receiver))
             .map_err(|_| Error::ConnectionFailed)?;
-        Ok((
-            Sink {
-                sender: listener_sender,
-            },
-            Stream {
-                receiver: dialer_receiver,
-            },
-        ))
+        Ok((listener_sender, dialer_receiver))
     }
 }
 
