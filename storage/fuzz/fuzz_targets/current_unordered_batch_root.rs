@@ -5,7 +5,7 @@ use commonware_cryptography::Sha256;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    mmr::journaled::Config as MmrConfig,
+    mmr::{self, journaled::Config as MmrConfig},
     qmdb::current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
     translator::OneCap,
 };
@@ -15,7 +15,7 @@ use std::num::NonZeroU16;
 
 type Key = FixedBytes<32>;
 type Value = FixedBytes<32>;
-type Db = CurrentDb<deterministic::Context, Key, Value, Sha256, OneCap, 32>;
+type Db = CurrentDb<mmr::Family, deterministic::Context, Key, Value, Sha256, OneCap, 32>;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(137);
 const COLLISION_GROUPS: u8 = 4;
@@ -76,7 +76,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
     Config {
-        mmr_config: MmrConfig {
+        merkle_config: MmrConfig {
             journal_partition: format!("{name}-mmr"),
             metadata_partition: format!("{name}-meta"),
             items_per_blob: NZU64!(17),
@@ -90,7 +90,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap> {
             write_buffer: NZUsize!(1024),
             page_cache,
         },
-        grafted_mmr_metadata_partition: format!("{name}-grafted"),
+        grafted_metadata_partition: format!("{name}-grafted"),
         translator: OneCap,
     }
 }
