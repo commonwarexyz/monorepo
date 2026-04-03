@@ -192,7 +192,7 @@ where
         let size = state.size();
         mmr::batch::MerkleizedBatch::Checkpoint {
             inner: Arc::new(state),
-            size,
+            base: size,
         }
     }
 
@@ -200,8 +200,7 @@ where
     pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<H, U, N> {
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
-            Vec::new(),
-            Vec::new(),
+            None, // No parent -- created from DB.
             self.grafted_snapshot(),
             self.status.clone(),
         )
@@ -559,31 +558,58 @@ where
     H: Hasher,
     Operation<mmr::Family, U>: Codec,
 {
-    /// Apply a changeset to the database, returning the range of written operations.
+    /// Apply a batch to the database, returning the range of
+    /// written operations.
     ///
-    /// A changeset is only valid if the database has not been modified since the batch that
-    /// produced it was created. Multiple batches can be forked from the same parent for speculative
-    /// execution, but only one may be applied. Applying a stale changeset returns
+    /// A batch is valid only if every batch applied to the database
+    /// since this batch's ancestor chain was created is an ancestor
+    /// of this batch. Applying a batch from a different fork returns
     /// [`Error::StaleChangeset`].
     ///
-    /// This publishes the batch to the in-memory Current view and appends it to the underlying
-    /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
-    /// durability.
+    /// This publishes the batch to the in-memory Current view and
+    /// appends it to the journal, but does not durably persist it.
+    /// Call [`Db::commit`] or [`Db::sync`] to guarantee durability.
     pub async fn apply_batch(
         &mut self,
-        batch: super::batch::Changeset<U::Key, H::Digest, Operation<mmr::Family, U>, N>,
+        batch: Arc<super::batch::MerkleizedBatch<H::Digest, U, N>>,
     ) -> Result<Range<Location>, Error> {
-        // Apply inner any batch (writes ops, updates snapshot).
-        let range = self.any.apply_batch(batch.inner).await?;
+        let db_size = *self.any.last_commit_loc + 1;
+        if batch.inner.total_size <= db_size {
+            return Err(Error::StaleChangeset {
+                expected: batch.inner.db_size,
+                actual: db_size,
+            });
+        }
+        let skip_ancestors = db_size > batch.inner.db_size;
 
-        // Push bitmap mutations as a layer (O(changeset), no deep clone).
-        self.status
-            .push_changeset(batch.bitmap_pushes, batch.bitmap_clears);
+        // 1. Apply inner any-layer batch.
+        let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
-        // Push grafted changeset as a layer (O(changeset), no deep clone).
-        self.grafted_mmr.push_changeset(batch.grafted_changeset);
+        // 2. Apply bitmap. When ancestors are committed, their bitmap
+        // changes are already applied; only push this batch's local changes.
+        if skip_ancestors {
+            self.status.push_changeset(
+                batch.bitmap_pushes.as_ref().clone(),
+                batch.bitmap_clears.as_ref().clone(),
+            );
+        } else {
+            let (pushes, clears) = super::batch::collect_bitmap_from_chain(
+                batch.parent.as_ref(),
+                &batch.bitmap_pushes,
+                &batch.bitmap_clears,
+            );
+            self.status.push_changeset(pushes, clears);
+        }
 
-        // Use precomputed canonical root from merkleize().
+        // 3. Apply grafted MMR.
+        let grafted_cs = if skip_ancestors {
+            batch.grafted.finalize_from(batch.grafted_parent_size)
+        } else {
+            batch.grafted.finalize()
+        };
+        self.grafted_mmr.push_changeset(grafted_cs);
+
+        // 4. Canonical root.
         self.root = batch.canonical_root;
 
         Ok(range)

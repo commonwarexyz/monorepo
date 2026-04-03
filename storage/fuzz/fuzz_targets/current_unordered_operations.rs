@@ -82,14 +82,12 @@ async fn commit_pending(
     committed_state: &mut HashMap<RawKey, Option<RawValue>>,
     pending_expected: &mut HashMap<RawKey, Option<RawValue>>,
 ) {
-    let finalized = {
-        let mut batch = db.new_batch();
-        for (k, v) in pending_writes.drain(..) {
-            batch = batch.write(k, v);
-        }
-        batch.merkleize(None, db).await.unwrap().finalize()
-    };
-    db.apply_batch(finalized)
+    let mut batch = db.new_batch();
+    for (k, v) in pending_writes.drain(..) {
+        batch = batch.write(k, v);
+    }
+    let merkleized = batch.merkleize(None, db).await.unwrap();
+    db.apply_batch(merkleized)
         .await
         .expect("commit should not fail");
     db.commit().await.expect("commit fsync should not fail");

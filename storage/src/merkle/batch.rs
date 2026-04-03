@@ -37,10 +37,11 @@
 //!
 //! # Checkpoints
 //!
-//! A [`MerkleizedBatch::Checkpoint`] records the committed size so that
-//! [`MerkleizedBatch::finalize`] produces changesets relative to that point. Without it,
-//! `base_size()` would recurse through any post-commit layers all the way to the original
-//! empty `Base`, producing a changeset the base would reject as stale.
+//! A [`MerkleizedBatch::Checkpoint`] records the number of nodes already committed
+//! so that [`MerkleizedBatch::finalize`] produces changesets relative to that point.
+//! Without it, `base_size()` would recurse through any post-commit layers all the
+//! way to the original empty `Base`, producing a changeset covering the entire
+//! history.
 //!
 //! # Example (MMR)
 //!
@@ -421,15 +422,17 @@ pub enum MerkleizedBatch<F: Family, D: Digest> {
     /// An uncommitted mutation on top of a parent batch.
     Layer(Arc<MerkleizedBatchLayer<F, D>>),
 
-    /// A wrapper around an existing batch that marks it as the base point for changeset
-    /// computation. Adds no data -- all reads delegate to the inner batch. The only
-    /// behavioral difference is that [`base_size()`](Self::base_size) returns the wrapped
-    /// batch's size instead of recursing further. See [module-level docs](self#checkpoints).
+    /// A wrapper that overrides [`base_size()`](Self::base_size) to return
+    /// `base` instead of recursing further. This makes [`finalize`](Self::finalize)
+    /// produce a changeset covering only nodes above `base`. Reads delegate
+    /// to the inner batch. See [module-level docs](self#checkpoints).
     Checkpoint {
         /// The wrapped batch. All reads delegate here.
         inner: Arc<Self>,
-        /// `inner.size()` at creation time. Returned by both `size()` and `base_size()`.
-        size: Position<F>,
+        /// Number of nodes already committed. [`base_size()`](Self::base_size)
+        /// returns this value; [`finalize`](Self::finalize) produces a
+        /// changeset covering nodes in `[base, size())`.
+        base: Position<F>,
     },
 }
 
@@ -439,7 +442,9 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         match self {
             Self::Base(mem) => mem.size(),
             Self::Layer(layer) => Position::new(*layer.parent_size + layer.appended.len() as u64),
-            Self::Checkpoint { size, .. } => *size,
+            // Full chain size, not the checkpoint base. base_size()
+            // returns the checkpoint base.
+            Self::Checkpoint { inner, .. } => inner.size(),
         }
     }
 
@@ -506,23 +511,24 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         }
     }
 
-    /// Flatten this batch chain into a single [`Changeset`] relative to the
-    /// ultimate base.
-    pub fn finalize(self) -> Changeset<F, D> {
+    /// Flatten this batch chain into a single [`Changeset`] covering
+    /// nodes in `[base_size(), size())`.
+    pub fn finalize(&self) -> Changeset<F, D> {
         let base_size = self.base_size();
         self.finalize_from(base_size)
     }
 
-    /// Like [`Self::finalize`], but produces a [`Changeset`] relative to `current_base`
-    /// instead of the chain's original base.
+    /// Like [`Self::finalize`], but produces a [`Changeset`] covering
+    /// nodes in `[current_base, size())` instead of `[base_size(), size())`.
     ///
-    /// Use this when an ancestor batch in the chain has already been committed, advancing
-    /// the base's size past the original fork point.
+    /// Use this when ancestors have already been committed, so the
+    /// changeset should start from a higher position than the chain's
+    /// original fork point.
     ///
     /// # Panics
     ///
     /// Panics if `current_base` exceeds this batch's size.
-    pub fn finalize_from(self, current_base: Position<F>) -> Changeset<F, D> {
+    pub fn finalize_from(&self, current_base: Position<F>) -> Changeset<F, D> {
         let effective = self.size();
         assert!(
             current_base <= effective,
@@ -548,15 +554,16 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         }
     }
 
-    /// Number of nodes in the committed structure this chain was forked from.
+    /// Number of nodes already committed (the changeset boundary).
+    /// [`finalize`](Self::finalize) produces changes covering `[base_size, size())`.
     ///
-    /// Recurses to the chain root for `Base` and `Layer`. Stops at `Checkpoint`,
-    /// which defines the boundary.
+    /// For `Base` and `Layer`, recurses to the chain root. For `Checkpoint`,
+    /// returns the stored `base` value.
     pub fn base_size(&self) -> Position<F> {
         match self {
             Self::Base(mem) => mem.size(),
             Self::Layer(layer) => layer.parent.base_size(),
-            Self::Checkpoint { size, .. } => *size,
+            Self::Checkpoint { base, .. } => *base,
         }
     }
 
@@ -565,7 +572,10 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
     /// overwrite earlier ones.
     fn collect_overwrites(&self, into: &mut BTreeMap<Position<F>, D>) {
         match self {
-            Self::Base(_) | Self::Checkpoint { .. } => {}
+            Self::Base(_) => {}
+            // Recurse through the checkpoint. finalize_from() filters
+            // the result to positions < current_base after collection.
+            Self::Checkpoint { inner, .. } => inner.collect_overwrites(into),
             Self::Layer(layer) => {
                 layer.parent.collect_overwrites(into);
                 for (&pos, &d) in &layer.overwrites {

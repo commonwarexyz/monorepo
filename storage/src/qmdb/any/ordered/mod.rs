@@ -320,7 +320,7 @@ mod test {
     use super::*;
     use crate::{
         merkle::mmr,
-        qmdb::any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+        qmdb::any::traits::{DbAny, UnmerkleizedBatch as _},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_runtime::{deterministic::Context, Metrics};
@@ -348,20 +348,15 @@ mod test {
         // Write without applying (unapplied batch should be lost on reopen).
         {
             let _batch = db.new_batch().write(d1, Some(d2));
-            // Don't merkleize/finalize/apply -- simulates uncommitted write
+            // Don't merkleize/apply -- simulates uncommitted write
         }
         let mut db = reopen_db(context.with_label("reopen1")).await;
         assert_eq!(db.root(), root);
 
         // Test applying an empty batch on an empty db.
         let metadata = Sha256::fill(3u8);
-        let finalized = db
-            .new_batch()
-            .merkleize(Some(metadata), &db)
-            .await
-            .unwrap()
-            .finalize();
-        let range = db.apply_batch(finalized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(Some(metadata), &db).await.unwrap();
+        let range = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         assert_eq!(range.start, Location::new(1));
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
@@ -378,22 +373,12 @@ mod test {
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
         for _ in 1..100 {
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            let _ = db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+            let _ = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap();
         }
-        let finalized = db
-            .new_batch()
-            .merkleize(None, &db)
-            .await
-            .unwrap()
-            .finalize();
-        let _ = db.apply_batch(finalized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         db.destroy().await.unwrap();
     }
@@ -416,74 +401,64 @@ mod test {
         assert!(db.get(&key2).await.unwrap().is_none());
 
         assert!(db.get(&key1).await.unwrap().is_none());
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val1))
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert!(db.get(&key2).await.unwrap().is_none());
 
         assert!(db.get(&key2).await.unwrap().is_none());
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(val2))
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key1.clone(), None)
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
 
         let new_val = Sha256::fill(5u8);
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(new_val))
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
 
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(new_val))
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // Empty commit batch (no preceding uncommitted writes).
-        let finalized = db
-            .new_batch()
-            .merkleize(None, &db)
-            .await
-            .unwrap()
-            .finalize();
-        let _ = db.apply_batch(finalized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
         // Make sure key1 is already active.
@@ -491,36 +466,29 @@ mod test {
 
         // Delete all keys.
         assert!(db.get(&key1).await.unwrap().is_some());
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key1.clone(), None)
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         assert!(db.get(&key2).await.unwrap().is_some());
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key2.clone(), None)
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
         // Empty commit batch.
-        let finalized = db
-            .new_batch()
-            .merkleize(None, &db)
-            .await
-            .unwrap()
-            .finalize();
-        let _ = db.apply_batch(finalized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
         // Multiple deletions of the same key should be a no-op.
@@ -531,13 +499,8 @@ mod test {
         assert!(db.get(&key3).await.unwrap().is_none());
 
         // Make sure closing/reopening gets us back to the same state.
-        let finalized = db
-            .new_batch()
-            .merkleize(None, &db)
-            .await
-            .unwrap()
-            .finalize();
-        let _ = db.apply_batch(finalized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         let op_count = db.bounds().await.end;
         let root = db.root();
@@ -546,64 +509,54 @@ mod test {
         assert_eq!(db.root(), root);
 
         // Re-activate the keys by updating them.
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val1))
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(val2))
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key1.clone(), None)
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(val1))
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val2))
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
         // Empty commit batch.
-        let finalized = db
-            .new_batch()
-            .merkleize(None, &db)
-            .await
-            .unwrap()
-            .finalize();
-        let _ = db.apply_batch(finalized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
@@ -616,13 +569,8 @@ mod test {
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
-        let finalized = db
-            .new_batch()
-            .merkleize(None, &db)
-            .await
-            .unwrap()
-            .finalize();
-        let _ = db.apply_batch(finalized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
         assert!(db.root() != root);
@@ -650,28 +598,22 @@ mod test {
         let key3 = FixedBytes::from([0xFFu8, 0xFFu8, 0u8, 0u8]);
         let val = Sha256::fill(1u8);
 
-        let finalized = db
+        let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val))
             .write(key2.clone(), Some(val))
             .write(key3.clone(), Some(val))
             .merkleize(None, &db)
             .await
-            .unwrap()
-            .finalize();
-        db.apply_batch(finalized).await.unwrap();
+            .unwrap();
+        db.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
-        let finalized = db
-            .new_batch()
-            .merkleize(None, &db)
-            .await
-            .unwrap()
-            .finalize();
-        let _ = db.apply_batch(finalized).await.unwrap();
+        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         db.destroy().await.unwrap();
     }
