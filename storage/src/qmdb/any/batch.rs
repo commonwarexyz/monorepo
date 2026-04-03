@@ -22,7 +22,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use core::ops::Range;
+use core::{iter, ops::Range};
 use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1098,7 +1098,7 @@ where
     /// Weak ref fails to upgrade (ancestor was freed).
     pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
         let mut next = self.parent.as_ref().and_then(Weak::upgrade);
-        core::iter::from_fn(move || {
+        iter::from_fn(move || {
             let batch = next.take()?;
             next = batch.parent.as_ref().and_then(Weak::upgrade);
             Some(batch)

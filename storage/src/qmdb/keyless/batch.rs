@@ -9,6 +9,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
+use core::iter;
 use std::sync::{Arc, Weak};
 
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
@@ -78,9 +79,9 @@ where
     Operation<V>: EncodeShared,
 {
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
-    fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
         let mut next = self.parent.as_ref().and_then(Weak::upgrade);
-        core::iter::from_fn(move || {
+        iter::from_fn(move || {
             let batch = next.take()?;
             next = batch.parent.as_ref().and_then(Weak::upgrade);
             Some(batch)

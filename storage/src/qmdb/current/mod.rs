@@ -22,11 +22,11 @@
 //!     .write(key_a, Some(val_a))
 //!     .merkleize(None, &db).await?;
 //!
-//! let child_a = parent.new_batch()
+//! let child_a = parent.new_batch::<Sha256>()
 //!     .write(key_b, Some(val_b))
 //!     .merkleize(None, &db).await?;
 //!
-//! let child_b = parent.new_batch()
+//! let child_b = parent.new_batch::<Sha256>()
 //!     .write(key_c, Some(val_c))
 //!     .merkleize(None, &db).await?;
 //!

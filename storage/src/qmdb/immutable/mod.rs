@@ -70,7 +70,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher as CHasher;
-use std::{num::NonZeroU64, ops::Range, sync::Arc};
+use std::{collections::BTreeSet, num::NonZeroU64, ops::Range, sync::Arc};
 use tracing::warn;
 
 pub mod batch;
@@ -447,15 +447,15 @@ where
 
         // Apply journal.
         let journal_cs = if skip_ancestors {
-            batch.journal.finalize_from(Location::new(db_size))
+            batch.journal_batch.finalize_from(Location::new(db_size))
         } else {
-            batch.journal.finalize()
+            batch.journal_batch.finalize()
         };
         self.journal.apply_batch(journal_cs).await?;
 
         // Apply snapshot inserts by reference.
         let bounds = self.journal.reader().await.bounds();
-        let mut seen = std::collections::BTreeSet::new();
+        let mut seen = BTreeSet::new();
         for (key, entry) in batch.diff.iter() {
             if skip_ancestors && *entry.loc < db_size {
                 continue;

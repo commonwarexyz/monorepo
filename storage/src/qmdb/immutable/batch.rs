@@ -10,6 +10,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher as CHasher};
+use core::iter;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Weak},
@@ -56,7 +57,7 @@ where
 /// in contrast to [`UnmerkleizedBatch`].
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// Authenticated journal batch (Merkle state + local items).
-    pub(super) journal: authenticated::MerkleizedBatch<F, D, Operation<K, V>>,
+    pub(super) journal_batch: authenticated::MerkleizedBatch<F, D, Operation<K, V>>,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     pub(super) diff: Arc<BTreeMap<K, DiffEntry<F, V::Value>>>,
@@ -75,7 +76,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
 impl<F: Family, D: Digest, K: Key, V: ValueEncoding> Clone for MerkleizedBatch<F, D, K, V> {
     fn clone(&self) -> Self {
         Self {
-            journal: self.journal.clone(),
+            journal_batch: self.journal_batch.clone(),
             diff: Arc::clone(&self.diff),
             parent: self.parent.clone(),
             total_size: self.total_size,
@@ -176,10 +177,10 @@ where
         for op in &ops {
             journal_batch = journal_batch.add(op.clone());
         }
-        let journal = journal_batch.merkleize();
+        let journal_merkleized = journal_batch.merkleize();
 
         Arc::new(MerkleizedBatch {
-            journal,
+            journal_batch: journal_merkleized,
             diff: Arc::new(diff),
             parent: self.parent.as_ref().map(Arc::downgrade),
             total_size,
@@ -194,13 +195,13 @@ where
 {
     /// Return the speculative root.
     pub fn root(&self) -> D {
-        self.journal.root()
+        self.journal_batch.root()
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
     pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
         let mut next = self.parent.as_ref().and_then(Weak::upgrade);
-        core::iter::from_fn(move || {
+        iter::from_fn(move || {
             let batch = next.take()?;
             next = batch.parent.as_ref().and_then(Weak::upgrade);
             Some(batch)
@@ -237,7 +238,7 @@ where
         H: CHasher<Digest = D>,
     {
         UnmerkleizedBatch {
-            journal_batch: self.journal.new_batch::<H>(),
+            journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             parent: Some(Arc::clone(self)),
             base_size: self.total_size,
@@ -261,7 +262,7 @@ where
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V>> {
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
-            journal: self.journal.to_merkleized_batch(),
+            journal_batch: self.journal.to_merkleized_batch(),
             diff: Arc::new(BTreeMap::new()),
             parent: None,
             total_size: journal_size,
