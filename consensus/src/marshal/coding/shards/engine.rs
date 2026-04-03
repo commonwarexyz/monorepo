@@ -703,12 +703,12 @@ where
 
     fn update_latest_primary_peers(&mut self, peers: Set<P>) {
         self.peer_buffers
-            .retain(|peer, _| peers.as_ref().contains(peer));
+            .retain(|peer, _| peers.position(peer).is_some());
         self.latest_primary_peers = peers;
     }
 
     fn should_buffer_peer(&self, peer: &P) -> bool {
-        self.latest_primary_peers.as_ref().contains(peer)
+        self.latest_primary_peers.position(peer).is_some()
     }
 
     /// Ingest buffered pre-leader shards for a commitment into active state.

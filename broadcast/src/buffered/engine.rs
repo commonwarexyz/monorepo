@@ -370,13 +370,12 @@ where
     }
 
     fn should_buffer_peer(&self, peer: &P) -> bool {
-        peer == &self.public_key || self.latest_primary_peers.as_ref().contains(peer)
+        peer == &self.public_key || self.latest_primary_peers.position(peer).is_some()
     }
 
     fn evict_untracked_peers(&mut self, primary_peers: &Set<P>) {
-        let primary = primary_peers.as_ref();
         for (peer, deque) in self.deques.extract_if(.., |peer, _| {
-            peer != &self.public_key && !primary.contains(peer)
+            peer != &self.public_key && primary_peers.position(peer).is_none()
         }) {
             debug!(?peer, digests = deque.len(), "evicting disconnected peer");
             for digest in deque {
