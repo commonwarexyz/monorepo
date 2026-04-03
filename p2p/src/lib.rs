@@ -218,7 +218,8 @@ stability_scope!(BETA {
     }
 
     /// Alias for the subscription type returned by [`Provider::subscribe`].
-    pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<(u64, Set<P>, Set<P>)>;
+    pub type PeerSetSubscription<P> =
+        mpsc::UnboundedReceiver<(u64, Set<P>, (Set<P>, Set<P>))>;
 
     /// Primary and secondary peers registered together for [`Manager::track`].
     #[derive(Clone, Debug)]
@@ -282,7 +283,8 @@ stability_scope!(BETA {
         /// Returns a receiver that will receive tuples of:
         /// - The peer set ID
         /// - The peers in the new primary set
-        /// - All currently primary peers (union of recent peer sets)
+        /// - All currently tracked primary peers (union of recent peer sets)
+        /// - All currently tracked secondary peers (union of recent peer sets)
         #[allow(clippy::type_complexity)]
         fn subscribe(
             &mut self,

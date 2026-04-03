@@ -22,7 +22,7 @@ pub struct StaticProvider<P: PublicKey> {
     id: u64,
     peers: Set<P>,
     #[allow(clippy::type_complexity)]
-    senders: Vec<UnboundedSender<(u64, Set<P>, Set<P>)>>,
+    senders: Vec<UnboundedSender<(u64, Set<P>, (Set<P>, Set<P>))>>,
 }
 
 impl<P: PublicKey> StaticProvider<P> {
@@ -44,9 +44,13 @@ impl<P: PublicKey> Provider for StaticProvider<P> {
         Some(self.peers.clone())
     }
 
-    async fn subscribe(&mut self) -> UnboundedReceiver<(u64, Set<P>, Set<P>)> {
+    async fn subscribe(&mut self) -> UnboundedReceiver<(u64, Set<P>, (Set<P>, Set<P>))> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        sender.send_lossy((self.id, self.peers.clone(), self.peers.clone()));
+        sender.send_lossy((
+            self.id,
+            self.peers.clone(),
+            (self.peers.clone(), Set::default()),
+        ));
         self.senders.push(sender); // prevent the receiver from closing
         receiver
     }

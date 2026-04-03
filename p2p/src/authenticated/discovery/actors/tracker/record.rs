@@ -235,6 +235,11 @@ impl<C: PublicKey> Record<C> {
         !matches!(self.address, Address::Myself(_))
     }
 
+    /// Returns the number of secondary peer sets this peer is part of.
+    pub const fn secondary_sets(&self) -> usize {
+        self.secondary_sets
+    }
+
     /// Returns the number of primary peer sets this peer is part of.
     pub const fn primary_sets(&self) -> usize {
         self.primary_sets

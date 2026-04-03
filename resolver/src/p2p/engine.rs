@@ -195,7 +195,7 @@ impl<
                 self.serves.cancel_all();
             },
             // Handle peer set updates
-            Some((id, _, all)) = peer_set_subscription.recv() else {
+            Some((id, _, (all_primary, _))) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 return;
             } => {
@@ -203,7 +203,7 @@ impl<
                 // be syncing), we reconcile with all primary peers.
                 if self.last_peer_set_id < Some(id) {
                     self.last_peer_set_id = Some(id);
-                    self.fetcher.reconcile(all.as_ref());
+                    self.fetcher.reconcile(all_primary.as_ref());
                 }
             },
             // Handle active deadline

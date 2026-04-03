@@ -210,7 +210,7 @@ where
                     .inc();
                 self.handle_network(peer, msg);
             },
-            Some((_, _, tracked_peers)) = peer_set_subscription.recv() else {
+            Some((_, _, (tracked_peers, _))) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 break;
             } => {

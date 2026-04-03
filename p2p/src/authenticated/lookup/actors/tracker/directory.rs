@@ -347,6 +347,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .expect("HashMap keys are unique")
     }
 
+    /// Returns all peers that are part of at least one secondary peer set.
+    pub fn secondary(&self) -> Set<C> {
+        self.peers
+            .iter()
+            .filter(|(_, record)| record.secondary_sets() > 0)
+            .map(|(k, _)| k.clone())
+            .try_collect()
+            .expect("HashMap keys are unique")
+    }
+
     /// Returns true if the peer is eligible for connection.
     ///
     /// A peer is eligible if it is in a peer set, not blocked, and not ourselves.

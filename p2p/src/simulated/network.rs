@@ -159,7 +159,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
 
     // Subscribers to primary peer set updates (used by Manager::subscribe())
     #[allow(clippy::type_complexity)]
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Set<P>, Set<P>)>>,
+    subscribers: Vec<mpsc::UnboundedSender<(u64, Set<P>, (Set<P>, Set<P>))>>,
 
     // Subscribers to the connectable peer list (used by PeerSource for LimitedSender)
     peer_subscribers: Vec<ring::Sender<Vec<P>>>,
@@ -338,9 +338,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                     }
                 }
 
-                // Notify all subscribers about the new peer set
-                let all = self.all_primary_peers();
-                let notification = (id, primary, all);
+                // Notify all subscribers about the new peer set.
+                let notification = (
+                    id,
+                    primary,
+                    (self.all_primary_peers(), self.all_secondary_peers()),
+                );
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(notification.clone()));
 
@@ -407,10 +410,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // Create a new subscription channel
                 let (sender, receiver) = mpsc::unbounded_channel();
 
-                // Send the latest peer set upon subscription
+                // Send the latest peer set upon subscription.
                 if let Some((index, peers)) = self.primary_sets.last_key_value() {
-                    let all = self.all_primary_peers();
-                    let notification = (*index, peers.clone(), all);
+                    let notification = (
+                        *index,
+                        peers.clone(),
+                        (self.all_primary_peers(), self.all_secondary_peers()),
+                    );
                     sender.send_lossy(notification);
                 }
                 self.subscribers.push(sender);
@@ -572,6 +578,15 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .try_collect()
                 .expect("BTreeMap keys are unique")
         }
+    }
+
+    /// Get all tracked secondary peers as an ordered set.
+    fn all_secondary_peers(&self) -> Set<P> {
+        self.secondary_refs
+            .keys()
+            .cloned()
+            .try_collect()
+            .expect("BTreeMap keys are unique")
     }
 
     /// Get all peers that should be exposed to `Recipients::All`.
@@ -1722,10 +1737,11 @@ mod tests {
             manager
                 .track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
                 .await;
-            let (id, new, all) = subscription.recv().await.unwrap();
+            let (id, new, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
             assert_eq!(id, 10);
             assert_eq!(new.len(), 2);
-            assert_eq!(all.len(), 2);
+            assert_eq!(all_primary.len(), 2);
+            assert!(all_secondary.is_empty());
 
             // Register old peer sets (ignored)
             let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
@@ -1738,10 +1754,11 @@ mod tests {
             manager
                 .track(11, Set::try_from([pk4.clone()]).unwrap())
                 .await;
-            let (id, new, all) = subscription.recv().await.unwrap();
+            let (id, new, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
             assert_eq!(id, 11);
             assert_eq!(new, Set::try_from([pk4.clone()]).unwrap());
-            assert_eq!(all, Set::try_from([pk1, pk2, pk4]).unwrap());
+            assert_eq!(all_primary, Set::try_from([pk1, pk2, pk4]).unwrap());
+            assert!(all_secondary.is_empty());
         });
     }
 

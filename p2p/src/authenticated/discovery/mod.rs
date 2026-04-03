@@ -833,10 +833,11 @@ mod tests {
                 .try_collect()
                 .unwrap();
             oracle.track(10, set10.clone()).await;
-            let (id, new, all) = subscription.recv().await.unwrap();
+            let (id, new, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
             assert_eq!(id, 10);
             assert_eq!(new, set10);
-            assert_eq!(all, set10);
+            assert_eq!(all_primary, set10);
+            assert!(all_secondary.is_empty());
 
             // Register old peer sets (ignored)
             let set9: Set<_> = peers_and_sks
@@ -855,7 +856,7 @@ mod tests {
                 .try_collect()
                 .unwrap();
             oracle.track(11, set11.clone()).await;
-            let (id, new, all) = subscription.recv().await.unwrap();
+            let (id, new, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
             assert_eq!(id, 11);
             assert_eq!(new, set11);
             let all_keys: Set<_> = set10
@@ -863,7 +864,8 @@ mod tests {
                 .chain(set11.into_iter())
                 .try_collect()
                 .unwrap();
-            assert_eq!(all, all_keys);
+            assert_eq!(all_primary, all_keys);
+            assert!(all_secondary.is_empty());
         });
     }
 
@@ -1072,10 +1074,11 @@ mod tests {
             oracle.track(1, peer_set.clone()).await;
 
             // Receive subscription notification
-            let (id, new, all) = subscription.recv().await.unwrap();
+            let (id, new, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
             assert_eq!(id, 1);
             assert_eq!(new.len(), 1);
-            assert_eq!(all.len(), 1);
+            assert_eq!(all_primary.len(), 1);
+            assert!(all_secondary.is_empty());
 
             // Self should NOT be in the new set
             assert!(
@@ -1089,11 +1092,11 @@ mod tests {
 
             // Self should NOT be in the tracked set (not registered)
             assert!(
-                all.position(&self_pk).is_none(),
+                all_primary.position(&self_pk).is_none(),
                 "tracked peers should not include self"
             );
             assert!(
-                all.position(&other_pk).is_some(),
+                all_primary.position(&other_pk).is_some(),
                 "tracked peers should include other"
             );
 
@@ -1102,10 +1105,11 @@ mod tests {
             oracle.track(2, peer_set.clone()).await;
 
             // Receive subscription notification
-            let (id, new, all) = subscription.recv().await.unwrap();
+            let (id, new, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
             assert_eq!(id, 2);
             assert_eq!(new.len(), 2);
-            assert_eq!(all.len(), 2);
+            assert_eq!(all_primary.len(), 2);
+            assert!(all_secondary.is_empty());
 
             // Both peers should be in the new set
             assert!(
@@ -1119,11 +1123,11 @@ mod tests {
 
             // Both peers should be in the tracked set
             assert!(
-                all.position(&self_pk).is_some(),
+                all_primary.position(&self_pk).is_some(),
                 "tracked peers should include self"
             );
             assert!(
-                all.position(&other_pk).is_some(),
+                all_primary.position(&other_pk).is_some(),
                 "tracked peers should include other"
             );
         });

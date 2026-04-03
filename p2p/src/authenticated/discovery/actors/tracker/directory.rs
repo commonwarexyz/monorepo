@@ -353,6 +353,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .expect("HashMap keys are unique")
     }
 
+    /// Returns all peers that are part of at least one secondary peer set.
+    pub fn secondary(&self) -> OrderedSet<C> {
+        self.peers
+            .iter()
+            .filter(|(_, record)| record.secondary_sets() > 0)
+            .map(|(k, _)| k.clone())
+            .try_collect()
+            .expect("HashMap keys are unique")
+    }
+
     /// Returns the sharable information for a given peer.
     pub fn info(&self, peer: &C) -> Option<Info<C>> {
         self.peers.get(peer).and_then(|r| r.sharable())

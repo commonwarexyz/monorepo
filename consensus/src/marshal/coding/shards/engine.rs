@@ -438,10 +438,15 @@ where
             on_stopped => {
                 debug!("received shutdown signal, stopping shard engine");
             },
-            Some((_, _, tracked_peers)) = peer_set_subscription.recv() else {
+            Some((_, _, (tracked_primary_peers, tracked_secondary_peers))) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 return;
             } => {
+                let tracked_peers = Set::from_iter_dedup(
+                    tracked_primary_peers
+                        .into_iter()
+                        .chain(tracked_secondary_peers.into_iter()),
+                );
                 self.peer_buffers
                     .retain(|peer, _| tracked_peers.as_ref().contains(peer));
                 self.tracked_peers = tracked_peers;

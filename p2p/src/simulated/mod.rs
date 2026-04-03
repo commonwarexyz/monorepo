@@ -2472,12 +2472,13 @@ mod tests {
             assert_eq!(keys, vec![pk1.clone(), pk2.clone()]);
 
             let mut subscription = manager.subscribe().await;
-            let (id, latest, all) = subscription.recv().await.unwrap();
+            let (id, latest, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
             assert_eq!(id, 1);
             let latest_keys: Vec<_> = Vec::from(latest.clone());
             assert_eq!(latest_keys, vec![pk1.clone(), pk2.clone()]);
-            let all_keys: Vec<_> = Vec::from(all.clone());
-            assert_eq!(all_keys, vec![pk1.clone(), pk2.clone()]);
+            let all_primary_keys: Vec<_> = Vec::from(all_primary.clone());
+            assert_eq!(all_primary_keys, vec![pk1.clone(), pk2.clone()]);
+            assert!(all_secondary.is_empty());
 
             manager
                 .track(
@@ -2486,12 +2487,13 @@ mod tests {
                 )
                 .await;
 
-            let (id, latest, all) = subscription.recv().await.unwrap();
+            let (id, latest, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
             assert_eq!(id, 2);
             let latest_keys: Vec<_> = Vec::from(latest);
             assert_eq!(latest_keys, vec![pk2.clone()]);
-            let all_keys: Vec<_> = Vec::from(all);
-            assert_eq!(all_keys, vec![pk1, pk2]);
+            let all_primary_keys: Vec<_> = Vec::from(all_primary);
+            assert_eq!(all_primary_keys, vec![pk1, pk2]);
+            assert!(all_secondary.is_empty());
         });
     }
 
@@ -2613,7 +2615,7 @@ mod tests {
 
             // Verify subscription works
             let mut subscription = manager.subscribe().await;
-            let (id, latest, _all) = subscription.recv().await.unwrap();
+            let (id, latest, (_all_primary, _all_secondary)) = subscription.recv().await.unwrap();
             assert_eq!(id, 1);
             let latest_keys: Vec<_> = Vec::from(latest);
             assert_eq!(latest_keys, vec![pk1, pk2]);
@@ -2910,13 +2912,18 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, peer_set, all) = subscription.recv().await.unwrap();
+            let (peer_set_id, peer_set, (all_primary, all_secondary)) =
+                subscription.recv().await.unwrap();
             assert_eq!(peer_set_id, 1);
             assert_eq!(
                 peer_set,
                 Set::try_from(vec![pk1.clone(), pk2.clone()]).unwrap()
             );
-            assert_eq!(all, Set::try_from(vec![pk1.clone(), pk2.clone()]).unwrap());
+            assert_eq!(
+                all_primary,
+                Set::try_from(vec![pk1.clone(), pk2.clone()]).unwrap()
+            );
+            assert!(all_secondary.is_empty());
 
             // Register second peer set
             manager
@@ -2924,18 +2931,20 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, peer_set, all) = subscription.recv().await.unwrap();
+            let (peer_set_id, peer_set, (all_primary, all_secondary)) =
+                subscription.recv().await.unwrap();
             assert_eq!(peer_set_id, 2);
             assert_eq!(
                 peer_set,
                 Set::try_from(vec![pk2.clone(), pk3.clone()]).unwrap()
             );
             assert_eq!(
-                all,
+                all_primary,
                 vec![pk1.clone(), pk2.clone(), pk3.clone()]
                     .try_into()
                     .unwrap()
             );
+            assert!(all_secondary.is_empty());
 
             // Register third peer set
             manager
@@ -2943,18 +2952,20 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, peer_set, all) = subscription.recv().await.unwrap();
+            let (peer_set_id, peer_set, (all_primary, all_secondary)) =
+                subscription.recv().await.unwrap();
             assert_eq!(peer_set_id, 3);
             assert_eq!(
                 peer_set,
                 Set::try_from(vec![pk1.clone(), pk3.clone()]).unwrap()
             );
             assert_eq!(
-                all,
+                all_primary,
                 vec![pk1.clone(), pk2.clone(), pk3.clone()]
                     .try_into()
                     .unwrap()
             );
+            assert!(all_secondary.is_empty());
 
             // Register fourth peer set
             manager
@@ -2962,13 +2973,18 @@ mod tests {
                 .await;
 
             // Verify we receive the notification
-            let (peer_set_id, peer_set, all) = subscription.recv().await.unwrap();
+            let (peer_set_id, peer_set, (all_primary, all_secondary)) =
+                subscription.recv().await.unwrap();
             assert_eq!(peer_set_id, 4);
             assert_eq!(
                 peer_set,
                 Set::try_from(vec![pk1.clone(), pk3.clone()]).unwrap()
             );
-            assert_eq!(all, Set::try_from(vec![pk1.clone(), pk3.clone()]).unwrap());
+            assert_eq!(
+                all_primary,
+                Set::try_from(vec![pk1.clone(), pk3.clone()]).unwrap()
+            );
+            assert!(all_secondary.is_empty());
         });
     }
 
@@ -3062,10 +3078,11 @@ mod tests {
                 .await;
 
             // Receive subscription notification
-            let (id, new, all) = subscription.recv().await.unwrap();
+            let (id, new, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
             assert_eq!(id, 1);
             assert_eq!(new.len(), 1);
-            assert_eq!(all.len(), 1);
+            assert_eq!(all_primary.len(), 1);
+            assert!(all_secondary.is_empty());
 
             // Self should NOT be in the new set
             assert!(
@@ -3079,11 +3096,11 @@ mod tests {
 
             // Self should NOT be in the tracked set (not registered)
             assert!(
-                all.position(&self_pk).is_none(),
+                all_primary.position(&self_pk).is_none(),
                 "tracked peers should not include self"
             );
             assert!(
-                all.position(&other_pk).is_some(),
+                all_primary.position(&other_pk).is_some(),
                 "tracked peers should include other"
             );
 
@@ -3095,10 +3112,11 @@ mod tests {
                 )
                 .await;
 
-            let (id, new, all) = subscription.recv().await.unwrap();
+            let (id, new, (all_primary, all_secondary)) = subscription.recv().await.unwrap();
             assert_eq!(id, 2);
             assert_eq!(new.len(), 2);
-            assert_eq!(all.len(), 2);
+            assert_eq!(all_primary.len(), 2);
+            assert!(all_secondary.is_empty());
 
             // Both peers should be in the new set
             assert!(
@@ -3112,11 +3130,11 @@ mod tests {
 
             // Both peers should be in the tracked set
             assert!(
-                all.position(&self_pk).is_some(),
+                all_primary.position(&self_pk).is_some(),
                 "tracked peers should include self"
             );
             assert!(
-                all.position(&other_pk).is_some(),
+                all_primary.position(&other_pk).is_some(),
                 "tracked peers should include other"
             );
         });
