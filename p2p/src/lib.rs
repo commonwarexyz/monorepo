@@ -285,6 +285,11 @@ stability_scope!(BETA {
         /// - The peers in the new primary set
         /// - All currently tracked primary peers (union of recent peer sets)
         /// - All currently tracked secondary peers (union of recent peer sets)
+        ///
+        /// The aggregate primary and secondary sets preserve role information.
+        /// If a peer is tracked as both primary and secondary, it will appear
+        /// in both sets. Callers that need a deduplicated recipient list should
+        /// union the sets explicitly.
         #[allow(clippy::type_complexity)]
         fn subscribe(
             &mut self,
