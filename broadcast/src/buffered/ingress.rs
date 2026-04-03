@@ -25,10 +25,26 @@ pub enum Message<P: PublicKey, M: Digestible> {
         responder: oneshot::Sender<M>,
     },
 
+    /// Subscribe to receive availability for a message by digest.
+    ///
+    /// The responder will be notified when the digest is available; either
+    /// instantly (if cached) or when it is received from the network. The request can be canceled
+    /// by dropping the responder.
+    SubscribeAvailable {
+        digest: M::Digest,
+        responder: oneshot::Sender<()>,
+    },
+
     /// Get a message by digest.
     Get {
         digest: M::Digest,
         responder: oneshot::Sender<Option<M>>,
+    },
+
+    /// Check whether a message is already cached by digest.
+    Has {
+        digest: M::Digest,
+        responder: oneshot::Sender<bool>,
     },
 }
 
@@ -58,6 +74,21 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
         receiver
     }
 
+    /// Subscribe to message availability by digest.
+    ///
+    /// The responder will be notified when the message is available; either
+    /// instantly (if cached) or when it is received from the network. The request can be canceled
+    /// by dropping the responder.
+    ///
+    /// If the engine has shut down, the returned receiver will resolve to `Canceled`.
+    pub async fn subscribe_available(&self, digest: M::Digest) -> oneshot::Receiver<()> {
+        let (responder, receiver) = oneshot::channel();
+        self.sender
+            .send_lossy(Message::SubscribeAvailable { digest, responder })
+            .await;
+        receiver
+    }
+
     /// Subscribe to a message by digest with an externally prepared responder.
     ///
     /// The responder will be sent the message when it is available; either
@@ -79,6 +110,16 @@ impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
             .request(|responder| Message::Get { digest, responder })
             .await
             .unwrap_or_default()
+    }
+
+    /// Check whether a message is already cached by digest.
+    ///
+    /// If the engine has shut down, returns `false`.
+    pub async fn has(&self, digest: M::Digest) -> bool {
+        self.sender
+            .request(|responder| Message::Has { digest, responder })
+            .await
+            .unwrap_or(false)
     }
 }
 

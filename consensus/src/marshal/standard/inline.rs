@@ -445,15 +445,16 @@ where
         }
 
         // Otherwise, subscribe to marshal for block availability.
-        //
-        // TODO(#3393): Avoid fetching the block just to check if it's available.
-        let block_rx = self.marshal.subscribe_by_digest(Some(round), digest).await;
+        let availability_rx = self
+            .marshal
+            .subscribe_available_by_digest(Some(round), digest)
+            .await;
         let (mut tx, rx) = oneshot::channel();
         self.context
             .with_label("inline_certify")
             .with_attribute("round", round)
             .spawn(move |_| async move {
-                if await_block_subscription(&mut tx, block_rx, &digest, "certification")
+                if await_block_subscription(&mut tx, availability_rx, &digest, "certification")
                     .await
                     .is_some()
                 {
