@@ -80,10 +80,12 @@ impl Topology {
     pub fn reckon(config: &Config, data_bytes: usize) -> Self {
         let n = config.minimum_shards.get() as usize;
         let k = config.extra_shards.get() as usize;
+        let nk = n + k;
         // The following calculations don't tolerate data_bytes = 0, so we
         // temporarily correct that to be at least 1, then make sure to adjust
         // it back again to 0.
         let corrected_data_bytes = data_bytes.max(1);
+        let data_els = F::bits_to_elements(8 * corrected_data_bytes);
         // The goal here is to try and maximize the number of columns in the
         // data. ZODA is more efficient the more columns there are. However,
         // we need to make sure that every shard has enough samples to guarantee
@@ -102,22 +104,70 @@ impl Topology {
         // It's possible that the first configuration, with one column, is not good.
         // To correct for that, we need to add extra checksum columns to guarantee
         // security.
+        //
+        // As cols increases, encoded_rows is non-increasing and only takes
+        // O(log(data_elements)) distinct power-of-two values. Within each
+        // plateau (same encoded_rows), the security constraint only gets
+        // easier (more cols means fewer data_rows, more redundancy, lower
+        // required_samples). We skip through each plateau by binary-searching
+        // for its last cols, reducing the number of expensive
+        // required_samples() calls from O(data_elements) to
+        // O(log(data_elements)).
         let mut out = Self::with_cols(corrected_data_bytes, n, k, 1);
-        loop {
-            let attempt = Self::with_cols(corrected_data_bytes, n, k, out.data_cols + 1);
+        let mut cols = 2;
+        while cols <= data_els {
+            let attempt = Self::with_cols(corrected_data_bytes, n, k, cols);
             let required_samples = attempt.required_samples();
-            if required_samples.saturating_mul(n + k) <= attempt.encoded_rows {
-                out = Self {
-                    samples: required_samples.max(attempt.samples),
-                    ..attempt
-                };
-            } else {
+            if required_samples.saturating_mul(nk) > attempt.encoded_rows {
                 break;
             }
+
+            // Find the last cols in this encoded_rows plateau.
+            let er = attempt.encoded_rows;
+            let end = Self::last_cols_for_er(corrected_data_bytes, n, k, data_els, er, cols);
+
+            // Update out to the topology at the end of the plateau.
+            let (final_attempt, final_rs) = if end == cols {
+                (attempt, required_samples)
+            } else {
+                let a = Self::with_cols(corrected_data_bytes, n, k, end);
+                let r = a.required_samples();
+                (a, r)
+            };
+            out = Self {
+                samples: final_rs.max(final_attempt.samples),
+                ..final_attempt
+            };
+
+            cols = end + 1;
         }
         out.correct_column_samples();
         out.data_bytes = data_bytes;
         out
+    }
+
+    /// Find the last cols in [min_cols, data_els] where `with_cols` produces
+    /// `encoded_rows >= target_er`. Since `encoded_rows` is non-increasing
+    /// in cols, this gives the last column count in the current plateau.
+    fn last_cols_for_er(
+        data_bytes: usize,
+        n: usize,
+        k: usize,
+        data_els: usize,
+        target_er: usize,
+        min_cols: usize,
+    ) -> usize {
+        let mut lo = min_cols;
+        let mut hi = data_els;
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2;
+            if Self::with_cols(data_bytes, n, k, mid).encoded_rows >= target_er {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
     }
 
     pub fn check_index(&self, i: u16) -> Result<(), Error> {
@@ -132,6 +182,31 @@ impl Topology {
 mod tests {
     use super::*;
     use commonware_utils::NZU16;
+    use std::num::NonZeroU16;
+
+    /// Original O(data_elements) implementation, kept as a reference for
+    /// validating the optimized `reckon`.
+    fn reckon_linear(config: &Config, data_bytes: usize) -> Topology {
+        let n = config.minimum_shards.get() as usize;
+        let k = config.extra_shards.get() as usize;
+        let corrected_data_bytes = data_bytes.max(1);
+        let mut out = Topology::with_cols(corrected_data_bytes, n, k, 1);
+        loop {
+            let attempt = Topology::with_cols(corrected_data_bytes, n, k, out.data_cols + 1);
+            let required_samples = attempt.required_samples();
+            if required_samples.saturating_mul(n + k) <= attempt.encoded_rows {
+                out = Topology {
+                    samples: required_samples.max(attempt.samples),
+                    ..attempt
+                };
+            } else {
+                break;
+            }
+        }
+        out.correct_column_samples();
+        out.data_bytes = data_bytes;
+        out
+    }
 
     #[test]
     fn reckon_handles_small_extra_shards() {
@@ -153,5 +228,33 @@ mod tests {
             provided >= required,
             "security invariant violated: provided {provided} < required {required}"
         );
+    }
+
+    #[test]
+    fn reckon_matches_linear_reference() {
+        let configs: Vec<Config> = [(2, 1), (3, 1), (3, 2), (3, 3), (5, 3), (10, 5)]
+            .into_iter()
+            .map(|(n, k)| Config {
+                minimum_shards: NonZeroU16::new(n).unwrap(),
+                extra_shards: NonZeroU16::new(k).unwrap(),
+            })
+            .collect();
+
+        let sizes: &[usize] = &[
+            0, 1, 7, 8, 15, 16, 62, 63, 64, 100, 128, 255, 256, 512, 1000,
+            4096, 8192, 16384, 65536, 131072, 262144, 1048576,
+        ];
+
+        for config in &configs {
+            for &data_bytes in sizes {
+                let optimized = Topology::reckon(config, data_bytes);
+                let reference = reckon_linear(config, data_bytes);
+                assert_eq!(
+                    optimized, reference,
+                    "mismatch at n={}, k={}, data_bytes={data_bytes}",
+                    config.minimum_shards, config.extra_shards,
+                );
+            }
+        }
     }
 }
