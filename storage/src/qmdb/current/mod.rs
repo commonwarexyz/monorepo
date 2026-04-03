@@ -3,60 +3,8 @@
 //!
 //! # Examples
 //!
-//! ```ignore
-//! // Simple mode: apply a batch, then durably commit it.
-//! let merkleized = db.new_batch()
-//!     .write(key, Some(value))
-//!     .merkleize(None, &db).await?;
-//! db.apply_batch(merkleized).await?;
-//! db.commit().await?;
-//!
-//! // Use `sync()` instead of `commit()` if you want the stronger durability
-//! // boundary for all database state.
-//! db.sync().await?;
-//! ```
-//!
-//! ```ignore
-//! // Batches can still fork before you apply them.
-//! let parent = db.new_batch()
-//!     .write(key_a, Some(val_a))
-//!     .merkleize(None, &db).await?;
-//!
-//! let child_a = parent.new_batch::<Sha256>()
-//!     .write(key_b, Some(val_b))
-//!     .merkleize(None, &db).await?;
-//!
-//! let child_b = parent.new_batch::<Sha256>()
-//!     .write(key_c, Some(val_c))
-//!     .merkleize(None, &db).await?;
-//!
-//! // Only one fork can be applied; the others become stale.
-//! db.apply_batch(child_a).await?;
-//! db.commit().await?;
-//! ```
-//!
-//! ```ignore
-//! // Advanced usage: while the previous batch is being committed, concurrently build a child
-//! // batch from the newly published state.
-//! let parent_merkleized = db.new_batch()
-//!     .write(key_a, Some(val_a))
-//!     .merkleize(None, &db).await?;
-//! db.apply_batch(parent_merkleized).await?;
-//!
-//! let (child_merkleized, commit_result) = futures::join!(
-//!     async {
-//!         db.new_batch()
-//!             .write(key_b, Some(val_b))
-//!             .merkleize(None, &db).await
-//!     },
-//!     db.commit(),
-//! );
-//! let child_merkleized = child_merkleized?;
-//! commit_result?;
-//!
-//! db.apply_batch(child_merkleized).await?;
-//! db.commit().await?;
-//! ```
+//! See [`crate::qmdb::any`] for batch API examples (forking, sequential
+//! commit, staleness). The Current layer uses the same batch API.
 //!
 //! # Motivation
 //!

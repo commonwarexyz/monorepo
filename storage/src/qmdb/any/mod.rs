@@ -12,61 +12,55 @@
 //! # Examples
 //!
 //! ```ignore
-//! // Simple mode: apply a batch, then durably commit it.
-//! let merkleized = db.new_batch()
+//! // 1. Create a batch and apply it.
+//! let batch = db.new_batch()
 //!     .write(key, Some(value))    // upsert
 //!     .write(other_key, None)     // delete
 //!     .merkleize(None, &db).await?;
-//! let root = merkleized.root();
-//! db.apply_batch(merkleized).await?;
-//! db.commit().await?;
-//!
-//! // Use `sync()` instead of `commit()` if you want a durability guarantee plus the guarantee
-//! // that no recovery would be required should the application crash.
-//! db.sync().await?;
+//! let root = batch.root();        // speculative root
+//! db.apply_batch(batch).await?;
+//! db.commit().await?;             // flush to disk
 //! ```
 //!
 //! ```ignore
-//! // Batches can still fork before you apply them.
-//! // The batch is lifetime-free, so it can be stored independently of the DB.
-//! let parent = db.new_batch()
-//!     .write(key_a, Some(val_a))
-//!     .merkleize(None, &db).await?;
+//! // 2. Fork two batches from the same parent. Apply one; the other is stale.
+//! let parent = db.new_batch().write(k1, Some(v1)).merkleize(None, &db).await?;
+//! let fork_a = parent.new_batch::<Sha256>().write(k2, Some(v2)).merkleize(None, &db).await?;
+//! let fork_b = parent.new_batch::<Sha256>().write(k3, Some(v3)).merkleize(None, &db).await?;
 //!
-//! let child_a = parent.new_batch::<Sha256>()
-//!     .write(key_b, Some(val_b))
-//!     .merkleize(None, &db).await?;
+//! db.apply_batch(fork_a).await?;           // OK -- includes parent
+//! assert!(db.apply_batch(fork_b).is_err()) // StaleChangeset
+//! ```
 //!
-//! let child_b = parent.new_batch::<Sha256>()
-//!     .write(key_c, Some(val_c))
-//!     .merkleize(None, &db).await?;
+//! ```ignore
+//! // 3. Chain two batches. Apply parent first, then child.
+//! let parent = db.new_batch().write(k1, Some(v1)).merkleize(None, &db).await?;
+//! let child = parent.new_batch::<Sha256>().write(k2, Some(v2)).merkleize(None, &db).await?;
 //!
-//! // Only one fork can be applied; the others become stale.
-//! db.apply_batch(child_a).await?;
+//! db.apply_batch(parent).await?;           // apply parent
+//! db.apply_batch(child).await?;            // ancestors skipped automatically
 //! db.commit().await?;
 //! ```
 //!
 //! ```ignore
-//! // Advanced usage: while the previous batch is being committed, concurrently build a child
-//! // batch from the newly published state.
-//! let parent = db.new_batch()
-//!     .write(key_a, Some(val_a))
-//!     .merkleize(None, &db).await?;
-//! db.apply_batch(parent).await?;
+//! // 4. Chain two batches. Apply child directly (includes parent's changes).
+//! let parent = db.new_batch().write(k1, Some(v1)).merkleize(None, &db).await?;
+//! let child = parent.new_batch::<Sha256>().write(k2, Some(v2)).merkleize(None, &db).await?;
 //!
-//! let (child_merkleized, commit_result) = futures::join!(
-//!     async {
-//!         db.new_batch()
-//!             .write(key_b, Some(val_b))
-//!             .merkleize(None, &db).await
-//!     },
-//!     db.commit(),
-//! );
-//! let child_merkleized = child_merkleized?;
-//! commit_result?;
+//! db.apply_batch(child).await?;            // OK -- includes parent
+//! assert!(db.apply_batch(parent).is_err()) // StaleChangeset
+//! ```
 //!
-//! db.apply_batch(child_merkleized).await?;
-//! db.commit().await?;
+//! ```ignore
+//! // 5. Two independent chains. Commit the tail of one; the other chain is stale.
+//! let a1 = db.new_batch().write(k1, Some(v1)).merkleize(None, &db).await?;
+//! let a2 = a1.new_batch::<Sha256>().write(k2, Some(v2)).merkleize(None, &db).await?;
+//!
+//! let b1 = db.new_batch().write(k3, Some(v3)).merkleize(None, &db).await?;
+//! let b2 = b1.new_batch::<Sha256>().write(k4, Some(v4)).merkleize(None, &db).await?;
+//!
+//! db.apply_batch(a2).await?;               // OK -- includes a1
+//! assert!(db.apply_batch(b2).is_err())     // StaleChangeset
 //! ```
 
 use crate::{
