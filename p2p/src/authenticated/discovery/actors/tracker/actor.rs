@@ -174,7 +174,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
 
                 // Notify all subscribers about the new peer set
-                let latest = (primary.clone(), secondary.clone());
+                let latest = (primary, secondary);
                 let tracked = (self.directory.primary(), self.directory.secondary());
                 self.subscribers.retain(|subscriber| {
                     subscriber.send_lossy((index, latest.clone(), tracked.clone()))
