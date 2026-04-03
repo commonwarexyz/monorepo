@@ -341,10 +341,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 let update = PeerSetUpdate {
                     index: id,
                     latest: TrackedPeers::new(primary.clone(), secondary.clone()),
-                    all: TrackedPeers::new(
-                        self.all_primary_peers(),
-                        self.all_secondary_peers(),
-                    ),
+                    all: self.all_tracked_peers(),
                 };
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
@@ -420,10 +417,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                             peers.clone(),
                             self.secondary_sets.get(index).cloned().unwrap_or_default(),
                         ),
-                        all: TrackedPeers::new(
-                            self.all_primary_peers(),
-                            self.all_secondary_peers(),
-                        ),
+                        all: self.all_tracked_peers(),
                     });
                 }
                 self.subscribers.push(sender);
@@ -571,8 +565,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
     /// When peer sets are registered, returns only the peers from those sets.
     /// Otherwise, returns all registered peers (for compatibility with tests
     /// that don't use peer sets).
-    fn all_primary_peers(&self) -> Set<P> {
-        if self.primary_sets.is_empty() && self.tracked_peer_sets.is_none() {
+    fn all_tracked_peers(&self) -> TrackedPeers<P> {
+        let primary = if self.primary_sets.is_empty() && self.tracked_peer_sets.is_none() {
             self.peers
                 .keys()
                 .cloned()
@@ -584,16 +578,14 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 .cloned()
                 .try_collect()
                 .expect("BTreeMap keys are unique")
-        }
-    }
-
-    /// Get all tracked secondary peers as an ordered set.
-    fn all_secondary_peers(&self) -> Set<P> {
-        self.secondary_refs
+        };
+        let secondary = self
+            .secondary_refs
             .keys()
             .cloned()
             .try_collect()
-            .expect("BTreeMap keys are unique")
+            .expect("BTreeMap keys are unique");
+        TrackedPeers::new(primary, secondary)
     }
 
     /// Get all peers that should be exposed to `Recipients::All`.

@@ -5,7 +5,7 @@ use crate::{
         lookup::{actors::tracker::ingress::Releaser, metrics},
     },
     types::Address,
-    Ingress,
+    Ingress, TrackedPeers,
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
@@ -342,24 +342,22 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     // ---------- Getters ----------
 
-    /// Returns all peers that are part of at least one primary peer set.
-    pub fn primary(&self) -> Set<C> {
-        self.peers
-            .iter()
-            .filter(|(_, record)| record.primary_sets() > 0)
-            .map(|(k, _)| k.clone())
-            .try_collect()
-            .expect("HashMap keys are unique")
-    }
-
-    /// Returns all peers that are part of at least one secondary peer set.
-    pub fn secondary(&self) -> Set<C> {
-        self.peers
-            .iter()
-            .filter(|(_, record)| record.secondary_sets() > 0)
-            .map(|(k, _)| k.clone())
-            .try_collect()
-            .expect("HashMap keys are unique")
+    /// Returns all peers across all tracked primary and secondary peer sets.
+    pub fn all(&self) -> TrackedPeers<C> {
+        let mut primary = Vec::new();
+        let mut secondary = Vec::new();
+        for (k, record) in &self.peers {
+            if record.primary_sets() > 0 {
+                primary.push(k.clone());
+            }
+            if record.secondary_sets() > 0 {
+                secondary.push(k.clone());
+            }
+        }
+        TrackedPeers::new(
+            primary.into_iter().try_collect().expect("HashMap keys are unique"),
+            secondary.into_iter().try_collect().expect("HashMap keys are unique"),
+        )
     }
 
     /// Returns true if the peer is eligible for connection.
@@ -825,7 +823,7 @@ mod tests {
                 directory.peers.get(&pk_1).unwrap().ingress(),
                 Some(Ingress::Socket(primary_addr))
             );
-            assert_eq!(directory.primary(), [pk_1.clone()].try_into().unwrap());
+            assert_eq!(directory.all().primary, [pk_1.clone()].try_into().unwrap());
             assert_eq!(directory.dialable().peers, vec![pk_1.clone()]);
             assert_eq!(
                 directory.dial(&pk_1).unwrap().1,
@@ -887,7 +885,7 @@ mod tests {
                 directory.peers.get(&pk_1).unwrap().ingress(),
                 Some(Ingress::Socket(new_addr))
             );
-            assert_eq!(directory.primary(), [pk_1.clone()].try_into().unwrap());
+            assert_eq!(directory.all().primary, [pk_1.clone()].try_into().unwrap());
             assert_eq!(directory.dialable().peers, vec![pk_1.clone()]);
             assert_eq!(directory.dial(&pk_1).unwrap().1, Ingress::Socket(new_addr));
             assert!(directory.listenable().contains(&new_addr.ip()));

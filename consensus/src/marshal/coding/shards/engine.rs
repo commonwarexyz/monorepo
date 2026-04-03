@@ -442,10 +442,7 @@ where
                 debug!("peer set subscription closed");
                 return;
             } => {
-                let all_peers = Set::from_iter_dedup(
-                    update.all.primary.into_iter()
-                        .chain(update.all.secondary.into_iter()),
-                );
+                let all_peers = update.all.union();
                 self.peer_buffers
                     .retain(|peer, _| all_peers.as_ref().contains(peer));
                 self.tracked_peers = all_peers;

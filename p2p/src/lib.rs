@@ -246,6 +246,11 @@ stability_scope!(BETA {
         pub fn primary(primary: Set<P>) -> Self {
             Self::new(primary, Set::default())
         }
+
+        /// Returns the deduplicated union of primary and secondary peers.
+        pub fn union(self) -> Set<P> {
+            Set::from_iter_dedup(self.primary.into_iter().chain(self.secondary.into_iter()))
+        }
     }
 
     impl<P: PublicKey> From<Set<P>> for TrackedPeers<P> {

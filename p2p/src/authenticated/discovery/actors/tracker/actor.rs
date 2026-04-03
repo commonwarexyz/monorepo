@@ -154,11 +154,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let primary = peers.primary;
                 let secondary = peers.secondary;
 
-                // Ensure that peer set is not too large.
+                // Ensure that peer sets are not too large.
                 // Panic since there is no way to recover from this.
-                let len = primary.len();
                 let max = self.max_peer_set_size;
-                assert!(len as u64 <= max, "peer set too large: {len} > {max}");
+                let plen = primary.len();
+                assert!(plen as u64 <= max, "primary peer set too large: {plen} > {max}");
+                let slen = secondary.len();
+                assert!(slen as u64 <= max, "secondary peer set too large: {slen} > {max}");
 
                 // Attempt to update tracked peers.
                 if !self
@@ -172,10 +174,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let update = PeerSetUpdate {
                     index,
                     latest: TrackedPeers::new(primary, secondary),
-                    all: TrackedPeers::new(
-                        self.directory.primary(),
-                        self.directory.secondary(),
-                    ),
+                    all: self.directory.all(),
                 };
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
@@ -199,10 +198,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                                 .cloned()
                                 .unwrap_or_default(),
                         ),
-                        all: TrackedPeers::new(
-                            self.directory.primary(),
-                            self.directory.secondary(),
-                        ),
+                        all: self.directory.all(),
                     });
                 }
                 self.subscribers.push(sender);
@@ -959,7 +955,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
 
             let dialable = mailbox.dialable().await;
-            assert!(dialable.peers.iter().any(|peer| peer == &secondary_pk));
+            assert!(!dialable.peers.iter().any(|peer| peer == &secondary_pk));
         });
     }
 

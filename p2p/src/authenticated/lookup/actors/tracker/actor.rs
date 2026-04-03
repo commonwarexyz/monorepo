@@ -167,10 +167,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 let update = PeerSetUpdate {
                     index,
                     latest: TrackedPeers::new(peer_keys, secondary_keys),
-                    all: TrackedPeers::new(
-                        self.directory.primary(),
-                        self.directory.secondary(),
-                    ),
+                    all: self.directory.all(),
                 };
                 self.subscribers
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
@@ -217,10 +214,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                                 .cloned()
                                 .unwrap_or_default(),
                         ),
-                        all: TrackedPeers::new(
-                            self.directory.primary(),
-                            self.directory.secondary(),
-                        ),
+                        all: self.directory.all(),
                     });
                 }
                 self.subscribers.push(sender);

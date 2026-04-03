@@ -167,6 +167,11 @@ impl<C: PublicKey> Record<C> {
         self.secondary_sets = self.secondary_sets.checked_sub(1).unwrap();
     }
 
+    /// Whether this peer should be dialed outbound (primary or persistent peers).
+    pub const fn is_outbound_target(&self) -> bool {
+        self.primary_sets > 0 || self.persistent
+    }
+
     /// Attempt to reserve the peer for connection.
     ///
     /// Checks that the peer is not ourselves, is currently inert, and that
@@ -256,7 +261,7 @@ impl<C: PublicKey> Record<C> {
         allow_private_ips: bool,
         allow_dns: bool,
     ) -> DialStatus {
-        if self.status != Status::Inert {
+        if self.status != Status::Inert || !self.is_outbound_target() {
             return DialStatus::Unavailable;
         }
         let ingress = match &self.address {
