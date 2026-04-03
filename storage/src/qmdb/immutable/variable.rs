@@ -693,4 +693,12 @@ mod tests {
             .await;
         });
     }
+
+    #[test_traced("WARN")]
+    fn test_variable_apply_after_ancestor_dropped() {
+        let executor = deterministic::Runner::default();
+        executor.start(|ctx| async move {
+            test::test_immutable_apply_after_ancestor_dropped(ctx, open::<mmr::Family>).await;
+        });
+    }
 }

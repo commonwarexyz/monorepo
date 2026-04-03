@@ -438,8 +438,9 @@ where
         let db_size = *self.last_commit_loc + 1;
         if db_size != batch.db_size && db_size != batch.base_size {
             return Err(Error::StaleChangeset {
-                expected: batch.db_size,
-                actual: db_size,
+                db_size,
+                batch_db_size: batch.db_size,
+                batch_base_size: batch.base_size,
             });
         }
         let skip_ancestors = db_size > batch.db_size;
@@ -465,8 +466,8 @@ where
                 .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
         }
         if !skip_ancestors {
-            for ancestor in batch.ancestors() {
-                for (key, entry) in ancestor.diff.iter() {
+            for ancestor_diff in &batch.ancestor_diffs {
+                for (key, entry) in ancestor_diff.iter() {
                     if seen.insert(key.clone()) {
                         self.snapshot
                             .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
@@ -1959,6 +1960,47 @@ pub(super) mod test {
 
         assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Regression: applying a batch after its ancestor Arc is dropped (without
+    /// committing) must still apply the ancestor's snapshot diffs.
+    pub(crate) async fn test_immutable_apply_after_ancestor_dropped<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<Digest, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+    {
+        let mut db = open_db(context.with_label("db")).await;
+
+        let key1 = Sha256::hash(&[1]);
+        let key2 = Sha256::hash(&[2]);
+        let key3 = Sha256::hash(&[3]);
+        let v1 = Sha256::fill(1u8);
+        let v2 = Sha256::fill(2u8);
+        let v3 = Sha256::fill(3u8);
+
+        // Chain: DB <- A <- B <- C
+        let a = db.new_batch().set(key1, v1).merkleize(None);
+        let b = a.new_batch::<Sha256>().set(key2, v2).merkleize(None);
+        let c = b.new_batch::<Sha256>().set(key3, v3).merkleize(None);
+
+        // Drop A and B without committing. Their Weak refs in C are now dead.
+        drop(a);
+        drop(b);
+
+        // Apply only the tip. This is !skip_ancestors (DB hasn't changed).
+        db.apply_batch(c).await.unwrap();
+
+        // All three keys must be in the snapshot.
+        assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
+        assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
+        assert_eq!(db.get(&key3).await.unwrap(), Some(v3));
 
         db.destroy().await.unwrap();
     }

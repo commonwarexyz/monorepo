@@ -2161,4 +2161,57 @@ pub mod tests {
             db.destroy().await.unwrap();
         });
     }
+
+    /// Regression: applying a batch after its ancestor Arc is dropped (without
+    /// committing) must still apply the ancestor's bitmap pushes/clears and
+    /// snapshot diffs.
+    #[test_traced("WARN")]
+    fn test_current_apply_after_ancestor_dropped() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("adrop", &ctx))
+                    .await
+                    .unwrap();
+
+            // Chain: DB <- A <- B <- C
+            let mut a = db.new_batch();
+            for i in 0..3 {
+                a = a.write(key(i), Some(val(i)));
+            }
+            let a_m = a.merkleize(None, &db).await.unwrap();
+
+            let mut b = a_m.new_batch::<Sha256>();
+            for i in 3..6 {
+                b = b.write(key(i), Some(val(i)));
+            }
+            let b_m = b.merkleize(None, &db).await.unwrap();
+
+            let mut c = b_m.new_batch::<Sha256>();
+            for i in 6..9 {
+                c = c.write(key(i), Some(val(i)));
+            }
+            let c_m = c.merkleize(None, &db).await.unwrap();
+
+            // Drop A and B without committing. Their Weak refs in C are now dead.
+            drop(a_m);
+            drop(b_m);
+
+            // Apply only the tip. This is !skip_ancestors (DB hasn't changed).
+            db.apply_batch(c_m).await.unwrap();
+            db.commit().await.unwrap();
+
+            // All nine keys must be accessible.
+            for i in 0..9 {
+                assert_eq!(
+                    db.get(&key(i)).await.unwrap(),
+                    Some(val(i)),
+                    "key({i}) missing after apply_batch with dropped ancestors"
+                );
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
 }

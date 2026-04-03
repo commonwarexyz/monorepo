@@ -73,6 +73,11 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
 
     /// The database size when the initial batch was created.
     pub(super) db_size: u64,
+
+    /// Arc refs to each ancestor's diff, collected during `merkleize()` while the parent
+    /// is alive. Used by `apply_batch` when `!skip_ancestors`.
+    #[allow(clippy::type_complexity)]
+    pub(super) ancestor_diffs: Vec<Arc<BTreeMap<K, DiffEntry<F, V::Value>>>>,
 }
 
 // Manual Clone: derive would add unnecessary Clone bounds on generic params.
@@ -85,6 +90,7 @@ impl<F: Family, D: Digest, K: Key, V: ValueEncoding> Clone for MerkleizedBatch<F
             base_size: self.base_size,
             total_size: self.total_size,
             db_size: self.db_size,
+            ancestor_diffs: self.ancestor_diffs.clone(),
         }
     }
 }
@@ -183,6 +189,12 @@ where
         }
         let journal_merkleized = journal_batch.merkleize();
 
+        let ancestor_diffs = self.parent.as_ref().map_or_else(Vec::new, |parent| {
+            let mut diffs = vec![Arc::clone(&parent.diff)];
+            diffs.extend(parent.ancestor_diffs.iter().cloned());
+            diffs
+        });
+
         Arc::new(MerkleizedBatch {
             journal_batch: journal_merkleized,
             diff: Arc::new(diff),
@@ -190,6 +202,7 @@ where
             base_size: self.base_size,
             total_size,
             db_size: self.db_size,
+            ancestor_diffs,
         })
     }
 }
@@ -273,6 +286,7 @@ where
             base_size: journal_size,
             total_size: journal_size,
             db_size: journal_size,
+            ancestor_diffs: Vec::new(),
         })
     }
 }

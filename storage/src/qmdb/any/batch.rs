@@ -239,6 +239,11 @@ where
     /// location for that key. Used by `apply_batch` to adjust `base_old_loc` when ancestors
     /// have been committed.
     pub(crate) ancestor_locs: Arc<BTreeMap<U::Key, Option<Location<F>>>>,
+
+    /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are
+    /// alive. Used by `apply_batch` when `!skip_ancestors` to apply ancestor snapshot diffs
+    /// without walking the `Weak` parent chain (which may be dead).
+    ancestor_diffs: Vec<Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>>,
 }
 
 // Manual Clone: #[derive(Clone)] would require U::Key: Clone and
@@ -259,6 +264,7 @@ where
             total_active_keys: self.total_active_keys,
             db_size: self.db_size,
             ancestor_locs: Arc::clone(&self.ancestor_locs),
+            ancestor_diffs: self.ancestor_diffs.clone(),
         }
     }
 }
@@ -616,6 +622,8 @@ where
             }
         }
 
+        let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
+
         debug_assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
@@ -628,6 +636,7 @@ where
             total_active_keys: total_active_keys as usize,
             db_size: self.db_size,
             ancestor_locs: Arc::new(ancestor_locs),
+            ancestor_diffs,
         }))
     }
 }
@@ -1251,8 +1260,9 @@ where
         // different fork was committed, or ancestors were only partially committed.
         if db_size != batch.db_size && db_size != batch.base_size {
             return Err(crate::qmdb::Error::StaleChangeset {
-                expected: batch.db_size,
-                actual: db_size,
+                db_size,
+                batch_db_size: batch.db_size,
+                batch_base_size: batch.base_size,
             });
         }
         // If the DB advanced past the batch's original fork point, ancestors in this chain
@@ -1292,9 +1302,8 @@ where
             }
         }
         if !skip_ancestors {
-            let ancestors: Vec<_> = batch.ancestors().collect();
-            for ancestor in &ancestors {
-                for (key, entry) in ancestor.diff.iter() {
+            for ancestor_diff in &batch.ancestor_diffs {
+                for (key, entry) in ancestor_diff.iter() {
                     // Skip keys already handled by this batch (child wins).
                     if seen.insert(key) {
                         apply_snapshot_diff(&mut self.snapshot, key, entry, entry.base_old_loc());
@@ -1340,6 +1349,7 @@ where
             total_active_keys: self.active_keys,
             db_size: journal_size,
             ancestor_locs: Arc::new(BTreeMap::new()),
+            ancestor_diffs: Vec::new(),
         })
     }
 }

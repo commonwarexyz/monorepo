@@ -331,8 +331,9 @@ where
         let db_size = *self.last_commit_loc + 1;
         if db_size != batch.db_size && db_size != batch.base_size {
             return Err(Error::StaleChangeset {
-                expected: batch.db_size,
-                actual: db_size,
+                db_size,
+                batch_db_size: batch.db_size,
+                batch_base_size: batch.base_size,
             });
         }
         let skip_ancestors = db_size > batch.db_size;

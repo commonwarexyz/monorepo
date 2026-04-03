@@ -325,6 +325,14 @@ where
 
     /// The canonical root (ops root + grafted root + partial chunk).
     pub(crate) canonical_root: D,
+
+    /// Arc refs to each ancestor's bitmap pushes, collected during
+    /// `compute_current_layer()` while the parent is alive.
+    pub(crate) ancestor_bitmap_pushes: Vec<Arc<Vec<bool>>>,
+
+    /// Arc refs to each ancestor's bitmap clears, collected during
+    /// `compute_current_layer()` while the parent is alive.
+    pub(crate) ancestor_bitmap_clears: Vec<Arc<Vec<Location>>>,
 }
 
 // Manual Clone: derive would add unnecessary Clone bounds on generic params.
@@ -342,6 +350,8 @@ where
             grafted_parent_size: self.grafted_parent_size,
             bitmap: self.bitmap.clone(),
             canonical_root: self.canonical_root,
+            ancestor_bitmap_pushes: self.ancestor_bitmap_pushes.clone(),
+            ancestor_bitmap_clears: self.ancestor_bitmap_clears.clone(),
         }
     }
 }
@@ -546,39 +556,6 @@ fn clear_ancestor_superseded<U, B, const N: usize>(
     }
 }
 
-/// Collect and flatten all bitmap pushes/clears from the full parent chain (root-to-tip
-/// order) into a single pair of Vecs.
-pub(crate) fn collect_bitmap_from_chain<
-    D: Digest,
-    U: update::Update + Send + Sync,
-    const N: usize,
->(
-    parent: Option<&Weak<MerkleizedBatch<D, U, N>>>,
-    local_pushes: &Arc<Vec<bool>>,
-    local_clears: &Arc<Vec<Location>>,
-) -> (Vec<bool>, Vec<Location>)
-where
-    Operation<mmr::Family, U>: Send + Sync,
-{
-    // Collect ancestors (tip-to-root), then flatten root-to-tip.
-    let mut ancestors = Vec::new();
-    let mut current = parent.and_then(Weak::upgrade);
-    while let Some(batch) = current {
-        current = batch.parent.as_ref().and_then(Weak::upgrade);
-        ancestors.push(batch);
-    }
-    let mut pushes = Vec::new();
-    let mut clears = Vec::new();
-    for batch in ancestors.iter().rev() {
-        pushes.extend_from_slice(&batch.bitmap_pushes);
-        clears.extend_from_slice(&batch.bitmap_clears);
-    }
-    pushes.extend_from_slice(local_pushes);
-    clears.extend_from_slice(local_clears);
-
-    (pushes, clears)
-}
-
 /// Compute the current layer (bitmap + grafted MMR + canonical root) on top of a merkleized
 /// any batch.
 ///
@@ -703,6 +680,19 @@ where
         cleared_bits: Arc::clone(&cleared_bits),
     }));
 
+    // Collect ancestor bitmap data while the parent is still alive.
+    let (ancestor_bitmap_pushes, ancestor_bitmap_clears) =
+        parent.as_ref().and_then(Weak::upgrade).map_or_else(
+            || (Vec::new(), Vec::new()),
+            |p| {
+                let mut pushes = vec![Arc::clone(&p.bitmap_pushes)];
+                let mut clears = vec![Arc::clone(&p.bitmap_clears)];
+                pushes.extend(p.ancestor_bitmap_pushes.iter().cloned());
+                clears.extend(p.ancestor_bitmap_clears.iter().cloned());
+                (pushes, clears)
+            },
+        );
+
     let grafted_parent_size = grafted_parent.size();
     Ok(Arc::new(MerkleizedBatch {
         inner,
@@ -713,6 +703,8 @@ where
         grafted_parent_size,
         bitmap: bitmap_batch,
         canonical_root,
+        ancestor_bitmap_pushes,
+        ancestor_bitmap_clears,
     }))
 }
 
@@ -938,6 +930,8 @@ where
             grafted_parent_size,
             bitmap: self.status.clone(),
             canonical_root: self.root,
+            ancestor_bitmap_pushes: Vec::new(),
+            ancestor_bitmap_clears: Vec::new(),
         })
     }
 }

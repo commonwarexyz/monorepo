@@ -586,11 +586,16 @@ where
                 batch.bitmap_clears.as_ref().clone(),
             );
         } else {
-            let (pushes, clears) = super::batch::collect_bitmap_from_chain(
-                batch.parent.as_ref(),
-                &batch.bitmap_pushes,
-                &batch.bitmap_clears,
-            );
+            let mut pushes = Vec::new();
+            let mut clears = Vec::new();
+            for p in &batch.ancestor_bitmap_pushes {
+                pushes.extend_from_slice(p);
+            }
+            for c in &batch.ancestor_bitmap_clears {
+                clears.extend_from_slice(c);
+            }
+            pushes.extend_from_slice(&batch.bitmap_pushes);
+            clears.extend_from_slice(&batch.bitmap_clears);
             self.status.push_changeset(pushes, clears);
         }
 

@@ -1270,4 +1270,65 @@ pub(crate) mod test {
             db.destroy().await.unwrap();
         });
     }
+
+    /// Regression: applying a batch after its ancestor Arc is dropped (without
+    /// committing) must still apply the ancestor's snapshot diffs. Before the
+    /// fix, the Weak parent chain was dead and ancestor diffs were silently
+    /// lost, causing the journal and snapshot to diverge.
+    #[test_traced("WARN")]
+    fn test_apply_batch_after_ancestor_dropped_without_commit() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = create_test_db(context).await;
+
+            apply_ops(&mut db, create_test_ops(5)).await;
+            db.commit().await.unwrap();
+
+            let base = db.to_batch();
+
+            // Chain: base <-- a <-- b <-- c
+            let key_a = Digest::random(&mut commonware_utils::test_rng_seeded(700));
+            let val_a = vec![1u8; 10];
+            let a = base
+                .new_batch::<Sha256>()
+                .write(key_a, Some(val_a.clone()))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            let key_b = Digest::random(&mut commonware_utils::test_rng_seeded(701));
+            let val_b = vec![2u8; 10];
+            let b = a
+                .new_batch::<Sha256>()
+                .write(key_b, Some(val_b.clone()))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            let key_c = Digest::random(&mut commonware_utils::test_rng_seeded(702));
+            let val_c = vec![3u8; 10];
+            let c = b
+                .new_batch::<Sha256>()
+                .write(key_c, Some(val_c.clone()))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            // Drop a and b without committing. Their Weak refs in c are now dead.
+            drop(a);
+            drop(b);
+
+            // Apply only the tip. This is !skip_ancestors (db hasn't changed).
+            // Before the fix, a's and b's snapshot diffs would be silently lost.
+            db.apply_batch(c).await.unwrap();
+            db.commit().await.unwrap();
+
+            // All three keys must be in the snapshot.
+            assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
+            assert_eq!(db.get(&key_b).await.unwrap().unwrap(), val_b);
+            assert_eq!(db.get(&key_c).await.unwrap().unwrap(), val_c);
+
+            db.destroy().await.unwrap();
+        });
+    }
 }
