@@ -18,7 +18,7 @@ fn quint_traces_dir() -> PathBuf {
 }
 
 fn fixtures_dir() -> PathBuf {
-    fuzz_dir().join("src/tracing/tests/fixtures")
+    fuzz_dir().join("src/tracing/tests/fixtures/regressions")
 }
 
 fn generate_json_trace(
@@ -89,16 +89,18 @@ fn run_quint_test(qnt_path: &Path) {
     );
 }
 
-/// Runs the encoder roundtrip from a pre-generated JSON fixture (no fuzz target needed).
-fn run_encoder_roundtrip_json(hash: &str) {
-    let json_path = fixtures_dir().join(hash);
+fn units_dir(suite: &str) -> PathBuf {
+    fuzz_dir().join(format!("src/tracing/tests/fixtures/units/{suite}"))
+}
+
+fn run_json_roundtrip(json_path: &Path, hash: &str) {
     assert!(
         json_path.exists(),
         "JSON fixture not found: {}",
         json_path.display()
     );
 
-    let json = std::fs::read_to_string(&json_path).expect("failed to read trace JSON");
+    let json = std::fs::read_to_string(json_path).expect("failed to read trace JSON");
     let qnt = encode_trace(&json);
 
     let qnt_path = quint_traces_dir().join(format!("trace_{hash}_encoder_test.qnt"));
@@ -110,6 +112,59 @@ fn run_encoder_roundtrip_json(hash: &str) {
 
     if let Err(e) = result {
         std::panic::resume_unwind(e);
+    }
+}
+
+/// Runs the encoder roundtrip from a pre-generated JSON fixture (no fuzz target needed).
+fn run_encoder_roundtrip_json(hash: &str) {
+    run_json_roundtrip(&fixtures_dir().join(hash), hash);
+}
+
+/// Iterates over all `.json` files in a units sub-directory and runs each
+/// through the encoder roundtrip. Collects all failures before panicking.
+fn run_all_units(suite: &str) {
+    let dir = units_dir(suite);
+    assert!(dir.exists(), "units dir not found: {}", dir.display());
+
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("failed to read units dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    assert!(!entries.is_empty(), "no JSON fixtures in {}", dir.display());
+
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for entry in &entries {
+        let path = entry.path();
+        let hash = path.file_stem().unwrap().to_str().unwrap();
+        let result = std::panic::catch_unwind(|| {
+            run_json_roundtrip(&path, hash);
+        });
+        if let Err(e) = result {
+            let msg = if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = e.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "unknown panic".to_string()
+            };
+            failures.push((hash.to_string(), msg));
+        }
+    }
+
+    if !failures.is_empty() {
+        let summary: Vec<String> = failures
+            .iter()
+            .map(|(h, m)| format!("  {h}: {m}"))
+            .collect();
+        panic!(
+            "{} of {} {suite} unit tests failed:\n{}",
+            failures.len(),
+            entries.len(),
+            summary.join("\n")
+        );
     }
 }
 
@@ -200,4 +255,16 @@ fn test_encoder_roundtrip_c72bd2b1346cedb1e287ab6c217fd1c9b1837068() {
 #[test]
 fn test_encoder_roundtrip_57ee33dc4aa3193f0f134235b1e9339f97335735() {
     run_encoder_roundtrip_json("57ee33dc4aa3193f0f134235b1e9339f97335735");
+}
+
+// --- Unit tests: all JSON fixtures per suite ---
+
+#[test]
+fn test_units_byzantine() {
+    run_all_units("byzantine");
+}
+
+#[test]
+fn test_units_twins() {
+    run_all_units("twins");
 }
