@@ -217,11 +217,19 @@ stability_scope!(BETA {
         ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
     }
 
-    /// Primary and secondary peer sets grouped together.
-    pub type PeerSets<P> = (Set<P>, Set<P>);
+    /// Notification sent to subscribers when a peer set changes.
+    #[derive(Clone, Debug)]
+    pub struct PeerSetUpdate<P: PublicKey> {
+        /// The index of the peer set that changed.
+        pub index: u64,
+        /// The primary and secondary peers in the new set.
+        pub latest: TrackedPeers<P>,
+        /// Union of all currently tracked primary and secondary peers.
+        pub all: TrackedPeers<P>,
+    }
 
     /// Alias for the subscription type returned by [`Provider::subscribe`].
-    pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<(u64, PeerSets<P>, PeerSets<P>)>;
+    pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<PeerSetUpdate<P>>;
 
     /// Primary and secondary peers registered together for [`Manager::track`].
     #[derive(Clone, Debug)]
@@ -282,17 +290,11 @@ stability_scope!(BETA {
 
         /// Subscribe to notifications when new peer sets are added.
         ///
-        /// Returns a receiver that will receive tuples of:
-        /// - The peer set ID
-        /// - The peers in the new primary and secondary sets
-        /// - All currently tracked primary peers (union of recent peer sets)
-        /// - All currently tracked secondary peers (union of recent peer sets)
-        ///
-        /// The aggregate primary and secondary sets preserve role information.
-        /// If a peer is tracked as both primary and secondary, it will appear
-        /// in both sets. Callers that need a deduplicated recipient list should
-        /// union the sets explicitly.
-        #[allow(clippy::type_complexity)]
+        /// Returns a receiver of [`PeerSetUpdate`] notifications. The aggregate
+        /// primary and secondary sets preserve role information. If a peer is
+        /// tracked as both primary and secondary, it will appear in both sets.
+        /// Callers that need a deduplicated recipient list should union the sets
+        /// explicitly.
         fn subscribe(
             &mut self,
         ) -> impl Future<Output = PeerSetSubscription<Self::PublicKey>> + Send;

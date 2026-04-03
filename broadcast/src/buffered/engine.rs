@@ -210,11 +210,11 @@ where
                     .inc();
                 self.handle_network(peer, msg);
             },
-            Some((_, (_, _), (primary_peers, _))) = peer_set_subscription.recv() else {
+            Some(update) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 break;
             } => {
-                self.evict_untracked_peers(&primary_peers);
+                self.evict_untracked_peers(&update.all.primary);
             },
         }
     }

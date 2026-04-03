@@ -11,7 +11,7 @@ use crate::{
         },
         mailbox::UnboundedMailbox,
     },
-    PeerSets,
+    PeerSetUpdate, TrackedPeers,
 };
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
@@ -55,8 +55,7 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     directory: Directory<E, C::PublicKey>,
 
     /// Subscribers to peer set updates.
-    #[allow(clippy::type_complexity)]
-    subscribers: Vec<mpsc::UnboundedSender<(u64, PeerSets<C::PublicKey>, PeerSets<C::PublicKey>)>>,
+    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C::PublicKey>>>,
 }
 
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -170,11 +169,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 }
 
                 // Notify all subscribers about the new peer set
-                let latest = (primary, secondary);
-                let tracked = (self.directory.primary(), self.directory.secondary());
-                self.subscribers.retain(|subscriber| {
-                    subscriber.send_lossy((index, latest.clone(), tracked.clone()))
-                });
+                let update = PeerSetUpdate {
+                    index,
+                    latest: TrackedPeers::new(primary, secondary),
+                    all: TrackedPeers::new(
+                        self.directory.primary(),
+                        self.directory.secondary(),
+                    ),
+                };
+                self.subscribers
+                    .retain(|subscriber| subscriber.send_lossy(update.clone()));
             }
             Message::PeerSet { index, responder } => {
                 // Send the peer set at the given index.
@@ -186,17 +190,20 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Send the latest peer set immediately
                 if let Some(latest_set_id) = self.directory.latest_set_index() {
-                    let latest_primary = self.directory.get_set(&latest_set_id).cloned().unwrap();
-                    let latest_secondary = self
-                        .directory
-                        .get_secondary_set(&latest_set_id)
-                        .cloned()
-                        .unwrap_or_default();
-                    sender.send_lossy((
-                        latest_set_id,
-                        (latest_primary, latest_secondary),
-                        (self.directory.primary(), self.directory.secondary()),
-                    ));
+                    sender.send_lossy(PeerSetUpdate {
+                        index: latest_set_id,
+                        latest: TrackedPeers::new(
+                            self.directory.get_set(&latest_set_id).cloned().unwrap(),
+                            self.directory
+                                .get_secondary_set(&latest_set_id)
+                                .cloned()
+                                .unwrap_or_default(),
+                        ),
+                        all: TrackedPeers::new(
+                            self.directory.primary(),
+                            self.directory.secondary(),
+                        ),
+                    });
                 }
                 self.subscribers.push(sender);
 
@@ -924,19 +931,18 @@ mod tests {
                 )
                 .await;
 
-            let (id, (latest_primary, latest_secondary), (all_primary, all_secondary)) =
-                subscription.recv().await.unwrap();
-            assert_eq!(id, 0);
-            assert_eq!(latest_primary.len(), 1);
-            assert!(latest_primary.position(&primary_pk).is_some());
-            assert!(latest_primary.position(&secondary_pk).is_none());
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 0);
+            assert_eq!(update.latest.primary.len(), 1);
+            assert!(update.latest.primary.position(&primary_pk).is_some());
+            assert!(update.latest.primary.position(&secondary_pk).is_none());
             assert_eq!(
-                latest_secondary,
+                update.latest.secondary,
                 Set::try_from([secondary_pk.clone()]).unwrap()
             );
-            assert_eq!(all_primary, latest_primary);
+            assert_eq!(update.all.primary, update.latest.primary);
             assert_eq!(
-                all_secondary,
+                update.all.secondary,
                 Set::try_from([secondary_pk.clone()]).unwrap()
             );
             assert!(mailbox.acceptable(secondary_pk.clone()).await);
@@ -981,14 +987,13 @@ mod tests {
                 )
                 .await;
 
-            let (id, (latest_primary, latest_secondary), (all_primary, all_secondary)) =
-                subscription.recv().await.unwrap();
-            assert_eq!(id, 0);
-            assert_eq!(latest_primary.len(), 1);
-            assert!(latest_primary.position(&pk).is_some());
-            assert_eq!(latest_secondary, Set::try_from([pk.clone()]).unwrap());
-            assert_eq!(all_primary, latest_primary);
-            assert_eq!(all_secondary, Set::try_from([pk.clone()]).unwrap());
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 0);
+            assert_eq!(update.latest.primary.len(), 1);
+            assert!(update.latest.primary.position(&pk).is_some());
+            assert_eq!(update.latest.secondary, Set::try_from([pk.clone()]).unwrap());
+            assert_eq!(update.all.primary, update.latest.primary);
+            assert_eq!(update.all.secondary, Set::try_from([pk.clone()]).unwrap());
             assert!(mailbox.acceptable(pk).await);
         });
     }

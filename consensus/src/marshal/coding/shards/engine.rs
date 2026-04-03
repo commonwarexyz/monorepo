@@ -438,18 +438,17 @@ where
             on_stopped => {
                 debug!("received shutdown signal, stopping shard engine");
             },
-            Some((_, (_, _), (tracked_primary_peers, tracked_secondary_peers))) = peer_set_subscription.recv() else {
+            Some(update) = peer_set_subscription.recv() else {
                 debug!("peer set subscription closed");
                 return;
             } => {
-                let tracked_peers = Set::from_iter_dedup(
-                    tracked_primary_peers
-                        .into_iter()
-                        .chain(tracked_secondary_peers.into_iter()),
+                let all_peers = Set::from_iter_dedup(
+                    update.all.primary.into_iter()
+                        .chain(update.all.secondary.into_iter()),
                 );
                 self.peer_buffers
-                    .retain(|peer, _| tracked_peers.as_ref().contains(peer));
-                self.tracked_peers = tracked_peers;
+                    .retain(|peer, _| all_peers.as_ref().contains(peer));
+                self.tracked_peers = all_peers;
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("shard mailbox closed, stopping shard engine");

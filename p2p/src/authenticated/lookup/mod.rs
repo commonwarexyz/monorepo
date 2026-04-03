@@ -757,13 +757,12 @@ mod tests {
                 .try_collect()
                 .unwrap();
             oracle.track(10, set10.clone()).await;
-            let (id, (new_primary, new_secondary), (all_primary, all_secondary)) =
-                subscription.recv().await.unwrap();
-            assert_eq!(id, 10);
-            assert_eq!(&new_primary, set10.keys());
-            assert!(new_secondary.is_empty());
-            assert_eq!(&all_primary, set10.keys());
-            assert!(all_secondary.is_empty());
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 10);
+            assert_eq!(&update.latest.primary, set10.keys());
+            assert!(update.latest.secondary.is_empty());
+            assert_eq!(&update.all.primary, set10.keys());
+            assert!(update.all.secondary.is_empty());
 
             // Register old peer sets (ignored)
             let set9: Map<_, _> = peers_and_sks
@@ -782,19 +781,18 @@ mod tests {
                 .try_collect()
                 .unwrap();
             oracle.track(11, set11.clone()).await;
-            let (id, (new_primary, new_secondary), (all_primary, all_secondary)) =
-                subscription.recv().await.unwrap();
-            assert_eq!(id, 11);
-            assert_eq!(&new_primary, set11.keys());
-            assert!(new_secondary.is_empty());
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 11);
+            assert_eq!(&update.latest.primary, set11.keys());
+            assert!(update.latest.secondary.is_empty());
             let all_keys: Set<_> = set10
                 .into_keys()
                 .into_iter()
                 .chain(set11.into_keys().into_iter())
                 .try_collect()
                 .unwrap();
-            assert_eq!(all_primary, all_keys);
-            assert!(all_secondary.is_empty());
+            assert_eq!(update.all.primary, all_keys);
+            assert!(update.all.secondary.is_empty());
         });
     }
 
@@ -995,34 +993,33 @@ mod tests {
             oracle.track(1, peer_set.clone()).await;
 
             // Receive subscription notification
-            let (id, (latest_primary, latest_secondary), (all_primary, all_secondary)) =
-                subscription.recv().await.unwrap();
-            assert_eq!(id, 1);
-            assert_eq!(latest_primary.len(), 1);
-            assert_eq!(all_primary.len(), 1);
-            assert!(all_secondary.is_empty());
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 1);
+            assert_eq!(update.latest.primary.len(), 1);
+            assert_eq!(update.all.primary.len(), 1);
+            assert!(update.all.secondary.is_empty());
 
             // Self should NOT be in the new set
             assert!(
-                latest_primary.position(&self_pk).is_none(),
+                update.latest.primary.position(&self_pk).is_none(),
                 "new set should not include self"
             );
             assert!(
-                latest_primary.position(&other_pk).is_some(),
+                update.latest.primary.position(&other_pk).is_some(),
                 "new set should include other"
             );
             assert!(
-                latest_secondary.is_empty(),
+                update.latest.secondary.is_empty(),
                 "new secondary set should be empty"
             );
 
             // Self should NOT be in the tracked set (not registered)
             assert!(
-                all_primary.position(&self_pk).is_none(),
+                update.all.primary.position(&self_pk).is_none(),
                 "tracked peers should not include self"
             );
             assert!(
-                all_primary.position(&other_pk).is_some(),
+                update.all.primary.position(&other_pk).is_some(),
                 "tracked peers should include other"
             );
 
@@ -1036,34 +1033,33 @@ mod tests {
             oracle.track(2, peer_set.clone()).await;
 
             // Receive subscription notification
-            let (id, (latest_primary, latest_secondary), (all_primary, all_secondary)) =
-                subscription.recv().await.unwrap();
-            assert_eq!(id, 2);
-            assert_eq!(latest_primary.len(), 2);
-            assert_eq!(all_primary.len(), 2);
-            assert!(all_secondary.is_empty());
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 2);
+            assert_eq!(update.latest.primary.len(), 2);
+            assert_eq!(update.all.primary.len(), 2);
+            assert!(update.all.secondary.is_empty());
 
             // Both peers should be in the new set
             assert!(
-                latest_primary.position(&self_pk).is_some(),
+                update.latest.primary.position(&self_pk).is_some(),
                 "new set should include self"
             );
             assert!(
-                latest_primary.position(&other_pk).is_some(),
+                update.latest.primary.position(&other_pk).is_some(),
                 "new set should include other"
             );
             assert!(
-                latest_secondary.is_empty(),
+                update.latest.secondary.is_empty(),
                 "new secondary set should be empty"
             );
 
             // Both peers should be in the tracked set
             assert!(
-                all_primary.position(&self_pk).is_some(),
+                update.all.primary.position(&self_pk).is_some(),
                 "tracked peers should include self"
             );
             assert!(
-                all_primary.position(&other_pk).is_some(),
+                update.all.primary.position(&other_pk).is_some(),
                 "tracked peers should include other"
             );
         });

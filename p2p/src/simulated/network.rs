@@ -9,7 +9,7 @@ use super::{
 use crate::{
     authenticated::UnboundedMailbox,
     utils::limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
-    Channel, Message, PeerSets, Recipients, UnlimitedSender as _,
+    Channel, Message, PeerSetUpdate, Recipients, TrackedPeers, UnlimitedSender as _,
 };
 use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
@@ -158,8 +158,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     transmitter: transmitter::State<P>,
 
     // Subscribers to primary peer set updates (used by Manager::subscribe())
-    #[allow(clippy::type_complexity)]
-    subscribers: Vec<mpsc::UnboundedSender<(u64, PeerSets<P>, PeerSets<P>)>>,
+    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<P>>>,
 
     // Subscribers to the connectable peer list (used by PeerSource for LimitedSender)
     peer_subscribers: Vec<ring::Sender<Vec<P>>>,
@@ -339,13 +338,16 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
 
                 // Notify all subscribers about the new peer set.
-                let notification: (u64, PeerSets<P>, PeerSets<P>) = (
-                    id,
-                    (primary.clone(), secondary.clone()),
-                    (self.all_primary_peers(), self.all_secondary_peers()),
-                );
+                let update = PeerSetUpdate {
+                    index: id,
+                    latest: TrackedPeers::new(primary.clone(), secondary.clone()),
+                    all: TrackedPeers::new(
+                        self.all_primary_peers(),
+                        self.all_secondary_peers(),
+                    ),
+                };
                 self.subscribers
-                    .retain(|subscriber| subscriber.send_lossy(notification.clone()));
+                    .retain(|subscriber| subscriber.send_lossy(update.clone()));
 
                 // Broadcast updated peer list to LimitedSender subscribers
                 self.broadcast_peer_list().await;
@@ -412,14 +414,17 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Send the latest peer set upon subscription.
                 if let Some((index, peers)) = self.primary_sets.last_key_value() {
-                    let latest_secondary =
-                        self.secondary_sets.get(index).cloned().unwrap_or_default();
-                    let notification = (
-                        *index,
-                        (peers.clone(), latest_secondary),
-                        (self.all_primary_peers(), self.all_secondary_peers()),
-                    );
-                    sender.send_lossy(notification);
+                    sender.send_lossy(PeerSetUpdate {
+                        index: *index,
+                        latest: TrackedPeers::new(
+                            peers.clone(),
+                            self.secondary_sets.get(index).cloned().unwrap_or_default(),
+                        ),
+                        all: TrackedPeers::new(
+                            self.all_primary_peers(),
+                            self.all_secondary_peers(),
+                        ),
+                    });
                 }
                 self.subscribers.push(sender);
 
@@ -1739,13 +1744,12 @@ mod tests {
             manager
                 .track(10, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
                 .await;
-            let (id, (latest_primary, latest_secondary), (all_primary, all_secondary)) =
-                subscription.recv().await.unwrap();
-            assert_eq!(id, 10);
-            assert_eq!(latest_primary.len(), 2);
-            assert!(latest_secondary.is_empty());
-            assert_eq!(all_primary.len(), 2);
-            assert!(all_secondary.is_empty());
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 10);
+            assert_eq!(update.latest.primary.len(), 2);
+            assert!(update.latest.secondary.is_empty());
+            assert_eq!(update.all.primary.len(), 2);
+            assert!(update.all.secondary.is_empty());
 
             // Register old peer sets (ignored)
             let pk3 = ed25519::PrivateKey::from_seed(3).public_key();
@@ -1758,13 +1762,12 @@ mod tests {
             manager
                 .track(11, Set::try_from([pk4.clone()]).unwrap())
                 .await;
-            let (id, (latest_primary, latest_secondary), (all_primary, all_secondary)) =
-                subscription.recv().await.unwrap();
-            assert_eq!(id, 11);
-            assert_eq!(latest_primary, Set::try_from([pk4.clone()]).unwrap());
-            assert!(latest_secondary.is_empty());
-            assert_eq!(all_primary, Set::try_from([pk1, pk2, pk4]).unwrap());
-            assert!(all_secondary.is_empty());
+            let update = subscription.recv().await.unwrap();
+            assert_eq!(update.index, 11);
+            assert_eq!(update.latest.primary, Set::try_from([pk4.clone()]).unwrap());
+            assert!(update.latest.secondary.is_empty());
+            assert_eq!(update.all.primary, Set::try_from([pk1, pk2, pk4]).unwrap());
+            assert!(update.all.secondary.is_empty());
         });
     }
 
