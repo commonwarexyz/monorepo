@@ -3045,7 +3045,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                    tracked_peer_sets: Some(1),
+                    tracked_peer_sets: None,
                 },
             );
             network.start();
@@ -3055,16 +3055,6 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-
-            let primary_participants = Set::from_iter_dedup(participants[1..].iter().cloned());
-            let secondary_participants = Set::from_iter_dedup([participants[0].clone()]);
-            oracle
-                .manager()
-                .track(
-                    0,
-                    TrackedPeers::new(primary_participants, secondary_participants),
-                )
-                .await;
 
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
@@ -3157,13 +3147,11 @@ mod tests {
                 honest_latest = honest_monitor.recv().await.expect("event missing");
             }
 
-            // Wait for all in-flight certificates to arrive at the secondary-only
-            // node and be reported.
+            // Wait for all in-flight certificates to arrive at excluded node and be reported.
             context.sleep(Duration::from_secs(1)).await;
 
-            // The secondary-only node should still process nearly the same chain
-            // as the honest primary node (with some tolerance for initial views
-            // in which it may not yet have observed every certificate).
+            // It should have received similar certificates to the honest node (with some
+            // tolerance for initial views in which may not have yet been connected).
             let honest_notarized = {
                 let notarizations = honest_reporter.notarizations.lock();
                 View::range(View::new(1), required_containers.next())
@@ -3178,7 +3166,7 @@ mod tests {
             };
             assert!(
                 excluded_notarized >= honest_notarized.saturating_sub(2),
-                "secondary_notarized: {excluded_notarized}, honest_notarized: {honest_notarized}"
+                "honest_notarized: {honest_notarized}, excluded_notarized: {excluded_notarized}"
             );
 
             let honest_finalized = {
@@ -3195,7 +3183,7 @@ mod tests {
             };
             assert!(
                 excluded_finalized >= honest_finalized.saturating_sub(2),
-                "secondary_finalized: {excluded_finalized}, honest_finalized: {honest_finalized}"
+                "honest_finalized: {honest_finalized}, excluded_finalized: {excluded_finalized}"
             );
         });
     }
