@@ -54,7 +54,13 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
 
     /// Subscribers to peer set updates.
     #[allow(clippy::type_complexity)]
-    subscribers: Vec<mpsc::UnboundedSender<(u64, Set<C::PublicKey>, (Set<C::PublicKey>, Set<C::PublicKey>))>>,
+    subscribers: Vec<
+        mpsc::UnboundedSender<(
+            u64,
+            Set<C::PublicKey>,
+            (Set<C::PublicKey>, Set<C::PublicKey>),
+        )>,
+    >,
 }
 
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -166,8 +172,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
                 // Notify all subscribers about the new peer set
                 let tracked = (self.directory.primary(), self.directory.secondary());
-                self.subscribers
-                    .retain(|subscriber| subscriber.send_lossy((index, primary.clone(), tracked.clone())));
+                self.subscribers.retain(|subscriber| {
+                    subscriber.send_lossy((index, primary.clone(), tracked.clone()))
+                });
             }
             Message::PeerSet { index, responder } => {
                 // Send the peer set at the given index.

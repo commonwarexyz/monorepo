@@ -52,8 +52,13 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
 
     /// Subscribers to peer set updates.
     #[allow(clippy::type_complexity)]
-    subscribers:
-        Vec<mpsc::UnboundedSender<(u64, Set<C::PublicKey>, (Set<C::PublicKey>, Set<C::PublicKey>))>>,
+    subscribers: Vec<
+        mpsc::UnboundedSender<(
+            u64,
+            Set<C::PublicKey>,
+            (Set<C::PublicKey>, Set<C::PublicKey>),
+        )>,
+    >,
 }
 
 impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
@@ -700,7 +705,10 @@ mod tests {
             assert!(new.position(&primary_pk).is_some());
             assert!(new.position(&secondary_pk).is_none());
             assert_eq!(all_primary, new);
-            assert_eq!(all_secondary, Set::try_from([secondary_pk.clone()]).unwrap());
+            assert_eq!(
+                all_secondary,
+                Set::try_from([secondary_pk.clone()]).unwrap()
+            );
 
             let dialable = mailbox.dialable().await;
             assert!(dialable.peers.iter().any(|peer| peer == &primary_pk));

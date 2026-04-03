@@ -1885,7 +1885,8 @@ mod tests {
                 Producer::default(),
             );
 
-            mailbox2.fetch_targeted(key.clone(), non_empty_vec![peers[0].clone()])
+            mailbox2
+                .fetch_targeted(key.clone(), non_empty_vec![peers[0].clone()])
                 .await;
 
             let event = cons_out2.recv().await.unwrap();
