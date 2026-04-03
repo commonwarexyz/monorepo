@@ -214,7 +214,7 @@ where
                 debug!("peer set subscription closed");
                 break;
             } => {
-                self.evict_untracked_peers(&update.all.primary);
+                self.evict_untracked_peers(&update.latest.primary);
             },
         }
     }

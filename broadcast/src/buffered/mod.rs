@@ -969,6 +969,121 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_peer_set_update_evicts_peers_not_in_latest_set() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(5));
+        runner.start(|context| async move {
+            // Use tracked_peer_sets=2 so old sets are retained in the window.
+            let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(
+                context.with_label("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: Some(2),
+                },
+            );
+            network.start();
+
+            let mut schemes = (0..3)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            schemes.sort_by_key(|s| s.public_key());
+            let peers: Vec<PublicKey> = schemes.iter().map(|c| c.public_key()).collect();
+            let peer_a = peers[0].clone();
+            let peer_b = peers[1].clone();
+            let peer_c = peers[2].clone();
+
+            let mut registrations: Registrations = BTreeMap::new();
+            for peer in peers.iter() {
+                let (sender, receiver) = oracle
+                    .control(peer.clone())
+                    .register(0, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                registrations.insert(peer.clone(), (sender, receiver));
+            }
+            let link = Link {
+                latency: NETWORK_SPEED,
+                jitter: Duration::ZERO,
+                success_rate: 1.0,
+            };
+            for p1 in peers.iter() {
+                for p2 in peers.iter() {
+                    if p2 != p1 {
+                        oracle
+                            .add_link(p1.clone(), p2.clone(), link.clone())
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+
+            // Track all three peers in set 0.
+            let all = commonware_utils::ordered::Set::from_iter_dedup(peers.clone());
+            oracle.manager().track(0, all).await;
+
+            // Spawn engines for B (with its own manager) and the rest.
+            let network_b = registrations.remove(&peer_b).unwrap();
+            let config_b = Config {
+                public_key: peer_b.clone(),
+                mailbox_size: 1024,
+                deque_size: CACHE_SIZE,
+                priority: false,
+                codec_config: RangeCfg::from(..),
+                peer_provider: oracle.manager(),
+            };
+            let (engine_b, mailbox_b) =
+                Engine::<_, PublicKey, TestMessage, _>::new(context.with_label("peer_b"), config_b);
+            engine_b.start(network_b);
+
+            let mut mailboxes = BTreeMap::new();
+            mailboxes.insert(peer_b.clone(), mailbox_b);
+            for (peer, network) in registrations {
+                let ctx = context.with_label(&format!("peer_{}", peer));
+                let config = Config {
+                    public_key: peer.clone(),
+                    mailbox_size: 1024,
+                    deque_size: CACHE_SIZE,
+                    priority: false,
+                    codec_config: RangeCfg::from(..),
+                    peer_provider: oracle.manager(),
+                };
+                let (engine, mailbox) = Engine::<_, PublicKey, TestMessage, _>::new(ctx, config);
+                mailboxes.insert(peer, mailbox);
+                engine.start(network);
+            }
+
+            // Peer A broadcasts a message. B caches it.
+            let msg = TestMessage::shared(b"eviction-latest-test");
+            let mailbox_a = mailboxes.get(&peer_a).unwrap().clone();
+            let result = mailbox_a.broadcast(Recipients::All, msg.clone()).await;
+            assert_eq!(result.await.unwrap().len(), 2);
+            context.sleep(NETWORK_SPEED_WITH_BUFFER).await;
+
+            let mailbox_b = mailboxes.get(&peer_b).unwrap().clone();
+            assert_eq!(
+                mailbox_b.get(msg.digest()).await,
+                Some(msg.clone()),
+                "peer B should have the message before eviction"
+            );
+
+            // Track set 1 with only [B, C]. With tracked_peer_sets=2, both
+            // sets 0 and 1 are retained, so A is still in `all.primary`. But
+            // the latest set excludes A, so A's deque should be evicted.
+            let remaining = commonware_utils::ordered::Set::from_iter_dedup(vec![
+                peer_b.clone(),
+                peer_c.clone(),
+            ]);
+            oracle.manager().track(1, remaining).await;
+            context.sleep(A_JIFFY).await;
+
+            assert!(
+                mailbox_b.get(msg.digest()).await.is_none(),
+                "message should be evicted: peer A is not in the latest peer set"
+            );
+        });
+    }
+
+    #[test_traced]
     fn test_peer_set_update_preserves_shared_messages() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
