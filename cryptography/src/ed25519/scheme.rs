@@ -30,7 +30,6 @@ const L: [u8; 32] = [
     0x00, 0x10,
 ];
 
-// Returns true iff s < l (canonical scalar).
 fn is_canonical_s(s: &[u8; 32]) -> bool {
     for i in (0..32).rev() {
         if s[i] < L[i] {
@@ -40,7 +39,7 @@ fn is_canonical_s(s: &[u8; 32]) -> bool {
             return false;
         }
     }
-    false // s == l
+    false
 }
 
 /// Ed25519 Private Key.
@@ -814,7 +813,6 @@ mod tests {
 
     #[test]
     fn test_s_equal_to_l_rejected_at_decode() {
-        // S == l is not canonical (must be in [0, l-1])
         let mut bad_signature = vec![0u8; SIGNATURE_LENGTH];
         bad_signature[32..].copy_from_slice(&L);
         assert!(Signature::decode(bad_signature.as_ref()).is_err());
@@ -822,10 +820,9 @@ mod tests {
 
     #[test]
     fn test_s_above_l_rejected_at_decode() {
-        // S == l + 1
         let mut bad_signature = vec![0u8; SIGNATURE_LENGTH];
         bad_signature[32..].copy_from_slice(&L);
-        bad_signature[32] = bad_signature[32].wrapping_add(1); // increment LSB
+        bad_signature[32] = bad_signature[32].wrapping_add(1);
         assert!(Signature::decode(bad_signature.as_ref()).is_err());
     }
 
