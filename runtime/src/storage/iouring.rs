@@ -330,7 +330,12 @@ impl Blob {
             }
 
             bytes_written += op_bytes_written;
-            offset += op_bytes_written as u64;
+            if bytes_written == buf_len {
+                break;
+            }
+            offset = offset
+                .checked_add(op_bytes_written as u64)
+                .ok_or(Error::OffsetOverflow)?;
         }
 
         Ok(())
@@ -413,7 +418,12 @@ impl Blob {
             }
 
             bufs.advance(op_bytes_written);
-            offset += op_bytes_written as u64;
+            if !bufs.has_remaining() {
+                break;
+            }
+            offset = offset
+                .checked_add(op_bytes_written as u64)
+                .ok_or(Error::OffsetOverflow)?;
         }
 
         Ok(())
@@ -458,7 +468,9 @@ impl crate::Blob for Blob {
             // correctly represents the remaining valid bytes.
             let ptr = unsafe { io_buf.as_mut_ptr().add(bytes_read) };
             let remaining_len = len - bytes_read;
-            let offset = offset + bytes_read as u64;
+            let offset = offset
+                .checked_add(bytes_read as u64)
+                .ok_or(Error::OffsetOverflow)?;
 
             // Create an operation to do the read
             let op = opcode::Read::new(self.as_raw_fd(), ptr, remaining_len as _)
@@ -730,6 +742,56 @@ mod tests {
         assert!(
             matches!(result, Err(crate::Error::BlobCorrupt(_, _, reason)) if reason.contains("invalid magic"))
         );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_single_write_no_spurious_offset_overflow() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage.open("partition", b"single_overflow").await.unwrap();
+
+        let result = blob
+            .write_at(u64::MAX - Header::SIZE_U64, IoBuf::from(b"x"))
+            .await;
+        assert!(
+            !matches!(result, Err(crate::Error::OffsetOverflow)),
+            "write at max offset should not trigger spurious OffsetOverflow"
+        );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_vectored_write_no_spurious_offset_overflow() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage
+            .open("partition", b"vectored_overflow")
+            .await
+            .unwrap();
+
+        let result = blob
+            .write_at(
+                u64::MAX - Header::SIZE_U64,
+                vec![IoBuf::from(b"a"), IoBuf::from(b"b")],
+            )
+            .await;
+        assert!(
+            !matches!(result, Err(crate::Error::OffsetOverflow)),
+            "write at max offset should not trigger spurious OffsetOverflow"
+        );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_read_offset_overflow() {
+        let (storage, storage_directory) = create_test_storage();
+        let (blob, _) = storage.open("partition", b"read_overflow").await.unwrap();
+
+        blob.write_at(0, b"x".to_vec()).await.unwrap();
+        let result = blob.read_at(u64::MAX - Header::SIZE_U64 + 1, 2).await;
+        assert!(matches!(result, Err(crate::Error::OffsetOverflow)));
 
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
