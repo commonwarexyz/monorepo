@@ -137,8 +137,8 @@ where
         if let Some(value) = self.mutations.get(key) {
             return Ok(Some(value.clone()));
         }
-        // Walk parent chain. The first parent is a strong Arc (held by
-        // UnmerkleizedBatch), subsequent parents are Weak refs.
+        // Walk parent chain. The first parent is a strong Arc (held by UnmerkleizedBatch),
+        // subsequent parents are Weak refs.
         if let Some(parent) = self.parent.as_ref() {
             if let Some(entry) = parent.diff.get(key) {
                 return Ok(Some(entry.value.clone()));

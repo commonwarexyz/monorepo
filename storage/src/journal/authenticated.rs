@@ -67,12 +67,12 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
         }
     }
 
-    /// Like [`merkleize`](Self::merkleize), but the caller supplies the items
-    /// instead of accumulating them with [`add`](Self::add). The two approaches
-    /// must not be mixed: do not call [`add`](Self::add) before this method.
+    /// Like [`merkleize`](Self::merkleize), but the caller supplies the items instead of
+    /// accumulating them with [`add`](Self::add). The two approaches must not be mixed: do
+    /// not call [`add`](Self::add) before this method.
     ///
-    /// The items are encoded and hashed into the Merkle structure, and the `Arc`
-    /// is stored directly in the resulting [`MerkleizedBatch`] without copying.
+    /// The items are encoded and hashed into the Merkle structure, and the `Arc` is stored
+    /// directly in the resulting [`MerkleizedBatch`] without copying.
     ///
     /// # Panics
     ///
@@ -151,8 +151,7 @@ impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
         }
     }
 
-    /// Return a [`Changeset`] that can apply the batch's changes to the
-    /// journal.
+    /// Return a [`Changeset`] that can apply the batch's changes to the journal.
     pub fn finalize(&self) -> Changeset<F, D, Item> {
         let items = self.collect_items();
         Changeset {
@@ -161,10 +160,9 @@ impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
         }
     }
 
-    /// Produce a changeset relative to `committed_leaves`, returning
-    /// only this batch's items. Callers must commit ancestor batches
-    /// in chain order before calling this; intermediate items are not
-    /// included.
+    /// Produce a changeset relative to `committed_leaves`, returning only this batch's items.
+    /// Callers must commit ancestor batches in chain order before calling this; intermediate
+    /// items are not included.
     pub fn finalize_from(&self, committed_leaves: Location<F>) -> Changeset<F, D, Item> {
         let base = Position::try_from(committed_leaves).expect("valid committed_leaves");
         Changeset {

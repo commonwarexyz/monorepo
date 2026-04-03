@@ -307,8 +307,8 @@ where
 
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
     ///
-    /// This rewinds both the operations journal and its Merkle structure to the historical state at `size`,
-    /// and removes rewound set operations from the in-memory snapshot.
+    /// This rewinds both the operations journal and its Merkle structure to the historical
+    /// state at `size`, and removes rewound set operations from the in-memory snapshot.
     ///
     /// # Errors
     ///
@@ -422,17 +422,15 @@ where
 
     /// Apply a [`batch::MerkleizedBatch`] to the database.
     ///
-    /// A batch is valid only if every batch applied to the database
-    /// since this batch's ancestor chain was created is an ancestor
-    /// of this batch. Applying a batch from a different fork returns
-    /// [`Error::StaleChangeset`].
+    /// A batch is valid only if every batch applied to the database since this batch's
+    /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
+    /// different fork returns [`Error::StaleChangeset`].
     ///
     /// Returns the range of locations written.
     ///
-    /// This publishes the batch to the in-memory database state and
-    /// appends it to the journal, but does not durably commit it.
-    /// Call [`Immutable::commit`] or [`Immutable::sync`] to guarantee
-    /// durability.
+    /// This publishes the batch to the in-memory database state and appends it to the
+    /// journal, but does not durably commit it. Call [`Immutable::commit`] or
+    /// [`Immutable::sync`] to guarantee durability.
     pub async fn apply_batch(
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V>>,

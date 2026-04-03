@@ -285,8 +285,7 @@ where
         self.journal.sync().await.map_err(Into::into)
     }
 
-    /// Durably commit the journal state published by prior [`Keyless::apply_batch`]
-    /// calls.
+    /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.
     pub async fn commit(&self) -> Result<(), Error<F>> {
         self.journal.commit().await.map_err(Into::into)
     }
@@ -315,17 +314,15 @@ where
 
     /// Apply a [`batch::MerkleizedBatch`] to the database.
     ///
-    /// A batch is valid only if every batch applied to the database
-    /// since this batch's ancestor chain was created is an ancestor
-    /// of this batch. Applying a batch from a different fork returns
-    /// [`Error::StaleChangeset`].
+    /// A batch is valid only if every batch applied to the database since this batch's
+    /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
+    /// different fork returns [`Error::StaleChangeset`].
     ///
     /// Returns the range of locations written.
     ///
-    /// This publishes the batch to the in-memory database state and
-    /// appends it to the journal, but does not durably commit it.
-    /// Call [`Keyless::commit`] or [`Keyless::sync`] to guarantee
-    /// durability.
+    /// This publishes the batch to the in-memory database state and appends it to the
+    /// journal, but does not durably commit it. Call [`Keyless::commit`] or
+    /// [`Keyless::sync`] to guarantee durability.
     pub async fn apply_batch(
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, V>>,

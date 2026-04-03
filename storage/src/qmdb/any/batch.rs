@@ -59,17 +59,15 @@ pub(crate) enum DiffEntry<F: Family, V> {
         value: V,
         /// Uncommitted location where this operation will be written.
         loc: Location<F>,
-        /// The key's committed location in the DB snapshot, or `None`
-        /// if the key did not exist in the committed DB. Resolved
-        /// during merkleize (either from the snapshot directly, or
-        /// inherited from the nearest ancestor that touched this key).
+        /// The key's committed location in the DB snapshot, or `None` if the key did not exist
+        /// in the committed DB. Resolved during merkleize (either from the snapshot directly,
+        /// or inherited from the nearest ancestor that touched this key).
         base_old_loc: Option<Location<F>>,
     },
     /// Key was deleted.
     Deleted {
-        /// The key's committed location in the DB snapshot, or `None`
-        /// if the key was created by an ancestor batch and never
-        /// existed in the committed DB.
+        /// The key's committed location in the DB snapshot, or `None` if the key was created
+        /// by an ancestor batch and never existed in the committed DB.
         base_old_loc: Option<Location<F>>,
     },
 }
@@ -119,17 +117,17 @@ where
     /// Parent batch in the chain. `None` for batches created directly from the DB.
     parent: Option<Arc<MerkleizedBatch<F, H::Digest, U>>>,
 
-    /// Total operations in the DB + all ancestor batches. This batch's
-    /// i-th operation is assigned location `base_size + i`.
+    /// Total operations in the DB + all ancestor batches. This batch's i-th operation is
+    /// assigned location `base_size + i`.
     base_size: u64,
 
     /// Inactivity floor location before this batch.
     base_inactivity_floor_loc: Location<F>,
 
-    /// Number of committed DB operations when the root of this batch's
-    /// ancestor chain was created (via `db.new_batch()` or `db.to_batch()`).
-    /// Inherited unchanged by all descendants. Used by `apply_batch` to
-    /// detect whether ancestors have been committed since then.
+    /// Number of committed DB operations when the root of this batch's ancestor chain was
+    /// created (via `db.new_batch()` or `db.to_batch()`). Inherited unchanged by all
+    /// descendants. Used by `apply_batch` to detect whether ancestors have been committed
+    /// since then.
     db_size: u64,
 
     /// Active key count before this batch.
@@ -151,8 +149,7 @@ where
 ///
 /// # Committing batches
 ///
-/// [`Db::apply_batch`] applies the batch. Already-committed ancestors
-/// are skipped automatically.
+/// [`Db::apply_batch`] applies the batch. Already-committed ancestors are skipped automatically.
 ///
 /// ```text
 /// db.apply_batch(b1).await.unwrap();
@@ -185,16 +182,15 @@ where
     /// Total active keys after this batch.
     pub(crate) total_active_keys: usize,
 
-    /// Number of committed DB operations when the root of this batch's
-    /// ancestor chain was created (via `db.new_batch()` or
-    /// `db.to_batch()`). Inherited unchanged by all descendants. When
-    /// `apply_batch` sees the current DB size exceeds this value, it
-    /// knows ancestors have been committed.
+    /// Number of committed DB operations when the root of this batch's ancestor chain was
+    /// created (via `db.new_batch()` or `db.to_batch()`). Inherited unchanged by all
+    /// descendants. When `apply_batch` sees the current DB size exceeds this value, it knows
+    /// ancestors have been committed.
     pub(crate) db_size: u64,
 
-    /// For each key in this batch's diff that an ancestor also touched,
-    /// the ancestor's location for that key. Used by `apply_batch` to
-    /// adjust `base_old_loc` when ancestors have been committed.
+    /// For each key in this batch's diff that an ancestor also touched, the ancestor's
+    /// location for that key. Used by `apply_batch` to adjust `base_old_loc` when ancestors
+    /// have been committed.
     pub(crate) ancestor_locs: Arc<BTreeMap<U::Key, Option<Location<F>>>>,
 }
 
@@ -221,10 +217,10 @@ where
 
 /// Batch-infrastructure state used during merkleization.
 ///
-/// Created by [`UnmerkleizedBatch::into_parts()`], which separates the pending
-/// mutations from the resolution/merkleization machinery. Helpers that need
-/// access to the parent chain, DB snapshot, or operation log are methods on
-/// this struct, eliminating parameter threading.
+/// Created by [`UnmerkleizedBatch::into_parts()`], which separates the pending mutations
+/// from the resolution/merkleization machinery. Helpers that need access to the parent
+/// chain, DB snapshot, or operation log are methods on this struct, eliminating parameter
+/// threading.
 struct Merkleizer<F: Family, H, U>
 where
     U: update::Update + Send + Sync,
@@ -277,8 +273,8 @@ fn apply_snapshot_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>>(
 
 /// Read a single operation item from the ancestor chain at the given location.
 ///
-/// `db_size` is the number of committed operations in the DB. The location
-/// must be in `[db_size, tip)` where `tip = ancestors[0].journal_batch.size()`.
+/// `db_size` is the number of committed operations in the DB. The location must be in
+/// `[db_size, tip)` where `tip = ancestors[0].journal_batch.size()`.
 fn read_chain_item_from_ancestors<F: Family, D: Digest, U: update::Update + Send + Sync>(
     ancestors: &[Arc<MerkleizedBatch<F, D, U>>],
     loc: u64,
@@ -317,10 +313,9 @@ where
     ///   committed (on disk)     ancestors (in mem)          this batch (in mem)
     /// ```
     ///
-    /// `db_size` here is the Merkleizer's effective boundary between disk
-    /// and in-memory ancestors. It equals the original DB size when the
-    /// full ancestor chain is alive, or a higher value if ancestors were
-    /// freed (see `into_parts`).
+    /// `db_size` here is the Merkleizer's effective boundary between disk and in-memory
+    /// ancestors. It equals the original DB size when the full ancestor chain is alive, or a
+    /// higher value if ancestors were freed (see `into_parts`).
     ///
     /// For top-level batches, the ancestor region is empty (`db_size == base_size`).
     async fn read_op<E, C, I>(
@@ -351,15 +346,14 @@ where
 
     /// Gather existing-key locations for all keys in `mutations`.
     ///
-    /// For each mutation key, checks the ancestor diffs first (returning the
-    /// uncommitted location for Active entries, skipping Deleted entries).
-    /// Keys not in the ancestor diffs fall back to the committed DB snapshot.
+    /// For each mutation key, checks the ancestor diffs first (returning the uncommitted
+    /// location for Active entries, skipping Deleted entries). Keys not in the ancestor diffs
+    /// fall back to the committed DB snapshot.
     ///
-    /// When `include_active_collision_siblings` is true, Active entries
-    /// also scan the snapshot bucket for collision siblings (other keys
-    /// sharing the same translated-key bucket). The ordered path needs
-    /// these so their `next_key` pointers are rewritten when a sibling
-    /// is deleted; the unordered path can skip them.
+    /// When `include_active_collision_siblings` is true, Active entries also scan the snapshot
+    /// bucket for collision siblings (other keys sharing the same translated-key bucket). The
+    /// ordered path needs these so their `next_key` pointers are rewritten when a sibling is
+    /// deleted; the unordered path can skip them.
     fn gather_existing_locations<E, C, I>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
@@ -371,8 +365,8 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        // Extra slack (*3/2) avoids re-allocations when index collisions
-        // cause more than one location per key.
+        // Extra slack (*3/2) avoids re-allocations when index collisions cause more than one
+        // location per key.
         let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
         if self.ancestors.is_empty() {
             for key in mutations.keys() {
@@ -562,9 +556,9 @@ where
         let ops = Arc::new(ops);
         let journal = self.journal_batch.merkleize_with(ops);
 
-        // Precompute ancestor_locs: for each key in this batch's diff that
-        // an ancestor also touched, record the ancestor's location. This is
-        // used by apply_batch when ancestors have been committed.
+        // Precompute ancestor_locs: for each key in this batch's diff that an ancestor also
+        // touched, record the ancestor's location. Used by apply_batch when ancestors have
+        // been committed.
         let mut ancestor_locs = BTreeMap::new();
         if !self.ancestors.is_empty() {
             for key in diff.keys() {
@@ -612,13 +606,11 @@ where
             v.extend(parent.ancestors());
             v
         });
-        // If the Weak parent chain was truncated (an ancestor was
-        // committed and freed), the oldest alive ancestor's items don't
-        // start at db_size. Example: chain A -> B -> C, A committed
-        // and dropped. ancestors() yields [B] (A's Weak is dead). B's
-        // items start at A.size(), not db_size. We use the journal
-        // (strong Arcs, always intact) to compute the actual base so
-        // read_op falls through to disk for locations in the gap.
+        // If the Weak parent chain was truncated (an ancestor was committed and freed), the
+        // oldest alive ancestor's items don't start at db_size. Example: chain A -> B -> C,
+        // A committed and dropped. ancestors() yields [B] (A's Weak is dead). B's items start
+        // at A.size(), not db_size. We use the journal (strong Arcs, always intact) to compute
+        // the actual base so read_op falls through to disk for locations in the gap.
         let effective_db_size = if let Some(oldest) = ancestors.last() {
             let oldest_base =
                 oldest.journal_batch.size() - oldest.journal_batch.items().len() as u64;
@@ -730,14 +722,12 @@ where
         for (op, &old_loc) in results.iter().zip(&locations) {
             let key = op.key().expect("updates should have a key");
 
-            // A key resolved via the ancestor diff must only match at its
-            // ancestor-diff location. Without this guard, a stale snapshot
-            // collision (the pre-parent DB snapshot still containing the
-            // key's old location) can consume the mutation at the wrong sort
-            // position, changing the operation order relative to the
-            // committed-state path. When the ancestor diff entry does match,
-            // use it to trace `base_old_loc` back to the key's location in
-            // the committed DB snapshot.
+            // A key resolved via the ancestor diff must only match at its ancestor-diff
+            // location. Without this guard, a stale snapshot collision (the pre-parent DB
+            // snapshot still containing the key's old location) can consume the mutation at the
+            // wrong sort position, changing the operation order relative to the committed-state
+            // path. When the ancestor diff entry does match, use it to trace `base_old_loc`
+            // back to the key's location in the committed DB snapshot.
             let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, key) {
                 if entry.loc() != Some(old_loc) {
                     continue;
@@ -943,11 +933,10 @@ where
             prev_candidates.insert(data.key, (data.value, old_loc));
         }
 
-        // Add ancestor-diff-created keys to candidate sets. These keys may be
-        // predecessors or successors of this batch's mutations but are invisible
-        // to the base-DB-only prev_translated_key lookup above.
-        // Walk the parent chain to collect the effective state for each key
-        // (closest ancestor wins).
+        // Add ancestor-diff-created keys to candidate sets. These keys may be predecessors
+        // or successors of this batch's mutations but are invisible to the base-DB-only
+        // prev_translated_key lookup above. Walk the parent chain to collect the effective
+        // state for each key (closest ancestor wins).
         let ancestor_entries = {
             let mut entries: BTreeMap<&K, &DiffEntry<F, V::Value>> = BTreeMap::new();
             for batch in &m.ancestors {
@@ -978,11 +967,10 @@ where
             }
         }
 
-        // Remove all known-deleted keys from possible_* sets. The
-        // prev_translated_key lookup already did this for this batch's deletes,
-        // but the ancestor diff incorporation may have re-added them via next_key
-        // references. Also remove parent-deleted keys that the base DB lookup may
-        // have added.
+        // Remove all known-deleted keys from possible_* sets. The prev_translated_key lookup
+        // already did this for this batch's deletes, but the ancestor diff incorporation may
+        // have re-added them via next_key references. Also remove parent-deleted keys that the
+        // base DB lookup may have added.
         for key in deleted.keys() {
             prev_candidates.remove(key);
             next_candidates.remove(key);
@@ -1106,8 +1094,8 @@ where
         self.journal_batch.root()
     }
 
-    /// Iterate over ancestor batches (parent first, then grandparent, etc.).
-    /// Stops when a Weak ref fails to upgrade (ancestor was freed).
+    /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
+    /// Weak ref fails to upgrade (ancestor was freed).
     pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
         let mut next = self.parent.as_ref().and_then(Weak::upgrade);
         core::iter::from_fn(move || {
@@ -1153,8 +1141,8 @@ where
         if let Some(entry) = self.diff.get(key) {
             return Ok(entry.value().cloned());
         }
-        // Walk parent chain. If a parent was freed (committed and
-        // dropped), the iterator stops and we fall through to DB.
+        // Walk parent chain. If a parent was freed (committed and dropped), the iterator
+        // stops and we fall through to DB.
         for batch in self.ancestors() {
             if let Some(entry) = batch.diff.get(key) {
                 return Ok(entry.value().cloned());
@@ -1200,35 +1188,31 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Apply a batch to the database, returning the range of
-    /// written operations.
+    /// Apply a batch to the database, returning the range of written operations.
     ///
-    /// A batch is valid only if every batch applied to the database
-    /// since this batch's ancestor chain was created is an ancestor of this
-    /// batch. Applying a batch from a different fork returns
-    /// [`crate::qmdb::Error::StaleChangeset`].
+    /// A batch is valid only if every batch applied to the database since this batch's
+    /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
+    /// different fork returns [`crate::qmdb::Error::StaleChangeset`].
     ///
-    /// This publishes the batch to the in-memory database state and
-    /// appends it to the journal, but does not durably persist it.
-    /// Call [`Db::commit`] or [`Db::sync`] to guarantee durability.
+    /// This publishes the batch to the in-memory database state and appends it to the
+    /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to
+    /// guarantee durability.
     pub async fn apply_batch(
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, U>>,
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        // Reject batches that add no new operations. Finer-grained
-        // staleness (e.g. DB rewound) is caught by the journal's
-        // merkle-level check in log.apply_batch().
+        // Reject batches that add no new operations. Finer-grained staleness (e.g. DB rewound)
+        // is caught by the journal's merkle-level check in log.apply_batch().
         if batch.total_size <= db_size {
             return Err(crate::qmdb::Error::StaleChangeset {
                 expected: batch.db_size,
                 actual: db_size,
             });
         }
-        // If the DB advanced past the batch's original fork point,
-        // ancestors in this chain have already been committed. Their
-        // diffs are already in the snapshot; skip them and adjust
-        // base_old_loc using the precomputed ancestor_locs map.
+        // If the DB advanced past the batch's original fork point, ancestors in this chain
+        // have already been committed. Their diffs are already in the snapshot; skip them and
+        // adjust base_old_loc using the precomputed ancestor_locs map.
         let skip_ancestors = db_size > batch.db_size;
         let start_loc = Location::new(db_size);
 
@@ -1247,10 +1231,9 @@ where
                 if entry.loc().is_some_and(|loc| *loc < db_size) {
                     continue;
                 }
-                // If this key was also touched by a committed ancestor,
-                // ancestor_locs has the ancestor's location (now the
-                // key's committed location). Use it as base_old_loc
-                // instead of the original pre-ancestor value.
+                // If this key was also touched by a committed ancestor, ancestor_locs has
+                // the ancestor's location (now the key's committed location). Use it as
+                // base_old_loc instead of the original pre-ancestor value.
                 let base_old_loc = batch
                     .ancestor_locs
                     .get(key)

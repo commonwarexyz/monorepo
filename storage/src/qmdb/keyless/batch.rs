@@ -90,9 +90,9 @@ where
 
 /// Read a single operation from the parent chain at the given location.
 ///
-/// Returns `None` if the location cannot be found in the live parent
-/// chain (e.g. the owning ancestor was committed and freed). Callers
-/// should fall through to the committed DB in that case.
+/// Returns `None` if the location cannot be found in the live parent chain (e.g. the
+/// owning ancestor was committed and freed). Callers should fall through to the committed
+/// DB in that case.
 fn read_chain_op<F: Family, D: Digest, V: ValueEncoding>(
     batch: &MerkleizedBatch<F, D, V>,
     loc: u64,
@@ -100,9 +100,9 @@ fn read_chain_op<F: Family, D: Digest, V: ValueEncoding>(
 where
     Operation<V>: EncodeShared,
 {
-    // Each batch's items span [size - items.len(), size). We compute
-    // the range from the journal (strong Arcs, always intact) rather
-    // than from the QMDB-layer Weak parent (which may be dead).
+    // Each batch's items span [size - items.len(), size). We compute the range from the
+    // journal (strong Arcs, always intact) rather than from the QMDB-layer Weak parent
+    // (which may be dead).
     let self_end = batch.journal_batch.size();
     let self_base = self_end - batch.journal_batch.items().len() as u64;
     if loc >= self_base && loc < self_end {
@@ -175,8 +175,8 @@ where
             };
         }
 
-        // Check parent operation chain. If the ancestor was freed,
-        // read_chain_op returns None and we fall through to the DB.
+        // Check parent operation chain. If the ancestor was freed, read_chain_op returns None
+        // and we fall through to the DB.
         if let Some(parent) = self.parent.as_ref() {
             if loc_val >= self.db_size {
                 if let Some(op) = read_chain_op(parent, loc_val) {
@@ -240,8 +240,8 @@ where
     {
         let loc_val = *loc;
 
-        // Check this batch's local items first, then walk parent chain.
-        // If an ancestor was freed, fall through to the committed DB.
+        // Check this batch's local items first, then walk parent chain. If an ancestor was
+        // freed, fall through to the committed DB.
         if loc_val >= self.db_size {
             if let Some(op) = read_chain_op(self, loc_val) {
                 return Ok(op.into_value());

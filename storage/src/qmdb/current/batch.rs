@@ -89,12 +89,11 @@ impl<B: BitmapReadable<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan
             return None;
         }
         let bitmap_len = self.bitmap.len();
-        // Within the bitmap: find the next set bit at or after floor.
-        // ones_iter_from returns set indices in ascending order so the
-        // first result is the only possible candidate below bound.
-        // tip >= bitmap_len always holds (base_size ==
-        // bitmap_parent.len()), so bound == bitmap_len and the
-        // length check inside the iterator prevents scanning past bound.
+        // Within the bitmap: find the next set bit at or after floor. ones_iter_from returns
+        // set indices in ascending order so the first result is the only possible candidate
+        // below bound. tip >= bitmap_len always holds (base_size == bitmap_parent.len()), so
+        // bound == bitmap_len and the length check inside the iterator prevents scanning past
+        // bound.
         if loc < bitmap_len {
             let bound = bitmap_len.min(tip);
             if let Some(idx) = self.bitmap.ones_iter_from(loc).next() {
@@ -103,9 +102,8 @@ impl<B: BitmapReadable<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan
                 }
             }
         }
-        // Beyond the bitmap: uncommitted ops from prior batches in the
-        // chain that aren't tracked by the bitmap yet. Conservatively
-        // treat them as candidates.
+        // Beyond the bitmap: uncommitted ops from prior batches in the chain that aren't
+        // tracked by the bitmap yet. Conservatively treat them as candidates.
         if bitmap_len < tip {
             let candidate = loc.max(bitmap_len);
             if candidate < tip {
@@ -400,8 +398,7 @@ where
         self.inner.get(key, &db.any).await
     }
 
-    /// Resolve mutations into operations, merkleize, and return an
-    /// `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub async fn merkleize<E, C, I>(
         self,
         metadata: Option<V::Value>,
@@ -448,8 +445,7 @@ where
         self.inner.get(key, &db.any).await
     }
 
-    /// Resolve mutations into operations, merkleize, and return an
-    /// `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub async fn merkleize<E, C, I>(
         self,
         metadata: Option<V::Value>,
@@ -550,8 +546,8 @@ fn clear_ancestor_superseded<U, B, const N: usize>(
     }
 }
 
-/// Collect and flatten all bitmap pushes/clears from the full parent
-/// chain (root-to-tip order) into a single pair of Vecs.
+/// Collect and flatten all bitmap pushes/clears from the full parent chain (root-to-tip
+/// order) into a single pair of Vecs.
 pub(crate) fn collect_bitmap_from_chain<
     D: Digest,
     U: update::Update + Send + Sync,
@@ -629,8 +625,7 @@ where
         .next()
         .is_some_and(|p| p.journal_batch.size() > db_base_leaves);
     if has_ancestors {
-        // Build the chain of segments (ancestor-first order) for
-        // clear_ancestor_superseded.
+        // Build the chain of segments (ancestor-first order) for clear_ancestor_superseded.
         let mut ancestor_segments: Vec<Arc<Vec<Operation<mmr::Family, U>>>> = Vec::new();
         for batch in inner.ancestors() {
             let items = batch.journal_batch.items();

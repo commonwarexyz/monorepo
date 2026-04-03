@@ -558,17 +558,15 @@ where
     H: Hasher,
     Operation<mmr::Family, U>: Codec,
 {
-    /// Apply a batch to the database, returning the range of
-    /// written operations.
+    /// Apply a batch to the database, returning the range of written operations.
     ///
-    /// A batch is valid only if every batch applied to the database
-    /// since this batch's ancestor chain was created is an ancestor
-    /// of this batch. Applying a batch from a different fork returns
-    /// [`Error::StaleChangeset`].
+    /// A batch is valid only if every batch applied to the database since this batch's
+    /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
+    /// different fork returns [`Error::StaleChangeset`].
     ///
-    /// This publishes the batch to the in-memory Current view and
-    /// appends it to the journal, but does not durably persist it.
-    /// Call [`Db::commit`] or [`Db::sync`] to guarantee durability.
+    /// This publishes the batch to the in-memory Current view and appends it to the journal,
+    /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
+    /// durability.
     pub async fn apply_batch(
         &mut self,
         batch: Arc<super::batch::MerkleizedBatch<H::Digest, U, N>>,
@@ -585,8 +583,8 @@ where
         // 1. Apply inner any-layer batch.
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
-        // 2. Apply bitmap. When ancestors are committed, their bitmap
-        // changes are already applied; only push this batch's local changes.
+        // 2. Apply bitmap. When ancestors are committed, their bitmap changes are already
+        // applied; only push this batch's local changes.
         if skip_ancestors {
             self.status.push_changeset(
                 batch.bitmap_pushes.as_ref().clone(),
