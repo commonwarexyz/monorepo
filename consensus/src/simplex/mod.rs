@@ -429,14 +429,14 @@ mod tests {
     use commonware_p2p::{
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
         utils::mocks::inert_channel,
-        Recipients, Sender as _,
+        Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
     };
-    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _, SeedableRng};
@@ -954,6 +954,19 @@ mod tests {
             let private_key_observer = PrivateKey::from_seed(n_active as u64);
             let public_key_observer = private_key_observer.public_key();
 
+            // Track the active validators as primary peers and the standalone
+            // observer as a secondary peer.
+            oracle
+                .manager()
+                .track(
+                    0,
+                    TrackedPeers::new(
+                        Set::from_iter_dedup(participants.iter().cloned()),
+                        Set::from_iter_dedup([public_key_observer.clone()]),
+                    ),
+                )
+                .await;
+
             // Register all (including observer) with the network
             let mut all_validators = participants.clone();
             all_validators.push(public_key_observer.clone());
@@ -1052,7 +1065,8 @@ mod tests {
             }
             join_all(finalizers).await;
 
-            // Sanity check
+            // Sanity check. The standalone secondary observer should still
+            // process the chain to the same progress threshold as validators.
             for reporter in reporters.iter() {
                 // Ensure no faults or invalid signatures
                 reporter.assert_no_faults();
@@ -3031,7 +3045,7 @@ mod tests {
                 Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: false,
-                    tracked_peer_sets: None,
+                    tracked_peer_sets: Some(1),
                 },
             );
             network.start();
@@ -3041,6 +3055,16 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+
+            let primary_participants = Set::from_iter_dedup(participants[1..].iter().cloned());
+            let secondary_participants = Set::from_iter_dedup([participants[0].clone()]);
+            oracle
+                .manager()
+                .track(
+                    0,
+                    TrackedPeers::new(primary_participants, secondary_participants),
+                )
+                .await;
 
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
@@ -3133,11 +3157,13 @@ mod tests {
                 honest_latest = honest_monitor.recv().await.expect("event missing");
             }
 
-            // Wait for all in-flight certificates to arrive at excluded node and be reported.
+            // Wait for all in-flight certificates to arrive at the secondary-only
+            // node and be reported.
             context.sleep(Duration::from_secs(1)).await;
 
-            // It should have received similar certificates to the honest node (with some
-            // tolerance for initial views in which may not have yet been connected).
+            // The secondary-only node should still process nearly the same chain
+            // as the honest primary node (with some tolerance for initial views
+            // in which it may not yet have observed every certificate).
             let honest_notarized = {
                 let notarizations = honest_reporter.notarizations.lock();
                 View::range(View::new(1), required_containers.next())
@@ -3152,7 +3178,7 @@ mod tests {
             };
             assert!(
                 excluded_notarized >= honest_notarized.saturating_sub(2),
-                "honest_notarized: {honest_notarized}, excluded_notarized: {excluded_notarized}"
+                "secondary_notarized: {excluded_notarized}, honest_notarized: {honest_notarized}"
             );
 
             let honest_finalized = {
@@ -3169,7 +3195,7 @@ mod tests {
             };
             assert!(
                 excluded_finalized >= honest_finalized.saturating_sub(2),
-                "honest_finalized: {honest_finalized}, excluded_finalized: {excluded_finalized}"
+                "secondary_finalized: {excluded_finalized}, honest_finalized: {honest_finalized}"
             );
         });
     }
