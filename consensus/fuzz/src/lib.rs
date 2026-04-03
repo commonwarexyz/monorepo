@@ -31,7 +31,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
-    Recipients,
+    Manager, Recipients,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
