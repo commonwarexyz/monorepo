@@ -639,11 +639,11 @@ pub mod fuzz {
                     assert_eq!(naive_eval, lin_comb);
                 }
                 Self::Interpolate(f) => {
-                    if f == Poly::zero() || f.required().get() >= F::MAX as u32 {
+                    if f == Poly::zero() || u64::from(f.required().get()) >= F::MAX {
                         return Ok(());
                     }
                     let mut points = (0..f.required().get())
-                        .map(|i| F::from((i + 1) as u8))
+                        .map(|i| F::from(u64::from(i) + 1))
                         .collect::<Vec<_>>();
                     let interpolator = Interpolator::new(points.iter().copied().enumerate());
                     let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
@@ -659,11 +659,12 @@ pub mod fuzz {
                     );
                 }
                 Self::InterpolateWithZeroPoint(f) => {
-                    if f == Poly::zero() || f.required().get() >= F::MAX as u32 {
+                    if f == Poly::zero() || u64::from(f.required().get()) >= F::MAX {
                         return Ok(());
                     }
-                    let points: Vec<_> =
-                        (0..f.required().get()).map(|i| F::from(i as u8)).collect();
+                    let points: Vec<_> = (0..f.required().get())
+                        .map(|i| F::from(u64::from(i)))
+                        .collect();
                     let interpolator = Interpolator::new(points.iter().copied().enumerate());
                     let evals = Map::from_iter_dedup(points.iter().map(|p| f.eval(p)).enumerate());
                     let recovered = interpolator.interpolate(&evals, &Sequential);
@@ -672,13 +673,13 @@ pub mod fuzz {
                 Self::InterpolateWithZeroPointMiddle(f) => {
                     if f == Poly::zero()
                         || f.required().get() < 2
-                        || f.required().get() >= F::MAX as u32
+                        || u64::from(f.required().get()) >= F::MAX
                     {
                         return Ok(());
                     }
                     let n = f.required().get();
                     let points: Vec<_> = (1..n)
-                        .map(|i| F::from(i as u8))
+                        .map(|i| F::from(u64::from(i)))
                         .chain(core::iter::once(F::zero()))
                         .collect();
                     let interpolator = Interpolator::new(points.iter().copied().enumerate());
