@@ -276,7 +276,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Returns the latest tracked primary peer set index.
-    /// Returns the latest tracked primary peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
         self.primary_sets.keys().last().copied()
     }
