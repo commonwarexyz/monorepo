@@ -16,9 +16,7 @@ pub struct Config<
 > {
     /// Manages the current set of peers.
     ///
-    /// Outbound fetches use only the latest primary peer set from this provider.
-    /// Older tracked sets may remain connected for overlap-window purposes, but
-    /// they are not eligible for new resolver requests.
+    /// Peer selection for outbound fetches is documented in the [`p2p`](crate::p2p) module.
     pub peer_provider: D,
 
     /// The blocker that will be used to block peers that send invalid responses

@@ -18,10 +18,6 @@ pub struct Config<P: PublicKey, MCfg, D: Provider<PublicKey = P>> {
     /// The configuration for the codec item.
     pub codec_config: MCfg,
 
-    /// Provider for peer set changes.
-    ///
-    /// Per-peer caches are freed when a sender leaves the latest primary peer
-    /// set. Older tracked sets may remain connected in the transport overlap
-    /// window, but they do not keep that sender's deque alive.
+    /// Provider for peer set changes (eviction follows latest primary; see [`buffered`](super)).
     pub peer_provider: D,
 }
