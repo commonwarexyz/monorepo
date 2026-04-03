@@ -34,15 +34,77 @@ use std::{
 
 type Error = crate::qmdb::Error<mmr::Family>;
 
+/// Cleared bitmap bits tracked in two synchronized views.
+///
+/// `locations` preserves the original clear operations so batch chaining, flattening, and
+/// finalization can replay them in order. `masks` indexes the same clears by chunk, allowing
+/// [`apply_push_clear`] to zero an entire chunk without rescanning every cleared location.
+#[derive(Clone, Debug, Default)]
+pub(super) struct ClearSet<const N: usize> {
+    locations: Vec<Location>,
+    masks: BTreeMap<usize, [u8; N]>,
+}
+
+impl<const N: usize> ClearSet<N> {
+    /// Create a clear set with a given capacity.
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            locations: Vec::with_capacity(capacity),
+            masks: BTreeMap::new(),
+        }
+    }
+
+    /// Push a location to the clear set.
+    fn push(&mut self, loc: Location) {
+        self.locations.push(loc);
+
+        let chunk_idx = BitMap::<N>::to_chunk_index(*loc);
+        let rel = (*loc % BitMap::<N>::CHUNK_SIZE_BITS) as usize;
+        let chunk = self.masks.entry(chunk_idx).or_insert([0u8; N]);
+        chunk[rel / 8] |= 1 << (rel % 8);
+    }
+
+    /// Merge another clear set into this one.
+    fn merge(&mut self, other: &Self) {
+        self.locations.extend_from_slice(&other.locations);
+        for (&idx, other_mask) in &other.masks {
+            let chunk = self.masks.entry(idx).or_insert([0u8; N]);
+            for (byte, &m) in chunk.iter_mut().zip(other_mask) {
+                *byte |= m;
+            }
+        }
+    }
+
+    /// Return the number of locations in the clear set.
+    const fn len(&self) -> usize {
+        self.locations.len()
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.locations.is_empty()
+    }
+
+    /// Return the locations in the clear set.
+    fn locations(&self) -> &[Location] {
+        &self.locations
+    }
+
+    /// Return the mask for the given chunk index.
+    fn mask(&self, idx: usize) -> Option<&[u8; N]> {
+        self.masks.get(&idx)
+    }
+}
+
 /// Apply pushed bits and cleared bits to `chunk` at absolute position `chunk_start`.
 ///
 /// `push_start` is the absolute bit index where pushes begin (i.e. the parent's length).
+/// `clear_mask` is the chunk-local view returned by [`ClearSet::mask`].
 fn apply_push_clear<const N: usize>(
     chunk: &mut [u8; N],
     chunk_start: u64,
     push_start: u64,
     pushed_bits: &[bool],
-    cleared_bits: &[Location],
+    clear_mask: Option<&[u8; N]>,
 ) {
     let chunk_end = chunk_start + BitMap::<N>::CHUNK_SIZE_BITS;
 
@@ -61,11 +123,9 @@ fn apply_push_clear<const N: usize>(
         }
     }
 
-    for &loc in cleared_bits {
-        let bit = *loc;
-        if bit >= chunk_start && bit < chunk_end {
-            let rel = (bit - chunk_start) as usize;
-            chunk[rel / 8] &= !(1 << (rel % 8));
+    if let Some(clear_mask) = clear_mask {
+        for (byte, mask) in chunk.iter_mut().zip(clear_mask) {
+            *byte &= !mask;
         }
     }
 }
@@ -125,8 +185,8 @@ pub struct BitmapDiff<'a, B: BitmapReadable<N>, const N: usize> {
     base_len: u64,
     /// New bits appended beyond the base bitmap.
     pushed_bits: Vec<bool>,
-    /// Locations of base bits that have been deactivated.
-    cleared_bits: Vec<Location>,
+    /// Base bits that have been deactivated, plus chunk masks derived from them.
+    clears: ClearSet<N>,
     /// Chunk indices containing cleared bits that need grafted MMR recomputation.
     dirty_chunks: HashSet<usize>,
     /// Number of complete chunks in the base bitmap at diff creation time.
@@ -141,7 +201,7 @@ impl<'a, B: BitmapReadable<N>, const N: usize> BitmapDiff<'a, B, N> {
             base_len: base.len(),
             base,
             pushed_bits: Vec::new(),
-            cleared_bits: Vec::new(),
+            clears: ClearSet::default(),
             dirty_chunks: HashSet::new(),
             old_grafted_leaves,
         }
@@ -152,7 +212,7 @@ impl<'a, B: BitmapReadable<N>, const N: usize> BitmapDiff<'a, B, N> {
     }
 
     fn clear_bit(&mut self, loc: Location) {
-        self.cleared_bits.push(loc);
+        self.clears.push(loc);
         let chunk = BitMap::<N>::to_chunk_index(*loc);
         if chunk < self.old_grafted_leaves {
             self.dirty_chunks.insert(chunk);
@@ -160,8 +220,8 @@ impl<'a, B: BitmapReadable<N>, const N: usize> BitmapDiff<'a, B, N> {
     }
 
     /// Consume the diff, returning the parts needed for a [`BitmapBatchLayer`].
-    fn into_parts(self) -> (u64, Vec<bool>, Vec<Location>) {
-        (self.base_len, self.pushed_bits, self.cleared_bits)
+    fn into_parts(self) -> (u64, Vec<bool>, ClearSet<N>) {
+        (self.base_len, self.pushed_bits, self.clears)
     }
 }
 
@@ -189,7 +249,7 @@ impl<B: BitmapReadable<N>, const N: usize> BitmapReadable<N> for BitmapDiff<'_, 
             chunk_start,
             self.base_len,
             &self.pushed_bits,
-            &self.cleared_bits,
+            self.clears.mask(idx),
         );
         chunk
     }
@@ -289,7 +349,7 @@ where
     base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
 
     /// Bitmap clears accumulated by prior batches in the chain.
-    base_bitmap_clears: Vec<Arc<Vec<Location>>>,
+    base_bitmap_clears: Vec<Arc<ClearSet<N>>>,
 
     /// Parent's grafted MMR state (owned, Arc-based internally).
     grafted_parent: mmr::batch::MerkleizedBatch<H::Digest>,
@@ -314,7 +374,7 @@ where
     bitmap_pushes: Vec<Arc<Vec<bool>>>,
 
     /// Accumulated bitmap clears from all batches in the chain.
-    bitmap_clears: Vec<Arc<Vec<Location>>>,
+    bitmap_clears: Vec<Arc<ClearSet<N>>>,
 
     /// Grafted MMR state.
     grafted: mmr::batch::MerkleizedBatch<D>,
@@ -334,8 +394,8 @@ pub struct Changeset<K, D: Digest, Item: Send, const N: usize> {
     /// One bool per operation in the batch chain (pushes applied before clears).
     pub(super) bitmap_pushes: Vec<bool>,
 
-    /// Locations of bits to clear after pushing.
-    pub(super) bitmap_clears: Vec<Location>,
+    /// Cleared bitmap locations, plus per-chunk masks cached for fast reapplication.
+    pub(super) bitmap_clears: ClearSet<N>,
 
     /// Changeset for the grafted MMR.
     pub(super) grafted_changeset: mmr::Changeset<D>,
@@ -353,7 +413,7 @@ where
     pub(super) const fn new(
         inner: any::batch::UnmerkleizedBatch<mmr::Family, H, U>,
         base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
-        base_bitmap_clears: Vec<Arc<Vec<Location>>>,
+        base_bitmap_clears: Vec<Arc<ClearSet<N>>>,
         grafted_parent: mmr::batch::MerkleizedBatch<H::Digest>,
         bitmap_parent: BitmapBatch<N>,
     ) -> Self {
@@ -577,7 +637,7 @@ async fn compute_current_layer<E, U, C, I, H, const N: usize>(
     inner: any::batch::MerkleizedBatch<mmr::Family, H::Digest, U>,
     current_db: &super::db::Db<E, C, I, H, U, N>,
     base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
-    base_bitmap_clears: Vec<Arc<Vec<Location>>>,
+    base_bitmap_clears: Vec<Arc<ClearSet<N>>>,
     grafted_parent: &mmr::batch::MerkleizedBatch<H::Digest>,
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<MerkleizedBatch<H::Digest, U, N>, Error>
@@ -664,21 +724,21 @@ where
         compute_db_root::<H, _, _, N>(&hasher, &grafted_storage, partial, &ops_root).await?;
 
     // 8. Extract diff data and build COW bitmap layer + push/clear chain.
-    let (parent_len, pushed_bits, cleared_bits) = bitmap.into_parts();
+    let (parent_len, pushed_bits, clears) = bitmap.into_parts();
 
     let pushed_bits = Arc::new(pushed_bits);
-    let cleared_bits = Arc::new(cleared_bits);
+    let clears = Arc::new(clears);
 
     let mut bitmap_pushes = base_bitmap_pushes;
     bitmap_pushes.push(Arc::clone(&pushed_bits));
     let mut bitmap_clears = base_bitmap_clears;
-    bitmap_clears.push(Arc::clone(&cleared_bits));
+    bitmap_clears.push(Arc::clone(&clears));
 
     let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
         parent: bitmap_parent.clone(),
         parent_len,
         pushed_bits,
-        cleared_bits,
+        clears,
     }));
 
     Ok(MerkleizedBatch {
@@ -710,8 +770,8 @@ pub(crate) struct BitmapBatchLayer<const N: usize> {
     parent_len: u64,
     /// New bits appended contiguously from `parent_len`.
     pushed_bits: Arc<Vec<bool>>,
-    /// Locations of parent bits that were deactivated.
-    cleared_bits: Arc<Vec<Location>>,
+    /// Parent bits that were deactivated, plus chunk masks derived from them.
+    clears: Arc<ClearSet<N>>,
 }
 
 impl<const N: usize> BitmapBatch<N> {
@@ -743,7 +803,7 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
                     chunk_start,
                     layer.parent_len,
                     &layer.pushed_bits,
-                    &layer.cleared_bits,
+                    layer.clears.mask(idx),
                 );
                 chunk
             }
@@ -784,8 +844,8 @@ impl<const N: usize> BitmapBatch<N> {
     /// Push a changeset as a new layer on top of this bitmap, mutating `self` in place.
     ///
     /// The old value becomes the parent of the new layer.
-    pub(super) fn push_changeset(&mut self, pushed_bits: Vec<bool>, cleared_bits: Vec<Location>) {
-        if pushed_bits.is_empty() && cleared_bits.is_empty() {
+    pub(super) fn push_changeset(&mut self, pushed_bits: Vec<bool>, clears: ClearSet<N>) {
+        if pushed_bits.is_empty() && clears.is_empty() {
             return;
         }
         let parent_len = self.len();
@@ -794,7 +854,7 @@ impl<const N: usize> BitmapBatch<N> {
             parent,
             parent_len,
             pushed_bits: Arc::new(pushed_bits),
-            cleared_bits: Arc::new(cleared_bits),
+            clears: Arc::new(clears),
         }));
     }
 
@@ -818,11 +878,11 @@ impl<const N: usize> BitmapBatch<N> {
                 Self::Base(bm) => break bm,
                 Self::Layer(layer) => match Arc::try_unwrap(layer) {
                     Ok(inner) => {
-                        layers.push((inner.pushed_bits, inner.cleared_bits));
+                        layers.push((inner.pushed_bits, inner.clears));
                         owned = inner.parent;
                     }
                     Err(arc) => {
-                        layers.push((arc.pushed_bits.clone(), arc.cleared_bits.clone()));
+                        layers.push((arc.pushed_bits.clone(), arc.clears.clone()));
                         owned = arc.parent.clone();
                     }
                 },
@@ -831,12 +891,12 @@ impl<const N: usize> BitmapBatch<N> {
 
         // Replay mutations from base to tip.
         let mut bitmap = Arc::try_unwrap(base).unwrap_or_else(|arc| (*arc).clone());
-        for (pushed, cleared) in layers.into_iter().rev() {
+        for (pushed, clears) in layers.into_iter().rev() {
             for &bit in pushed.iter() {
                 bitmap.push(bit);
             }
-            for loc in cleared.iter() {
-                bitmap.set_bit(**loc, false);
+            for &loc in clears.locations() {
+                bitmap.set_bit(*loc, false);
             }
         }
         *self = Self::Base(Arc::new(bitmap));
@@ -907,9 +967,9 @@ where
         }
 
         let total_clears: usize = self.bitmap_clears.iter().map(|s| s.len()).sum();
-        let mut bitmap_clears = Vec::with_capacity(total_clears);
+        let mut bitmap_clears = ClearSet::with_capacity(total_clears);
         for seg in &self.bitmap_clears {
-            bitmap_clears.extend_from_slice(seg);
+            bitmap_clears.merge(seg);
         }
 
         Changeset {
@@ -972,9 +1032,14 @@ where
         }
 
         // Flatten uncommitted clear segments (1:1 with push segments).
-        let mut bitmap_clears = Vec::new();
+        let mut bitmap_clears = ClearSet::with_capacity(
+            self.bitmap_clears[segments_to_skip..]
+                .iter()
+                .map(|s| s.len())
+                .sum(),
+        );
         for seg in &self.bitmap_clears[segments_to_skip..] {
-            bitmap_clears.extend_from_slice(seg);
+            bitmap_clears.merge(seg);
         }
 
         // The grafted MMR base must reflect the current committed bitmap's
@@ -1321,6 +1386,146 @@ mod tests {
         assert!(diff.dirty_chunks.contains(&1));
     }
 
+    #[test]
+    fn clear_set_merge_empty_into_empty() {
+        let mut a = ClearSet::<N>::default();
+        let b = ClearSet::<N>::default();
+        a.merge(&b);
+        assert_eq!(a.len(), 0);
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn clear_set_merge_non_empty_into_empty() {
+        let mut a = ClearSet::<N>::default();
+        let mut b = ClearSet::<N>::default();
+        b.push(Location::new(3));
+        b.push(Location::new(7));
+
+        a.merge(&b);
+        assert_eq!(a.len(), 2);
+        assert_eq!(a.locations(), &[Location::new(3), Location::new(7)]);
+        // Both bits in chunk 0.
+        let mask = a.mask(0).unwrap();
+        assert_eq!(mask[0], (1 << 3) | (1 << 7));
+    }
+
+    #[test]
+    fn clear_set_merge_empty_into_non_empty() {
+        let mut a = ClearSet::<N>::default();
+        a.push(Location::new(5));
+        let b = ClearSet::<N>::default();
+
+        a.merge(&b);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a.locations(), &[Location::new(5)]);
+        let mask = a.mask(0).unwrap();
+        assert_eq!(mask[0], 1 << 5);
+    }
+
+    #[test]
+    fn clear_set_merge_disjoint_chunks() {
+        // N=4 -> CHUNK_SIZE_BITS = 32. Bit 2 is in chunk 0, bit 33 is in chunk 1.
+        let mut a = ClearSet::<N>::default();
+        a.push(Location::new(2));
+
+        let mut b = ClearSet::<N>::default();
+        b.push(Location::new(33));
+
+        a.merge(&b);
+        assert_eq!(a.len(), 2);
+        assert_eq!(a.locations(), &[Location::new(2), Location::new(33)]);
+        // Chunk 0: only bit 2.
+        let m0 = a.mask(0).unwrap();
+        assert_eq!(m0[0], 1 << 2);
+        // Chunk 1: bit 33 -> relative bit 1 -> byte 0, bit 1.
+        let m1 = a.mask(1).unwrap();
+        assert_eq!(m1[0], 1 << 1);
+    }
+
+    #[test]
+    fn clear_set_merge_overlapping_chunk() {
+        // Both sets clear bits in the same chunk; masks must be OR'd.
+        let mut a = ClearSet::<N>::default();
+        a.push(Location::new(1));
+        a.push(Location::new(4));
+
+        let mut b = ClearSet::<N>::default();
+        b.push(Location::new(4)); // duplicate with a
+        b.push(Location::new(6));
+
+        a.merge(&b);
+        assert_eq!(a.len(), 4);
+        let mask = a.mask(0).unwrap();
+        // bits 1, 4, 6 (4 appears in both but OR is idempotent for mask)
+        assert_eq!(mask[0], (1 << 1) | (1 << 4) | (1 << 6));
+    }
+
+    #[test]
+    fn clear_set_merge_matches_sequential_push() {
+        // Verify merge produces the same masks as pushing each location individually.
+        let locs_a: Vec<Location> = (0..5).map(Location::new).collect();
+        let locs_b: Vec<Location> = (30..36).map(Location::new).collect(); // spans chunks 0 and 1
+
+        // Build via merge.
+        let mut via_merge = ClearSet::<N>::default();
+        let mut part_a = ClearSet::<N>::default();
+        for &loc in &locs_a {
+            part_a.push(loc);
+        }
+        let mut part_b = ClearSet::<N>::default();
+        for &loc in &locs_b {
+            part_b.push(loc);
+        }
+        via_merge.merge(&part_a);
+        via_merge.merge(&part_b);
+
+        // Build via sequential push.
+        let mut via_push = ClearSet::<N>::default();
+        for &loc in locs_a.iter().chain(&locs_b) {
+            via_push.push(loc);
+        }
+
+        assert_eq!(via_merge.locations(), via_push.locations());
+        for idx in 0..2 {
+            assert_eq!(via_merge.mask(idx), via_push.mask(idx));
+        }
+    }
+
+    #[test]
+    fn bitmap_diff_clear_set_tracks_chunk_bits() {
+        let base = make_bitmap(&[true; 96]);
+        let mut diff = BitmapDiff::<Bm, N>::new(&base, 3);
+
+        diff.clear_bit(Location::new(3));
+        diff.clear_bit(Location::new(40));
+        diff.clear_bit(Location::new(63));
+
+        assert_eq!(diff.clears.mask(0).unwrap()[0], 1 << 3);
+        assert_eq!(diff.clears.mask(1).unwrap()[1], 0x01);
+        assert_eq!(diff.clears.mask(1).unwrap()[3], 0x80);
+    }
+
+    #[test]
+    fn bitmap_batch_push_changeset_preserves_clear_set() {
+        let mut batch = BitmapBatch::Base(Arc::new(make_bitmap(&[true; 64])));
+        let mut clears = ClearSet::default();
+        clears.push(Location::new(3));
+        clears.push(Location::new(40));
+        batch.push_changeset(Vec::new(), clears);
+
+        let BitmapBatch::Layer(layer) = &batch else {
+            panic!("expected layer");
+        };
+        assert_eq!(layer.clears.mask(0).unwrap()[0], 1 << 3);
+        assert_eq!(layer.clears.mask(1).unwrap()[1], 0x01);
+
+        let chunk0 = batch.get_chunk(0);
+        let chunk1 = batch.get_chunk(1);
+        assert_eq!(chunk0[0] & (1 << 3), 0);
+        assert_eq!(chunk1[1] & 0x01, 0);
+    }
+
     // ---- push_operation_bits test ----
 
     #[test]
@@ -1417,7 +1622,7 @@ mod tests {
 
         clear_base_old_locs::<K, u64, Bm, N>(&mut bitmap, &diff);
 
-        assert_eq!(bitmap.cleared_bits.len(), 2);
+        assert_eq!(bitmap.clears.len(), 2);
 
         // Verify bits 5 and 10 are cleared.
         let c0 = bitmap.get_chunk(0);
