@@ -1,3 +1,128 @@
+//! This module provides an "Inner Product Argument", using [Bulletproofs](https://eprint.iacr.org/2017/1066).
+//!
+//! # Background
+//!
+//! We have a cryptographic group `G`, with associated scalar field `F`.
+//!
+//! Prior to this, we have agreed on distinct group elements `G_i`, `H_i`, and `Q`.
+//!
+//! A prover has two vectors of field elements `a_i` and `b_i`. They have created
+//! a commitment `P` to these vectors, defined as `P = <a_i, G_i> + <b_i, H_i>`.
+//! They want to convince the verifier that the product of the vectors that `P`
+//! commits to is equal to `c = <a_i, b_i>`.
+//!
+//! One way to do this is to simply send the vectors `a_i` and `b_i`. The goal
+//! of the Bulletproofs IPA is to convince the verifier while sending less information.
+//! The result is that we can convince the verifier while sending `O(lg N)` group elements
+//! rather than `O(N)` field elements.
+//!
+//! Importantly, this argument is NOT zero-knowledge. The verifier learns information
+//! about the vectors. This argument can be used as part of a broader zero-knowledge
+//! protocol though, but this step by itself does not provide that property.
+//!
+//! The prover's work is mostly `O(N)` scalar multiplications, and the verifier's
+//! work is mostly an MSM of size `O(N)`. The verifier gets to be a bit faster because
+//! they can do a large MSM rather than many individual scalar multiplications,
+//! but the asymptotic complexity is the same.
+//!
+//! # Usage
+//!
+//! Let's look at the concrete API now.
+//!
+//! We need group elements we can use to create commitments. This is what [`Setup`]
+//! is for. A single [`Setup`] can support arguments for vectors of various sizes.
+//! [`Setup::new`] creates a setup by explicitly providing all of the generators
+//! we need.
+//!
+//! Next, we need to actual vectors we want to make a proof over. This is the
+//! [`Witness`] type. This can be constructed with [`Witness::new`], which enforces
+//! that the vectors have the same length, and that this length is a power of two.
+//! This is a technical requirement for the Bulletproofs IPA. Padding should be
+//! handled at the layer above.
+//!
+//! Next, we need the public statement, represented by [`Claim`]. This contains
+//! the claimed product `c`, and the commitment `P`. For a honest prover that
+//! wants to generate a claim from a witness, you can use [`Witness::new_with_claim`],
+//! which makes sure that the witness satisfies the same conditions as [`Witness::new`],
+//! while also calculating the claim.
+//!
+//! This is not necessarily what you want to do in all situations. When using
+//! the Bulletproofs IPA as a step in a larger proof system, you might have a claim
+//! and witness which come from previous steps. Because of that, you can construct
+//! a [`Claim`] directly, using its public fields.
+//!
+//! Because a single [`Setup`] can support vectors of different lengths, the claim
+//! also needs to contain information about the length of these vectors.
+//!
+//! Given a [`Setup`], [`Witness`], and [`Claim`], you can create a [`Proof`]
+//! with [`prove`].
+//!
+//! Both [`prove`] and [`verify`] also take a [`Transcript`]. The proof is only
+//! valid for the transcript state used to produce it, so the verifier must
+//! replay the same transcript history before calling [`verify`].
+//!
+//! On the verifier side, we don't have a [`Witness`], and can instead check
+//! that the prover had a valid witness, using their [`Proof`], through [`verify`].
+//!
+//! ## Example
+//!
+//! ```rust
+//! # use commonware_cryptography::{
+//! #     bls12381::primitives::group::{G1, Scalar},
+//! #     transcript::Transcript,
+//! #     zk::bulletproofs::ipa::{prove, verify, Setup, Witness},
+//! # };
+//! # use commonware_math::algebra::CryptoGroup;
+//! # use commonware_parallel::Sequential;
+//! # type F = Scalar;
+//! # type G = G1;
+//! # #[allow(non_snake_case)]
+//! # let GENERATORS: [G; 9] = core::array::from_fn(|i| G::generator() * &F::from(i as u64 + 1));
+//!
+//! // It's important that these generators have no known discrete logarithm
+//! // relationships relative to each other. For example, multipying a single
+//! // generator would be insecure!
+//! let setup = Setup::new(
+//!     GENERATORS[0].clone(),
+//!     GENERATORS[1..]
+//!         .chunks_exact(2)
+//!         .map(|chunk| (chunk[0].clone(), chunk[1].clone())),
+//! );
+//!
+//! // Witness vectors must have the same power-of-two length.
+//! let (witness, claim) = Witness::new_with_claim(
+//!     &setup,
+//!     [
+//!         (F::from(3u64), F::from(4u64)),
+//!         (F::from(5u64), F::from(6u64)),
+//!         (F::from(7u64), F::from(8u64)),
+//!         (F::from(9u64), F::from(10u64)),
+//!     ],
+//! )
+//! .expect("witness should fit the setup");
+//!
+//! // The proof is bound to this transcript state.
+//! let mut prover_transcript = Transcript::new(b"ipa-example");
+//! prover_transcript.commit(b"context".as_slice());
+//!
+//! // Any Strategy works here. Sequential is simplest; a parallel strategy can
+//! // reduce wall-clock time on larger inputs without changing the proof.
+//! let strategy = Sequential;
+//! let proof = prove(&mut prover_transcript, &setup, &claim, witness, &strategy)
+//!     .expect("claim should match the witness and setup");
+//!
+//! // Verification must replay the same transcript state.
+//! let mut verifier_transcript = Transcript::new(b"ipa-example");
+//! verifier_transcript.commit(b"context".as_slice());
+//! assert!(verify(
+//!     &mut verifier_transcript,
+//!     &setup,
+//!     &claim,
+//!     proof,
+//!     &strategy,
+//! ));
+//! ```
+//!
 //! # References
 //!
 //! The [Dalek crate](https://doc-internal.dalek.rs/bulletproofs/notes/inner_product_proof/index.html)
@@ -250,8 +375,9 @@ fn sample_challenge<F: Field + Random>(transcript: &Transcript) -> F {
 
 /// Prove that a given [`Witness`] is valid, relative to a [`Claim`] and [`Setup`].
 ///
-/// We also take in a transcript, allowing us to tie in this proof to a specific context.
-/// This is useful when using this argument in the context of a larger proof.
+/// We also take in a transcript. The proof is bound to the transcript state at
+/// the time of this call, so the verifier must replay the same transcript
+/// history before calling [`verify`].
 ///
 /// This returns `None` if the setup is too short for the witness, or if the
 /// claim's vector length does not match the witness length.
