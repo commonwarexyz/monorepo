@@ -281,7 +281,8 @@ where
     /// Handles a message that was received from a peer.
     fn handle_network(&mut self, peer: P, msg: M) {
         let digest = msg.digest();
-        let tracked = self.should_buffer_peer(&peer);
+        let tracked =
+            peer == self.public_key || self.latest_primary_peers.position(&peer).is_some();
         let duplicate = tracked
             && self
                 .deques
@@ -317,7 +318,7 @@ where
             }
         }
 
-        if !self.should_buffer_peer(&peer) {
+        if peer != self.public_key && self.latest_primary_peers.position(&peer).is_none() {
             return false;
         }
 
@@ -363,23 +364,15 @@ where
     }
 
     fn update_latest_primary_peers(&mut self, peers: Set<P>) {
-        self.evict_untracked_peers(&peers);
-        self.latest_primary_peers = peers;
-    }
-
-    fn should_buffer_peer(&self, peer: &P) -> bool {
-        peer == &self.public_key || self.latest_primary_peers.position(peer).is_some()
-    }
-
-    fn evict_untracked_peers(&mut self, primary_peers: &Set<P>) {
         for (peer, deque) in self.deques.extract_if(.., |peer, _| {
-            peer != &self.public_key && primary_peers.position(peer).is_none()
+            peer != &self.public_key && peers.position(peer).is_none()
         }) {
             debug!(?peer, digests = deque.len(), "evicting disconnected peer");
             for digest in deque {
                 decrement_digest_refcount(&mut self.counts, &mut self.items, &digest);
             }
         }
+        self.latest_primary_peers = peers;
     }
 
     ////////////////////////////////////////
