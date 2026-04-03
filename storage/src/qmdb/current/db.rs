@@ -583,19 +583,19 @@ where
         if skip_ancestors {
             self.status.push_changeset(
                 batch.bitmap_pushes.as_ref().clone(),
-                batch.bitmap_clears.as_ref().clone(),
+                (*batch.bitmap_clears).clone(),
             );
         } else {
             let mut pushes = Vec::new();
-            let mut clears = Vec::new();
+            let mut clears = super::batch::ClearSet::with_capacity(0);
             for p in &batch.ancestor_bitmap_pushes {
                 pushes.extend_from_slice(p);
             }
             for c in &batch.ancestor_bitmap_clears {
-                clears.extend_from_slice(c);
+                clears.merge(c);
             }
             pushes.extend_from_slice(&batch.bitmap_pushes);
-            clears.extend_from_slice(&batch.bitmap_clears);
+            clears.merge(&batch.bitmap_clears);
             self.status.push_changeset(pushes, clears);
         }
 
