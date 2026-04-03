@@ -268,3 +268,8 @@ fn test_units_byzantine() {
 fn test_units_twins() {
     run_all_units("twins");
 }
+
+#[test]
+fn test_units_honest() {
+    run_all_units("honest");
+}

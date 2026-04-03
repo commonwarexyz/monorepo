@@ -1,7 +1,7 @@
 FUZZ_TRACES_ROOT ?= ../fuzz/artifacts/traces
 FUZZ_CORPUS ?= ../fuzz/corpus
 TRACES_DIR ?= traces
-TRACE_TARGETS ?= [simplex_ed25519_quint_disrupter, simplex_ed25519_quint_byzantine, simplex_ed25519_quint_twins]
+TRACE_TARGETS ?= [simplex_ed25519_quint_honest,simplex_ed25519_quint_disrupter, simplex_ed25519_quint_byzantine, simplex_ed25519_quint_twins]
 FUZZ_RUNS ?= -1
 TRACE_SELECTION_STRATEGY ?= smallscope
 MIN_REQUIRED_CONTAINERS ?= 3

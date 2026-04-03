@@ -542,80 +542,92 @@ fn build_actions(
                 let byzantine_receiver = is_byzantine_node(receiver, cfg.faults);
 
                 match vote {
-                TracedVote::Notarize { view, sig, block } => {
-                    let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
-                    let bn = map_block(block, block_map);
-                    let proposal = proposal_key(*view, &bn);
-                    let is_leader =
-                        leader_lookup.get(view).map(|l| l.as_str()) == Some(sig.as_str());
+                    TracedVote::Notarize { view, sig, block } => {
+                        let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
+                        let bn = map_block(block, block_map);
+                        let proposal = proposal_key(*view, &bn);
+                        let is_leader =
+                            leader_lookup.get(view).map(|l| l.as_str()) == Some(sig.as_str());
 
-                    if sent_votes_emitted.insert((
-                        sig.clone(),
-                        *view,
-                        "notarize".into(),
-                        bn.clone(),
-                    )) {
-                        actions.push(ActionItem::Barrier(format!(
-                            "send_notarize_vote({{ proposal: {}, sig: \"{}\" }})",
-                            proposal_ref(*view, &bn),
-                            sig
-                        )));
-                    }
+                        if sent_votes_emitted.insert((
+                            sig.clone(),
+                            *view,
+                            "notarize".into(),
+                            bn.clone(),
+                        )) {
+                            actions.push(ActionItem::Barrier(format!(
+                                "send_notarize_vote({{ proposal: {}, sig: \"{}\" }})",
+                                proposal_ref(*view, &bn),
+                                sig
+                            )));
+                        }
 
-                    if byzantine_receiver {
-                        continue;
-                    }
+                        if byzantine_receiver {
+                            continue;
+                        }
 
-                    // The trace typically does not contain a self-delivery for the
-                    // correct leader's own proposal vote, so synthesize one once.
-                    if is_leader
-                        && !is_byzantine_node(&sig, cfg.faults)
-                        && leader_self_processed.insert(proposal.clone())
-                    {
+                        // The trace typically does not contain a self-delivery for the
+                        // correct leader's own proposal vote, so synthesize one once.
+                        if is_leader
+                            && !is_byzantine_node(&sig, cfg.faults)
+                            && leader_self_processed.insert(proposal.clone())
+                        {
+                            actions.push(ActionItem::Barrier(format!(
+                                "on_notarize(\"{}\", {{ proposal: {}, sig: \"{}\" }})",
+                                sig,
+                                proposal_var_name(&proposal),
+                                sig
+                            )));
+                        }
+
+                        // Deliver vote to receiver
                         actions.push(ActionItem::Barrier(format!(
                             "on_notarize(\"{}\", {{ proposal: {}, sig: \"{}\" }})",
-                            sig,
-                            proposal_var_name(&proposal),
-                            sig
-                        )));
-                    }
-
-                    // Deliver vote to receiver
-                    actions.push(ActionItem::Barrier(format!(
-                        "on_notarize(\"{}\", {{ proposal: {}, sig: \"{}\" }})",
-                        receiver,
-                        proposal_ref(*view, &bn),
-                        sig
-                    )));
-                }
-                TracedVote::Finalize { view, sig, block } => {
-                    let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
-                    let bn = map_block(block, block_map);
-
-                    if sent_votes_emitted.insert((
-                        sig.clone(),
-                        *view,
-                        "finalize".into(),
-                        bn.clone(),
-                    )) {
-                        actions.push(ActionItem::Barrier(format!(
-                            "send_finalize_vote({{ proposal: {}, sig: \"{}\" }})",
+                            receiver,
                             proposal_ref(*view, &bn),
                             sig
                         )));
                     }
+                    TracedVote::Finalize { view, sig, block } => {
+                        let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
+                        let bn = map_block(block, block_map);
 
-                    if byzantine_receiver {
-                        continue;
-                    }
+                        if sent_votes_emitted.insert((
+                            sig.clone(),
+                            *view,
+                            "finalize".into(),
+                            bn.clone(),
+                        )) {
+                            actions.push(ActionItem::Barrier(format!(
+                                "send_finalize_vote({{ proposal: {}, sig: \"{}\" }})",
+                                proposal_ref(*view, &bn),
+                                sig
+                            )));
+                        }
 
-                    // Correct finalize: self-delivery (node counts its own finalize)
-                    if !is_byzantine_node(&sig, cfg.faults)
-                        && self_delivered.insert((sig.clone(), *view, "finalize".into()))
-                    {
+                        if byzantine_receiver {
+                            continue;
+                        }
+
+                        // Correct finalize: self-delivery (node counts its own finalize)
+                        if !is_byzantine_node(&sig, cfg.faults)
+                            && self_delivered.insert((sig.clone(), *view, "finalize".into()))
+                        {
+                            actions.push(ActionItem::VoteDelivery {
+                                kind: VoteKind::Finalize,
+                                receiver: sig.clone(),
+                                vote: format!(
+                                    "{{ proposal: {}, sig: \"{}\" }}",
+                                    proposal_ref(*view, &bn),
+                                    sig
+                                ),
+                            });
+                        }
+
+                        // Deliver vote to receiver
                         actions.push(ActionItem::VoteDelivery {
                             kind: VoteKind::Finalize,
-                            receiver: sig.clone(),
+                            receiver: receiver.clone(),
                             vote: format!(
                                 "{{ proposal: {}, sig: \"{}\" }}",
                                 proposal_ref(*view, &bn),
@@ -623,57 +635,46 @@ fn build_actions(
                             ),
                         });
                     }
-
-                    // Deliver vote to receiver
-                    actions.push(ActionItem::VoteDelivery {
-                        kind: VoteKind::Finalize,
-                        receiver: receiver.clone(),
-                        vote: format!(
-                            "{{ proposal: {}, sig: \"{}\" }}",
-                            proposal_ref(*view, &bn),
-                            sig
-                        ),
-                    });
-                }
-                TracedVote::Nullify { view, sig } => {
-                    let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
-                    if sent_votes_emitted.insert((
-                        sig.clone(),
-                        *view,
-                        "nullify".into(),
-                        String::new(),
-                    )) {
-                        actions.push(ActionItem::Barrier(format!(
-                            "send_nullify_vote({{ view: {}, sig: \"{}\" }})",
-                            view, sig
-                        )));
-                    }
-
-                    if byzantine_receiver {
-                        continue;
-                    }
-
-                    // Correct nullify: inject if it was not already produced by
-                    // leader proposal processing for that signer/view.
-                    if !is_byzantine_node(&sig, cfg.faults) {
-                        // Self-delivery
-                        if self_delivered.insert((sig.clone(), *view, "nullify".into())) {
-                            actions.push(ActionItem::VoteDelivery {
-                                kind: VoteKind::Nullify,
-                                receiver: sig.clone(),
-                                vote: format!("{{ view: {}, sig: \"{}\" }}", view, sig),
-                            });
+                    TracedVote::Nullify { view, sig } => {
+                        let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
+                        if sent_votes_emitted.insert((
+                            sig.clone(),
+                            *view,
+                            "nullify".into(),
+                            String::new(),
+                        )) {
+                            actions.push(ActionItem::Barrier(format!(
+                                "send_nullify_vote({{ view: {}, sig: \"{}\" }})",
+                                view, sig
+                            )));
                         }
-                    }
 
-                    // Deliver vote to receiver
-                    actions.push(ActionItem::VoteDelivery {
-                        kind: VoteKind::Nullify,
-                        receiver: receiver.clone(),
-                        vote: format!("{{ view: {}, sig: \"{}\" }}", view, sig),
-                    });
+                        if byzantine_receiver {
+                            continue;
+                        }
+
+                        // Correct nullify: inject if it was not already produced by
+                        // leader proposal processing for that signer/view.
+                        if !is_byzantine_node(&sig, cfg.faults) {
+                            // Self-delivery
+                            if self_delivered.insert((sig.clone(), *view, "nullify".into())) {
+                                actions.push(ActionItem::VoteDelivery {
+                                    kind: VoteKind::Nullify,
+                                    receiver: sig.clone(),
+                                    vote: format!("{{ view: {}, sig: \"{}\" }}", view, sig),
+                                });
+                            }
+                        }
+
+                        // Deliver vote to receiver
+                        actions.push(ActionItem::VoteDelivery {
+                            kind: VoteKind::Nullify,
+                            receiver: receiver.clone(),
+                            vote: format!("{{ view: {}, sig: \"{}\" }}", view, sig),
+                        });
+                    }
                 }
-            }},
+            }
             TraceEntry::Certificate { receiver, cert, .. } => {
                 // Skip forged certificates from byzantine senders.
                 // The sniffer captures all network messages including certs

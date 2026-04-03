@@ -92,6 +92,8 @@ impl Configuration {
     }
 }
 
+/// 4 nodes, 0 faulty, 4 correct (honest, no Byzantine)
+pub const N4F0C4: Configuration = Configuration::new(4, 0, 4);
 /// 4 nodes, 1 faulty, 3 correct (standard BFT config)
 pub const N4F1C3: Configuration = Configuration::new(4, 1, 3);
 /// 4 nodes, 3 faulty, 1 correct (adversarial majority, no liveness)
@@ -824,4 +826,8 @@ pub fn run_quint_disrupter_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
 
 pub fn run_quint_byzantine_tracing(actor: ByzantineActor, input: FuzzInput, corpus_bytes: &[u8]) {
     tracing::run_quint_byzantine_tracing(actor, input, corpus_bytes);
+}
+
+pub fn run_quint_honest_tracing(input: FuzzInput, corpus_bytes: &[u8]) {
+    tracing::run_quint_honest_tracing(input, corpus_bytes);
 }

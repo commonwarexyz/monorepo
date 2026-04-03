@@ -156,6 +156,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "simplex_ed25519_quint_honest"
+path = "fuzz_targets/simplex_ed25519_quint_honest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "simplex_ed25519_quint_byzantine"
 path = "fuzz_targets/simplex_ed25519_quint_byzantine.rs"
 test = false
