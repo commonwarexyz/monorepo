@@ -1262,114 +1262,6 @@ mod tests {
         bm
     }
 
-    // ---- ClearSet::merge tests ----
-
-    #[test]
-    fn clear_set_merge_empty_into_empty() {
-        let mut a = ClearSet::<N>::default();
-        let b = ClearSet::<N>::default();
-        a.merge(&b);
-        assert_eq!(a.len(), 0);
-        assert!(a.is_empty());
-    }
-
-    #[test]
-    fn clear_set_merge_non_empty_into_empty() {
-        let mut a = ClearSet::<N>::default();
-        let mut b = ClearSet::<N>::default();
-        b.push(Location::new(3));
-        b.push(Location::new(7));
-
-        a.merge(&b);
-        assert_eq!(a.len(), 2);
-        assert_eq!(a.locations(), &[Location::new(3), Location::new(7)]);
-        // Both bits in chunk 0.
-        let mask = a.mask(0).unwrap();
-        assert_eq!(mask[0], (1 << 3) | (1 << 7));
-    }
-
-    #[test]
-    fn clear_set_merge_empty_into_non_empty() {
-        let mut a = ClearSet::<N>::default();
-        a.push(Location::new(5));
-        let b = ClearSet::<N>::default();
-
-        a.merge(&b);
-        assert_eq!(a.len(), 1);
-        assert_eq!(a.locations(), &[Location::new(5)]);
-        let mask = a.mask(0).unwrap();
-        assert_eq!(mask[0], 1 << 5);
-    }
-
-    #[test]
-    fn clear_set_merge_disjoint_chunks() {
-        // N=4 -> CHUNK_SIZE_BITS = 32. Bit 2 is in chunk 0, bit 33 is in chunk 1.
-        let mut a = ClearSet::<N>::default();
-        a.push(Location::new(2));
-
-        let mut b = ClearSet::<N>::default();
-        b.push(Location::new(33));
-
-        a.merge(&b);
-        assert_eq!(a.len(), 2);
-        assert_eq!(a.locations(), &[Location::new(2), Location::new(33)]);
-        // Chunk 0: only bit 2.
-        let m0 = a.mask(0).unwrap();
-        assert_eq!(m0[0], 1 << 2);
-        // Chunk 1: bit 33 -> relative bit 1 -> byte 0, bit 1.
-        let m1 = a.mask(1).unwrap();
-        assert_eq!(m1[0], 1 << 1);
-    }
-
-    #[test]
-    fn clear_set_merge_overlapping_chunk() {
-        // Both sets clear bits in the same chunk; masks must be OR'd.
-        let mut a = ClearSet::<N>::default();
-        a.push(Location::new(1));
-        a.push(Location::new(4));
-
-        let mut b = ClearSet::<N>::default();
-        b.push(Location::new(4)); // duplicate with a
-        b.push(Location::new(6));
-
-        a.merge(&b);
-        assert_eq!(a.len(), 4);
-        let mask = a.mask(0).unwrap();
-        // bits 1, 4, 6 (4 appears in both but OR is idempotent for mask)
-        assert_eq!(mask[0], (1 << 1) | (1 << 4) | (1 << 6));
-    }
-
-    #[test]
-    fn clear_set_merge_matches_sequential_push() {
-        // Verify merge produces the same masks as pushing each location individually.
-        let locs_a: Vec<Location> = (0..5).map(Location::new).collect();
-        let locs_b: Vec<Location> = (30..36).map(Location::new).collect(); // spans chunks 0 and 1
-
-        // Build via merge.
-        let mut via_merge = ClearSet::<N>::default();
-        let mut part_a = ClearSet::<N>::default();
-        for &loc in &locs_a {
-            part_a.push(loc);
-        }
-        let mut part_b = ClearSet::<N>::default();
-        for &loc in &locs_b {
-            part_b.push(loc);
-        }
-        via_merge.merge(&part_a);
-        via_merge.merge(&part_b);
-
-        // Build via sequential push.
-        let mut via_push = ClearSet::<N>::default();
-        for &loc in locs_a.iter().chain(&locs_b) {
-            via_push.push(loc);
-        }
-
-        assert_eq!(via_merge.locations(), via_push.locations());
-        for idx in 0..2 {
-            assert_eq!(via_merge.mask(idx), via_push.mask(idx));
-        }
-    }
-
     // ---- BitmapDiff tests ----
 
     #[test]
@@ -1492,6 +1384,112 @@ mod tests {
         diff.clear_bit(Location::new(96)); // in the pushed region
         assert_eq!(diff.dirty_chunks.len(), 1);
         assert!(diff.dirty_chunks.contains(&1));
+    }
+
+    #[test]
+    fn clear_set_merge_empty_into_empty() {
+        let mut a = ClearSet::<N>::default();
+        let b = ClearSet::<N>::default();
+        a.merge(&b);
+        assert_eq!(a.len(), 0);
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn clear_set_merge_non_empty_into_empty() {
+        let mut a = ClearSet::<N>::default();
+        let mut b = ClearSet::<N>::default();
+        b.push(Location::new(3));
+        b.push(Location::new(7));
+
+        a.merge(&b);
+        assert_eq!(a.len(), 2);
+        assert_eq!(a.locations(), &[Location::new(3), Location::new(7)]);
+        // Both bits in chunk 0.
+        let mask = a.mask(0).unwrap();
+        assert_eq!(mask[0], (1 << 3) | (1 << 7));
+    }
+
+    #[test]
+    fn clear_set_merge_empty_into_non_empty() {
+        let mut a = ClearSet::<N>::default();
+        a.push(Location::new(5));
+        let b = ClearSet::<N>::default();
+
+        a.merge(&b);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a.locations(), &[Location::new(5)]);
+        let mask = a.mask(0).unwrap();
+        assert_eq!(mask[0], 1 << 5);
+    }
+
+    #[test]
+    fn clear_set_merge_disjoint_chunks() {
+        // N=4 -> CHUNK_SIZE_BITS = 32. Bit 2 is in chunk 0, bit 33 is in chunk 1.
+        let mut a = ClearSet::<N>::default();
+        a.push(Location::new(2));
+
+        let mut b = ClearSet::<N>::default();
+        b.push(Location::new(33));
+
+        a.merge(&b);
+        assert_eq!(a.len(), 2);
+        assert_eq!(a.locations(), &[Location::new(2), Location::new(33)]);
+        // Chunk 0: only bit 2.
+        let m0 = a.mask(0).unwrap();
+        assert_eq!(m0[0], 1 << 2);
+        // Chunk 1: bit 33 -> relative bit 1 -> byte 0, bit 1.
+        let m1 = a.mask(1).unwrap();
+        assert_eq!(m1[0], 1 << 1);
+    }
+
+    #[test]
+    fn clear_set_merge_overlapping_chunk() {
+        // Both sets clear bits in the same chunk; masks must be OR'd.
+        let mut a = ClearSet::<N>::default();
+        a.push(Location::new(1));
+        a.push(Location::new(4));
+
+        let mut b = ClearSet::<N>::default();
+        b.push(Location::new(4)); // duplicate with a
+        b.push(Location::new(6));
+
+        a.merge(&b);
+        assert_eq!(a.len(), 4);
+        let mask = a.mask(0).unwrap();
+        // bits 1, 4, 6 (4 appears in both but OR is idempotent for mask)
+        assert_eq!(mask[0], (1 << 1) | (1 << 4) | (1 << 6));
+    }
+
+    #[test]
+    fn clear_set_merge_matches_sequential_push() {
+        // Verify merge produces the same masks as pushing each location individually.
+        let locs_a: Vec<Location> = (0..5).map(Location::new).collect();
+        let locs_b: Vec<Location> = (30..36).map(Location::new).collect(); // spans chunks 0 and 1
+
+        // Build via merge.
+        let mut via_merge = ClearSet::<N>::default();
+        let mut part_a = ClearSet::<N>::default();
+        for &loc in &locs_a {
+            part_a.push(loc);
+        }
+        let mut part_b = ClearSet::<N>::default();
+        for &loc in &locs_b {
+            part_b.push(loc);
+        }
+        via_merge.merge(&part_a);
+        via_merge.merge(&part_b);
+
+        // Build via sequential push.
+        let mut via_push = ClearSet::<N>::default();
+        for &loc in locs_a.iter().chain(&locs_b) {
+            via_push.push(loc);
+        }
+
+        assert_eq!(via_merge.locations(), via_push.locations());
+        for idx in 0..2 {
+            assert_eq!(via_merge.mask(idx), via_push.mask(idx));
+        }
     }
 
     #[test]
