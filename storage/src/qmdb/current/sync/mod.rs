@@ -30,7 +30,10 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    merkle::mmr::{self, Location, StandardHasher},
+    merkle::{
+        mmr::{self, Location, StandardHasher},
+        Family as _,
+    },
     qmdb::{
         self,
         any::{
@@ -166,7 +169,7 @@ where
     // `popcount(pruned_chunks)` are at or above the grafting height. The remaining
     // smaller peaks cover the partial trailing chunk and are not grafted pinned nodes.
     let grafted_pinned_nodes = {
-        let ops_pin_positions = mmr::iterator::nodes_to_pin(range.start);
+        let ops_pin_positions = mmr::Family::nodes_to_pin(range.start);
         let num_grafted_pins = (pruned_chunks as u64).count_ones() as usize;
         let mut pins = Vec::with_capacity(num_grafted_pins);
         for pos in ops_pin_positions.take(num_grafted_pins) {

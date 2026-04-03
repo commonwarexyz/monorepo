@@ -277,35 +277,61 @@ where
         }
     }
 
-    /// Gather the existing-key locations for all keys in `mutations`.
+    /// Gather existing-key locations for all keys in `mutations`.
     ///
     /// For each mutation key, checks the base diff first (returning the
-    /// uncommitted location for Active entries, skipping Deleted entries), then
-    /// falls back to the base DB snapshot.
+    /// uncommitted location for Active entries, skipping Deleted entries).
+    /// Keys not in the base diff fall back to the base DB snapshot.
+    ///
+    /// When `include_active_collision_siblings` is true, Active entries
+    /// also scan the snapshot bucket for collision siblings (other keys
+    /// sharing the same translated-key bucket). The ordered path needs
+    /// these so their `next_key` pointers are rewritten when a sibling
+    /// is deleted; the unordered path can skip them.
     fn gather_existing_locations<E, C, I>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
         db: &Db<F, E, C, I, H, U>,
+        include_active_collision_siblings: bool,
     ) -> Vec<Location<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let mut locations = Vec::new();
+        // Extra slack (*3/2) avoids re-allocations when index collisions
+        // cause more than one location per key.
+        let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
         if self.base_diff.is_empty() {
             for key in mutations.keys() {
                 locations.extend(db.snapshot.get(key).copied());
             }
         } else {
             for key in mutations.keys() {
-                if let Some(entry) = self.base_diff.get(key) {
-                    if let Some(loc) = entry.loc() {
-                        locations.push(loc);
+                match self.base_diff.get(key) {
+                    Some(DiffEntry::Deleted { .. }) => {
+                        // Stale; handled via extract_parent_deleted_creates.
                     }
-                    continue;
+                    Some(DiffEntry::Active {
+                        loc, base_old_loc, ..
+                    }) => {
+                        // Push the parent's uncommitted location, then scan
+                        // the snapshot bucket for collision siblings (excluding
+                        // this key's own stale committed location).
+                        locations.push(*loc);
+                        if include_active_collision_siblings {
+                            locations.extend(
+                                db.snapshot
+                                    .get(key)
+                                    .copied()
+                                    .filter(move |loc| Some(*loc) != *base_old_loc),
+                            );
+                        }
+                    }
+                    None => {
+                        locations.extend(db.snapshot.get(key).copied());
+                    }
                 }
-                locations.extend(db.snapshot.get(key).copied());
             }
         }
         locations.sort();
@@ -346,8 +372,8 @@ where
         let mut creates = BTreeMap::new();
         mutations.retain(|key, value| {
             if let Some(DiffEntry::Deleted { base_old_loc }) = self.base_diff.get(key) {
-                if let Some(value) = value {
-                    creates.insert(key.clone(), (value.clone(), *base_old_loc));
+                if let Some(v) = value.take() {
+                    creates.insert(key.clone(), (v, *base_old_loc));
                     return false;
                 }
             }
@@ -459,14 +485,11 @@ where
         // parent already contains all prior batches' Merkle state, so we only
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
-        let mut journal_batch = self.journal_batch;
-        for op in &ops {
-            journal_batch = journal_batch.add(op.clone());
-        }
-        let journal = journal_batch.merkleize();
+        let ops = Arc::new(ops);
+        let journal = self.journal_batch.merkleize_with(ops.clone());
 
         // Build the operation chain: parent segments + this batch's segment.
-        self.base_operations.push(Arc::new(ops));
+        self.base_operations.push(ops);
 
         // Merge with base diff: entries not overridden by this batch.
         // O(K) deep copy (K = distinct keys in parent diff) when the parent MerkleizedBatch or
@@ -589,12 +612,13 @@ where
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O, parallelized).
-        let locations = m.gather_existing_locations(&mutations, db);
+        let locations = m.gather_existing_locations(&mutations, db, false);
         let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
         let results = try_join_all(futures).await?;
 
         // Generate user mutation operations.
-        let mut ops: Vec<Operation<F, update::Unordered<K, V>>> = Vec::new();
+        let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
+            Vec::with_capacity(mutations.len() + 1);
         let mut diff: BTreeMap<K, DiffEntry<F, V::Value>> = BTreeMap::new();
         let mut active_keys_delta: isize = 0;
         let mut user_steps: u64 = 0;
@@ -727,7 +751,7 @@ where
         let (mut mutations, m) = self.into_parts();
 
         // Resolve existing keys (async I/O).
-        let locations = m.gather_existing_locations(&mutations, db);
+        let locations = m.gather_existing_locations(&mutations, db, true);
 
         // Read and unwrap Update operations (snapshot only references Updates).
         let futures = locations.iter().map(|&loc| m.read_op(loc, &[], db));
@@ -807,13 +831,13 @@ where
             try_join_all(futures).await?
         };
 
-        for (op, &old_loc) in prev_results.iter().zip(&prev_locations) {
+        for (op, &old_loc) in prev_results.into_iter().zip(&prev_locations) {
             let data = match op {
                 Operation::Update(data) => data,
                 _ => unreachable!("expected update operation"),
             };
-            next_candidates.insert(data.next_key.clone());
-            prev_candidates.insert(data.key.clone(), (data.value.clone(), old_loc));
+            next_candidates.insert(data.next_key);
+            prev_candidates.insert(data.key, (data.value, old_loc));
         }
 
         // Add base-diff-created keys to candidate sets. These keys may be
@@ -853,7 +877,8 @@ where
         }
 
         // Generate operations.
-        let mut ops: Vec<Operation<F, update::Ordered<K, V>>> = Vec::new();
+        let mut ops: Vec<Operation<F, update::Ordered<K, V>>> =
+            Vec::with_capacity(deleted.len() + updated.len() + created.len() + 1);
         let mut diff: BTreeMap<K, DiffEntry<F, V::Value>> = BTreeMap::new();
         let mut active_keys_delta: isize = 0;
         let mut user_steps: u64 = 0;
@@ -898,10 +923,11 @@ where
         }
 
         // Collect created keys for the predecessor loop before consuming.
-        let created_keys: Vec<K> = created.keys().cloned().collect();
+        let mut created_keys: Vec<K> = Vec::with_capacity(created.len());
 
         // Process creates.
         for (key, (value, base_old_loc)) in created {
+            created_keys.push(key.clone());
             let new_loc = Location::new(m.base_size + ops.len() as u64);
             let next_key = find_next_key(&key, &next_candidates);
             ops.push(Operation::Update(update::Ordered {

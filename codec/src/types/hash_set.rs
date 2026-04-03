@@ -4,7 +4,7 @@
 //! the size of the set must fit within a [u32].
 
 use crate::{
-    codec::{EncodeSize, Read, Write},
+    codec::{BufsMut, EncodeSize, Read, Write},
     error::Error,
     types::read_ordered_set,
     RangeCfg,
@@ -25,6 +25,17 @@ impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
             item.write(buf);
         }
     }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.len().write(buf);
+
+        // Sort the items to ensure deterministic encoding
+        let mut items: Vec<_> = self.iter().collect();
+        items.sort();
+        for item in items {
+            item.write_bufs(buf);
+        }
+    }
 }
 
 impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
@@ -34,6 +45,16 @@ impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
         // Note: Iteration order doesn't matter for size calculation.
         for item in self {
             size += item.encode_size();
+        }
+        size
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        let mut size = self.len().encode_size();
+
+        // Note: Iteration order doesn't matter for size calculation.
+        for item in self {
+            size += item.encode_inline_size();
         }
         size
     }

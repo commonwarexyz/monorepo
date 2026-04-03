@@ -1113,6 +1113,7 @@ dependencies = [
  "commonware-macros",
  "commonware-math",
  "commonware-parallel",
+ "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
  "criterion",

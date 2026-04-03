@@ -69,6 +69,39 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
             items,
         }
     }
+
+    /// Like [`merkleize`](Self::merkleize), but the caller supplies the items
+    /// instead of accumulating them with [`add`](Self::add). The two approaches
+    /// must not be mixed: do not call [`add`](Self::add) before this method.
+    ///
+    /// The items are encoded and hashed into the Merkle structure, and the `Arc`
+    /// is stored directly in the resulting [`MerkleizedBatch`] without copying.
+    ///
+    /// # Panics
+    ///
+    /// Panics if items were previously added via [`add`](Self::add).
+    pub(crate) fn merkleize_with(
+        mut self,
+        items: Arc<Vec<Item>>,
+    ) -> MerkleizedBatch<F, H::Digest, Item> {
+        assert!(
+            self.items.is_empty(),
+            "merkleize_with expects no items added via add"
+        );
+        for item in &*items {
+            let encoded = item.encode();
+            self.inner = self.inner.add(&self.hasher, &encoded);
+        }
+        let merkle = self.inner.merkleize(&self.hasher);
+        let mut parent_items = self.parent_items;
+        if !items.is_empty() {
+            parent_items.push(items);
+        }
+        MerkleizedBatch {
+            inner: merkle,
+            items: parent_items,
+        }
+    }
 }
 
 /// A speculative batch whose root digest has been computed, in contrast to [`UnmerkleizedBatch`].
@@ -2526,5 +2559,98 @@ mod tests {
     fn test_finalize_from_skip_too_many_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_finalize_from_skip_too_many_inner::<mmb::Family>);
+    }
+
+    /// merkleize_with produces the same root as add + merkleize.
+    async fn test_merkleize_with_matches_add_inner<F: Family + PartialEq>(context: Context) {
+        let journal = create_journal_with_ops::<F>(context, "mw-matches", 5).await;
+
+        let ops = vec![
+            create_operation::<F>(10),
+            create_operation::<F>(11),
+            create_operation::<F>(12),
+        ];
+
+        // add + merkleize
+        let mut batch = journal.new_batch();
+        for op in &ops {
+            batch = batch.add(op.clone());
+        }
+        let expected = batch.merkleize();
+
+        // merkleize_with
+        let actual = journal.new_batch().merkleize_with(Arc::new(ops));
+
+        assert_eq!(actual.root(), expected.root());
+    }
+
+    #[test_traced("INFO")]
+    fn test_merkleize_with_matches_add_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_merkleize_with_matches_add_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_merkleize_with_matches_add_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_merkleize_with_matches_add_inner::<mmb::Family>);
+    }
+
+    /// merkleize_with items are readable after finalize + apply.
+    async fn test_merkleize_with_apply_inner<F: Family + PartialEq>(context: Context) {
+        let mut journal = create_journal_with_ops::<F>(context, "mw-apply", 5).await;
+
+        let ops = vec![create_operation::<F>(10), create_operation::<F>(11)];
+        let merkleized = journal.new_batch().merkleize_with(Arc::new(ops.clone()));
+
+        let expected_root = merkleized.root();
+        journal.apply_batch(merkleized.finalize()).await.unwrap();
+
+        assert_eq!(journal.root(), expected_root);
+        assert_eq!(*journal.size().await, 7);
+
+        let reader = journal.reader().await;
+        assert_eq!(reader.read(5).await.unwrap(), ops[0]);
+        assert_eq!(reader.read(6).await.unwrap(), ops[1]);
+    }
+
+    #[test_traced("INFO")]
+    fn test_merkleize_with_apply_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_merkleize_with_apply_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_merkleize_with_apply_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_merkleize_with_apply_inner::<mmb::Family>);
+    }
+
+    /// merkleize_with shares the Arc: the caller's clone and the batch's
+    /// internal segment point to the same allocation.
+    async fn test_merkleize_with_shares_arc_inner<F: Family + PartialEq>(context: Context) {
+        let journal = create_journal_with_ops::<F>(context, "mw-arc", 3).await;
+
+        let ops = Arc::new(vec![create_operation::<F>(20), create_operation::<F>(21)]);
+        let ops_clone = Arc::clone(&ops);
+        let merkleized = journal.new_batch().merkleize_with(ops_clone);
+
+        // The batch should hold the same Arc allocation, not a copy.
+        assert!(merkleized
+            .items
+            .last()
+            .is_some_and(|arc| Arc::ptr_eq(arc, &ops)));
+    }
+
+    #[test_traced("INFO")]
+    fn test_merkleize_with_shares_arc_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_merkleize_with_shares_arc_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_merkleize_with_shares_arc_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_merkleize_with_shares_arc_inner::<mmb::Family>);
     }
 }

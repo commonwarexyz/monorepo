@@ -7,7 +7,7 @@ use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{hasher::Standard, journaled::Config as MerkleConfig, mmb, mmr, Family, Location},
     qmdb::{
-        keyless::{Config, Keyless},
+        keyless::variable::{Config, Db as Keyless},
         verify_proof,
     },
 };

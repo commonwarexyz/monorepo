@@ -153,9 +153,7 @@ where
         if !loc.is_valid() {
             return Err(crate::merkle::Error::LocationOverflow(loc).into());
         }
-        let leaves = self.log.merkle.leaves();
-        let futs: Vec<_> = F::nodes_to_pin(leaves, loc)
-            .into_iter()
+        let futs: Vec<_> = F::nodes_to_pin(loc)
             .map(|p| async move {
                 self.log
                     .merkle

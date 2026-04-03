@@ -68,7 +68,8 @@ stability_scope!(BETA {
 
     pub mod iobuf;
     pub use iobuf::{
-        BufferPool, BufferPoolConfig, BufferPoolThreadCache, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+        BufferPool, BufferPoolConfig, BufferPoolThreadCache, Builder as IoBufsBuilder, IoBuf,
+        IoBufMut, IoBufs, IoBufsMut,
     };
 
     pub mod utils;

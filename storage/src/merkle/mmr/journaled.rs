@@ -25,7 +25,7 @@ pub type Mmr<E, D> = crate::merkle::journaled::Journaled<Family, E, D>;
 mod tests {
     use super::*;
     use crate::{
-        merkle::{conformance::build_test_mmr, mmr::iterator::nodes_to_pin},
+        merkle::{conformance::build_test_mmr, Family as _},
         mmr::{mem, Error, Location, Position, StandardHasher as Standard},
     };
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
@@ -335,7 +335,7 @@ mod tests {
             let expected_size = ref_mmr.size();
             let prune_loc = Location::new(100);
             let mut pinned = Vec::new();
-            for pos in nodes_to_pin(prune_loc) {
+            for pos in Family::nodes_to_pin(prune_loc) {
                 pinned.push(ref_mmr.get_node(pos).await.unwrap().unwrap());
             }
             ref_mmr.destroy().await.unwrap();

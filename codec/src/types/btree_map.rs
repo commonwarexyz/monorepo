@@ -6,7 +6,7 @@
 extern crate alloc;
 
 use crate::{
-    codec::{EncodeSize, Read, Write},
+    codec::{BufsMut, EncodeSize, Read, Write},
     error::Error,
     types::read_ordered_map,
     RangeCfg,
@@ -28,6 +28,16 @@ impl<K: Ord + Eq + Write, V: Write> Write for BTreeMap<K, V> {
             v.write(buf);
         }
     }
+
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.len().write(buf);
+
+        // Keys are already sorted in BTreeMap, so we can iterate directly
+        for (k, v) in self {
+            k.write_bufs(buf);
+            v.write_bufs(buf);
+        }
+    }
 }
 
 impl<K: Ord + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
@@ -39,6 +49,18 @@ impl<K: Ord + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
         for (k, v) in self {
             size += k.encode_size();
             size += v.encode_size();
+        }
+        size
+    }
+
+    fn encode_inline_size(&self) -> usize {
+        // Start with the size of the length prefix
+        let mut size = self.len().encode_size();
+
+        // Add the encoded size of each key and value
+        for (k, v) in self {
+            size += k.encode_inline_size();
+            size += v.encode_inline_size();
         }
         size
     }

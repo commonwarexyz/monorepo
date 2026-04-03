@@ -22,6 +22,14 @@ pub trait FixedSize {
 pub trait EncodeSize {
     /// Returns the encoded size of this value (in bytes).
     fn encode_size(&self) -> usize;
+
+    /// Returns the encoded size excluding bytes passed to [`BufsMut::push`]
+    /// during [`Write::write_bufs`]. Used to size the working buffer for inline
+    /// writes. Override alongside [`Write::write_bufs`] for types where large
+    /// [`Bytes`] fields go via push; failing to do so will over-allocate.
+    fn encode_inline_size(&self) -> usize {
+        self.encode_size()
+    }
 }
 
 // Automatically implement `EncodeSize` for types that are `FixedSize`.
@@ -37,6 +45,13 @@ pub trait Write {
     ///
     /// Implementations should panic if the buffer doesn't have enough capacity.
     fn write(&self, buf: &mut impl BufMut);
+
+    /// Writes to a [`BufsMut`], allowing existing [`Bytes`] chunks to be
+    /// appended via [`BufsMut::push`] instead of written inline. Must encode
+    /// to the same format as [`Write::write`]. Defaults to [`Write::write`].
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.write(buf);
+    }
 }
 
 /// Trait for types that can be read (decoded) from a byte buffer.
@@ -193,6 +208,13 @@ pub trait CodecFixedShared: CodecFixed<Cfg = ()> + Send + Sync {}
 
 // Automatically implement `CodecFixedShared` for types that meet all bounds.
 impl<T: CodecFixed<Cfg = ()> + Send + Sync> CodecFixedShared for T {}
+
+/// A [`BufMut`] that can also append pre-existing [`Bytes`] chunks.
+pub trait BufsMut: BufMut {
+    /// Appends a [`Bytes`] chunk instead of writing its contents inline into
+    /// the destination buffer.
+    fn push(&mut self, bytes: impl Into<Bytes>);
+}
 
 #[cfg(test)]
 mod tests {

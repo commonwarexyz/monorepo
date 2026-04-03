@@ -18,7 +18,7 @@ use commonware_storage::{
             unordered::{fixed::Db as UCFixed, variable::Db as UCVariable},
             FixedConfig as CurrentFixedConfig, VariableConfig as CurrentVariableConfig,
         },
-        keyless::{Config as KeylessConfig, Keyless},
+        keyless::variable::{Config as KeylessConfig, Db as Keyless},
     },
     translator::EightCap,
 };
@@ -62,6 +62,11 @@ pub type CurOVarVecDb = OCVariable<Context, Digest, Vec<u8>, Sha256, EightCap, C
 // -- Keyless --
 
 pub type KeylessDb = Keyless<Family, Context, Vec<u8>, Sha256>;
+
+pub async fn open_keyless_db(ctx: Context) -> KeylessDb {
+    let cfg = keyless_cfg(&ctx);
+    KeylessDb::init(ctx, cfg).await.unwrap()
+}
 
 // -- Variant enums --
 

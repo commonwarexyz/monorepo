@@ -1478,6 +1478,96 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// Regression test: child batch deleting a key whose predecessor shares the
+    /// same translated-key bucket must update the predecessor's next_key.
+    #[test_traced("INFO")]
+    fn test_ordered_child_delete_colliding_key_corrupts_next_key() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut db = open_db(context.with_label("db")).await;
+
+            // B and K collide under TwoCap (same first 2 bytes 0xAABB).
+            let key_b = Digest::from({
+                let mut b = [0u8; 32];
+                b[0] = 0xAA;
+                b[1] = 0xBB;
+                b[2] = 0x01;
+                b
+            });
+            let key_k = Digest::from({
+                let mut k = [0u8; 32];
+                k[0] = 0xAA;
+                k[1] = 0xBB;
+                k[2] = 0x02;
+                k
+            });
+            // A is in a different bucket.
+            let key_a = Digest::from({
+                let mut a = [0u8; 32];
+                a[0] = 0x11;
+                a[1] = 0x22;
+                a
+            });
+
+            // Commit A, B, K.
+            commit_writes_generic(
+                &mut db,
+                [
+                    (key_a, Some(val(1))),
+                    (key_b, Some(val(2))),
+                    (key_k, Some(val(3))),
+                ],
+                None,
+            )
+            .await;
+
+            // Add padding keys so the floor-raise in subsequent batches moves
+            // padding ops (not B) and B stays at its original log position.
+            let mut padding_keys = Vec::new();
+            for i in 0..20u64 {
+                let pk = Digest::from({
+                    let mut p = [0u8; 32];
+                    p[0] = 0xCC;
+                    p[1] = i as u8;
+                    p
+                });
+                padding_keys.push(pk);
+                commit_writes_generic(&mut db, [(pk, Some(val(100 + i)))], None).await;
+            }
+
+            // Sanity: B.next_key == K before the speculative batches.
+            let (_, next_b) = db.get_all(&key_b).await.unwrap().unwrap();
+            assert_eq!(next_b, key_k, "B.next_key should be K before delete");
+
+            // Parent batch: update K's value (K enters base_diff).
+            let mut parent = db.new_batch();
+            parent = parent.write(key_k, Some(val(4)));
+            let parent_m = parent.merkleize(None, &db).await.unwrap();
+
+            // Child batch: delete K.
+            let mut child = parent_m.new_batch::<Sha256>();
+            child = child.write(key_k, None);
+            let child_m = child.merkleize(None, &db).await.unwrap();
+
+            // Apply and commit.
+            db.apply_batch(child_m.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            // K should be deleted.
+            assert!(db.get(&key_k).await.unwrap().is_none());
+
+            // B.next_key must not point to deleted K.
+            let (_, b_next) = db.get_all(&key_b).await.unwrap().unwrap();
+            assert_ne!(
+                b_next, key_k,
+                "B.next_key still points to deleted K (corrupted next_key ring)"
+            );
+            assert_eq!(b_next, padding_keys[0]);
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     // -- MMR test wrappers --
 
     #[test_traced("INFO")]
@@ -1609,7 +1699,10 @@ pub(crate) mod test {
     mod from_sync_testable {
         use super::*;
         use crate::{
-            merkle::mmr::{iterator::nodes_to_pin, journaled::Mmr},
+            merkle::{
+                mmr::{self, journaled::Mmr},
+                Family as _,
+            },
             qmdb::any::sync::tests::FromSyncTestable,
         };
         use futures::future::join_all;
@@ -1624,7 +1717,7 @@ pub(crate) mod test {
             }
 
             async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
-                join_all(nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
+                join_all(mmr::Family::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
                     .await
                     .into_iter()
                     .map(|n| n.unwrap().unwrap())

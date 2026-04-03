@@ -1,7 +1,7 @@
 //! Codec implementations for range types ([`Range`], [`RangeFrom`], [`RangeTo`],
 //! [`RangeInclusive`], [`RangeToInclusive`], [`RangeFull`]).
 
-use crate::{EncodeSize, Error, FixedSize, Read, Write};
+use crate::{BufsMut, EncodeSize, Error, FixedSize, Read, Write};
 use bytes::{Buf, BufMut};
 use core::ops::{Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};
 
@@ -15,12 +15,27 @@ impl<T: Write + PartialOrd> Write for Range<T> {
         self.start.write(buf);
         self.end.write(buf);
     }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        assert!(
+            self.start.partial_cmp(&self.end).is_some_and(|o| o.is_le()),
+            "start must be <= end"
+        );
+        self.start.write_bufs(buf);
+        self.end.write_bufs(buf);
+    }
 }
 
 impl<T: EncodeSize> EncodeSize for Range<T> {
     #[inline]
     fn encode_size(&self) -> usize {
         self.start.encode_size() + self.end.encode_size()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.start.encode_inline_size() + self.end.encode_inline_size()
     }
 }
 
@@ -50,12 +65,29 @@ impl<T: Write + PartialOrd> Write for RangeInclusive<T> {
         self.start().write(buf);
         self.end().write(buf);
     }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        assert!(
+            self.start()
+                .partial_cmp(self.end())
+                .is_some_and(|o| o.is_le()),
+            "start must be <= end"
+        );
+        self.start().write_bufs(buf);
+        self.end().write_bufs(buf);
+    }
 }
 
 impl<T: EncodeSize> EncodeSize for RangeInclusive<T> {
     #[inline]
     fn encode_size(&self) -> usize {
         self.start().encode_size() + self.end().encode_size()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.start().encode_inline_size() + self.end().encode_inline_size()
     }
 }
 
@@ -78,12 +110,22 @@ impl<T: Write> Write for RangeFrom<T> {
     fn write(&self, buf: &mut impl BufMut) {
         self.start.write(buf);
     }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.start.write_bufs(buf);
+    }
 }
 
 impl<T: EncodeSize> EncodeSize for RangeFrom<T> {
     #[inline]
     fn encode_size(&self) -> usize {
         self.start.encode_size()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.start.encode_inline_size()
     }
 }
 
@@ -102,12 +144,22 @@ impl<T: Write> Write for RangeTo<T> {
     fn write(&self, buf: &mut impl BufMut) {
         self.end.write(buf);
     }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.end.write_bufs(buf);
+    }
 }
 
 impl<T: EncodeSize> EncodeSize for RangeTo<T> {
     #[inline]
     fn encode_size(&self) -> usize {
         self.end.encode_size()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.end.encode_inline_size()
     }
 }
 
@@ -126,12 +178,22 @@ impl<T: Write> Write for RangeToInclusive<T> {
     fn write(&self, buf: &mut impl BufMut) {
         self.end.write(buf);
     }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.end.write_bufs(buf);
+    }
 }
 
 impl<T: EncodeSize> EncodeSize for RangeToInclusive<T> {
     #[inline]
     fn encode_size(&self) -> usize {
         self.end.encode_size()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.end.encode_inline_size()
     }
 }
 
