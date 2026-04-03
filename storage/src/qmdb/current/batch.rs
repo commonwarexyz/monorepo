@@ -729,18 +729,20 @@ where
         clears: Arc::clone(&clears),
     }));
 
-    // Collect ancestor bitmap data while the parent is still alive.
-    let (ancestor_bitmap_pushes, ancestor_bitmap_clears) =
-        parent.as_ref().and_then(Weak::upgrade).map_or_else(
-            || (Vec::new(), Vec::new()),
-            |p| {
-                let mut pushes = vec![Arc::clone(&p.bitmap_pushes)];
-                let mut clears = vec![Arc::clone(&p.bitmap_clears)];
-                pushes.extend(p.ancestor_bitmap_pushes.iter().cloned());
-                clears.extend(p.ancestor_bitmap_clears.iter().cloned());
-                (pushes, clears)
-            },
-        );
+    // Collect ancestor bitmap data by walking the Weak parent chain. Dead refs
+    // truncate the walk (committed-and-dropped ancestors are skipped). The walk
+    // yields tip-to-root order; reverse to root-to-tip so that apply_batch
+    // concatenates pushes in the correct positional order.
+    let mut ancestor_bitmap_pushes = Vec::new();
+    let mut ancestor_bitmap_clears = Vec::new();
+    let mut current = parent.as_ref().and_then(Weak::upgrade);
+    while let Some(batch) = current {
+        ancestor_bitmap_pushes.push(Arc::clone(&batch.bitmap_pushes));
+        ancestor_bitmap_clears.push(Arc::clone(&batch.bitmap_clears));
+        current = batch.parent.as_ref().and_then(Weak::upgrade);
+    }
+    ancestor_bitmap_pushes.reverse();
+    ancestor_bitmap_clears.reverse();
 
     let grafted_parent_size = grafted_parent.size();
     Ok(Arc::new(MerkleizedBatch {

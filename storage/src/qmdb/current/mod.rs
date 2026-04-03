@@ -2214,4 +2214,133 @@ pub mod tests {
             db.destroy().await.unwrap();
         });
     }
+
+    /// Regression: applying a 3-deep chain as a single batch must leave the
+    /// bitmap in the same state as applying the same operations sequentially.
+    /// This fails if ancestor bitmap pushes are concatenated in the wrong order
+    /// (tip-to-root instead of root-to-tip), because Delete operations produce
+    /// false bitmap bits, and wrong ordering puts the false at the wrong
+    /// position. We detect this by building a NEW batch on top of the
+    /// (possibly corrupted) bitmap and comparing its root against the
+    /// sequential path.
+    #[test_traced("WARN")]
+    fn test_current_chain_bitmap_order_matches_sequential() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // -- Path 1: build a 3-deep chain and apply the tip directly. --
+            let ctx1 = context.with_label("db1");
+            let mut db1: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx1.clone(), variable_config::<OneCap>("ord1", &ctx1))
+                    .await
+                    .unwrap();
+
+            // Seed some committed data so there's a base bitmap to clear.
+            commit_writes_with_metadata(
+                &mut db1,
+                [(key(10), Some(val(10))), (key(11), Some(val(11)))],
+                None,
+            )
+            .await;
+
+            // Chain: DB <- A <- B <- C
+            // A: updates key(10) and DELETES key(11). The delete produces a
+            //    false bitmap bit. If A's bits end up at B's positions (wrong
+            //    order), the false bit lands at the wrong journal location.
+            // B: updates key(12) and key(13). All true bits.
+            // C: updates key(14). All true bits.
+            let a = db1
+                .new_batch()
+                .write(key(10), Some(val(100)))
+                .write(key(11), None) // DELETE
+                .merkleize(None, &db1)
+                .await
+                .unwrap();
+
+            let b = a
+                .new_batch::<Sha256>()
+                .write(key(12), Some(val(120)))
+                .write(key(13), Some(val(130)))
+                .merkleize(None, &db1)
+                .await
+                .unwrap();
+
+            let c = b
+                .new_batch::<Sha256>()
+                .write(key(14), Some(val(140)))
+                .merkleize(None, &db1)
+                .await
+                .unwrap();
+
+            db1.apply_batch(c).await.unwrap();
+            db1.commit().await.unwrap();
+
+            // Build one more batch on top to exercise the bitmap state.
+            let d1 = db1
+                .new_batch()
+                .write(key(20), Some(val(200)))
+                .merkleize(None, &db1)
+                .await
+                .unwrap();
+            let chain_then_d_root = d1.root();
+
+            // -- Path 2: apply the same operations sequentially. --
+            let ctx2 = context.with_label("db2");
+            let mut db2: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx2.clone(), variable_config::<OneCap>("ord2", &ctx2))
+                    .await
+                    .unwrap();
+
+            commit_writes_with_metadata(
+                &mut db2,
+                [(key(10), Some(val(10))), (key(11), Some(val(11)))],
+                None,
+            )
+            .await;
+
+            let a2 = db2
+                .new_batch()
+                .write(key(10), Some(val(100)))
+                .write(key(11), None)
+                .merkleize(None, &db2)
+                .await
+                .unwrap();
+            db2.apply_batch(a2).await.unwrap();
+            db2.commit().await.unwrap();
+
+            let b2 = db2
+                .new_batch()
+                .write(key(12), Some(val(120)))
+                .write(key(13), Some(val(130)))
+                .merkleize(None, &db2)
+                .await
+                .unwrap();
+            db2.apply_batch(b2).await.unwrap();
+            db2.commit().await.unwrap();
+
+            let c2 = db2
+                .new_batch()
+                .write(key(14), Some(val(140)))
+                .merkleize(None, &db2)
+                .await
+                .unwrap();
+            db2.apply_batch(c2).await.unwrap();
+            db2.commit().await.unwrap();
+
+            let d2 = db2
+                .new_batch()
+                .write(key(20), Some(val(200)))
+                .merkleize(None, &db2)
+                .await
+                .unwrap();
+            let sequential_then_d_root = d2.root();
+
+            assert_eq!(
+                chain_then_d_root, sequential_then_d_root,
+                "batch D's root on top of chain-applied state must match sequential state"
+            );
+
+            db1.destroy().await.unwrap();
+            db2.destroy().await.unwrap();
+        });
+    }
 }
