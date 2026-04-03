@@ -51,14 +51,14 @@ impl<C> Cell<C> {
     pub fn take(&mut self) -> C {
         match std::mem::replace(self, Self::Missing) {
             Self::Present(context) => context,
-            Self::Missing => panic!("{}", MISSING_CONTEXT),
+            Self::Missing => panic!("{MISSING_CONTEXT}"),
         }
     }
 
     /// Return a context to the slot, panicking if one is already present.
     pub fn restore(&mut self, context: C) {
         match self {
-            Self::Present(_) => panic!("{}", DUPLICATE_CONTEXT),
+            Self::Present(_) => panic!("{DUPLICATE_CONTEXT}"),
             Self::Missing => {
                 *self = Self::Present(context);
             }
@@ -73,7 +73,7 @@ impl<C> Cell<C> {
     pub fn as_present(&self) -> &C {
         match self {
             Self::Present(context) => context,
-            Self::Missing => panic!("{}", MISSING_CONTEXT),
+            Self::Missing => panic!("{MISSING_CONTEXT}"),
         }
     }
 
@@ -85,7 +85,7 @@ impl<C> Cell<C> {
     pub fn as_present_mut(&mut self) -> &mut C {
         match self {
             Self::Present(context) => context,
-            Self::Missing => panic!("{}", MISSING_CONTEXT),
+            Self::Missing => panic!("{MISSING_CONTEXT}"),
         }
     }
 
@@ -97,7 +97,7 @@ impl<C> Cell<C> {
     pub fn into_present(self) -> C {
         match self {
             Self::Present(context) => context,
-            Self::Missing => panic!("{}", MISSING_CONTEXT),
+            Self::Missing => panic!("{MISSING_CONTEXT}"),
         }
     }
 }
