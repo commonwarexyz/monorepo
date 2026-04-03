@@ -240,16 +240,17 @@ commonware_macros::stability_scope!(ALPHA {
     ///
     /// type Z = Zoda<Sha256>;
     ///
+    /// let namespace = b"my-application";
     /// let config = Config {
     ///     minimum_shards: NZU16!(2),
     ///     extra_shards: NZU16!(1),
     /// };
     /// let data = b"Hello!";
-    /// let (commitment, mut shards) = Z::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+    /// let (commitment, mut shards) = Z::encode(namespace, &config, data.as_slice(), &STRATEGY).unwrap();
     ///
     /// let (checking_data, checked_0, _) =
-    ///     Z::weaken(&config, &commitment, 0, shards.remove(0)).unwrap();
-    /// let (_, _, weak_1) = Z::weaken(&config, &commitment, 1, shards.remove(0)).unwrap();
+    ///     Z::weaken(namespace, &config, &commitment, 0, shards.remove(0)).unwrap();
+    /// let (_, _, weak_1) = Z::weaken(namespace, &config, &commitment, 1, shards.remove(0)).unwrap();
     /// let checked_1 = Z::check(&config, &commitment, &checking_data, 1, weak_1).unwrap();
     ///
     /// let data2 = Z::decode(
@@ -308,8 +309,13 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// Each shard and proof is intended for exactly one participant. The number of shards returned
         /// should equal `config.minimum_shards + config.extra_shards`.
+        ///
+        /// `namespace` is a caller-provided byte string used for domain separation. All parties
+        /// participating in the same session must use the same `namespace` when calling `encode`
+        /// and `weaken`. Using `b""` produces the default behavior with no caller-specific context.
         #[allow(clippy::type_complexity)]
         fn encode(
+            namespace: &[u8],
             config: &Config,
             data: impl Buf,
             strategy: &impl Strategy,
@@ -324,8 +330,11 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// You also get [`PhasedScheme::CheckingData`], which has information you can use to check
         /// the shards you receive from others.
+        ///
+        /// `namespace` must match the one used in the corresponding `encode` call.
         #[allow(clippy::type_complexity)]
         fn weaken(
+            namespace: &[u8],
             config: &Config,
             commitment: &Self::Commitment,
             index: u16,
@@ -416,7 +425,7 @@ commonware_macros::stability_scope!(ALPHA {
             data: impl Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
-            P::encode(config, data, strategy).map_err(PhasedAsSchemeError::Scheme)
+            P::encode(b"", config, data, strategy).map_err(PhasedAsSchemeError::Scheme)
         }
 
         fn check(
@@ -426,7 +435,7 @@ commonware_macros::stability_scope!(ALPHA {
             shard: &Self::Shard,
         ) -> Result<Self::CheckedShard, Self::Error> {
             let (checking_data, checked_shard, _) =
-                P::weaken(config, commitment, index, shard.clone())
+                P::weaken(b"", config, commitment, index, shard.clone())
                     .map_err(PhasedAsSchemeError::Scheme)?;
             Ok(PhasedCheckedShard {
                 checking_data,
@@ -660,7 +669,7 @@ mod test {
 
         fn roundtrip<S: PhasedScheme>(config: &Config, data: &[u8], selected: &[u16]) {
             let owner = *selected.first().expect("selected must not be empty");
-            let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
+            let (commitment, shards) = S::encode(b"", config, data, &Sequential).unwrap();
             let read_cfg = CodecConfig {
                 maximum_shard_size: MAX_SHARD_SIZE,
             };
@@ -670,15 +679,27 @@ mod test {
                 assert_eq!(decoded_shard, *shard);
             }
 
-            let (checking_data, own_checked, _) =
-                S::weaken(config, &commitment, owner, shards[owner as usize].clone()).unwrap();
+            let (checking_data, own_checked, _) = S::weaken(
+                b"",
+                config,
+                &commitment,
+                owner,
+                shards[owner as usize].clone(),
+            )
+            .unwrap();
             let mut checked_shards = vec![own_checked];
             for &index in selected {
                 if index == owner {
                     continue;
                 }
-                let (_, _, weak_shard) =
-                    S::weaken(config, &commitment, index, shards[index as usize].clone()).unwrap();
+                let (_, _, weak_shard) = S::weaken(
+                    b"",
+                    config,
+                    &commitment,
+                    index,
+                    shards[index as usize].clone(),
+                )
+                .unwrap();
                 let decoded_weak =
                     S::WeakShard::read_cfg(&mut weak_shard.encode(), &read_cfg).unwrap();
                 assert_eq!(decoded_weak, weak_shard);
@@ -704,13 +725,13 @@ mod test {
             data_a: &[u8],
             data_b: &[u8],
         ) {
-            let (commitment_a, shards_a) = S::encode(config, data_a, &Sequential).unwrap();
-            let (commitment_b, shards_b) = S::encode(config, data_b, &Sequential).unwrap();
+            let (commitment_a, shards_a) = S::encode(b"", config, data_a, &Sequential).unwrap();
+            let (commitment_b, shards_b) = S::encode(b"", config, data_b, &Sequential).unwrap();
 
             let (checking_data_a, checked_a, _) =
-                S::weaken(config, &commitment_a, 0, shards_a[0].clone()).unwrap();
+                S::weaken(b"", config, &commitment_a, 0, shards_a[0].clone()).unwrap();
             let (checking_data_b, checked_b, weak_b) =
-                S::weaken(config, &commitment_b, 1, shards_b[1].clone()).unwrap();
+                S::weaken(b"", config, &commitment_b, 1, shards_b[1].clone()).unwrap();
 
             let check_result = S::check(config, &commitment_a, &checking_data_a, 1, weak_b);
             assert!(
@@ -734,7 +755,7 @@ mod test {
                 config,
                 &commitment_b,
                 checking_data_b,
-                core::iter::empty(),
+                core::iter::empty::<&S::CheckedShard>(),
                 &Sequential,
             );
             assert!(
