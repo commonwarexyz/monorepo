@@ -306,10 +306,12 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
                 // Remove oldest tracked peer sets if we exceed the limit.
                 while self.primary_sets.len() > tracked_peer_sets {
-                    let (id, set) = self.primary_sets.pop_first().unwrap();
-                    debug!(id, "removed oldest primary peer set");
+                    let (primary_index, primary_set) = self.primary_sets.pop_first().unwrap();
+                    let (secondary_index, secondary_set) = self.secondary_sets.pop_first().unwrap();
+                    assert_eq!(primary_index, secondary_index);
+                    debug!(index = primary_index, "removed oldest tracked peer sets");
 
-                    for public_key in set.iter() {
+                    for public_key in primary_set.iter() {
                         let refs = self.primary_refs.get_mut(public_key).unwrap();
                         *refs = refs.checked_sub(1).expect("reference count underflow");
 
@@ -322,8 +324,6 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                         }
                     }
 
-                    let (secondary_id, secondary_set) = self.secondary_sets.pop_first().unwrap();
-                    debug!(secondary_id, "removed oldest secondary peer set");
                     for public_key in secondary_set.iter() {
                         let refs = self.secondary_refs.get_mut(public_key).unwrap();
                         *refs = refs.checked_sub(1).expect("reference count underflow");
