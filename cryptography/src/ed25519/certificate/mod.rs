@@ -412,7 +412,7 @@ impl<N: Namespace> Generic<N> {
 
     pub const fn is_batchable() -> bool {
         // Batch verification requires the `std` feature because it depends on
-        // `ed25519_consensus::batch::Verifier`.
+        // `ed25519_zebra::batch::Verifier`.
         cfg!(feature = "std")
     }
 

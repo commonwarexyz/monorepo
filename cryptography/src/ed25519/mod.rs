@@ -1,6 +1,6 @@
 //! Ed25519 implementation of the [crate::Verifier] and [crate::Signer] traits.
 //!
-//! This implementation uses the `ed25519-consensus` crate to adhere to a strict
+//! This implementation uses the `ed25519-zebra` crate to adhere to a strict
 //! set of validation rules for Ed25519 signatures (which is necessary for
 //! stability in a consensus context). You can read more about this
 //! [here](https://hdevalence.ca/blog/2020-10-04-its-25519am).

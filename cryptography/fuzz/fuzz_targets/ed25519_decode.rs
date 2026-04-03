@@ -3,7 +3,9 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::ed25519::PublicKey;
-use ed25519_zebra::{VerificationKey as RefPublicKey, VerificationKeyBytes as RefPublicKeyBytes};
+use ed25519_consensus::{
+    VerificationKey as RefPublicKey, VerificationKeyBytes as RefPublicKeyBytes,
+};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, Arbitrary)]
