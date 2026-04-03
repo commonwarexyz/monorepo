@@ -8,12 +8,12 @@ hash = "0285839b29ab975f6f348ae6df4075ec9b35b1c091f135813629175358015870"
 
 ["commonware_math::poly::test::conformance::CodecConformance<Poly<F>>"]
 n_cases = 65536
-hash = "54e1597874d55f57cdcb090728d133d0e4448509f417db8434bfd39614a7b465"
+hash = "fbf61b786530f6a68c6401bc350c8ac475292e7eba628330e576e08f591cbf71"
 
 ["commonware_math::test::test::conformance::CodecConformance<F>"]
 n_cases = 65536
-hash = "94dd2831d555fe832ef6cd897230db53efbcfe248ec71b8f52c7d8503df4a9cf"
+hash = "2f73074b3a8cbdab051e13ae307b16f3eab62bd86772e1f3f9d4cea99d4dc879"
 
 ["commonware_math::test::test::conformance::CodecConformance<G>"]
 n_cases = 65536
-hash = "ada757c61874a554cc6915dc30953af19f2ea35ad176380f2f465d467eb3f210"
+hash = "1bfd819c72f7dcc9f6a9ba908ec6bcff242ecf9e5c47371d3e61c0ee0ccdedf4"
