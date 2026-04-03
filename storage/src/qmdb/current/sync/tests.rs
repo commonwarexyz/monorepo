@@ -174,7 +174,11 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch.merkleize(None::<Digest>, &db).await.unwrap().finalize()
+            batch
+                .merkleize(None::<Digest>, &db)
+                .await
+                .unwrap()
+                .finalize()
         };
         db.apply_batch(finalized).await.unwrap();
         db
@@ -199,7 +203,11 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch.merkleize(None::<Digest>, &db).await.unwrap().finalize()
+            batch
+                .merkleize(None::<Digest>, &db)
+                .await
+                .unwrap()
+                .finalize()
         };
         db.apply_batch(finalized).await.unwrap();
         db
@@ -224,7 +232,11 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch.merkleize(None::<Digest>, &db).await.unwrap().finalize()
+            batch
+                .merkleize(None::<Digest>, &db)
+                .await
+                .unwrap()
+                .finalize()
         };
         db.apply_batch(finalized).await.unwrap();
         db
@@ -249,7 +261,11 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch.merkleize(None::<Digest>, &db).await.unwrap().finalize()
+            batch
+                .merkleize(None::<Digest>, &db)
+                .await
+                .unwrap()
+                .finalize()
         };
         db.apply_batch(finalized).await.unwrap();
         db
@@ -269,11 +285,18 @@ mod harnesses {
             fixed_config::<crate::translator::TwoCap>(suffix, pooler)
         }
 
-        fn create_ops(n: usize) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmr::Family, Digest, Digest>> {
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmr::Family, Digest, Digest>>
+        {
             create_unordered_fixed_ops::<mmr::Family>(n, 0)
         }
 
-        fn create_ops_seeded(n: usize, seed: u64) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmr::Family, Digest, Digest>> {
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmr::Family, Digest, Digest>>
+        {
             create_unordered_fixed_ops::<mmr::Family>(n, seed)
         }
 
@@ -286,7 +309,10 @@ mod harnesses {
             Self::Db::init(ctx, config).await.unwrap()
         }
 
-        async fn apply_ops(db: Self::Db, ops: Vec<crate::qmdb::any::unordered::fixed::Operation<mmr::Family, Digest, Digest>>) -> Self::Db {
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<crate::qmdb::any::unordered::fixed::Operation<mmr::Family, Digest, Digest>>,
+        ) -> Self::Db {
             apply_unordered_fixed_ops(db, ops).await
         }
     }
@@ -305,11 +331,18 @@ mod harnesses {
             fixed_config::<crate::translator::TwoCap>(suffix, pooler)
         }
 
-        fn create_ops(n: usize) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>> {
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>
+        {
             create_unordered_fixed_ops::<mmb::Family>(n, 0)
         }
 
-        fn create_ops_seeded(n: usize, seed: u64) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>> {
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>
+        {
             create_unordered_fixed_ops::<mmb::Family>(n, seed)
         }
 
@@ -322,7 +355,10 @@ mod harnesses {
             Self::Db::init(ctx, config).await.unwrap()
         }
 
-        async fn apply_ops(db: Self::Db, ops: Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>) -> Self::Db {
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<crate::qmdb::any::unordered::fixed::Operation<mmb::Family, Digest, Digest>>,
+        ) -> Self::Db {
             apply_unordered_fixed_ops(db, ops).await
         }
     }
@@ -341,11 +377,18 @@ mod harnesses {
             variable_config::<crate::translator::TwoCap>(suffix, pooler)
         }
 
-        fn create_ops(n: usize) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmr::Family, Digest, Digest>> {
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmr::Family, Digest, Digest>>
+        {
             create_unordered_variable_ops::<mmr::Family>(n, 0)
         }
 
-        fn create_ops_seeded(n: usize, seed: u64) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmr::Family, Digest, Digest>> {
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmr::Family, Digest, Digest>>
+        {
             create_unordered_variable_ops::<mmr::Family>(n, seed)
         }
 
@@ -358,7 +401,10 @@ mod harnesses {
             Self::Db::init(ctx, config).await.unwrap()
         }
 
-        async fn apply_ops(db: Self::Db, ops: Vec<crate::qmdb::any::unordered::variable::Operation<mmr::Family, Digest, Digest>>) -> Self::Db {
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<crate::qmdb::any::unordered::variable::Operation<mmr::Family, Digest, Digest>>,
+        ) -> Self::Db {
             apply_unordered_variable_ops(db, ops).await
         }
     }
@@ -377,11 +423,18 @@ mod harnesses {
             variable_config::<crate::translator::TwoCap>(suffix, pooler)
         }
 
-        fn create_ops(n: usize) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Digest>> {
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Digest>>
+        {
             create_unordered_variable_ops::<mmb::Family>(n, 0)
         }
 
-        fn create_ops_seeded(n: usize, seed: u64) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Digest>> {
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Digest>>
+        {
             create_unordered_variable_ops::<mmb::Family>(n, seed)
         }
 
@@ -394,7 +447,10 @@ mod harnesses {
             Self::Db::init(ctx, config).await.unwrap()
         }
 
-        async fn apply_ops(db: Self::Db, ops: Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Digest>>) -> Self::Db {
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<crate::qmdb::any::unordered::variable::Operation<mmb::Family, Digest, Digest>>,
+        ) -> Self::Db {
             apply_unordered_variable_ops(db, ops).await
         }
     }
@@ -413,11 +469,16 @@ mod harnesses {
             fixed_config::<crate::translator::OneCap>(suffix, pooler)
         }
 
-        fn create_ops(n: usize) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmr::Family, Digest, Digest>> {
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmr::Family, Digest, Digest>> {
             create_ordered_fixed_ops::<mmr::Family>(n, 0)
         }
 
-        fn create_ops_seeded(n: usize, seed: u64) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmr::Family, Digest, Digest>> {
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmr::Family, Digest, Digest>> {
             create_ordered_fixed_ops::<mmr::Family>(n, seed)
         }
 
@@ -430,7 +491,10 @@ mod harnesses {
             Self::Db::init(ctx, config).await.unwrap()
         }
 
-        async fn apply_ops(db: Self::Db, ops: Vec<crate::qmdb::any::ordered::fixed::Operation<mmr::Family, Digest, Digest>>) -> Self::Db {
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<crate::qmdb::any::ordered::fixed::Operation<mmr::Family, Digest, Digest>>,
+        ) -> Self::Db {
             apply_ordered_fixed_ops(db, ops).await
         }
     }
@@ -449,11 +513,16 @@ mod harnesses {
             fixed_config::<crate::translator::OneCap>(suffix, pooler)
         }
 
-        fn create_ops(n: usize) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>> {
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>> {
             create_ordered_fixed_ops::<mmb::Family>(n, 0)
         }
 
-        fn create_ops_seeded(n: usize, seed: u64) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>> {
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>> {
             create_ordered_fixed_ops::<mmb::Family>(n, seed)
         }
 
@@ -466,7 +535,10 @@ mod harnesses {
             Self::Db::init(ctx, config).await.unwrap()
         }
 
-        async fn apply_ops(db: Self::Db, ops: Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>>) -> Self::Db {
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<crate::qmdb::any::ordered::fixed::Operation<mmb::Family, Digest, Digest>>,
+        ) -> Self::Db {
             apply_ordered_fixed_ops(db, ops).await
         }
     }
@@ -485,11 +557,18 @@ mod harnesses {
             variable_config::<crate::translator::OneCap>(suffix, pooler)
         }
 
-        fn create_ops(n: usize) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmr::Family, Digest, Digest>> {
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmr::Family, Digest, Digest>>
+        {
             create_ordered_variable_ops::<mmr::Family>(n, 0)
         }
 
-        fn create_ops_seeded(n: usize, seed: u64) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmr::Family, Digest, Digest>> {
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmr::Family, Digest, Digest>>
+        {
             create_ordered_variable_ops::<mmr::Family>(n, seed)
         }
 
@@ -502,7 +581,10 @@ mod harnesses {
             Self::Db::init(ctx, config).await.unwrap()
         }
 
-        async fn apply_ops(db: Self::Db, ops: Vec<crate::qmdb::any::ordered::variable::Operation<mmr::Family, Digest, Digest>>) -> Self::Db {
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<crate::qmdb::any::ordered::variable::Operation<mmr::Family, Digest, Digest>>,
+        ) -> Self::Db {
             apply_ordered_variable_ops(db, ops).await
         }
     }
@@ -521,11 +603,18 @@ mod harnesses {
             variable_config::<crate::translator::OneCap>(suffix, pooler)
         }
 
-        fn create_ops(n: usize) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Digest>> {
+        fn create_ops(
+            n: usize,
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Digest>>
+        {
             create_ordered_variable_ops::<mmb::Family>(n, 0)
         }
 
-        fn create_ops_seeded(n: usize, seed: u64) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Digest>> {
+        fn create_ops_seeded(
+            n: usize,
+            seed: u64,
+        ) -> Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Digest>>
+        {
             create_ordered_variable_ops::<mmb::Family>(n, seed)
         }
 
@@ -538,7 +627,10 @@ mod harnesses {
             Self::Db::init(ctx, config).await.unwrap()
         }
 
-        async fn apply_ops(db: Self::Db, ops: Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Digest>>) -> Self::Db {
+        async fn apply_ops(
+            db: Self::Db,
+            ops: Vec<crate::qmdb::any::ordered::variable::Operation<mmb::Family, Digest, Digest>>,
+        ) -> Self::Db {
             apply_ordered_variable_ops(db, ops).await
         }
     }
@@ -679,11 +771,29 @@ macro_rules! current_sync_tests_for_harness {
     };
 }
 
-current_sync_tests_for_harness!(self::harnesses::UnorderedFixedMmrHarness, unordered_fixed_mmr);
-current_sync_tests_for_harness!(self::harnesses::UnorderedFixedMmbHarness, unordered_fixed_mmb);
-current_sync_tests_for_harness!(self::harnesses::UnorderedVariableMmrHarness, unordered_variable_mmr);
-current_sync_tests_for_harness!(self::harnesses::UnorderedVariableMmbHarness, unordered_variable_mmb);
+current_sync_tests_for_harness!(
+    self::harnesses::UnorderedFixedMmrHarness,
+    unordered_fixed_mmr
+);
+current_sync_tests_for_harness!(
+    self::harnesses::UnorderedFixedMmbHarness,
+    unordered_fixed_mmb
+);
+current_sync_tests_for_harness!(
+    self::harnesses::UnorderedVariableMmrHarness,
+    unordered_variable_mmr
+);
+current_sync_tests_for_harness!(
+    self::harnesses::UnorderedVariableMmbHarness,
+    unordered_variable_mmb
+);
 current_sync_tests_for_harness!(self::harnesses::OrderedFixedMmrHarness, ordered_fixed_mmr);
 current_sync_tests_for_harness!(self::harnesses::OrderedFixedMmbHarness, ordered_fixed_mmb);
-current_sync_tests_for_harness!(self::harnesses::OrderedVariableMmrHarness, ordered_variable_mmr);
-current_sync_tests_for_harness!(self::harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
+current_sync_tests_for_harness!(
+    self::harnesses::OrderedVariableMmrHarness,
+    ordered_variable_mmr
+);
+current_sync_tests_for_harness!(
+    self::harnesses::OrderedVariableMmbHarness,
+    ordered_variable_mmb
+);

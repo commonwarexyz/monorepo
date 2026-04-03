@@ -108,9 +108,7 @@ impl<F: merkle::Family, Op, D: Digest, E> Requests<F, Op, D, E> {
     #[allow(clippy::type_complexity)]
     pub fn futures_mut(
         &mut self,
-    ) -> &mut FuturesUnordered<
-        Pin<Box<dyn Future<Output = IndexedFetchResult<F, Op, D, E>> + Send>>,
-    >
+    ) -> &mut FuturesUnordered<Pin<Box<dyn Future<Output = IndexedFetchResult<F, Op, D, E>> + Send>>>
     {
         &mut self.futures
     }

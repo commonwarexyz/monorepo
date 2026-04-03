@@ -1,6 +1,6 @@
 use crate::{
-    mmr,
     merkle::{self, Location},
+    mmr,
     qmdb::{
         self,
         any::{
@@ -39,9 +39,7 @@ pub struct FetchResult<F: merkle::Family, Op, D: Digest> {
     pub pinned_nodes: Option<Vec<D>>,
 }
 
-impl<F: merkle::Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug
-    for FetchResult<F, Op, D>
-{
+impl<F: merkle::Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<F, Op, D> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FetchResult")
             .field("proof", &self.proof)
@@ -284,7 +282,8 @@ macro_rules! impl_resolver_immutable {
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<FetchResult<mmr::Family, Self::Op, Self::Digest>, qmdb::Error<mmr::Family>> {
+            ) -> Result<FetchResult<mmr::Family, Self::Op, Self::Digest>, qmdb::Error<mmr::Family>>
+            {
                 let db = self.read().await;
                 let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;
                 let pinned_nodes = if include_pinned_nodes {
@@ -322,7 +321,8 @@ macro_rules! impl_resolver_immutable {
                 max_ops: NonZeroU64,
                 include_pinned_nodes: bool,
                 _cancel_rx: oneshot::Receiver<()>,
-            ) -> Result<FetchResult<mmr::Family, Self::Op, Self::Digest>, qmdb::Error<mmr::Family>> {
+            ) -> Result<FetchResult<mmr::Family, Self::Op, Self::Digest>, qmdb::Error<mmr::Family>>
+            {
                 let guard = self.read().await;
                 let db = guard.as_ref().ok_or(qmdb::Error::KeyNotFound)?;
                 let (proof, operations) = db.historical_proof(op_count, start_loc, max_ops).await?;

@@ -689,7 +689,9 @@ pub(super) async fn compute_grafted_root<
     let leaves = Location::try_from(size)?;
 
     // Collect peak digests of the grafted structure.
-    let peak_positions = F::peaks(size).map(|(peak_pos, _)| peak_pos).collect::<Vec<_>>();
+    let peak_positions = F::peaks(size)
+        .map(|(peak_pos, _)| peak_pos)
+        .collect::<Vec<_>>();
     let mut peaks: Vec<H::Digest> = Vec::with_capacity(peak_positions.len());
     for peak_pos in peak_positions {
         let digest = storage

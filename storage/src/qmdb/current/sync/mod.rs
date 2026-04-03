@@ -30,12 +30,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    merkle::{
-        self,
-        hasher::Standard as StandardHasher,
-        journaled,
-        Location,
-    },
+    merkle::{self, hasher::Standard as StandardHasher, journaled, Location},
     qmdb::{
         self,
         any::{
@@ -227,11 +222,9 @@ where
     );
 
     // Initialize metadata store and construct the Db.
-    let (metadata, _, _) = db::init_metadata::<F, E, DigestOf<H>>(
-        context.with_label("metadata"),
-        &metadata_partition,
-    )
-    .await?;
+    let (metadata, _, _) =
+        db::init_metadata::<F, E, DigestOf<H>>(context.with_label("metadata"), &metadata_partition)
+            .await?;
 
     let current_db = db::Db {
         any,

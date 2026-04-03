@@ -8,7 +8,7 @@ use crate::{
         authenticated,
         contiguous::{fixed, variable, Mutable},
     },
-    merkle::{self, journaled, hasher::Standard as StandardHasher, Location},
+    merkle::{self, hasher::Standard as StandardHasher, journaled, Location},
     qmdb::{
         self,
         any::{

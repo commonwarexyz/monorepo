@@ -112,7 +112,11 @@ mod tests {
     use rstest::rstest;
     use std::io::Cursor;
 
-    fn target(root: sha256::Digest, start: u64, end: u64) -> Target<merkle::mmr::Family, sha256::Digest> {
+    fn target(
+        root: sha256::Digest,
+        start: u64,
+        end: u64,
+    ) -> Target<merkle::mmr::Family, sha256::Digest> {
         Target {
             root,
             range: non_empty_range!(
@@ -161,10 +165,8 @@ mod tests {
         let root = sha256::Digest::from([42; 32]);
         let mut buffer = Vec::new();
         root.write(&mut buffer);
-        (
-            merkle::Location::<merkle::mmr::Family>::new(100)
-                ..merkle::Location::<merkle::mmr::Family>::new(100)
-        )
+        (merkle::Location::<merkle::mmr::Family>::new(100)
+            ..merkle::Location::<merkle::mmr::Family>::new(100))
             .write(&mut buffer);
 
         let mut cursor = Cursor::new(buffer);

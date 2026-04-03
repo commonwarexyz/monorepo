@@ -93,8 +93,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
             Context = deterministic::Context,
             Digest = Digest,
             Config: Clone,
-        >
-        + DbAny<Self::Family, Key = Digest, Digest = Digest>;
+        > + DbAny<Self::Family, Key = Digest, Digest = Digest>;
 
     /// Return the root the sync engine targets.
     fn sync_target_root(db: &Self::Db) -> Digest;
@@ -1693,7 +1692,7 @@ mod harnesses {
         merkle::{self, mmb, mmr},
         qmdb::any::{
             self,
-            operation::{update::Ordered as OrderedUpdate, update::Unordered as UnorderedUpdate},
+            operation::update::{Ordered as OrderedUpdate, Unordered as UnorderedUpdate},
             ordered, unordered,
             value::VariableEncoding,
         },
@@ -1782,7 +1781,9 @@ mod harnesses {
                 ops.push(unordered::fixed::Operation::Delete(prev_key));
             } else {
                 let value = Digest::random(&mut rng);
-                ops.push(unordered::fixed::Operation::Update(UnorderedUpdate(key, value)));
+                ops.push(unordered::fixed::Operation::Update(UnorderedUpdate(
+                    key, value,
+                )));
                 prev_key = key;
             }
         }
@@ -1828,7 +1829,11 @@ mod harnesses {
                     }
                 }
             }
-            batch.merkleize(None::<Digest>, &db).await.unwrap().finalize()
+            batch
+                .merkleize(None::<Digest>, &db)
+                .await
+                .unwrap()
+                .finalize()
         };
         db.apply_batch(finalized).await.unwrap();
         db
@@ -1853,7 +1858,11 @@ mod harnesses {
                     }
                 }
             }
-            batch.merkleize(None::<Vec<u8>>, &db).await.unwrap().finalize()
+            batch
+                .merkleize(None::<Vec<u8>>, &db)
+                .await
+                .unwrap()
+                .finalize()
         };
         db.apply_batch(finalized).await.unwrap();
         db
@@ -1878,7 +1887,11 @@ mod harnesses {
                     }
                 }
             }
-            batch.merkleize(None::<Digest>, &db).await.unwrap().finalize()
+            batch
+                .merkleize(None::<Digest>, &db)
+                .await
+                .unwrap()
+                .finalize()
         };
         db.apply_batch(finalized).await.unwrap();
         db
@@ -1903,7 +1916,11 @@ mod harnesses {
                     }
                 }
             }
-            batch.merkleize(None::<Vec<u8>>, &db).await.unwrap().finalize()
+            batch
+                .merkleize(None::<Vec<u8>>, &db)
+                .await
+                .unwrap()
+                .finalize()
         };
         db.apply_batch(finalized).await.unwrap();
         db
@@ -2007,10 +2024,8 @@ mod harnesses {
         }
 
         async fn init_db(mut ctx: Context) -> Self::Db {
-            let cfg = crate::qmdb::any::ordered::variable::test::create_test_config(
-                ctx.next_u64(),
-                &ctx,
-            );
+            let cfg =
+                crate::qmdb::any::ordered::variable::test::create_test_config(ctx.next_u64(), &ctx);
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -2049,10 +2064,8 @@ mod harnesses {
         }
 
         async fn init_db(mut ctx: Context) -> Self::Db {
-            let cfg = crate::qmdb::any::ordered::variable::test::create_test_config(
-                ctx.next_u64(),
-                &ctx,
-            );
+            let cfg =
+                crate::qmdb::any::ordered::variable::test::create_test_config(ctx.next_u64(), &ctx);
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -2384,14 +2397,44 @@ macro_rules! from_sync_result_tests_for_harness {
 
 sync_tests_for_harness!(self::harnesses::OrderedFixedMmrHarness, ordered_fixed_mmr);
 sync_tests_for_harness!(self::harnesses::OrderedFixedMmbHarness, ordered_fixed_mmb);
-sync_tests_for_harness!(self::harnesses::OrderedVariableMmrHarness, ordered_variable_mmr);
-sync_tests_for_harness!(self::harnesses::OrderedVariableMmbHarness, ordered_variable_mmb);
-sync_tests_for_harness!(self::harnesses::UnorderedFixedMmrHarness, unordered_fixed_mmr);
-sync_tests_for_harness!(self::harnesses::UnorderedFixedMmbHarness, unordered_fixed_mmb);
-sync_tests_for_harness!(self::harnesses::UnorderedVariableMmrHarness, unordered_variable_mmr);
-sync_tests_for_harness!(self::harnesses::UnorderedVariableMmbHarness, unordered_variable_mmb);
+sync_tests_for_harness!(
+    self::harnesses::OrderedVariableMmrHarness,
+    ordered_variable_mmr
+);
+sync_tests_for_harness!(
+    self::harnesses::OrderedVariableMmbHarness,
+    ordered_variable_mmb
+);
+sync_tests_for_harness!(
+    self::harnesses::UnorderedFixedMmrHarness,
+    unordered_fixed_mmr
+);
+sync_tests_for_harness!(
+    self::harnesses::UnorderedFixedMmbHarness,
+    unordered_fixed_mmb
+);
+sync_tests_for_harness!(
+    self::harnesses::UnorderedVariableMmrHarness,
+    unordered_variable_mmr
+);
+sync_tests_for_harness!(
+    self::harnesses::UnorderedVariableMmbHarness,
+    unordered_variable_mmb
+);
 
-from_sync_result_tests_for_harness!(harnesses::OrderedFixedMmrHarness, ordered_fixed_mmr_from_sync_result);
-from_sync_result_tests_for_harness!(harnesses::OrderedVariableMmrHarness, ordered_variable_mmr_from_sync_result);
-from_sync_result_tests_for_harness!(harnesses::UnorderedFixedMmrHarness, unordered_fixed_mmr_from_sync_result);
-from_sync_result_tests_for_harness!(harnesses::UnorderedVariableMmrHarness, unordered_variable_mmr_from_sync_result);
+from_sync_result_tests_for_harness!(
+    harnesses::OrderedFixedMmrHarness,
+    ordered_fixed_mmr_from_sync_result
+);
+from_sync_result_tests_for_harness!(
+    harnesses::OrderedVariableMmrHarness,
+    ordered_variable_mmr_from_sync_result
+);
+from_sync_result_tests_for_harness!(
+    harnesses::UnorderedFixedMmrHarness,
+    unordered_fixed_mmr_from_sync_result
+);
+from_sync_result_tests_for_harness!(
+    harnesses::UnorderedVariableMmrHarness,
+    unordered_variable_mmr_from_sync_result
+);

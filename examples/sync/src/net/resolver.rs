@@ -3,7 +3,10 @@ use crate::net::request_id;
 use commonware_codec::{EncodeShared, IsUnit, Read};
 use commonware_cryptography::Digest;
 use commonware_runtime::{Network, Spawner};
-use commonware_storage::{mmr::{self, Location}, qmdb::sync};
+use commonware_storage::{
+    mmr::{self, Location},
+    qmdb::sync,
+};
 use commonware_utils::channel::{mpsc, oneshot};
 use std::num::NonZeroU64;
 

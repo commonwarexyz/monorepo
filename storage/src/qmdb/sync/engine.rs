@@ -781,9 +781,8 @@ mod tests {
     fn dummy_future(
         id: RequestId,
         loc: u64,
-    ) -> Pin<
-        Box<dyn Future<Output = IndexedFetchResult<Family, i32, sha256::Digest, ()>> + Send>,
-    > {
+    ) -> Pin<Box<dyn Future<Output = IndexedFetchResult<Family, i32, sha256::Digest, ()>> + Send>>
+    {
         Box::pin(async move {
             IndexedFetchResult {
                 id,
