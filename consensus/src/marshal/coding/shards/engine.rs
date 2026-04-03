@@ -261,10 +261,11 @@ where
     /// capacity.
     pub background_channel_capacity: usize,
 
-    /// Provider for peer set information. Pre-leader shards are buffered per peer
-    /// only while that peer appears in [`PeerSetUpdate::latest`] primary set,
-    /// matching [`commonware_broadcast::buffered::Engine`]. Broadcast delivery
-    /// uses the aggregate [`PeerSetUpdate::all`] union.
+    /// Provider for peer set information. Pre-leader shards are buffered per
+    /// peer only while that peer appears in the
+    /// [`commonware_p2p::PeerSetUpdate::latest`] primary set, matching
+    /// [`commonware_broadcast::buffered::Engine`]. Broadcast delivery uses the
+    /// aggregate [`commonware_p2p::PeerSetUpdate::all`] union.
     pub peer_provider: D,
 }
 
@@ -4926,9 +4927,10 @@ mod tests {
         });
     }
 
-    /// If the evicted node leaves [`PeerSetUpdate::latest.primary`], it
-    /// must still reconstruct once the leader is discovered, as long as enough
-    /// buffered shards came from peers that remain in `latest.primary`.
+    /// If the evicted node leaves the
+    /// [`commonware_p2p::PeerSetUpdate::latest`] primary set, it must still
+    /// reconstruct once the leader is discovered, as long as enough buffered
+    /// shards came from peers that remain in `latest.primary`.
     ///
     /// This does not rely on a self-buffered shard or a leader-delivered shard:
     /// reconstruction should succeed from the remaining buffered peer shards
