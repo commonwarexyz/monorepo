@@ -97,6 +97,66 @@ impl<F: Family, V> DiffEntry<F, V> {
     }
 }
 
+/// Where this batch's inherited state comes from.
+enum Base<F: Family, D: Digest, U: update::Update + Send + Sync>
+where
+    Operation<F, U>: Send + Sync,
+{
+    /// Created from the DB via `db.new_batch()`.
+    Db {
+        db_size: u64,
+        inactivity_floor_loc: Location<F>,
+        active_keys: usize,
+    },
+    /// Created from a parent batch via `parent.new_batch()`.
+    Child(Arc<MerkleizedBatch<F, D, U>>),
+}
+
+impl<F: Family, D: Digest, U: update::Update + Send + Sync> Base<F, D, U>
+where
+    Operation<F, U>: Send + Sync,
+{
+    /// Total operations before this batch (committed DB + ancestor batches).
+    fn base_size(&self) -> u64 {
+        match self {
+            Self::Db { db_size, .. } => *db_size,
+            Self::Child(parent) => parent.total_size,
+        }
+    }
+
+    /// Number of committed DB operations when the ancestor chain was created.
+    fn db_size(&self) -> u64 {
+        match self {
+            Self::Db { db_size, .. } => *db_size,
+            Self::Child(parent) => parent.db_size,
+        }
+    }
+
+    fn inactivity_floor_loc(&self) -> Location<F> {
+        match self {
+            Self::Db {
+                inactivity_floor_loc,
+                ..
+            } => *inactivity_floor_loc,
+            Self::Child(parent) => parent.new_inactivity_floor_loc,
+        }
+    }
+
+    fn active_keys(&self) -> usize {
+        match self {
+            Self::Db { active_keys, .. } => *active_keys,
+            Self::Child(parent) => parent.total_active_keys,
+        }
+    }
+
+    const fn parent(&self) -> Option<&Arc<MerkleizedBatch<F, D, U>>> {
+        match self {
+            Self::Db { .. } => None,
+            Self::Child(parent) => Some(parent),
+        }
+    }
+}
+
 /// A speculative batch of operations whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
 ///
@@ -114,24 +174,8 @@ where
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
 
-    /// Parent batch in the chain. `None` for batches created directly from the DB.
-    parent: Option<Arc<MerkleizedBatch<F, H::Digest, U>>>,
-
-    /// Total operations in the DB + all ancestor batches. This batch's i-th operation is
-    /// assigned location `base_size + i`.
-    base_size: u64,
-
-    /// Inactivity floor location before this batch.
-    base_inactivity_floor_loc: Location<F>,
-
-    /// Number of committed DB operations when the root of this batch's ancestor chain was
-    /// created (via `db.new_batch()` or `db.to_batch()`). Inherited unchanged by all
-    /// descendants. Used by `apply_batch` to detect whether ancestors have been committed
-    /// since then.
-    db_size: u64,
-
-    /// Active key count before this batch.
-    base_active_keys: usize,
+    /// The committed DB or parent batch this batch was created from.
+    base: Base<F, H::Digest, U>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -601,7 +645,7 @@ where
     /// Split into pending mutations and the merkleization machinery.
     #[allow(clippy::type_complexity)]
     fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U>) {
-        let ancestors: Vec<_> = self.parent.as_ref().map_or_else(Vec::new, |parent| {
+        let ancestors: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
             let mut v = vec![Arc::clone(parent)];
             v.extend(parent.ancestors());
             v
@@ -611,22 +655,21 @@ where
         // A committed and dropped. ancestors() yields [B] (A's Weak is dead). B's items start
         // at A.size(), not db_size. We use the journal (strong Arcs, always intact) to compute
         // the actual base so read_op falls through to disk for locations in the gap.
-        let effective_db_size = if let Some(oldest) = ancestors.last() {
+        let db_size = self.base.db_size();
+        let effective_db_size = ancestors.last().map_or(db_size, |oldest| {
             let oldest_base =
                 oldest.journal_batch.size() - oldest.journal_batch.items().len() as u64;
-            self.db_size.max(oldest_base)
-        } else {
-            self.db_size
-        };
+            db_size.max(oldest_base)
+        });
         (
             self.mutations,
             Merkleizer {
                 journal_batch: self.journal_batch,
                 ancestors,
-                base_size: self.base_size,
+                base_size: self.base.base_size(),
                 db_size: effective_db_size,
-                base_inactivity_floor_loc: self.base_inactivity_floor_loc,
-                base_active_keys: self.base_active_keys,
+                base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
+                base_active_keys: self.base.active_keys(),
             },
         )
     }
@@ -653,7 +696,7 @@ where
         if let Some(value) = self.mutations.get(key) {
             return Ok(value.clone());
         }
-        if let Some(parent) = &self.parent {
+        if let Some(parent) = self.base.parent() {
             if let Some(entry) = parent.diff.get(key) {
                 return Ok(entry.value().cloned());
             }
@@ -1118,11 +1161,7 @@ where
         UnmerkleizedBatch {
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
-            parent: Some(Arc::clone(self)),
-            base_size: self.total_size,
-            db_size: self.db_size,
-            base_inactivity_floor_loc: self.new_inactivity_floor_loc,
-            base_active_keys: self.total_active_keys,
+            base: Base::Child(Arc::clone(self)),
         }
     }
 
@@ -1169,11 +1208,11 @@ where
         UnmerkleizedBatch {
             journal_batch: self.log.new_batch(),
             mutations: BTreeMap::new(),
-            parent: None,
-            base_size: journal_size,
-            db_size: journal_size,
-            base_inactivity_floor_loc: self.inactivity_floor_loc,
-            base_active_keys: self.active_keys,
+            base: Base::Db {
+                db_size: journal_size,
+                inactivity_floor_loc: self.inactivity_floor_loc,
+                active_keys: self.active_keys,
+            },
         }
     }
 }
