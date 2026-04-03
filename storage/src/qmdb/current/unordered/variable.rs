@@ -47,7 +47,7 @@ where
     Operation<F, K, V>: Read,
 {
     /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
-    /// the bitmap MMR if a thread pool is provided.
+    /// the bitmap Merkle tree if a thread pool is provided.
     pub async fn init(
         context: E,
         config: Config<T, <Operation<F, K, V> as Read>::Cfg>,
@@ -94,7 +94,7 @@ pub mod partitioned {
         Operation<F, K, V>: Read,
     {
         /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
-        /// the bitmap MMR if a thread pool is provided.
+        /// the bitmap Merkle tree if a thread pool is provided.
         pub async fn init(
             context: E,
             config: Config<T, <Operation<F, K, V> as Read>::Cfg>,

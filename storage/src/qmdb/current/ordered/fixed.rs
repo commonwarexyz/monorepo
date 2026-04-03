@@ -45,7 +45,7 @@ impl<
     > Db<F, E, K, V, H, T, N>
 {
     /// Initializes a [Db] from the given `config`. Leverages parallel Merkleization to initialize
-    /// the bitmap MMR if a thread pool is provided.
+    /// the bitmap Merkle tree if a thread pool is provided.
     pub async fn init(context: E, config: Config<T>) -> Result<Self, Error<F>> {
         crate::qmdb::current::init(context, config).await
     }
@@ -87,7 +87,7 @@ pub mod partitioned {
         > Db<F, E, K, V, H, T, P, N>
     {
         /// Initializes a [Db] authenticated database from the given `config`. Leverages parallel
-        /// Merkleization to initialize the bitmap MMR if a thread pool is provided.
+        /// Merkleization to initialize the bitmap Merkle tree if a thread pool is provided.
         pub async fn init(context: E, config: Config<T>) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }

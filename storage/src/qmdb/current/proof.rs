@@ -221,7 +221,7 @@ fn reconstruct_grafted_root<F: Graftable, H: CHasher, C: AsRef<[u8]>>(
 /// A proof that a range of operations exist in the database.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct RangeProof<F: Family, D: Digest> {
-    /// The MMR digest material required to verify the proof.
+    /// The Merkle digest material required to verify the proof.
     pub proof: Proof<F, D>,
 
     /// The single folded accumulator of all aligned prefix peaks that do not require unfolding.
@@ -471,7 +471,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         };
         let needs_grafted_peak_fold =
             proof_needs_grafted_peak_fold(&layout, size, grafting_height, complete_chunks);
-        let mmr_root = if !needs_grafted_peak_fold {
+        let merkle_root = if !needs_grafted_peak_fold {
             match self.proof.reconstruct_root(&verifier, &elements, start_loc) {
                 Ok(root) => root,
                 Err(error) => {
@@ -518,7 +518,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
         // Compute the canonical root and compare.
         hasher.update(&self.ops_root);
-        hasher.update(&mmr_root);
+        hasher.update(&merkle_root);
         if has_partial_chunk {
             // partial_chunk_digest is guaranteed Some by the check above.
             hasher.update(&next_bit.to_be_bytes());

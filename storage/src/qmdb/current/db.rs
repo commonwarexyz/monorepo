@@ -667,8 +667,8 @@ pub(super) async fn compute_db_root<
 /// Compute the root of the grafted structure represented by `storage`.
 ///
 /// We use [`grafting::grafted_root`] instead of a standard `hasher.root()` fold to correctly handle
-/// grafting over MMB (Merkle Mountain Builder) structures. In an MMB, the trailing operations at
-/// the right edge of the structure might not be numerous enough to form a complete subtree at the
+/// grafting over MMB (Merkle Mountain Belt) structures. In an MMB, the trailing operations at the
+/// right edge of the structure might not be numerous enough to form a complete subtree at the
 /// grafting height. Therefore, a single bitmap chunk may span across multiple smaller ops peaks.
 /// `grafting::grafted_root` intercepts the folding process to group these sub-grafting-height
 /// peaks, hash them together with their corresponding bitmap chunks, and then complete the final

@@ -80,8 +80,12 @@ pub trait Syncable: Sized {
         op_count: Location<Self::Family>,
         start_loc: Location<Self::Family>,
         max_ops: NonZeroU64,
-    ) -> impl Future<Output = Result<(Proof<Self::Family, Key>, Vec<Self::Operation>), qmdb::Error<Self::Family>>>
-           + Send;
+    ) -> impl Future<
+        Output = Result<
+            (Proof<Self::Family, Key>, Vec<Self::Operation>),
+            qmdb::Error<Self::Family>,
+        >,
+    > + Send;
 
     /// Get the pinned nodes for a lower operation boundary of `loc`.
     fn pinned_nodes_at(
