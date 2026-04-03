@@ -25,13 +25,6 @@ struct Waiter<M> {
     responder: oneshot::Sender<M>,
 }
 
-/// Result of attempting to process a received message.
-enum InsertMessage {
-    Inserted,
-    Duplicate,
-    Untracked,
-}
-
 /// Instance of the main engine for the module.
 ///
 /// It is responsible for:
@@ -247,7 +240,8 @@ where
         responder: oneshot::Sender<Vec<P>>,
     ) {
         // Store the message, continue even if it was already stored
-        let _ = self.insert_message(self.public_key.clone(), msg.clone());
+        let digest = msg.digest();
+        self.insert_message(self.public_key.clone(), digest, msg.clone());
 
         // Broadcast the message to the network
         let sent_to = sender
@@ -286,19 +280,25 @@ where
 
     /// Handles a message that was received from a peer.
     fn handle_network(&mut self, peer: P, msg: M) {
-        match self.insert_message(peer.clone(), msg) {
-            InsertMessage::Inserted => {
-                self.metrics.receive.inc(Status::Success);
-            }
-            InsertMessage::Duplicate => {
-                debug!(?peer, "message already stored");
-                self.metrics.receive.inc(Status::Dropped);
-            }
-            InsertMessage::Untracked => {
-                debug!(?peer, "message from peer outside latest.primary not cached");
-                self.metrics.receive.inc(Status::Dropped);
-            }
+        let digest = msg.digest();
+        let tracked = self.should_buffer_peer(&peer);
+        let duplicate = tracked
+            && self
+                .deques
+                .get(&peer)
+                .is_some_and(|deque| deque.iter().any(|cached| cached == &digest));
+
+        if self.insert_message(peer.clone(), digest, msg) {
+            self.metrics.receive.inc(Status::Success);
+            return;
         }
+
+        if duplicate {
+            debug!(?peer, "message already stored");
+        } else {
+            debug!(?peer, "message from peer outside latest.primary not cached");
+        }
+        self.metrics.receive.inc(Status::Dropped);
     }
 
     ////////////////////////////////////////
@@ -309,9 +309,7 @@ where
     ///
     /// Waiters are notified even when a sender is no longer eligible to keep a
     /// buffered cache entry resident.
-    fn insert_message(&mut self, peer: P, msg: M) -> InsertMessage {
-        let digest = msg.digest();
-
+    fn insert_message(&mut self, peer: P, digest: M::Digest, msg: M) -> bool {
         // Send the message to the waiters, if any
         if let Some(waiters) = self.waiters.remove(&digest) {
             for waiter in waiters {
@@ -320,7 +318,7 @@ where
         }
 
         if !self.should_buffer_peer(&peer) {
-            return InsertMessage::Untracked;
+            return false;
         }
 
         // Get the relevant deque for the peer
@@ -335,7 +333,7 @@ where
                 let v = deque.remove(i).unwrap(); // Must exist
                 deque.push_front(v);
             }
-            return InsertMessage::Duplicate;
+            return false;
         };
 
         // - Insert the digest into the peer cache
@@ -361,7 +359,7 @@ where
             decrement_digest_refcount(&mut self.counts, &mut self.items, &stale);
         }
 
-        InsertMessage::Inserted
+        true
     }
 
     fn update_latest_primary_peers(&mut self, peers: Set<P>) {
