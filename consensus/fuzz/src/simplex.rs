@@ -120,7 +120,7 @@ impl Simplex for SimplexSecp256r1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{fuzz, strategy::StrategyChoice, utils::Partition, FuzzInput, Standard, N4F1C3};
+    use crate::{fuzz, strategy::StrategyChoice, utils::Partition, FuzzInput, Standard};
     use commonware_macros::{test_group, test_traced};
     use proptest::prelude::*;
 
@@ -132,7 +132,6 @@ mod tests {
         FuzzInput {
             raw_bytes: seed.to_be_bytes().to_vec(),
             partition: Partition::Connected,
-            configuration: N4F1C3,
             required_containers: containers,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
