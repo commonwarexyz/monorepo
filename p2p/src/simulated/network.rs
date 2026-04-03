@@ -215,6 +215,127 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         )
     }
 
+    /// Create a new simulated network with an initial primary peer set.
+    ///
+    /// This is a convenience for test setups that would otherwise call
+    /// [`crate::Manager::track`] immediately after construction.
+    pub async fn new_with_primary_peers<I>(
+        context: E,
+        cfg: Config,
+        peers: I,
+    ) -> (Self, Oracle<P, E>)
+    where
+        I: IntoIterator<Item = P>,
+    {
+        Self::new_with_tracked_peers(context, cfg, peers, std::iter::empty()).await
+    }
+
+    /// Create a new simulated network with an initial tracked peer set.
+    ///
+    /// The primary and secondary peers are registered at peer-set ID `0`,
+    /// matching the most common test setup.
+    pub async fn new_with_tracked_peers<I, J>(
+        context: E,
+        cfg: Config,
+        primary: I,
+        secondary: J,
+    ) -> (Self, Oracle<P, E>)
+    where
+        I: IntoIterator<Item = P>,
+        J: IntoIterator<Item = P>,
+    {
+        let (mut network, oracle) = Self::new(context, cfg);
+        network
+            .register_tracked_peer_set(
+                0,
+                TrackedPeers::new(
+                    Set::from_iter_dedup(primary),
+                    Set::from_iter_dedup(secondary),
+                ),
+            )
+            .await;
+        (network, oracle)
+    }
+
+    /// Register a tracked peer set directly in the network state.
+    ///
+    /// This mirrors the bookkeeping performed for [`ingress::Message::Track`]
+    /// and is used by constructor helpers that seed the initial topology before
+    /// the network event loop starts.
+    async fn register_tracked_peer_set(&mut self, id: u64, peers: TrackedPeers<P>) -> bool {
+        let primary = peers.primary;
+        let secondary = peers.secondary;
+
+        let tracked_peer_sets = self.tracked_peer_sets;
+
+        // Check if peer set already exists
+        if self.primary_sets.contains_key(&id) {
+            warn!(id, "peer set already exists");
+            return false;
+        }
+
+        // Ensure that peer set is monotonically increasing
+        if let Some((last, _)) = self.primary_sets.last_key_value() {
+            if id <= *last {
+                warn!(
+                    new_id = id,
+                    old_id = last,
+                    "attempted to register peer set with non-monotonically increasing ID"
+                );
+                return false;
+            }
+        }
+
+        // Create and store new primary peer set.
+        for public_key in primary.iter() {
+            self.ensure_peer_exists(public_key).await;
+            *self.primary_refs.entry(public_key.clone()).or_insert(0) += 1;
+        }
+        self.primary_sets.insert(id, primary.clone());
+
+        // Create and store new secondary peer set.
+        for public_key in secondary.iter() {
+            self.ensure_peer_exists(public_key).await;
+            *self.secondary_refs.entry(public_key.clone()).or_insert(0) += 1;
+        }
+        self.secondary_sets.insert(id, secondary.clone());
+
+        // Remove oldest tracked peer sets if we exceed the limit.
+        while self.primary_sets.len() > tracked_peer_sets.get() {
+            let (primary_index, primary_set) = self.primary_sets.pop_first().unwrap();
+            let (secondary_index, secondary_set) = self.secondary_sets.pop_first().unwrap();
+            assert_eq!(primary_index, secondary_index);
+            debug!(index = primary_index, "removed oldest tracked peer sets");
+
+            for public_key in primary_set.iter() {
+                let refs = self.primary_refs.get_mut(public_key).unwrap();
+                *refs = refs.checked_sub(1).expect("reference count underflow");
+
+                if *refs == 0 {
+                    self.primary_refs.remove(public_key);
+                    debug!(
+                        ?public_key,
+                        "removed peer no longer in any tracked primary set"
+                    );
+                }
+            }
+
+            for public_key in secondary_set.iter() {
+                let refs = self.secondary_refs.get_mut(public_key).unwrap();
+                *refs = refs.checked_sub(1).expect("reference count underflow");
+                if *refs == 0 {
+                    self.secondary_refs.remove(public_key);
+                    debug!(
+                        ?public_key,
+                        "removed peer no longer in any tracked secondary set"
+                    );
+                }
+            }
+        }
+
+        true
+    }
+
     /// Returns (and increments) the next available socket address.
     ///
     /// The port number is incremented for each call, and the IP address is incremented if the port
@@ -260,77 +381,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
         match message {
             ingress::Message::Track { id, peers } => {
-                let primary = peers.primary;
-                let secondary = peers.secondary;
-
-                let tracked_peer_sets = self.tracked_peer_sets;
-
-                // Check if peer set already exists
-                if self.primary_sets.contains_key(&id) {
-                    warn!(id, "peer set already exists");
+                let primary = peers.primary.clone();
+                let secondary = peers.secondary.clone();
+                if !self.register_tracked_peer_set(id, peers).await {
                     return;
-                }
-
-                // Ensure that peer set is monotonically increasing
-                if let Some((last, _)) = self.primary_sets.last_key_value() {
-                    if id <= *last {
-                        warn!(
-                            new_id = id,
-                            old_id = last,
-                            "attempted to register peer set with non-monotonically increasing ID"
-                        );
-                        return;
-                    }
-                }
-
-                // Create and store new primary peer set.
-                for public_key in primary.iter() {
-                    // Create peer if it doesn't exist
-                    self.ensure_peer_exists(public_key).await;
-
-                    // Increment reference count
-                    *self.primary_refs.entry(public_key.clone()).or_insert(0) += 1;
-                }
-                self.primary_sets.insert(id, primary.clone());
-
-                // Create and store new secondary peer set.
-                for public_key in secondary.iter() {
-                    self.ensure_peer_exists(public_key).await;
-                    *self.secondary_refs.entry(public_key.clone()).or_insert(0) += 1;
-                }
-                self.secondary_sets.insert(id, secondary.clone());
-
-                // Remove oldest tracked peer sets if we exceed the limit.
-                while self.primary_sets.len() > tracked_peer_sets.get() {
-                    let (primary_index, primary_set) = self.primary_sets.pop_first().unwrap();
-                    let (secondary_index, secondary_set) = self.secondary_sets.pop_first().unwrap();
-                    assert_eq!(primary_index, secondary_index);
-                    debug!(index = primary_index, "removed oldest tracked peer sets");
-
-                    for public_key in primary_set.iter() {
-                        let refs = self.primary_refs.get_mut(public_key).unwrap();
-                        *refs = refs.checked_sub(1).expect("reference count underflow");
-
-                        if *refs == 0 {
-                            self.primary_refs.remove(public_key);
-                            debug!(
-                                ?public_key,
-                                "removed peer no longer in any tracked primary set"
-                            );
-                        }
-                    }
-
-                    for public_key in secondary_set.iter() {
-                        let refs = self.secondary_refs.get_mut(public_key).unwrap();
-                        *refs = refs.checked_sub(1).expect("reference count underflow");
-                        if *refs == 0 {
-                            self.secondary_refs.remove(public_key);
-                            debug!(
-                                ?public_key,
-                                "removed peer no longer in any tracked secondary set"
-                            );
-                        }
-                    }
                 }
 
                 // Notify all subscribers about the new peer set.
@@ -1348,18 +1402,16 @@ mod tests {
                 tracked_peer_sets: commonware_utils::NZUsize!(3),
             };
             let network_context = context.with_label("network");
-            let (network, oracle) = Network::new(network_context.clone(), cfg);
-            network_context.spawn(|_| network.run());
 
             // Create two public keys
             let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
             let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
+            let peers = [pk1.clone(), pk2.clone()];
 
-            // Register the peer set
-            let mut manager = oracle.manager();
-            manager
-                .track(0, Set::try_from([pk1.clone(), pk2.clone()]).unwrap())
-                .await;
+            let (network, oracle) =
+                Network::new_with_primary_peers(network_context.clone(), cfg, peers).await;
+            network_context.spawn(|_| network.run());
+
             let control = oracle.control(pk1.clone());
             control.register(0, TEST_QUOTA).await.unwrap();
             control.register(1, TEST_QUOTA).await.unwrap();
@@ -1386,6 +1438,48 @@ mod tests {
                 oracle.add_link(pk1, pk2, link).await,
                 Err(Error::LinkExists)
             ));
+        });
+    }
+
+    #[test]
+    fn test_new_with_tracked_peers_seeds_initial_update() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                max_size: MAX_MESSAGE_SIZE,
+                disconnect_on_block: true,
+                tracked_peer_sets: commonware_utils::NZUsize!(3),
+            };
+            let network_context = context.with_label("network");
+            let primary = ed25519::PrivateKey::from_seed(11).public_key();
+            let secondary = ed25519::PrivateKey::from_seed(12).public_key();
+
+            let (network, oracle) = Network::new_with_tracked_peers(
+                network_context.clone(),
+                cfg,
+                [primary.clone()],
+                [secondary.clone()],
+            )
+            .await;
+            network_context.spawn(|_| network.run());
+
+            let mut manager = oracle.manager();
+            let peer_set = manager.peer_set(0).await.unwrap();
+            assert_eq!(peer_set, Set::try_from([primary.clone()]).unwrap());
+
+            let mut updates = manager.subscribe().await;
+            let update = updates.recv().await.unwrap();
+            assert_eq!(update.index, 0);
+            assert_eq!(
+                update.latest.primary,
+                Set::try_from([primary.clone()]).unwrap()
+            );
+            assert_eq!(
+                update.latest.secondary,
+                Set::try_from([secondary.clone()]).unwrap()
+            );
+            assert_eq!(update.all.primary, Set::try_from([primary]).unwrap());
+            assert_eq!(update.all.secondary, Set::try_from([secondary]).unwrap());
         });
     }
 

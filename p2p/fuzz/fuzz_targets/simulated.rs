@@ -4,10 +4,9 @@ use arbitrary::Arbitrary;
 use commonware_codec::codec::FixedSize;
 use commonware_cryptography::{ed25519, Signer};
 use commonware_p2p::{
-    simulated, Channel, Manager as _, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
+    simulated, Channel, Receiver as ReceiverTrait, Recipients, Sender as SenderTrait,
 };
 use commonware_runtime::{deterministic, Clock, IoBuf, Metrics, Quota, Runner};
-use commonware_utils::ordered::Set;
 use libfuzzer_sys::fuzz_target;
 use rand::Rng;
 use std::{
@@ -125,12 +124,13 @@ fn fuzz(input: FuzzInput) {
         }
 
         // Create the simulated network and oracle for controlling it
-        let (network, oracle) = simulated::Network::new(context.with_label("network"), p2p_cfg);
+        let (network, oracle) = simulated::Network::new_with_primary_peers(
+            context.with_label("network"),
+            p2p_cfg,
+            peer_pks.iter().cloned(),
+        )
+        .await;
         let _network_handle = network.start();
-        oracle
-            .manager()
-            .track(0, Set::from_iter_dedup(peer_pks.iter().cloned()))
-            .await;
 
         // Track registered channels: (peer_idx, channel_id) -> (sender, receiver)
         // Each peer can register multiple channels for message segregation

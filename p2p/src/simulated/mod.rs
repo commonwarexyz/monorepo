@@ -59,10 +59,10 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_p2p::{Manager, simulated::{Config, Link, Network}};
+//! use commonware_p2p::simulated::{Config, Link, Network};
 //! use commonware_cryptography::{ed25519, PrivateKey, Signer as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, Metrics, Quota, Runner, Spawner};
-//! use commonware_utils::{ordered::Set, NZU32};
+//! use commonware_utils::NZU32;
 //! use std::time::Duration;
 //!
 //! // Generate peers
@@ -86,15 +86,13 @@
 //! // Start context
 //! let executor = deterministic::Runner::seeded(0);
 //! executor.start(|context| async move {
-//!     // Initialize network
-//!     let (network, oracle) = Network::new(context.with_label("network"), p2p_cfg);
+//!     // Initialize network with an initial tracked peer set.
+//!     let (network, oracle) =
+//!         Network::new_with_primary_peers(context.with_label("network"), p2p_cfg, peers.clone())
+//!             .await;
 //!
 //!     // Start network
 //!     let network_handler = network.start();
-//!
-//!     // Register a peer set
-//!     let mut manager = oracle.manager();
-//!     manager.track(0, Set::try_from(peers.clone()).unwrap()).await;
 //!
 //!     let (sender1, receiver1) = oracle.control(peers[0].clone()).register(0, quota).await.unwrap();
 //!     let (sender2, receiver2) = oracle.control(peers[1].clone()).register(0, quota).await.unwrap();

@@ -68,9 +68,8 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        Manager as _,
         simulated::{Config as NConfig, Link, Network},
-        Recipients, Sender as _, TrackedPeers,
+        Manager as _, Recipients, Sender as _, TrackedPeers,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Clock, Metrics, Quota, Runner};
@@ -1203,8 +1202,14 @@ mod tests {
                 .add_link(injector_pk.clone(), me.clone(), link.clone())
                 .await
                 .unwrap();
-            track_test_peers(&mut context, &oracle, 1, &participants, &[injector_pk.clone()])
-                .await;
+            track_test_peers(
+                &mut context,
+                &oracle,
+                1,
+                &participants,
+                &[injector_pk.clone()],
+            )
+            .await;
 
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
@@ -1417,8 +1422,14 @@ mod tests {
                 .add_link(injector_pk.clone(), me.clone(), link)
                 .await
                 .unwrap();
-            track_test_peers(&mut context, &oracle, 1, &participants, &[injector_pk.clone()])
-                .await;
+            track_test_peers(
+                &mut context,
+                &oracle,
+                1,
+                &participants,
+                &[injector_pk.clone()],
+            )
+            .await;
 
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 

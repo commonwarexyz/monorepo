@@ -429,14 +429,14 @@ mod tests {
     use commonware_p2p::{
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
         utils::mocks::inert_channel,
-        Manager as _, Recipients, Sender as _, TrackedPeers,
+        Recipients, Sender as _,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, count_running_tasks, deterministic, Clock, IoBuf, Metrics, Quota,
         Runner, Spawner,
     };
-    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _, SeedableRng};
@@ -594,11 +594,54 @@ mod tests {
             let registration = register_validator(oracle, validator.clone()).await;
             registrations.insert(validator.clone(), registration);
         }
-        oracle
-            .manager()
-            .track(0, Set::from_iter_dedup(validators.iter().cloned()))
-            .await;
         registrations
+    }
+
+    async fn start_test_network_with_primary_peers<I>(
+        context: deterministic::Context,
+        peers: I,
+        disconnect_on_block: bool,
+    ) -> Oracle<PublicKey, deterministic::Context>
+    where
+        I: IntoIterator<Item = PublicKey>,
+    {
+        let (network, oracle) = Network::new_with_primary_peers(
+            context.with_label("network"),
+            Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block,
+                tracked_peer_sets: commonware_utils::NZUsize!(1),
+            },
+            peers,
+        )
+        .await;
+        network.start();
+        oracle
+    }
+
+    async fn start_test_network_with_tracked_peers<I, J>(
+        context: deterministic::Context,
+        primary: I,
+        secondary: J,
+        disconnect_on_block: bool,
+    ) -> Oracle<PublicKey, deterministic::Context>
+    where
+        I: IntoIterator<Item = PublicKey>,
+        J: IntoIterator<Item = PublicKey>,
+    {
+        let (network, oracle) = Network::new_with_tracked_peers(
+            context.with_label("network"),
+            Config {
+                max_size: 1024 * 1024,
+                disconnect_on_block,
+                tracked_peer_sets: commonware_utils::NZUsize!(1),
+            },
+            primary,
+            secondary,
+        )
+        .await;
+        network.start();
+        oracle
     }
 
     /// Enum to describe the action to take when linking validators.
@@ -684,25 +727,15 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -933,19 +966,6 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants (active)
             let Fixture {
                 participants,
@@ -958,18 +978,13 @@ mod tests {
             let private_key_observer = PrivateKey::from_seed(n_active as u64);
             let public_key_observer = private_key_observer.public_key();
 
-            // Track the active validators as primary peers and the standalone
-            // observer as a secondary peer.
-            oracle
-                .manager()
-                .track(
-                    0,
-                    TrackedPeers::new(
-                        Set::from_iter_dedup(participants.iter().cloned()),
-                        Set::from_iter_dedup([public_key_observer.clone()]),
-                    ),
-                )
-                .await;
+            let mut oracle = start_test_network_with_tracked_peers(
+                context.clone(),
+                participants.clone(),
+                [public_key_observer.clone()],
+                true,
+            )
+            .await;
 
             // Register all (including observer) with the network
             let mut all_validators = participants.clone();
@@ -1135,20 +1150,13 @@ mod tests {
             relay.deregister_all(); // Clear all recipients from previous restart.
 
             let f = |mut context: deterministic::Context| async move {
-                // Create simulated network
-                let (network, mut oracle) = Network::new(
-                    context.with_label("network"),
-                    Config {
-                        max_size: 1024 * 1024,
-                        disconnect_on_block: true,
-                        tracked_peer_sets: commonware_utils::NZUsize!(1),
-                    },
-                );
-
-                // Start network
-                network.start();
-
                 // Register participants
+                let mut oracle = start_test_network_with_primary_peers(
+                    context.clone(),
+                    participants.clone(),
+                    true,
+                )
+                .await;
                 let mut registrations = register_validators(&mut oracle, &participants).await;
 
                 // Link all validators
@@ -1310,25 +1318,15 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(240));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1576,25 +1574,15 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -1818,25 +1806,15 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2006,25 +1984,15 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(1800));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2218,25 +2186,15 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2420,25 +2378,15 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(5_000)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2675,25 +2623,15 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -2862,19 +2800,6 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
@@ -2896,6 +2821,9 @@ mod tests {
                 })
                 .collect();
 
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3044,22 +2972,15 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
 
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), false)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all honest nodes. Only link node 0 to node 1.
@@ -3241,25 +3162,15 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3409,25 +3320,15 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(60)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3740,25 +3641,15 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3907,25 +3798,15 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4087,25 +3968,15 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(30)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4245,25 +4116,15 @@ mod tests {
         let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4427,25 +4288,15 @@ mod tests {
             .with_timeout(Some(Duration::from_secs(10)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register a single participant
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -4640,23 +4491,15 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), false)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4876,23 +4719,15 @@ mod tests {
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), false)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // ========== Build the certificates manually ==========
@@ -5208,25 +5043,15 @@ mod tests {
         let skip_timeout = ViewDelta::new(50);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: false,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5365,25 +5190,15 @@ mod tests {
         let cfg = deterministic::Config::new().with_seed(seed);
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
-            // Create simulated network
-            let (network, mut oracle) = Network::new(
-                context.with_label("network"),
-                Config {
-                    max_size: 1024 * 1024,
-                    disconnect_on_block: true,
-                    tracked_peer_sets: commonware_utils::NZUsize!(1),
-                },
-            );
-
-            // Start network
-            network.start();
-
             // Register participants
             let Fixture {
                 participants,
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let mut oracle =
+                start_test_network_with_primary_peers(context.clone(), participants.clone(), true)
+                    .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5882,22 +5697,18 @@ mod tests {
                 .with_rng(Box::new(StdRng::from_rng(&mut *rng).unwrap()));
             let executor = deterministic::Runner::new(cfg);
             executor.start(|mut context| async move {
-                let (network, mut oracle) = Network::new(
-                    context.with_label("network"),
-                    Config {
-                        max_size: 1024 * 1024,
-                        disconnect_on_block: false,
-                        tracked_peer_sets: commonware_utils::NZUsize!(1),
-                    },
-                );
-                network.start();
-
                 let Fixture {
                     participants,
                     schemes,
                     ..
                 } = case_fixture(&mut context, &namespace, n);
                 let participants: Arc<[_]> = participants.into();
+                let mut oracle = start_test_network_with_primary_peers(
+                    context.clone(),
+                    participants.iter().cloned(),
+                    false,
+                )
+                .await;
                 let mut registrations = register_validators(&mut oracle, &participants).await;
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 

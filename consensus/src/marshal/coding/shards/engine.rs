@@ -1733,16 +1733,6 @@ mod tests {
         ) {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
-                let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
-                    context.with_label("network"),
-                    simulated::Config {
-                        max_size: MAX_SHARD_SIZE as u32,
-                        disconnect_on_block: true,
-                        tracked_peer_sets: commonware_utils::NZUsize!(1),
-                    },
-                );
-                network.start();
-
                 let mut private_keys = (0..self.num_peers)
                     .map(|i| PrivateKey::from_seed(i as u64))
                     .collect::<Vec<_>>();
@@ -1756,6 +1746,20 @@ mod tests {
                     .collect::<Vec<_>>();
                 np_private_keys.sort_by_key(|s| s.public_key());
                 let np_keys: Vec<P> = np_private_keys.iter().map(|k| k.public_key()).collect();
+
+                let (network, oracle) =
+                    simulated::Network::<deterministic::Context, P>::new_with_tracked_peers(
+                        context.with_label("network"),
+                        simulated::Config {
+                            max_size: MAX_SHARD_SIZE as u32,
+                            disconnect_on_block: true,
+                            tracked_peer_sets: commonware_utils::NZUsize!(1),
+                        },
+                        peer_keys.clone(),
+                        np_keys.clone(),
+                    )
+                    .await;
+                network.start();
 
                 let all_keys: Vec<P> = peer_keys.iter().chain(np_keys.iter()).cloned().collect();
 
@@ -1861,18 +1865,6 @@ mod tests {
                         sender: sender_clone,
                     });
                 }
-
-                let primary_participants: Set<P> = Set::from_iter_dedup(peer_keys.iter().cloned());
-                let secondary_non_participants: Set<P> =
-                    Set::from_iter_dedup(np_keys.iter().cloned());
-                oracle
-                    .manager()
-                    .track(
-                        1,
-                        TrackedPeers::new(primary_participants, secondary_non_participants),
-                    )
-                    .await;
-                context.sleep(Duration::from_millis(10)).await;
 
                 f(
                     self,

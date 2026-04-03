@@ -91,10 +91,7 @@ mod tests {
         Signer as _,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
-        Manager as _,
-    };
+    use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef,
@@ -103,7 +100,6 @@ mod tests {
     };
     use commonware_utils::{
         channel::{fallible::OneshotExt, oneshot},
-        ordered::Set,
         NZUsize, NZU16, NZU64,
     };
     use futures::future::join_all;
@@ -138,10 +134,6 @@ mod tests {
             let (b1, b2) = control.register(1, TEST_QUOTA).await.unwrap();
             registrations.insert(participant.clone(), ((a1, a2), (b1, b2)));
         }
-        oracle
-            .manager()
-            .track(0, Set::from_iter_dedup(participants.iter().cloned()))
-            .await;
         registrations
     }
 
@@ -194,14 +186,16 @@ mod tests {
         Oracle<PublicKey, deterministic::Context>,
         Registrations<PublicKey>,
     ) {
-        let (network, mut oracle) = Network::new(
+        let (network, mut oracle) = Network::new_with_primary_peers(
             context.with_label("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
                 tracked_peer_sets: commonware_utils::NZUsize!(1),
             },
-        );
+            fixture.participants.clone(),
+        )
+        .await;
         network.start();
 
         let registrations = register_participants(&mut oracle, &fixture.participants).await;
@@ -418,14 +412,16 @@ mod tests {
             let f = |mut context: deterministic::Context| async move {
                 let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
 
-                let (network, mut oracle) = Network::new(
+                let (network, mut oracle) = Network::new_with_primary_peers(
                     context.with_label("network"),
                     commonware_p2p::simulated::Config {
                         max_size: 1024 * 1024,
                         disconnect_on_block: true,
                         tracked_peer_sets: commonware_utils::NZUsize!(1),
                     },
-                );
+                    fixture.participants.clone(),
+                )
+                .await;
                 network.start();
 
                 let mut registrations =
@@ -895,14 +891,16 @@ mod tests {
             participants.push(sequencer.public_key());
 
             // Create network
-            let (network, mut oracle) = Network::new(
+            let (network, mut oracle) = Network::new_with_primary_peers(
                 context.with_label("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
                     disconnect_on_block: true,
                     tracked_peer_sets: commonware_utils::NZUsize!(1),
                 },
-            );
+                participants.clone(),
+            )
+            .await;
             network.start();
 
             // Register all participants
