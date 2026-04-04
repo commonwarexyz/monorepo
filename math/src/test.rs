@@ -203,7 +203,7 @@ impl Neg for G {
     type Output = Self;
 
     fn neg(self) -> Self::Output {
-        self.scale(&[(Q - 2).into()])
+        self.scale(&[Q - 2])
     }
 }
 
@@ -231,7 +231,7 @@ impl<'a> Mul<&'a F> for G {
     type Output = Self;
 
     fn mul(self, rhs: &'a F) -> Self::Output {
-        self.scale(&[rhs.0.into()])
+        self.scale(&[rhs.0])
     }
 }
 
