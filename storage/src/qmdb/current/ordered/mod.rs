@@ -36,7 +36,7 @@ pub mod tests {
         qmdb::{
             any::{
                 ordered::{Operation, Update},
-                traits::{BatchableDb, DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+                traits::{DbAny, UnmerkleizedBatch as _},
                 ValueEncoding,
             },
             current::{proof::RangeProof, tests::apply_random_ops, BitmapPrunedBits},
@@ -70,7 +70,7 @@ pub mod tests {
     /// and verifies state is preserved across close/reopen cycles.
     pub fn test_build_small_close_reopen<C, F, Fut>(mut open_db: F)
     where
-        C: DbAny<mmr::Family> + BatchableDb<Family = mmr::Family> + BitmapPrunedBits,
+        C: DbAny<mmr::Family> + BitmapPrunedBits,
         C::Key: TestKey,
         <C as DbAny<mmr::Family>>::Value: TestValue,
         F: FnMut(Context, String) -> Fut,
@@ -92,14 +92,13 @@ pub mod tests {
             let k1: C::Key = TestKey::from_seed(0);
             let v1: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed(10);
             assert!(db.get(&k1).await.unwrap().is_none());
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(k1, Some(v1.clone()))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get_metadata().await.unwrap().is_none());
@@ -116,14 +115,13 @@ pub mod tests {
             // Delete that one key.
             assert!(db.get(&k1).await.unwrap().is_some());
             let metadata: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed(1);
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(k1, None)
                 .merkleize(Some(metadata.clone()), &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             let root2 = db.root();
@@ -135,13 +133,8 @@ pub mod tests {
 
             // Repeated delete of same key should fail (key already deleted).
             assert!(db.get(&k1).await.unwrap().is_none());
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap();
             let root3 = db.root();
             assert_ne!(root3, root2);
@@ -154,14 +147,13 @@ pub mod tests {
             assert!(db.get_bit(*bounds.end - 1));
 
             // Test that we can get a non-durable root.
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(k1, Some(v1))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             assert_ne!(db.root(), root3);
 
             db.destroy().await.unwrap();
@@ -179,9 +171,7 @@ pub mod tests {
             + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<mmr::Family, Digest, V>: Codec,
-        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest>
-            + BatchableDb<Family = mmr::Family>
-            + 'static,
+        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         F: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<C, V>>,
     {
@@ -194,14 +184,13 @@ pub mod tests {
             // Add one key.
             let k = Sha256::fill(0x01);
             let v1 = Sha256::fill(0xA1);
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(k, Some(v1))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
@@ -237,14 +226,13 @@ pub mod tests {
             ));
 
             // Update the key to a new value (v2), which inactivates the previous operation.
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(k, Some(v2))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -370,9 +358,7 @@ pub mod tests {
             + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<mmr::Family, Digest, V>: Codec,
-        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest>
-            + BatchableDb<Family = mmr::Family>
-            + 'static,
+        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         F: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<C, V>>,
     {
@@ -402,13 +388,8 @@ pub mod tests {
             let mut db = apply_random_ops::<TestDb<C, V>>(200, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -462,9 +443,7 @@ pub mod tests {
             + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<mmr::Family, Digest, V>: Codec,
-        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest>
-            + BatchableDb<Family = mmr::Family>
-            + 'static,
+        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         F: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<C, V>>,
     {
@@ -476,13 +455,8 @@ pub mod tests {
             let mut db = apply_random_ops::<TestDb<C, V>>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -569,9 +543,7 @@ pub mod tests {
             + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<mmr::Family, Digest, V>: Codec,
-        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest>
-            + BatchableDb<Family = mmr::Family>
-            + 'static,
+        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         F: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<C, V>>,
     {
@@ -586,14 +558,13 @@ pub mod tests {
             let mut old_val = Sha256::fill(0x00);
             for i in 1u8..=255 {
                 let v = Sha256::fill(i);
-                let finalized = db
+                let merkleized = db
                     .new_batch()
                     .write(k, Some(v))
                     .merkleize(None, &db)
                     .await
-                    .unwrap()
-                    .finalize();
-                db.apply_batch(finalized).await.unwrap();
+                    .unwrap();
+                db.apply_batch(merkleized).await.unwrap();
                 assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
                 let root = db.root();
 
@@ -627,9 +598,7 @@ pub mod tests {
             + 'static,
         V: ValueEncoding<Value = Digest> + PartialEq + core::fmt::Debug + 'static,
         Operation<mmr::Family, Digest, V>: Codec,
-        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest>
-            + BatchableDb<Family = mmr::Family>
-            + 'static,
+        TestDb<C, V>: DbAny<mmr::Family, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         F: FnMut(Context, String) -> Fut + 'static,
         Fut: Future<Output = TestDb<C, V>>,
     {
@@ -656,14 +625,13 @@ pub mod tests {
 
             // Add `key_exists_1` and test exclusion proving over the single-key database case.
             let v1 = Sha256::fill(0xA1);
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key_exists_1, Some(v1))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // We shouldn't be able to generate an exclusion proof for a key already in the db.
@@ -704,14 +672,13 @@ pub mod tests {
             let key_exists_2 = Sha256::fill(0x30);
             let v2 = Sha256::fill(0xB2);
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key_exists_2, Some(v2))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Use a lesser/greater key that has a translated-key conflict based
@@ -792,15 +759,14 @@ pub mod tests {
 
             // Make the DB empty again by deleting the keys and check the empty case
             // again.
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key_exists_1, None)
                 .write(key_exists_2, None)
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.sync().await.unwrap();
             let root = db.root();
             // This root should be different than the empty root from earlier since the DB now has a

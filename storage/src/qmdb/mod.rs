@@ -108,9 +108,15 @@ pub enum Error<F: Family> {
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
-    /// The changeset was created from a different database state than the current one.
-    #[error("stale changeset: batch expected db size {expected}, but db has {actual}")]
-    StaleChangeset { expected: u64, actual: u64 },
+    /// The batch was created from a different database state than the current one.
+    #[error(
+        "stale batch: db has {db_size} ops, batch requires {batch_db_size} or {batch_base_size}"
+    )]
+    StaleBatch {
+        db_size: u64,
+        batch_db_size: u64,
+        batch_base_size: u64,
+    },
 }
 
 impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {

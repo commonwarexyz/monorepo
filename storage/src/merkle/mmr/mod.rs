@@ -79,7 +79,7 @@ cfg_if::cfg_if! {
 pub use super::proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
 use crate::merkle;
 pub use crate::merkle::{hasher, Readable};
-pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
+pub use batch::{MerkleizedBatch, UnmerkleizedBatch};
 
 /// MMR-specific type alias for `merkle::proof::Proof`.
 pub type Proof<D> = merkle::proof::Proof<Family, D>;
@@ -358,12 +358,12 @@ mod tests {
                 size_to_check += 1;
             }
             assert!(size_to_check.is_valid_size());
-            let changeset = {
+            let batch = {
                 let mut batch = mmr.new_batch();
                 batch = batch.add(&hasher, &digest);
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &mmr)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             size_to_check += 1;
         }
         assert!(!Position::new(u64::MAX).is_valid_size());

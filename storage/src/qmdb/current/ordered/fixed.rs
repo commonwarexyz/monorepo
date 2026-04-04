@@ -153,14 +153,13 @@ pub mod test {
             let key = Sha256::fill(0x11);
             for i in 0..chunk_bits + 10 {
                 let value = Sha256::hash(&i.to_be_bytes());
-                let finalized = db
+                let merkleized = db
                     .new_batch()
                     .write(key, Some(value))
                     .merkleize(None, &db)
                     .await
-                    .unwrap()
-                    .finalize();
-                db.apply_batch(finalized).await.unwrap();
+                    .unwrap();
+                db.apply_batch(merkleized).await.unwrap();
             }
 
             // Prune the database

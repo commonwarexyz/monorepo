@@ -151,9 +151,9 @@ mod tests {
                 batch = batch.add(&hasher, &digest);
                 positions.push(Position::try_from(loc).unwrap());
             }
-            (batch.merkleize(&hasher).finalize(), positions)
+            (batch.merkleize(&hasher, &mmr), positions)
         };
-        mmr.apply(changeset).unwrap();
+        mmr.apply_batch(&changeset).unwrap();
 
         let mut last_leaf_pos = 0;
         for (leaf_loc_expected, leaf_pos) in loc_to_pos.into_iter().enumerate() {
@@ -209,12 +209,11 @@ mod tests {
                 }
             }
 
-            let changeset = mmr
+            let batch = mmr
                 .new_batch()
                 .add(&hasher, &digest)
-                .merkleize(&hasher)
-                .finalize();
-            mmr.apply(changeset).unwrap();
+                .merkleize(&hasher, &mmr);
+            mmr.apply_batch(&batch).unwrap();
         }
     }
 

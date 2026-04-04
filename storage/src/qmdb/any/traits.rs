@@ -44,13 +44,9 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
 /// Merkleized batch of operations.
 pub trait MerkleizedBatch: Sized {
     type Digest: Digest;
-    type Changeset: Send;
 
     /// Return the committed root.
     fn root(&self) -> Self::Digest;
-
-    /// Consume this batch, producing an owned changeset.
-    fn finalize(self) -> Self::Changeset;
 }
 
 /// Db that supports updates through a batch API.
@@ -58,23 +54,23 @@ pub trait BatchableDb {
     type Family: Family;
     type K;
     type V;
-    type Changeset: Send;
+    type Merkleized: MerkleizedBatch;
     type Batch: UnmerkleizedBatch<
         Self,
         Family = Self::Family,
         K = Self::K,
         V = Self::V,
         Metadata = Self::V,
-        Merkleized: MerkleizedBatch<Changeset = Self::Changeset>,
+        Merkleized = Self::Merkleized,
     >;
 
     /// Create a new speculative batch of operations with this database as its parent.
     fn new_batch(&self) -> Self::Batch;
 
-    /// Apply a changeset.
+    /// Apply a merkleized batch.
     fn apply_batch(
         &mut self,
-        batch: Self::Changeset,
+        batch: Self::Merkleized,
     ) -> impl Future<Output = Result<Range<Location<Self::Family>>, Error<Self::Family>>>;
 }
 

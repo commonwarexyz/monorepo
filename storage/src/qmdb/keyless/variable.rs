@@ -294,10 +294,10 @@ mod test {
     }
 
     #[test_traced]
-    fn test_stale_changeset_parent_applied_before_child() {
+    fn test_sequential_commit_parent_then_child() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_stale_changeset_parent_before_child(db).await;
+            tests::test_keyless_sequential_commit_parent_then_child(db).await;
         });
     }
 
@@ -310,18 +310,18 @@ mod test {
     }
 
     #[test_traced]
-    fn test_keyless_to_batch() {
+    fn test_stale_partial_ancestor_commit() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_to_batch(db).await;
+            tests::test_keyless_stale_partial_ancestor_commit(db).await;
         });
     }
 
     #[test_traced]
-    fn test_keyless_finalize_from() {
+    fn test_keyless_to_batch() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_finalize_from(db).await;
+            tests::test_keyless_to_batch(db).await;
         });
     }
 
@@ -545,10 +545,10 @@ mod test {
     }
 
     #[test_traced]
-    fn test_stale_changeset_parent_applied_before_child_mmb() {
+    fn test_sequential_commit_parent_then_child_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_stale_changeset_parent_before_child(db).await;
+            tests::test_keyless_sequential_commit_parent_then_child(db).await;
         });
     }
 
@@ -565,14 +565,6 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
             tests::test_keyless_to_batch(db).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_keyless_finalize_from_mmb() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_finalize_from(db).await;
         });
     }
 

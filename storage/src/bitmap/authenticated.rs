@@ -606,8 +606,8 @@ impl<E: Context, D: Digest, const N: usize> UnmerkleizedBitMap<E, D, N> {
         batch = batch.update_leaf_batched(&dirty)?;
 
         // Merkleize and apply.
-        let changeset = batch.merkleize(hasher).finalize();
-        self.mmr.apply(changeset)?;
+        let batch = batch.merkleize(hasher, &self.mmr);
+        self.mmr.apply_batch(&batch)?;
 
         // Compute the bitmap root.
         let mmr_root = *self.mmr.root();

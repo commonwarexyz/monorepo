@@ -289,14 +289,14 @@ mod tests {
             let hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::new(&hasher);
             let elements: Vec<_> = (0..49).map(test_digest).collect();
-            let changeset = {
+            let batch = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
                     batch = batch.add(&hasher, element);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &mmr)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             let root = mmr.root();
 
             // Extract a ProofStore from a proof over a variety of ranges, starting with the full
@@ -349,14 +349,14 @@ mod tests {
             let hasher: Standard<Sha256> = Standard::new();
             let mut mmr = Mmr::new(&hasher);
             let elements: Vec<_> = (0..49).map(test_digest).collect();
-            let changeset = {
+            let batch = {
                 let mut batch = mmr.new_batch();
                 for element in &elements {
                     batch = batch.add(&hasher, element);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &mmr)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             let root = mmr.root();
 
             // Proof for range 32..49 has a non-empty fold prefix (the 32-leaf peak).
@@ -399,14 +399,14 @@ mod tests {
             let hasher: Standard<Sha256> = Standard::new();
             let mut mmb = Mmb::new(&hasher);
             let elements: Vec<_> = (0..8).map(test_digest).collect();
-            let changeset = {
+            let batch = {
                 let mut batch = mmb.new_batch();
                 for element in &elements {
                     batch = batch.add(&hasher, element);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &mmb)
             };
-            mmb.apply(changeset).unwrap();
+            mmb.apply_batch(&batch).unwrap();
             let root = mmb.root();
 
             // With 8 leaves, the oldest MMB peak covers locations 0..4 but sits at position 7,

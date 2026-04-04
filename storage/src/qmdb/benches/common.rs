@@ -9,7 +9,7 @@ use commonware_storage::{
     qmdb::{
         any::{
             ordered::{fixed::Db as OFixed, variable::Db as OVariable},
-            traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+            traits::{DbAny, UnmerkleizedBatch as _},
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
             FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
         },
@@ -509,8 +509,8 @@ pub async fn gen_random_kv<M>(
             let k = Sha256::hash(&i.to_be_bytes());
             batch = batch.write(k, Some(make_value(&mut rng)));
         }
-        let finalized = batch.merkleize(None, db).await.unwrap().finalize();
-        db.apply_batch(finalized).await.unwrap();
+        let merkleized = batch.merkleize(None, db).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
     }
 
     // Perform `num_operations` random updates/deletes, committing periodically.
@@ -525,14 +525,14 @@ pub async fn gen_random_kv<M>(
             batch = batch.write(rand_key, Some(make_value(&mut rng)));
             if let Some(freq) = commit_frequency {
                 if rng.next_u32() % freq == 0 {
-                    let finalized = batch.merkleize(None, db).await.unwrap().finalize();
-                    db.apply_batch(finalized).await.unwrap();
+                    let merkleized = batch.merkleize(None, db).await.unwrap();
+                    db.apply_batch(merkleized).await.unwrap();
                     batch = db.new_batch();
                 }
             }
         }
-        let finalized = batch.merkleize(None, db).await.unwrap().finalize();
-        db.apply_batch(finalized).await.unwrap();
+        let merkleized = batch.merkleize(None, db).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
     }
 }
 

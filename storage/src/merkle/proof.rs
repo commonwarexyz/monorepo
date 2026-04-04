@@ -829,14 +829,14 @@ mod tests {
     /// Build an in-memory Merkle structure with `n` elements (element i = i.to_be_bytes()).
     fn build_raw<F: Family>(hasher: &H, n: u64) -> Mem<F, D> {
         let mut mem = Mem::new(hasher);
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for i in 0..n {
                 batch = batch.add(hasher, &i.to_be_bytes());
             }
-            batch.merkleize(hasher).finalize()
+            batch.merkleize(hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         mem
     }
 
@@ -864,14 +864,14 @@ mod tests {
         let element = D::from(*b"01234567012345670123456701234567");
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for _ in 0..11 {
                 batch = batch.add(&hasher, &element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         let root = mem.root();
 
         // Confirm the proof of inclusion for each leaf verifies.
@@ -954,14 +954,14 @@ mod tests {
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         let root = mem.root();
 
         // Test range proofs over all possible ranges of at least 2 elements.
@@ -1063,14 +1063,14 @@ mod tests {
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..49).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         // Confirm we can successfully prove all retained elements after pruning.
         let root = *mem.root();
@@ -1101,14 +1101,14 @@ mod tests {
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
         let mut elements: Vec<_> = (0..49).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         // Prune up to the first peak.
         let prune_loc = Location::<F>::new(32);
@@ -1138,14 +1138,14 @@ mod tests {
 
         // Add more nodes, prune again, and test again.
         let new_elements: Vec<_> = (0..37).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &new_elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         elements.extend(new_elements);
         mem.prune(Location::new(66)).unwrap();
         assert_eq!(mem.bounds().start, Location::new(66));
@@ -1169,14 +1169,14 @@ mod tests {
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..25).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         // Generate proofs over all possible ranges of elements and confirm each
         // serializes=>deserializes correctly.
@@ -1236,14 +1236,14 @@ mod tests {
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..20).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         let root = mem.root();
 
@@ -1391,14 +1391,14 @@ mod tests {
         let hasher = H::new();
         let mut mem = Mem::<F, D>::new(&hasher);
         let elements: Vec<_> = (0..30).map(test_digest).collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         // Get individual proofs that will share some digests (elements in same subtree).
         let proof1 = mem.proof(&hasher, Location::new(0)).unwrap();
@@ -1441,14 +1441,14 @@ mod tests {
         let elements: Vec<D> = (0..252u16)
             .map(|i| <Sha256 as commonware_cryptography::Hasher>::hash(&i.to_be_bytes()))
             .collect();
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for e in &elements {
                 batch = batch.add(&hasher, e);
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         let root = mem.root();
 
         let loc = Location::new(240);

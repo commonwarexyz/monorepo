@@ -3,63 +3,8 @@
 //!
 //! # Examples
 //!
-//! ```ignore
-//! // Simple mode: apply a batch, then durably commit it.
-//! let merkleized = db.new_batch()
-//!     .write(key, Some(value))
-//!     .merkleize(None, &db).await?;
-//! let finalized = merkleized.finalize();
-//! db.apply_batch(finalized).await?;
-//! db.commit().await?;
-//!
-//! // Use `sync()` instead of `commit()` if you want the stronger durability
-//! // boundary for all database state.
-//! db.sync().await?;
-//! ```
-//!
-//! ```ignore
-//! // Batches can still fork before you apply them.
-//! let parent = db.new_batch()
-//!     .write(key_a, Some(val_a))
-//!     .merkleize(None, &db).await?;
-//!
-//! let child_a = parent.new_batch()
-//!     .write(key_b, Some(val_b))
-//!     .merkleize(None, &db).await?;
-//!
-//! let child_b = parent.new_batch()
-//!     .write(key_c, Some(val_c))
-//!     .merkleize(None, &db).await?;
-//!
-//! // Only one fork can be applied; the others become stale.
-//! db.apply_batch(child_a.finalize()).await?;
-//! db.commit().await?;
-//! ```
-//!
-//! ```ignore
-//! // Advanced usage: while the previous batch is being committed, concurrently build a child
-//! // batch from the newly published state.
-//! let parent_finalized = db.new_batch()
-//!     .write(key_a, Some(val_a))
-//!     .merkleize(None, &db).await?
-//!     .finalize();
-//! db.apply_batch(parent_finalized).await?;
-//!
-//! let (child_finalized, commit_result) = futures::join!(
-//!     async {
-//!         db.new_batch()
-//!             .write(key_b, Some(val_b))
-//!             .merkleize(None, &db).await
-//!             .map(|batch| batch.finalize())
-//!     },
-//!     db.commit(),
-//! );
-//! let child_finalized = child_finalized?;
-//! commit_result?;
-//!
-//! db.apply_batch(child_finalized).await?;
-//! db.commit().await?;
-//! ```
+//! See [`crate::qmdb::any`] for batch API examples (forking, sequential
+//! commit, staleness). The Current layer uses the same batch API.
 //!
 //! # Motivation
 //!
@@ -371,7 +316,7 @@ where
     Ok(db::Db {
         any,
         status: batch::BitmapBatch::Base(Arc::new(status)),
-        grafted_mmr: crate::mmr::batch::MerkleizedBatch::Base(grafted_mmr),
+        grafted_mmr,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
         root,
@@ -402,7 +347,7 @@ pub mod tests {
         qmdb::{
             any::{
                 test::colliding_digest,
-                traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+                traits::{DbAny, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
         },
@@ -497,8 +442,8 @@ pub mod tests {
         for (k, v) in writes {
             batch = batch.write(k, v);
         }
-        let finalized = batch.merkleize(None, db).await?.finalize();
-        db.apply_batch(finalized).await?;
+        let merkleized = batch.merkleize(None, db).await?;
+        db.apply_batch(merkleized).await?;
         db.commit().await?;
         Ok(())
     }
@@ -597,13 +542,8 @@ pub mod tests {
             db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.sync().await.unwrap();
 
             // Drop and reopen the db
@@ -627,13 +567,8 @@ pub mod tests {
             db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.sync().await.unwrap();
 
             let root = db.root();
@@ -824,8 +759,8 @@ pub mod tests {
 
             // Apply random operations with commits to advance the inactivity floor.
             db = apply_random_ops::<C>(ELEMENTS, true, rng_seed, db).await.unwrap();
-            let finalized = db.new_batch().merkleize(None, &db).await.unwrap().finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             // Prune to flatten bitmap layers and advance pruned_chunks.
             let floor = db.inactivity_floor_loc().await;
@@ -896,41 +831,39 @@ pub mod tests {
                 std::collections::HashMap::<C::Key, <C as DbAny<mmr::Family>>::Value>::default();
 
             // All creates, updates, and deletes in one batch.
-            let finalized = {
-                let mut batch = db.new_batch();
+            let mut batch = db.new_batch();
 
-                // Initial creates
-                for i in 0u64..ELEMENTS {
-                    let k: C::Key = TestKey::from_seed(i);
-                    let v: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed(i * 1000);
-                    batch = batch.write(k, Some(v.clone()));
-                    map.insert(k, v);
+            // Initial creates
+            for i in 0u64..ELEMENTS {
+                let k: C::Key = TestKey::from_seed(i);
+                let v: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed(i * 1000);
+                batch = batch.write(k, Some(v.clone()));
+                map.insert(k, v);
+            }
+
+            // Update every 3rd key
+            for i in 0u64..ELEMENTS {
+                if i % 3 != 0 {
+                    continue;
                 }
+                let k: C::Key = TestKey::from_seed(i);
+                let v: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed((i + 1) * 10000);
+                batch = batch.write(k, Some(v.clone()));
+                map.insert(k, v);
+            }
 
-                // Update every 3rd key
-                for i in 0u64..ELEMENTS {
-                    if i % 3 != 0 {
-                        continue;
-                    }
-                    let k: C::Key = TestKey::from_seed(i);
-                    let v: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed((i + 1) * 10000);
-                    batch = batch.write(k, Some(v.clone()));
-                    map.insert(k, v);
+            // Delete every 7th key
+            for i in 0u64..ELEMENTS {
+                if i % 7 != 1 {
+                    continue;
                 }
+                let k: C::Key = TestKey::from_seed(i);
+                batch = batch.write(k, None);
+                map.remove(&k);
+            }
 
-                // Delete every 7th key
-                for i in 0u64..ELEMENTS {
-                    if i % 7 != 1 {
-                        continue;
-                    }
-                    let k: C::Key = TestKey::from_seed(i);
-                    batch = batch.write(k, None);
-                    map.remove(&k);
-                }
-
-                batch.merkleize(None, &db).await.unwrap().finalize()
-            };
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = batch.merkleize(None, &db).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             // Sync and prune.
             db.sync().await.unwrap();
@@ -981,28 +914,24 @@ pub mod tests {
             let value1 = <<C as DbAny<mmr::Family>>::Value as TestValue>::from_seed(10);
             let value2 = <<C as DbAny<mmr::Family>>::Value as TestValue>::from_seed(20);
 
-            let changeset_a = {
-                let mut batch = db.new_batch();
-                batch = batch.write(key1, Some(value1.clone()));
-                batch.merkleize(None, &db).await.unwrap().finalize()
-            };
-            let changeset_b = {
-                let mut batch = db.new_batch();
-                batch = batch.write(key2, Some(value2));
-                batch.merkleize(None, &db).await.unwrap().finalize()
-            };
+            let mut batch = db.new_batch();
+            batch = batch.write(key1, Some(value1.clone()));
+            let batch_a = batch.merkleize(None, &db).await.unwrap();
+            let mut batch = db.new_batch();
+            batch = batch.write(key2, Some(value2));
+            let batch_b = batch.merkleize(None, &db).await.unwrap();
 
-            db.apply_batch(changeset_a).await.unwrap();
+            db.apply_batch(batch_a).await.unwrap();
             let expected_root = db.root();
             let expected_bounds = db.bounds().await;
             let expected_metadata = db.get_metadata().await.unwrap();
             assert_eq!(db.get(&key1).await.unwrap(), Some(value1.clone()));
             assert_eq!(db.get(&key2).await.unwrap(), None);
 
-            let result = db.apply_batch(changeset_b).await;
+            let result = db.apply_batch(batch_b).await;
             assert!(
-                matches!(result, Err(Error::StaleChangeset { .. })),
-                "expected StaleChangeset error, got {result:?}"
+                matches!(result, Err(Error::StaleBatch { .. })),
+                "expected StaleBatch error, got {result:?}"
             );
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.bounds().await, expected_bounds);
@@ -1242,8 +1171,8 @@ pub mod tests {
         for (k, v) in writes {
             batch = batch.write(k, v);
         }
-        let finalized = batch.merkleize(metadata, db).await.unwrap().finalize();
-        let range = db.apply_batch(finalized).await.unwrap();
+        let merkleized = batch.merkleize(metadata, db).await.unwrap();
+        let range = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         range
     }
@@ -1693,8 +1622,7 @@ pub mod tests {
             // Canonical root includes bitmap/grafted layers, so it differs from ops root.
             assert_ne!(speculative_root, ops_root);
 
-            let finalized = merkleized.finalize();
-            db.apply_batch(finalized).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             // Speculative canonical root matches the committed canonical root.
             assert_eq!(db.root(), speculative_root);
@@ -1722,8 +1650,8 @@ pub mod tests {
             {
                 let mut batch = db.new_batch();
                 batch = batch.write(ka, Some(val(0)));
-                let finalized = batch.merkleize(None, &db).await.unwrap().finalize();
-                db.apply_batch(finalized).await.unwrap();
+                let merkleized = batch.merkleize(None, &db).await.unwrap();
+                db.apply_batch(merkleized).await.unwrap();
             }
 
             // Batch: update A, delete nothing, create B.
@@ -1776,8 +1704,7 @@ pub mod tests {
             assert_eq!(child_m.get(&key(3), &db).await.unwrap(), Some(val(3)));
             assert_eq!(child_m.get(&key(7), &db).await.unwrap(), Some(val(7)));
 
-            let finalized = child_m.finalize();
-            db.apply_batch(finalized).await.unwrap();
+            db.apply_batch(child_m).await.unwrap();
             assert_eq!(db.root(), child_root);
 
             // Verify all keys are correct.
@@ -1810,9 +1737,8 @@ pub mod tests {
             for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
             }
-            db.apply_batch(initial.merkleize(None, &db).await.unwrap().finalize())
-                .await
-                .unwrap();
+            let merkleized = initial.merkleize(None, &db).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
@@ -1836,7 +1762,10 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            db.apply_batch(parent.finalize()).await.unwrap();
+            let pending_root = pending_child.root();
+            let pending_ops_root = pending_child.ops_root();
+
+            db.apply_batch(parent).await.unwrap();
             db.commit().await.unwrap();
 
             let committed_child = db
@@ -1847,15 +1776,12 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(pending_child.root(), committed_child.root());
-            assert_eq!(pending_child.ops_root(), committed_child.ops_root());
+            assert_eq!(pending_root, committed_child.root());
+            assert_eq!(pending_ops_root, committed_child.ops_root());
 
-            // Rebase the pending child onto the committed parent and ensure the
-            // applied wrapper roots still match the committed-path child roots.
-            let current_db_size = *db.bounds().await.end;
-            db.apply_batch(pending_child.finalize_from(current_db_size))
-                .await
-                .unwrap();
+            // Apply pending child onto the committed parent
+            // and ensure the applied wrapper roots still match.
+            db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
             assert_eq!(db.ops_root(), committed_child.ops_root());
 
@@ -1881,9 +1807,8 @@ pub mod tests {
             for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
             }
-            db.apply_batch(initial.merkleize(None, &db).await.unwrap().finalize())
-                .await
-                .unwrap();
+            let merkleized = initial.merkleize(None, &db).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap();
 
             // Update only key_a so the colliding sibling key_b remains outside
@@ -1906,7 +1831,10 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            db.apply_batch(parent.finalize()).await.unwrap();
+            let pending_root = pending_child.root();
+            let pending_ops_root = pending_child.ops_root();
+
+            db.apply_batch(parent).await.unwrap();
             db.commit().await.unwrap();
 
             let committed_child = db
@@ -1917,15 +1845,12 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(pending_child.root(), committed_child.root());
-            assert_eq!(pending_child.ops_root(), committed_child.ops_root());
+            assert_eq!(pending_root, committed_child.root());
+            assert_eq!(pending_ops_root, committed_child.ops_root());
 
-            // Rebase the pending child onto the committed parent and compare
-            // the applied wrapper roots with the committed-path child roots.
-            let current_db_size = *db.bounds().await.end;
-            db.apply_batch(pending_child.finalize_from(current_db_size))
-                .await
-                .unwrap();
+            // Apply pending child onto the committed parent
+            // and compare the applied wrapper roots with the committed-path child roots.
+            db.apply_batch(pending_child).await.unwrap();
             assert_eq!(db.root(), committed_child.root());
             assert_eq!(db.ops_root(), committed_child.ops_root());
 
@@ -1947,14 +1872,13 @@ pub mod tests {
 
             let committed_root = db.root();
 
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(key(0), Some(val(0)))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
 
@@ -1984,29 +1908,23 @@ pub mod tests {
                     .await
                     .unwrap();
 
-            let parent_finalized = {
-                let mut batch = db.new_batch();
-                batch = batch.write(key(0), Some(val(0)));
-                batch.merkleize(None, &db).await.unwrap().finalize()
-            };
-            db.apply_batch(parent_finalized).await.unwrap();
+            let mut batch = db.new_batch();
+            batch = batch.write(key(0), Some(val(0)));
+            let parent_merkleized = batch.merkleize(None, &db).await.unwrap();
+            db.apply_batch(parent_merkleized).await.unwrap();
 
-            let (child_finalized, commit_result) = futures::join!(
+            let (child_merkleized, commit_result) = futures::join!(
                 async {
                     assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
                     let mut child = db.new_batch();
                     child = child.write(key(1), Some(val(1)));
-                    child
-                        .merkleize(None, &db)
-                        .await
-                        .map(|batch| batch.finalize())
+                    child.merkleize(None, &db).await.unwrap()
                 },
                 db.commit(),
             );
-            let child_finalized = child_finalized.unwrap();
             commit_result.unwrap();
 
-            db.apply_batch(child_finalized).await.unwrap();
+            db.apply_batch(child_merkleized).await.unwrap();
             db.commit().await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -2016,10 +1934,10 @@ pub mod tests {
         });
     }
 
-    /// Apply parent via finalize(), then child via finalize_from(). Both keys
+    /// Apply parent then child sequentially. Both keys
     /// present and canonical root matches a fresh single-batch build.
     #[test_traced("INFO")]
-    fn test_current_finalize_from() {
+    fn test_current_sequential_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.with_label("db");
@@ -2044,14 +1962,8 @@ pub mod tests {
                 .await
                 .unwrap();
 
-            // Apply parent.
-            db.apply_batch(parent_m.finalize()).await.unwrap();
-            let current_db_size = *db.any.last_commit_loc + 1;
-
-            // Apply child via finalize_from.
-            db.apply_batch(child_m.finalize_from(current_db_size))
-                .await
-                .unwrap();
+            db.apply_batch(parent_m).await.unwrap();
+            db.apply_batch(child_m).await.unwrap();
 
             // Both keys present.
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
@@ -2064,22 +1976,20 @@ pub mod tests {
                 UnorderedVariableDb::init(ctx2.clone(), variable_config::<OneCap>("ff2", &ctx2))
                     .await
                     .unwrap();
-            let f1 = db2
+            let m1 = db2
                 .new_batch()
                 .write(key(0), Some(val(0)))
                 .merkleize(None, &db2)
                 .await
-                .unwrap()
-                .finalize();
-            db2.apply_batch(f1).await.unwrap();
-            let f2 = db2
+                .unwrap();
+            db2.apply_batch(m1).await.unwrap();
+            let m2 = db2
                 .new_batch()
                 .write(key(1), Some(val(1)))
                 .merkleize(None, &db2)
                 .await
-                .unwrap()
-                .finalize();
-            db2.apply_batch(f2).await.unwrap();
+                .unwrap();
+            db2.apply_batch(m2).await.unwrap();
 
             assert_eq!(db.root(), db2.root());
 
@@ -2101,14 +2011,13 @@ pub mod tests {
                     .unwrap();
 
             // Apply an initial batch.
-            let f = db
+            let m = db
                 .new_batch()
                 .write(key(0), Some(val(0)))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(f).await.unwrap();
+                .unwrap();
+            db.apply_batch(m).await.unwrap();
 
             // Get an owned batch from the committed state.
             let snapshot = db.to_batch();
@@ -2126,7 +2035,7 @@ pub mod tests {
             assert_ne!(child.root(), snapshot.root());
 
             // Apply child.
-            db.apply_batch(child.finalize()).await.unwrap();
+            db.apply_batch(child).await.unwrap();
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
 
@@ -2166,14 +2075,13 @@ pub mod tests {
 
             // Apply several batches to accumulate layers.
             for i in 0u64..5 {
-                let f = db
+                let m = db
                     .new_batch()
                     .write(key(i), Some(val(i)))
                     .merkleize(None, &db)
                     .await
-                    .unwrap()
-                    .finalize();
-                db.apply_batch(f).await.unwrap();
+                    .unwrap();
+                db.apply_batch(m).await.unwrap();
             }
 
             let root_before = db.root();
@@ -2200,14 +2108,13 @@ pub mod tests {
                     .await
                     .unwrap();
 
-            let f = db
+            let m = db
                 .new_batch()
                 .write(key(0), Some(val(0)))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(f).await.unwrap();
+                .unwrap();
+            db.apply_batch(m).await.unwrap();
 
             db.flatten();
             let root_after_first = db.root();
@@ -2231,29 +2138,209 @@ pub mod tests {
                     .unwrap();
 
             // Apply a batch, flatten, then apply another.
-            let f = db
+            let m = db
                 .new_batch()
                 .write(key(0), Some(val(0)))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(f).await.unwrap();
+                .unwrap();
+            db.apply_batch(m).await.unwrap();
             db.flatten();
 
-            let f = db
+            let m = db
                 .new_batch()
                 .write(key(1), Some(val(1)))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(f).await.unwrap();
+                .unwrap();
+            db.apply_batch(m).await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: applying a batch after its ancestor Arc is dropped (without
+    /// committing) must still apply the ancestor's bitmap pushes/clears and
+    /// snapshot diffs.
+    #[test_traced("WARN")]
+    fn test_current_apply_after_ancestor_dropped() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("adrop", &ctx))
+                    .await
+                    .unwrap();
+
+            // Chain: DB <- A <- B <- C
+            let mut a = db.new_batch();
+            for i in 0..3 {
+                a = a.write(key(i), Some(val(i)));
+            }
+            let a_m = a.merkleize(None, &db).await.unwrap();
+
+            let mut b = a_m.new_batch::<Sha256>();
+            for i in 3..6 {
+                b = b.write(key(i), Some(val(i)));
+            }
+            let b_m = b.merkleize(None, &db).await.unwrap();
+
+            let mut c = b_m.new_batch::<Sha256>();
+            for i in 6..9 {
+                c = c.write(key(i), Some(val(i)));
+            }
+            let c_m = c.merkleize(None, &db).await.unwrap();
+
+            // Drop A and B without committing. Their Weak refs in C are now dead.
+            drop(a_m);
+            drop(b_m);
+
+            // Apply only the tip. This is !skip_ancestors (DB hasn't changed).
+            db.apply_batch(c_m).await.unwrap();
+            db.commit().await.unwrap();
+
+            // All nine keys must be accessible.
+            for i in 0..9 {
+                assert_eq!(
+                    db.get(&key(i)).await.unwrap(),
+                    Some(val(i)),
+                    "key({i}) missing after apply_batch with dropped ancestors"
+                );
+            }
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: applying a 3-deep chain as a single batch must leave the
+    /// bitmap in the same state as applying the same operations sequentially.
+    /// This fails if ancestor bitmap pushes are concatenated in the wrong order
+    /// (tip-to-root instead of root-to-tip), because Delete operations produce
+    /// false bitmap bits, and wrong ordering puts the false at the wrong
+    /// position. We detect this by building a NEW batch on top of the
+    /// (possibly corrupted) bitmap and comparing its root against the
+    /// sequential path.
+    #[test_traced("WARN")]
+    fn test_current_chain_bitmap_order_matches_sequential() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // -- Path 1: build a 3-deep chain and apply the tip directly. --
+            let ctx1 = context.with_label("db1");
+            let mut db1: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx1.clone(), variable_config::<OneCap>("ord1", &ctx1))
+                    .await
+                    .unwrap();
+
+            // Seed some committed data so there's a base bitmap to clear.
+            commit_writes_with_metadata(
+                &mut db1,
+                [(key(10), Some(val(10))), (key(11), Some(val(11)))],
+                None,
+            )
+            .await;
+
+            // Chain: DB <- A <- B <- C
+            // A: updates key(10) and DELETES key(11). The delete produces a
+            //    false bitmap bit. If A's bits end up at B's positions (wrong
+            //    order), the false bit lands at the wrong journal location.
+            // B: updates key(12) and key(13). All true bits.
+            // C: updates key(14). All true bits.
+            let a = db1
+                .new_batch()
+                .write(key(10), Some(val(100)))
+                .write(key(11), None) // DELETE
+                .merkleize(None, &db1)
+                .await
+                .unwrap();
+
+            let b = a
+                .new_batch::<Sha256>()
+                .write(key(12), Some(val(120)))
+                .write(key(13), Some(val(130)))
+                .merkleize(None, &db1)
+                .await
+                .unwrap();
+
+            let c = b
+                .new_batch::<Sha256>()
+                .write(key(14), Some(val(140)))
+                .merkleize(None, &db1)
+                .await
+                .unwrap();
+
+            db1.apply_batch(c).await.unwrap();
+            db1.commit().await.unwrap();
+
+            // Build one more batch on top to exercise the bitmap state.
+            let d1 = db1
+                .new_batch()
+                .write(key(20), Some(val(200)))
+                .merkleize(None, &db1)
+                .await
+                .unwrap();
+            let chain_then_d_root = d1.root();
+
+            // -- Path 2: apply the same operations sequentially. --
+            let ctx2 = context.with_label("db2");
+            let mut db2: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx2.clone(), variable_config::<OneCap>("ord2", &ctx2))
+                    .await
+                    .unwrap();
+
+            commit_writes_with_metadata(
+                &mut db2,
+                [(key(10), Some(val(10))), (key(11), Some(val(11)))],
+                None,
+            )
+            .await;
+
+            let a2 = db2
+                .new_batch()
+                .write(key(10), Some(val(100)))
+                .write(key(11), None)
+                .merkleize(None, &db2)
+                .await
+                .unwrap();
+            db2.apply_batch(a2).await.unwrap();
+            db2.commit().await.unwrap();
+
+            let b2 = db2
+                .new_batch()
+                .write(key(12), Some(val(120)))
+                .write(key(13), Some(val(130)))
+                .merkleize(None, &db2)
+                .await
+                .unwrap();
+            db2.apply_batch(b2).await.unwrap();
+            db2.commit().await.unwrap();
+
+            let c2 = db2
+                .new_batch()
+                .write(key(14), Some(val(140)))
+                .merkleize(None, &db2)
+                .await
+                .unwrap();
+            db2.apply_batch(c2).await.unwrap();
+            db2.commit().await.unwrap();
+
+            let d2 = db2
+                .new_batch()
+                .write(key(20), Some(val(200)))
+                .merkleize(None, &db2)
+                .await
+                .unwrap();
+            let sequential_then_d_root = d2.root();
+
+            assert_eq!(
+                chain_then_d_root, sequential_then_d_root,
+                "batch D's root on top of chain-applied state must match sequential state"
+            );
+
+            db1.destroy().await.unwrap();
+            db2.destroy().await.unwrap();
         });
     }
 }

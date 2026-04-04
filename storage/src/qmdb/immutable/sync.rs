@@ -236,21 +236,19 @@ mod tests {
         ops: Vec<Operation<sha256::Digest, sha256::Digest>>,
         metadata: Option<sha256::Digest>,
     ) {
-        let finalized = {
-            let mut batch = db.new_batch();
-            for op in ops {
-                match op {
-                    Operation::Set(key, value) => {
-                        batch = batch.set(key, value);
-                    }
-                    Operation::Commit(_metadata) => {
-                        panic!("Commit operation not supported in apply_ops");
-                    }
+        let mut batch = db.new_batch();
+        for op in ops {
+            match op {
+                Operation::Set(key, value) => {
+                    batch = batch.set(key, value);
+                }
+                Operation::Commit(_metadata) => {
+                    panic!("Commit operation not supported in apply_ops");
                 }
             }
-            batch.merkleize(metadata).finalize()
-        };
-        db.apply_batch(finalized).await.unwrap();
+        }
+        let merkleized = batch.merkleize(metadata);
+        db.apply_batch(merkleized).await.unwrap();
     }
 
     #[rstest]

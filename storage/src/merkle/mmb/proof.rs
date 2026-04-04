@@ -17,14 +17,14 @@ mod tests {
     fn make_mmb(n: u64) -> (H, Mmb<D>) {
         let hasher = H::new();
         let mut mmb = Mmb::new(&hasher);
-        let changeset = {
+        let batch = {
             let mut batch = mmb.new_batch();
             for i in 0..n {
                 batch = batch.add(&hasher, &i.to_be_bytes());
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mmb)
         };
-        mmb.apply(changeset).unwrap();
+        mmb.apply_batch(&batch).unwrap();
         (hasher, mmb)
     }
 
@@ -65,14 +65,14 @@ mod tests {
             );
 
             // Grow by 100 elements.
-            let changeset = {
+            let batch = {
                 let mut batch = mmb.new_batch();
                 for i in n..n + 100 {
                     batch = batch.add(&hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &mmb)
             };
-            mmb.apply(changeset).unwrap();
+            mmb.apply_batch(&batch).unwrap();
             n += 100;
         }
     }

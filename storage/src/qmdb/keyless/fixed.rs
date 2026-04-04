@@ -283,10 +283,10 @@ mod test {
     }
 
     #[test_traced]
-    fn test_keyless_fixed_stale_changeset_parent_before_child() {
+    fn test_keyless_fixed_sequential_commit_parent_then_child() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_stale_changeset_parent_before_child(db).await;
+            tests::test_keyless_sequential_commit_parent_then_child(db).await;
         });
     }
 
@@ -303,14 +303,6 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
             tests::test_keyless_to_batch(db).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_keyless_fixed_finalize_from() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_finalize_from(db).await;
         });
     }
 
@@ -534,10 +526,10 @@ mod test {
     }
 
     #[test_traced]
-    fn test_keyless_fixed_stale_changeset_parent_before_child_mmb() {
+    fn test_keyless_fixed_sequential_commit_parent_then_child_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_stale_changeset_parent_before_child(db).await;
+            tests::test_keyless_sequential_commit_parent_then_child(db).await;
         });
     }
 
@@ -554,14 +546,6 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
             tests::test_keyless_to_batch(db).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_keyless_fixed_finalize_from_mmb() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_finalize_from(db).await;
         });
     }
 

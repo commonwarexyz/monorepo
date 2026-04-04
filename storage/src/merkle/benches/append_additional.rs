@@ -35,14 +35,14 @@ fn bench_append_additional_family<F: Family>(c: &mut Criterion, family: &str) {
                             let h = StandardHasher::<Sha256>::new();
                             let mut mem = Mem::<F, _>::new(&h);
                             block_on(async {
-                                let changeset = {
+                                let batch = {
                                     let mut batch = mem.new_batch();
                                     for digest in &elements {
                                         batch = batch.add(&h, digest);
                                     }
-                                    batch.merkleize(&h).finalize()
+                                    batch.merkleize(&h, &mem)
                                 };
-                                mem.apply(changeset).unwrap();
+                                mem.apply_batch(&batch).unwrap();
                             });
                             mem
                         },
@@ -53,7 +53,7 @@ fn bench_append_additional_family<F: Family>(c: &mut Criterion, family: &str) {
                                 for digest in &additional {
                                     batch = batch.add(&h, digest);
                                 }
-                                batch.merkleize(&h);
+                                batch.merkleize(&h, &mem);
                             });
                         },
                         criterion::BatchSize::SmallInput,

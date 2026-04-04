@@ -110,8 +110,8 @@ where
                     batch = batch.set(key, value);
                 }
                 Operation::Commit(metadata) => {
-                    let finalized = batch.merkleize(metadata).finalize();
-                    self.apply_batch(finalized).await?;
+                    let merkleized = batch.merkleize(metadata);
+                    self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();
                 }

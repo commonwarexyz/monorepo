@@ -153,20 +153,18 @@ async fn commit_pending(
     pending: &mut HashMap<RawKey, Option<RawValue>>,
     committed: &mut HashMap<RawKey, RawValue>,
 ) -> bool {
-    let result = {
-        let mut batch = db.new_batch();
-        for (k, v) in pending_writes.drain(..) {
-            batch = batch.write(k, v);
+    let mut batch = db.new_batch();
+    for (k, v) in pending_writes.drain(..) {
+        batch = batch.write(k, v);
+    }
+    let merkleized = match batch.merkleize(None, db).await {
+        Ok(m) => m,
+        Err(_) => {
+            forget_pending(pending, committed);
+            return false;
         }
-        let merkleized = match batch.merkleize(None, db).await {
-            Ok(m) => m,
-            Err(_) => {
-                forget_pending(pending, committed);
-                return false;
-            }
-        };
-        db.apply_batch(merkleized.finalize()).await
     };
+    let result = db.apply_batch(merkleized).await;
     if result.is_err() {
         forget_pending(pending, committed);
         return false;
@@ -344,14 +342,13 @@ fn fuzz(input: FuzzInput) {
             // Verify the recovered DB is usable.
             let test_key = Key::new([0xAB; 32]);
             let test_value = Value::new([0xCD; 32]);
-            let finalized = db
+            let batch = db
                 .new_batch()
                 .write(test_key, Some(test_value))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized)
+                .unwrap();
+            db.apply_batch(batch)
                 .await
                 .expect("apply_batch after recovery should succeed");
             db.commit()

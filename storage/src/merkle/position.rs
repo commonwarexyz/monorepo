@@ -548,12 +548,11 @@ mod tests {
                 size_to_check += 1;
             }
             assert!(size_to_check.is_valid_size());
-            let changeset = mmr
+            let batch = mmr
                 .new_batch()
                 .add(&hasher, &digest)
-                .merkleize(&hasher)
-                .finalize();
-            mmr.apply(changeset).unwrap();
+                .merkleize(&hasher, &mmr);
+            mmr.apply_batch(&batch).unwrap();
             size_to_check += 1;
         }
 

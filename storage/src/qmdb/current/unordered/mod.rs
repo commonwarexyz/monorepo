@@ -28,7 +28,7 @@ pub mod tests {
         qmdb::{
             any::{
                 operation::update::Unordered as UnorderedUpdate,
-                traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
+                traits::{DbAny, UnmerkleizedBatch as _},
                 unordered::Operation,
                 ValueEncoding,
             },
@@ -85,14 +85,13 @@ pub mod tests {
             let k1: C::Key = TestKey::from_seed(0);
             let v1: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed(10);
             assert!(db.get(&k1).await.unwrap().is_none());
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(k1, Some(v1.clone()))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap();
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert!(db.get_metadata().await.unwrap().is_none());
@@ -109,27 +108,21 @@ pub mod tests {
             // Delete that one key.
             assert!(db.get(&k1).await.unwrap().is_some());
             let metadata: <C as DbAny<mmr::Family>>::Value = TestValue::from_seed(1);
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(k1, None)
                 .merkleize(Some(metadata.clone()), &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
             let root2 = db.root();
 
             // Repeated delete of same key should fail (key already deleted).
             assert!(db.get(&k1).await.unwrap().is_none());
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             db.sync().await.unwrap();
             let root3 = db.root();
             assert_ne!(root3, root2);
@@ -149,14 +142,13 @@ pub mod tests {
             assert!(db.get_bit(*bounds.end - 1));
 
             // Test that we can get a non-durable root.
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(k1, Some(v1))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             assert_ne!(db.root(), root3);
 
             db.destroy().await.unwrap();
@@ -187,14 +179,13 @@ pub mod tests {
             // Add one key.
             let k = Sha256::fill(0x01);
             let v1 = Sha256::fill(0xA1);
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(k, Some(v1))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(&mut hasher, k).await.unwrap();
@@ -220,14 +211,13 @@ pub mod tests {
             ));
 
             // Update the key to a new value (v2), which inactivates the previous operation.
-            let finalized = db
+            let merkleized = db
                 .new_batch()
                 .write(k, Some(v2))
                 .merkleize(None, &db)
                 .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -376,13 +366,8 @@ pub mod tests {
             let mut db = apply_random_ops::<TestDb<C, V>>(200, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -448,13 +433,8 @@ pub mod tests {
             let mut db = apply_random_ops::<TestDb<C, V>>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let finalized = db
-                .new_batch()
-                .merkleize(None, &db)
-                .await
-                .unwrap()
-                .finalize();
-            db.apply_batch(finalized).await.unwrap();
+            let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+            db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -547,14 +527,13 @@ pub mod tests {
             let mut old_val = Sha256::fill(0x00);
             for i in 1u8..=255 {
                 let v = Sha256::fill(i);
-                let finalized = db
+                let merkleized = db
                     .new_batch()
                     .write(k, Some(v))
                     .merkleize(None, &db)
                     .await
-                    .unwrap()
-                    .finalize();
-                db.apply_batch(finalized).await.unwrap();
+                    .unwrap();
+                db.apply_batch(merkleized).await.unwrap();
                 assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
                 let root = db.root();
 
