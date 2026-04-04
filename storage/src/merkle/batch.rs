@@ -30,11 +30,27 @@
 //!                          Mem                   (committed)
 //! ```
 //!
-//! # Parent chain
+//! # Parent chain and memory
 //!
-//! Each [`MerkleizedBatch`] stores a `Weak` pointer to its parent. During merkleize,
-//! ancestor data is collected by walking the `Weak` chain while ancestors are alive.
-//! Dead refs (committed and dropped ancestors) truncate the walk.
+//! Each [`MerkleizedBatch`] stores only its own local data (appended nodes and overwrites),
+//! not a flattened copy of all ancestors. A `Weak` pointer to the parent allows reads to
+//! walk the live chain; committed-and-dropped ancestors simply truncate the walk.
+//!
+//! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc` (keeping
+//! it alive), and the `Weak` chain is walked to collect `Arc` refs to each ancestor's
+//! data. These ancestor segments are stored on the resulting [`MerkleizedBatch`] for use
+//! by [`Mem::apply_batch`]. After merkleize, the parent is downgraded to `Weak`.
+//!
+//! In a pipelining pattern (build next batch from prev, apply prev, repeat), each batch
+//! holds at most one ancestor segment (its immediate parent's data, as an `Arc` ref).
+//! When that batch is applied and dropped, the ancestor segment is freed. Memory per
+//! batch is O(batch size), never growing with chain depth.
+//!
+//! A `committed` [`Mem`] snapshot (from when the chain was forked) is inherited by all
+//! descendants. This allows [`MerkleizedBatch::get_node`] to resolve positions in the
+//! original committed structure without walking the full `Weak` chain, which is needed
+//! for proof generation against speculative batches. The snapshot is `Arc`-backed, so
+//! all batches in a chain share a single underlying allocation.
 //!
 //! # Example (MMR)
 //!

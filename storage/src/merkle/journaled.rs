@@ -81,6 +81,8 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     }
 
     /// Consume this batch and produce an immutable [`batch::MerkleizedBatch`] with computed root.
+    /// The committed Mem (captured at [`Journaled::new_batch`] time) is passed as the fallback
+    /// for node lookups during hash computation.
     pub fn merkleize(
         self,
         hasher: &impl Hasher<F, Digest = D>,

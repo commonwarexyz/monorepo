@@ -6,7 +6,7 @@
 //!
 //! Internally, the structure's data is behind an [`Arc`] so that
 //! [`new_batch`](Mem::new_batch) shares it with the batch layer without copying. Mutating
-//! methods ([`apply`](Mem::apply), [`prune`](Mem::prune), etc.) use `Arc::make_mut`: this is
+//! methods ([`apply_batch`](Mem::apply_batch), [`prune`](Mem::prune), etc.) use `Arc::make_mut`: this is
 //! in-place when no outstanding batch references the data, but triggers an O(N) copy-on-write
 //! if any batch is still alive.
 

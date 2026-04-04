@@ -271,13 +271,11 @@ where
         self.any.pinned_nodes_at(loc).await
     }
 
-    /// Collapse accumulated `Layer` chains in the bitmap and grafted MMR into flat `Base`
-    /// representations.
+    /// Collapse the accumulated bitmap `Layer` chain into a flat `Base`.
     ///
-    /// Each [`Db::apply_batch`] pushes a new `Layer` on both the bitmap and the grafted MMR.
-    /// These layers are cheap to create (O(changeset)) but make subsequent reads walk the full
-    /// chain. Calling `flatten` collapses the chain into a single `Base`, bounding lookup cost
-    /// and reducing memory overhead from stale intermediate layers.
+    /// Each [`Db::apply_batch`] pushes a new `Layer` on the bitmap. These layers are cheap
+    /// to create but make subsequent reads walk the full chain. Calling `flatten` collapses
+    /// the chain into a single `Base`, bounding lookup cost.
     ///
     /// This is called automatically by [`Db::prune`]. Callers that apply many batches without
     /// pruning should call this periodically.
