@@ -29,20 +29,25 @@ test:
 	cd tests && quint test --max-samples=1000 tests_n4f1b1.qnt
 	cd tests && quint test --max-samples=1000 tests_n5f1b1.qnt
 
+longtest:
+	cd tests && quint test --max-samples=100000 --backend=rust tests_n4f1b0.qnt
+	cd tests && quint test --max-samples=100000 --backend=rust tests_n4f1b1.qnt
+	cd tests && quint test --max-samples=100000 --backend=rust tests_n5f1b1.qnt
+	quint run --max-steps=1000 --max-samples=1000 --invariant=safe_invariants --backend=rust main_n4f1b0.qnt
+	quint run --max-steps=1000 --max-samples=1000 --invariant=safe_invariants --backend=rust main_n4f1b1.qnt
+
 repl:
 	echo "init\n step\n step\n step" | quint -r main_n4f1b0.qnt::main
 
-MAX_STEPS ?= 100
-MAX_SAMPLES ?= 1000
+MAX_STEPS ?= 400
+MAX_SAMPLES ?= 10000
 run:
-	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
+	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) --backend=rust \
 		--invariant=safe_invariants main_n4f1b0.qnt
-	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
+	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) --backend=rust \
 		--invariant=safe_invariants main_n4f1b1.qnt
-	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
+	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) --backend=rust \
 		--invariant=safe_invariants main_n5f1b1.qnt
-	quint run --max-steps $(MAX_STEPS) --max-samples=$(MAX_SAMPLES) \
-    	--invariant=safe_invariants twins_n4f1b1.qnt
 
 get_fuzz_traces:
 	TRACE_SELECTION_STRATEGY=$(TRACE_SELECTION_STRATEGY) \

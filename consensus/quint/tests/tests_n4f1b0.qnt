@@ -87,7 +87,7 @@ module tests {
             )),
             assert(replica_state.get("n0").last_finalized == FIRST_VIEW),
             assert(ghost_committed_blocks.get("n0").length() == 1),
-            assert(ghost_committed_blocks.get("n0")[0] == "val_b0"),
+            assert(ghost_committed_blocks.get("n0")[0] == proposal),
             unchanged_all,
         })
         .expect(test_invariants)
@@ -131,7 +131,7 @@ module tests {
         .then(all {
             assert(store_nullify_votes.get("n1").exists(v => v.sig == "n0" and v.view == FIRST_VIEW)),
             assert(sent_nullify_votes.exists(v => v.sig == "n1" and v.view == FIRST_VIEW)),
-            assert(replica_state.get("n1").broadcast_nullify.get(FIRST_VIEW) == true),
+            assert(broadcast_nullify("n1", FIRST_VIEW)),
             assert(replica_state.get("n1").leader_timeout.get(FIRST_VIEW) == Some(true)),
             assert(replica_state.get("n1").certification_timeout.get(FIRST_VIEW) == Some(true)),
             assert(replica_state.get("n1").view == FIRST_VIEW),
@@ -155,7 +155,7 @@ module tests {
             assert(is_none(parent_payload(replica_state.get("n0"), FIRST_VIEW, FIRST_VIEW, store_certificates.get("n0")))),
             assert(parent_payload(replica_state.get("n0"), FIRST_VIEW, GENESIS_VIEW, store_certificates.get("n0")) == Some(GENESIS_PAYLOAD)),
             assert(not(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == FIRST_VIEW))),
-            assert(replica_state.get("n0").broadcast_nullify.get(FIRST_VIEW) == false),
+            assert(not(broadcast_nullify("n0", FIRST_VIEW))),
             assert(replica_state.get("n0").leader_timeout.get(FIRST_VIEW) == Some(false)),
             assert(replica_state.get("n0").certification_timeout.get(FIRST_VIEW) == Some(false)),
             assert(replica_state.get("n0").propose_sent == false),
@@ -276,7 +276,7 @@ module tests {
         .then(all {
             assert(sent_nullify_votes.exists(v => v.sig == "n1" and v.view == FIRST_VIEW)),
             assert(not(sent_notarize_votes.exists(v => v.sig == "n1" and v.proposal.view == FIRST_VIEW))),
-            assert(replica_state.get("n1").broadcast_nullify.get(FIRST_VIEW) == true),
+            assert(broadcast_nullify("n1", FIRST_VIEW)),
             assert(replica_state.get("n1").leader_timeout.get(FIRST_VIEW) == None),
             assert(replica_state.get("n1").certification_timeout.get(FIRST_VIEW) == None),
             assert(replica_state.get("n1").view == FIRST_VIEW),
@@ -389,7 +389,7 @@ module tests {
             .then(replica_receives_finalize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
             .then(all {
                 assert(CORRECT.forall(id => ghost_committed_blocks.get(id).length() == 1)),
-                assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == "val_b0")),
+                assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == proposal1)),
                 assert(CORRECT.forall(id => replica_state.get(id).view == 2)),
                 unchanged_all,
             })
@@ -421,9 +421,149 @@ module tests {
             .then(replica_receives_finalize_vote("n3", "val_b1", 2, FIRST_VIEW, "n2"))
             .then(all {
                 assert(CORRECT.forall(id => ghost_committed_blocks.get(id).length() == 2)),
-                assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == "val_b0")),
-                assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[1] == "val_b1")),
+                assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == proposal1)),
+                assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[1] == proposal2)),
                 assert(CORRECT.forall(id => replica_state.get(id).last_finalized == 2)),
+                unchanged_all,
+            })
+            .expect(test_invariants)
+        }
+
+        // The same payload may be finalized in multiple views; the committed
+        // chain should track proposals, not collapse them by payload string.
+        run repeatedPayloadAcrossViewsFinalizeTest = {
+            val proposal1 = {
+                payload: "val_b0",
+                view: FIRST_VIEW,
+                parent: GENESIS_VIEW,
+            }
+            val proposal2 = {
+                payload: "val_b0",
+                view: 2,
+                parent: FIRST_VIEW,
+            }
+
+            initWithLeaderAndCertify(
+                Map(0 -> "n2", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
+                CERTIFY_ALL_TRUE
+            )
+            .then(send_proposal("n0", proposal1))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", FIRST_VIEW, GENESIS_VIEW, "n2"))
+            .then(send_proposal("n1", proposal2))
+            .then(replica_receives_notarize_vote("n0", "val_b0", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n3", "val_b0", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", 2, FIRST_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n0", "val_b0", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 2, FIRST_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n1", "val_b0", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 2, FIRST_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n2", "val_b0", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_notarize_vote("n3", "val_b0", 2, FIRST_VIEW, "n0"))
+            .then(replica_receives_notarize_vote("n3", "val_b0", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 2, FIRST_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n0", "val_b0", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", 2, FIRST_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n1", "val_b0", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", 2, FIRST_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n2", "val_b0", 2, FIRST_VIEW, "n2"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", 2, FIRST_VIEW, "n0"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", 2, FIRST_VIEW, "n1"))
+            .then(replica_receives_finalize_vote("n3", "val_b0", 2, FIRST_VIEW, "n2"))
+            .then(all {
+                assert(CORRECT.forall(id => ghost_committed_blocks.get(id).length() == 2)),
+                assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == proposal1)),
+                assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[1] == proposal2)),
+                assert(committed_blocks_no_duplicates),
+                unchanged_all,
+            })
+            .expect(test_invariants)
+        }
+
+        // A later finalization must not appear in the committed chain until
+        // the parent proposal is committed and any skipped views are nullified.
+        run disconnectedFinalizationWaitsForParentAndNullificationTest = {
+            val proposal1 = {
+                payload: "val_b0",
+                view: FIRST_VIEW,
+                parent: GENESIS_VIEW,
+            }
+            val proposal3 = {
+                payload: "val_b1",
+                view: 3,
+                parent: FIRST_VIEW,
+            }
+            val finalization1 = finalization(proposal1, Set("n0", "n1", "n2"), "n0")
+            val finalization3 = finalization(proposal3, Set("n0", "n1", "n2"), "n0")
+            val nullification2 = nullification(2, Set("n0", "n1", "n2"), "n0")
+
+            initWithLeaderAndCertify(
+                Map(0 -> "n2", 1 -> "n0", 2 -> "n1", 3 -> "n2", 4 -> "n3", 5 -> "n0", 6 -> "n1"),
+                CERTIFY_ALL_TRUE
+            )
+            // n1 learns only the child finalization first, so the committed
+            // prefix must stay empty even though last_finalized advances.
+            .then(on_certificate("n1", finalization3))
+            .then(all {
+                assert(replica_state.get("n1").last_finalized == 3),
+                assert(ghost_committed_blocks.get("n1").length() == 0),
+                assert(agreement),
+                unchanged_all,
+            })
+            // Another replica that only knows the parent finalization still
+            // agrees, because [] is a prefix of [proposal1].
+            .then(on_certificate("n2", finalization1))
+            .then(all {
+                assert(replica_state.get("n2").last_finalized == FIRST_VIEW),
+                assert(ghost_committed_blocks.get("n2").length() == 1),
+                assert(ghost_committed_blocks.get("n2")[0] == proposal1),
+                assert(agreement),
+                unchanged_all,
+            })
+            // Once n1 learns the parent finalization, view 3 still cannot be
+            // committed until view 2 is known nullified.
+            .then(on_certificate("n1", finalization1))
+            .then(all {
+                assert(ghost_committed_blocks.get("n1").length() == 1),
+                assert(ghost_committed_blocks.get("n1")[0] == proposal1),
+                assert(agreement),
+                unchanged_all,
+            })
+            // Nullification of the skipped view unblocks the connected chain.
+            .then(on_certificate("n1", nullification2))
+            .then(all {
+                assert(ghost_committed_blocks.get("n1").length() == 2),
+                assert(ghost_committed_blocks.get("n1")[0] == proposal1),
+                assert(ghost_committed_blocks.get("n1")[1] == proposal3),
+                assert(committed_chain_is_connected),
+                assert(agreement),
                 unchanged_all,
             })
             .expect(test_invariants)
@@ -503,7 +643,7 @@ module tests {
             .then(replica_receives_finalize_vote("n3", "val_b0", 3, GENESIS_VIEW, "n2"))
             .then(all {
                 assert(CORRECT.forall(id => ghost_committed_blocks.get(id).length() == 1)),
-                assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == "val_b0")),
+                assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == proposal)),
                 assert(CORRECT.forall(id => replica_state.get(id).last_finalized == 3)),
                 unchanged_all,
             })
@@ -535,7 +675,7 @@ module tests {
             .then(replica_receives_notarize_vote("n2", "val_b0", 1, FIRST_VIEW, "n0"))
             .then(replica_receives_notarize_vote("n3", "val_b0", 1, FIRST_VIEW, "n0"))
             .then(all {
-                assert(CORRECT.forall(id => replica_state.get(id).broadcast_nullify.get(FIRST_VIEW) == true)),
+                assert(CORRECT.forall(id => broadcast_nullify(id, FIRST_VIEW))),
                 assert(CORRECT.forall(id => sent_nullify_votes.exists(v => v.sig == id and v.view == FIRST_VIEW))),
                 unchanged_all,
             })
@@ -580,7 +720,7 @@ module tests {
             .then(replica_receives_finalize_vote("n3", "val_b0", 2, GENESIS_VIEW, "n2"))
             .then(all {
                 assert(CORRECT.forall(id => ghost_committed_blocks.get(id).length() == 1)),
-                assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == "val_b0")),
+                assert(CORRECT.forall(id => ghost_committed_blocks.get(id)[0] == correct_proposal)),
                 assert(CORRECT.forall(id => replica_state.get(id).last_finalized == 2)),
                 unchanged_all,
             })
@@ -653,14 +793,14 @@ module tests {
             .then(all {
                 // n1, n2, n3 finalized 2 payloads
                 assert(Set("n1", "n2", "n3").forall(id => ghost_committed_blocks.get(id).length() == 2)),
-                assert(Set("n1", "n2", "n3").forall(id => ghost_committed_blocks.get(id)[0] == "val_b0")),
-                assert(Set("n1", "n2", "n3").forall(id => ghost_committed_blocks.get(id)[1] == "val_b1")),
+                assert(Set("n1", "n2", "n3").forall(id => ghost_committed_blocks.get(id)[0] == proposal1)),
+                assert(Set("n1", "n2", "n3").forall(id => ghost_committed_blocks.get(id)[1] == proposal2)),
                 // n0 nullified both views
                 assert(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == FIRST_VIEW)),
                 assert(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == 2)),
                 // n0 committed 1 payload (from receiving finalization cert for view 1)
                 assert(ghost_committed_blocks.get("n0").length() == 1),
-                assert(ghost_committed_blocks.get("n0")[0] == "val_b0"),
+                assert(ghost_committed_blocks.get("n0")[0] == proposal1),
                 unchanged_all,
             })
             .expect(test_invariants)

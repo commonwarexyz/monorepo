@@ -36,7 +36,15 @@ module tests {
         lastAction' = lastAction,
     }
 
-    action init_with_blocks(chains: ReplicaId -> List[Payload]): bool = {
+    pure def committed(view: ViewNumber, parent: ViewNumber, payload: Payload): Proposal = {
+        {
+            view: view,
+            parent: parent,
+            payload: payload,
+        }
+    }
+
+    action init_with_blocks(chains: ReplicaId -> List[Proposal]): bool = {
         initWithLeaderAndCertify(
             Map(0 -> "n0", 1 -> "n1", 2 -> "n2", 3 -> "n3", 4 -> "n0"),
             CERTIFY_ALL_TRUE
@@ -62,46 +70,96 @@ module tests {
         .then(all { assert(agreement), unchanged_all })
 
     run prefixOneTest =
-        init_with_blocks(Map("n0" -> List("val_b0"), "n1" -> List(), "n2" -> List(), "n3" -> List()))
+        init_with_blocks(Map("n0" -> List(committed(1, 0, "val_b0")), "n1" -> List(), "n2" -> List(), "n3" -> List()))
         .then(all { assert(agreement), unchanged_all })
 
     run prefixMatchTest =
-        init_with_blocks(Map("n0" -> List("val_b0"), "n1" -> List("val_b0"), "n2" -> List(), "n3" -> List()))
+        init_with_blocks(Map("n0" -> List(committed(1, 0, "val_b0")), "n1" -> List(committed(1, 0, "val_b0")), "n2" -> List(), "n3" -> List()))
         .then(all { assert(agreement), unchanged_all })
 
     run prefixLongerTest =
-        init_with_blocks(Map("n0" -> List("val_b0", "val_b1"), "n1" -> List("val_b0"), "n2" -> List(), "n3" -> List()))
+        init_with_blocks(Map(
+            "n0" -> List(committed(1, 0, "val_b0"), committed(2, 1, "val_b1")),
+            "n1" -> List(committed(1, 0, "val_b0")),
+            "n2" -> List(),
+            "n3" -> List()
+        ))
         .then(all { assert(agreement), unchanged_all })
 
     run disagreementTest =
-        init_with_blocks(Map("n0" -> List("val_b0"), "n1" -> List("val_b1"), "n2" -> List(), "n3" -> List()))
+        init_with_blocks(Map(
+            "n0" -> List(committed(1, 0, "val_b0")),
+            "n1" -> List(committed(1, 0, "val_b1")),
+            "n2" -> List(),
+            "n3" -> List()
+        ))
         .then(all { assert(not(agreement)), unchanged_all })
 
     run disagreementSecondBlockTest =
-        init_with_blocks(Map("n0" -> List("val_b0", "val_b1"), "n1" -> List("val_b0", "val_b0"), "n2" -> List(), "n3" -> List()))
+        init_with_blocks(Map(
+            "n0" -> List(committed(1, 0, "val_b0"), committed(2, 1, "val_b1")),
+            "n1" -> List(committed(1, 0, "val_b0"), committed(2, 1, "val_b0")),
+            "n2" -> List(),
+            "n3" -> List()
+        ))
         .then(all { assert(not(agreement)), unchanged_all })
 
     run allAgreeTest =
-        init_with_blocks(Map("n0" -> List("val_b0", "val_b1"), "n1" -> List("val_b0", "val_b1"), "n2" -> List("val_b0", "val_b1"), "n3" -> List("val_b0", "val_b1")))
+        init_with_blocks(Map(
+            "n0" -> List(committed(1, 0, "val_b0"), committed(2, 1, "val_b1")),
+            "n1" -> List(committed(1, 0, "val_b0"), committed(2, 1, "val_b1")),
+            "n2" -> List(committed(1, 0, "val_b0"), committed(2, 1, "val_b1")),
+            "n3" -> List(committed(1, 0, "val_b0"), committed(2, 1, "val_b1"))
+        ))
         .then(all { assert(agreement), unchanged_all })
 
     // Negative: three replicas disagree with each other.
     run threeWayDisagreementTest =
-        init_with_blocks(Map("n0" -> List("val_b0"), "n1" -> List("val_b1"), "n2" -> List("val_b0"), "n3" -> List("val_b1")))
+        init_with_blocks(Map(
+            "n0" -> List(committed(1, 0, "val_b0")),
+            "n1" -> List(committed(1, 0, "val_b1")),
+            "n2" -> List(committed(1, 0, "val_b0")),
+            "n3" -> List(committed(1, 0, "val_b1"))
+        ))
         .then(all { assert(not(agreement)), unchanged_all })
 
     // Negative: longer chain diverges from shorter.
     run longerDivergesTest =
-        init_with_blocks(Map("n0" -> List("val_b1", "val_b0"), "n1" -> List("val_b0"), "n2" -> List(), "n3" -> List()))
+        init_with_blocks(Map(
+            "n0" -> List(committed(1, 0, "val_b1"), committed(2, 1, "val_b0")),
+            "n1" -> List(committed(1, 0, "val_b0")),
+            "n2" -> List(),
+            "n3" -> List()
+        ))
         .then(all { assert(not(agreement)), unchanged_all })
 
     // Positive: committed_blocks_no_duplicates holds with distinct blocks.
     run noDuplicatesTest =
-        init_with_blocks(Map("n0" -> List("val_b0", "val_b1"), "n1" -> List("val_b0"), "n2" -> List(), "n3" -> List()))
+        init_with_blocks(Map(
+            "n0" -> List(committed(1, 0, "val_b0"), committed(2, 1, "val_b1")),
+            "n1" -> List(committed(1, 0, "val_b0")),
+            "n2" -> List(),
+            "n3" -> List()
+        ))
         .then(all { assert(committed_blocks_no_duplicates), unchanged_all })
 
-    // Negative: committed_blocks_no_duplicates fails with duplicate blocks.
+    // Positive: the same payload can appear in multiple committed views.
+    run duplicatePayloadDifferentViewsAllowedTest =
+        init_with_blocks(Map(
+            "n0" -> List(committed(1, 0, "val_b0"), committed(2, 1, "val_b0")),
+            "n1" -> List(),
+            "n2" -> List(),
+            "n3" -> List()
+        ))
+        .then(all { assert(committed_blocks_no_duplicates), unchanged_all })
+
+    // Negative: committed_blocks_no_duplicates fails with duplicate committed views.
     run duplicateBlocksTest =
-        init_with_blocks(Map("n0" -> List("val_b0", "val_b0"), "n1" -> List(), "n2" -> List(), "n3" -> List()))
+        init_with_blocks(Map(
+            "n0" -> List(committed(1, 0, "val_b0"), committed(1, 0, "val_b0")),
+            "n1" -> List(),
+            "n2" -> List(),
+            "n3" -> List()
+        ))
         .then(all { assert(not(committed_blocks_no_duplicates)), unchanged_all })
 }

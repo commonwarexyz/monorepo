@@ -168,18 +168,6 @@ module types {
     type ReplicaState = {
         // Current view. Genesis is view 0, voting starts at view 1.
         view: ViewNumber,
-        // whether this replica has broadcast notarize for a view
-        broadcast_notarize: ViewNumber -> bool,
-        // whether this replica has broadcast nullify for a view
-        broadcast_nullify: ViewNumber -> bool,
-        // whether this replica has broadcast finalize for a view
-        broadcast_finalize: ViewNumber -> bool,
-        // whether this replica has broadcast notarization certificate for a view
-        broadcast_notarization: ViewNumber -> bool,
-        // whether this replica has broadcast nullification certificate for a view
-        broadcast_nullification: ViewNumber -> bool,
-        // whether this replica has broadcast finalization certificate for a view
-        broadcast_finalization: ViewNumber -> bool,
         // leader timeout state per view:
         // Some(false) = pending, Some(true) = expired, None = cancelled
         leader_timeout: ViewNumber -> Option[bool],

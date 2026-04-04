@@ -44,7 +44,7 @@ module tests {
                 assert(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == FIRST_VIEW)),
                 assert(sent_nullify_votes.exists(v => v.sig == "n1" and v.view == FIRST_VIEW)),
                 assert(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == FIRST_VIEW)),
-                assert(replica_state.get("n0").broadcast_nullify.get(FIRST_VIEW) == true),
+                assert(broadcast_nullify("n0", FIRST_VIEW)),
                 assert(replica_state.get("n0").view == FIRST_VIEW),
                 unchanged_all,
             })
@@ -90,7 +90,7 @@ module tests {
                 assert(replica_state.get("n2").view == 2),
                 assert(replica_state.get("n2").last_finalized == FIRST_VIEW),
                 assert(ghost_committed_blocks.get("n2").length() == 1),
-                assert(ghost_committed_blocks.get("n2")[0] == "val_b0"),
+                assert(ghost_committed_blocks.get("n2")[0] == proposal),
                 unchanged_all,
             })
             .expect(test_invariants)

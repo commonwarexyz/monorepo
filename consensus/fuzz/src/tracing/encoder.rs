@@ -196,20 +196,6 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
     // emit `send_*_vote` barriers before certificates that depend on them.
     let filtered_entries = filter_invalid_byzantine_votes(entries, cfg, &honest_votes);
 
-    // Entries with correct receivers only, for helpers that do not need
-    // byzantine-receiver entries (vote-block maps, proposal extraction).
-    let correct_entries: Vec<TraceEntry> = filtered_entries
-        .iter()
-        .filter(|e| {
-            let receiver = match e {
-                TraceEntry::Vote { receiver, .. } => receiver,
-                TraceEntry::Certificate { receiver, .. } => receiver,
-            };
-            !is_byzantine_node(receiver, cfg.faults)
-        })
-        .cloned()
-        .collect();
-
     let block_map = build_block_map(trace_data);
     let leader_map = build_leader_map_to(cfg, cfg.max_view);
     let leader_lookup: HashMap<u64, String> = leader_map.iter().cloned().collect();
@@ -218,10 +204,9 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
     let f = (cfg.n - 1) / 3;
     let q = cfg.n - f;
 
-    let vote_blocks = build_correct_vote_blocks(&correct_entries, &block_map, cfg);
-
-    // Build view proposals from notarize votes and authentic certificates
-    let proposals = build_view_proposals(&correct_entries, &block_map, &vote_blocks, cfg);
+    // Build view proposals from the filtered trace itself. Certificate
+    // validity is checked by the Quint model, not by the encoder.
+    let proposals = build_view_proposals(&filtered_entries, &block_map, cfg);
 
     let mut out = String::new();
 
@@ -316,13 +301,7 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
     // Generate actions in original trace order, then group vote deliveries.
     // Pass all filtered entries (including byzantine receivers) so that
     // `send_*_vote` barriers are emitted at the earliest occurrence.
-    let action_items = build_actions(
-        &filtered_entries,
-        &block_map,
-        cfg,
-        &leader_lookup,
-        &vote_blocks,
-    );
+    let action_items = build_actions(&filtered_entries, &block_map, cfg, &leader_lookup);
 
     // Flatten vote deliveries: each finalize/nullify vote becomes its own
     // on_finalize/on_nullify call with a single vote argument.
@@ -396,109 +375,17 @@ pub fn encode(trace_data: &TraceData, cfg: &EncoderConfig) -> String {
     out
 }
 
-/// Pre-scans the trace to build a map of blocks that correct nodes actually
-/// voted for. Used to filter out forged certificates from byzantine senders.
-/// The sniffer captures all network messages including forged certs that the
-/// Rust engine rejects via signature verification.
-fn build_correct_vote_blocks(
-    entries: &[TraceEntry],
-    block_map: &[(String, String)],
-    cfg: &EncoderConfig,
-) -> HashMap<(String, u64, String), HashSet<String>> {
-    let mut map: HashMap<(String, u64, String), HashSet<String>> = HashMap::new();
-    for entry in entries {
-        if let TraceEntry::Vote { sender, vote, .. } = entry {
-            match vote {
-                TracedVote::Notarize { view, sig, block } => {
-                    let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
-                    if is_byzantine_node(&sig, cfg.faults) {
-                        continue;
-                    }
-                    let bn = map_block(block, block_map);
-                    map.entry((sig, *view, "notarize".into()))
-                        .or_default()
-                        .insert(bn);
-                }
-                TracedVote::Finalize { view, sig, block } => {
-                    let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
-                    if is_byzantine_node(&sig, cfg.faults) {
-                        continue;
-                    }
-                    let bn = map_block(block, block_map);
-                    map.entry((sig, *view, "finalize".into()))
-                        .or_default()
-                        .insert(bn);
-                }
-                _ => {}
-            }
-        }
-    }
-    map
-}
-
-/// Returns true if a certificate is authentic: all correct signers actually
-/// voted for the cert's block. Certs from correct senders are trusted.
-/// Certs from byzantine senders are validated against the vote map.
-fn is_authentic_cert(
-    cert: &TracedCert,
-    vote_blocks: &HashMap<(String, u64, String), HashSet<String>>,
-    block_map: &[(String, String)],
-    faults: usize,
-) -> bool {
-    let ghost_sender = match cert {
-        TracedCert::Notarization { ghost_sender, .. }
-        | TracedCert::Nullification { ghost_sender, .. }
-        | TracedCert::Finalization { ghost_sender, .. } => ghost_sender,
-    };
-    // Certs from correct senders are trusted (they assembled from real votes)
-    if !is_byzantine_node(ghost_sender, faults) {
-        return true;
-    }
-    // For byzantine-sourced certs, verify correct signers' votes match the block
-    match cert {
-        TracedCert::Notarization {
-            view,
-            block,
-            signers,
-            ..
-        } => {
-            let bn = map_block(block, block_map);
-            signers.iter().all(|s| {
-                is_byzantine_node(s, faults)
-                    || vote_blocks
-                        .get(&(s.clone(), *view, "notarize".into()))
-                        .map_or(false, |blocks| blocks.contains(&bn))
-            })
-        }
-        TracedCert::Nullification { .. } => {
-            // Nullify votes don't carry a block, no forgery possible
-            true
-        }
-        TracedCert::Finalization {
-            view,
-            block,
-            signers,
-            ..
-        } => {
-            let bn = map_block(block, block_map);
-            signers.iter().all(|s| {
-                is_byzantine_node(s, faults)
-                    || vote_blocks
-                        .get(&(s.clone(), *view, "finalize".into()))
-                        .map_or(false, |blocks| blocks.contains(&bn))
-            })
-        }
-    }
-}
-
 /// Builds the full action list, processing entries in original trace order.
 ///
-/// For notarize votes, leader proposal handling is driven directly through
-/// `on_notarize(receiver, vote)`. The encoder synthesizes a single
-/// self-delivery for a correct leader so the leader's own sent/local vote
-/// is represented even when the trace only shows network deliveries to
-/// other replicas. Every observed vote also emits a matching `send_*_vote`
-/// action once so the global sent-vote history matches the replay.
+/// For notarize votes, the trace format does not include explicit proposal
+/// events. We therefore reconstruct the missing causal prefix:
+/// - when a correct leader is first needed, emit `propose(...)`
+/// - when a byzantine leader is first needed, emit `send_notarize_vote(...)`
+/// - before replaying an honest non-leader notarize send, ensure that sender
+///   has already processed the leader's notarize vote via
+///   `on_notarize(sender, leader_vote)`
+/// This keeps the current trace format while restoring the protocol's causal
+/// order: proposal first, then honest votes that depend on it.
 /// Finalize/nullify deliveries emit individual `on_finalize`/`on_nullify`
 /// calls, each with a single vote argument.
 ///
@@ -510,14 +397,14 @@ fn build_actions(
     block_map: &[(String, String)],
     cfg: &EncoderConfig,
     leader_lookup: &HashMap<u64, String>,
-    vote_blocks: &HashMap<(String, u64, String), HashSet<String>>,
 ) -> Vec<ActionItem> {
     let mut actions: Vec<ActionItem> = Vec::new();
     // Keys include block name for notarize/finalize to handle byzantine equivocation
     // (same signer, same view, different blocks).
     let mut sent_votes_emitted: HashSet<(String, u64, String, String)> = HashSet::new();
     let mut self_delivered: HashSet<(String, u64, String)> = HashSet::new();
-    let mut leader_self_processed: HashSet<ProposalKey> = HashSet::new();
+    let mut leader_vote_introduced: HashSet<ProposalKey> = HashSet::new();
+    let mut leader_vote_delivered: HashSet<(String, u64, String)> = HashSet::new();
     // Dedup cert deliveries per receiver. In the Rust execution, each node
     // broadcasts its assembled cert to all peers, producing up to N^2 total
     // deliveries (N senders x N receivers). In the quint model, the first
@@ -546,15 +433,59 @@ fn build_actions(
                         let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
                         let bn = map_block(block, block_map);
                         let proposal = proposal_key(*view, &bn);
-                        let is_leader =
-                            leader_lookup.get(view).map(|l| l.as_str()) == Some(sig.as_str());
+                        let leader_id = leader_lookup
+                            .get(view)
+                            .cloned()
+                            .expect("leader must be defined for traced view");
+                        let leader_is_byzantine = is_byzantine_node(&leader_id, cfg.faults);
+                        let sender_is_correct = !is_byzantine_node(sender, cfg.faults);
+                        let is_leader_vote = sig == leader_id;
+                        let leader_vote = format!(
+                            "{{ proposal: {}, sig: \"{}\" }}",
+                            proposal_ref(*view, &bn),
+                            leader_id
+                        );
 
-                        if sent_votes_emitted.insert((
-                            sig.clone(),
-                            *view,
-                            "notarize".into(),
-                            bn.clone(),
-                        )) {
+                        if sender_is_correct {
+                            if leader_vote_introduced.insert(proposal.clone()) {
+                                if leader_is_byzantine {
+                                    if sent_votes_emitted.insert((
+                                        leader_id.clone(),
+                                        *view,
+                                        "notarize".into(),
+                                        bn.clone(),
+                                    )) {
+                                        actions.push(ActionItem::Barrier(format!(
+                                            "send_notarize_vote({})",
+                                            leader_vote
+                                        )));
+                                    }
+                                } else {
+                                    actions.push(ActionItem::Barrier(format!(
+                                        "propose(\"{}\", {}.payload, {}.parent)",
+                                        leader_id,
+                                        proposal_ref(*view, &bn),
+                                        proposal_ref(*view, &bn)
+                                    )));
+                                }
+                            }
+
+                            if sender != &leader_id
+                                && leader_vote_delivered.insert((sender.clone(), *view, bn.clone()))
+                            {
+                                actions.push(ActionItem::Barrier(format!(
+                                    "on_notarize(\"{}\", {})",
+                                    sender, leader_vote
+                                )));
+                            }
+                        } else if is_byzantine_node(&sig, cfg.faults)
+                            && sent_votes_emitted.insert((
+                                sig.clone(),
+                                *view,
+                                "notarize".into(),
+                                bn.clone(),
+                            ))
+                        {
                             actions.push(ActionItem::Barrier(format!(
                                 "send_notarize_vote({{ proposal: {}, sig: \"{}\" }})",
                                 proposal_ref(*view, &bn),
@@ -566,27 +497,27 @@ fn build_actions(
                             continue;
                         }
 
-                        // The trace typically does not contain a self-delivery for the
-                        // correct leader's own proposal vote, so synthesize one once.
-                        if is_leader
-                            && !is_byzantine_node(&sig, cfg.faults)
-                            && leader_self_processed.insert(proposal.clone())
-                        {
+                        if is_leader_vote {
+                            if receiver != &leader_id
+                                && leader_vote_delivered.insert((
+                                    receiver.clone(),
+                                    *view,
+                                    bn.clone(),
+                                ))
+                            {
+                                actions.push(ActionItem::Barrier(format!(
+                                    "on_notarize(\"{}\", {})",
+                                    receiver, leader_vote
+                                )));
+                            }
+                        } else {
                             actions.push(ActionItem::Barrier(format!(
                                 "on_notarize(\"{}\", {{ proposal: {}, sig: \"{}\" }})",
-                                sig,
-                                proposal_var_name(&proposal),
+                                receiver,
+                                proposal_ref(*view, &bn),
                                 sig
                             )));
                         }
-
-                        // Deliver vote to receiver
-                        actions.push(ActionItem::Barrier(format!(
-                            "on_notarize(\"{}\", {{ proposal: {}, sig: \"{}\" }})",
-                            receiver,
-                            proposal_ref(*view, &bn),
-                            sig
-                        )));
                     }
                     TracedVote::Finalize { view, sig, block } => {
                         let sig = normalize_vote_sig_for_sender(sender, sig, cfg);
@@ -676,13 +607,6 @@ fn build_actions(
                 }
             }
             TraceEntry::Certificate { receiver, cert, .. } => {
-                // Skip forged certificates from byzantine senders.
-                // The sniffer captures all network messages including certs
-                // that the Rust engine would reject via signature verification.
-                if !is_authentic_cert(cert, vote_blocks, block_map, cfg.faults) {
-                    continue;
-                }
-
                 let cert_str = encode_cert(cert, block_map);
 
                 // Emit send_certificate once per unique cert (regardless of
@@ -917,11 +841,10 @@ fn encode_cert(cert: &TracedCert, block_map: &[(String, String)]) -> String {
 /// Twins traces may contain multiple Byzantine proposals in the same view, so
 /// proposals are reconstructed per `(view, block)`. All proposals within a
 /// given view share the same parent view, and the parent for the next view is
-/// chosen from the latest authentic certifiable certificate.
+/// chosen from the latest certifiable certificate present in the trace.
 fn build_view_proposals(
     entries: &[TraceEntry],
     block_map: &[(String, String)],
-    vote_blocks: &HashMap<(String, u64, String), HashSet<String>>,
     cfg: &EncoderConfig,
 ) -> HashMap<ProposalKey, ViewProposal> {
     let mut per_view_blocks: HashMap<u64, HashMap<String, (Vec<String>, usize)>> = HashMap::new();
@@ -961,29 +884,25 @@ fn build_view_proposals(
                     .or_insert_with(|| (Vec::new(), idx));
                 block_entry.1 = idx;
             }
-            TraceEntry::Certificate { cert, .. }
-                if is_authentic_cert(cert, vote_blocks, block_map, cfg.faults) =>
-            {
-                match cert {
-                    TracedCert::Notarization { view, block, .. }
-                    | TracedCert::Finalization { view, block, .. } => {
-                        let block_name = map_block(block, block_map);
-                        per_view_blocks
+            TraceEntry::Certificate { cert, .. } => match cert {
+                TracedCert::Notarization { view, block, .. }
+                | TracedCert::Finalization { view, block, .. } => {
+                    let block_name = map_block(block, block_map);
+                    per_view_blocks
+                        .entry(*view)
+                        .or_default()
+                        .entry(block_name.clone())
+                        .or_insert_with(|| (Vec::new(), idx))
+                        .1 = idx;
+                    if is_certifiable(block) {
+                        certified_blocks
                             .entry(*view)
                             .or_default()
-                            .entry(block_name.clone())
-                            .or_insert_with(|| (Vec::new(), idx))
-                            .1 = idx;
-                        if is_certifiable(block) {
-                            certified_blocks
-                                .entry(*view)
-                                .or_default()
-                                .insert(block_name, idx);
-                        }
+                            .insert(block_name, idx);
                     }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
             _ => {}
         }
     }

@@ -616,24 +616,29 @@ pub fn extract_expected_state(
             .map(|(_, v)| parse_int(&v["last_finalized"]))
             .unwrap_or(0);
 
-        // Extract committed sequence from ghost_committed_blocks
+        // Extract committed sequence from ghost_committed_blocks.
+        // Older specs stored payload strings; the current spec stores proposals.
         let committed_sequence = committed_entries
             .iter()
             .find(|(k, _)| k.as_str() == Some(node.as_str()))
             .and_then(|(_, v)| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|b| {
-                        let block_name = b.as_str()?;
-                        finalizations
-                            .iter()
-                            .find(|(_, hex)| {
-                                block_map
-                                    .get(block_name)
-                                    .map(|h| h == hex.as_str())
-                                    .unwrap_or(false)
-                            })
-                            .map(|(&v, _)| v)
+                    .filter_map(|entry| {
+                        if entry.is_object() {
+                            Some(parse_int(&entry["view"]))
+                        } else {
+                            let block_name = entry.as_str()?;
+                            finalizations
+                                .iter()
+                                .find(|(_, hex)| {
+                                    block_map
+                                        .get(block_name)
+                                        .map(|h| h == hex.as_str())
+                                        .unwrap_or(false)
+                                })
+                                .map(|(&v, _)| v)
+                        }
                     })
                     .collect()
             })

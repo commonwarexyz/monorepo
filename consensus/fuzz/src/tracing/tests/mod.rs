@@ -257,6 +257,11 @@ fn test_encoder_roundtrip_57ee33dc4aa3193f0f134235b1e9339f97335735() {
     run_encoder_roundtrip_json("57ee33dc4aa3193f0f134235b1e9339f97335735");
 }
 
+#[test]
+fn test_encoder_roundtrip_f8e973d05611bcdd590fc791818775e247225159() {
+    run_encoder_roundtrip_json("f8e973d05611bcdd590fc791818775e247225159");
+}
+
 // --- Unit tests: all JSON fixtures per suite ---
 
 #[test]
