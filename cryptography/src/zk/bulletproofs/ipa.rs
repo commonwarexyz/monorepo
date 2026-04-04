@@ -374,15 +374,6 @@ impl<F: Read, G: Read> Read for Proof<F, G> {
     }
 }
 
-fn sample_challenge<F: Field + Random>(transcript: &Transcript) -> F {
-    let mut noise = transcript.noise(b"challenge");
-    let mut challenge = F::zero();
-    while challenge == F::zero() {
-        challenge = F::random(&mut noise);
-    }
-    challenge
-}
-
 /// Prove that a given [`Witness`] is valid, relative to a [`Claim`] and [`Setup`].
 ///
 /// We also take in a transcript. The proof is bound to the transcript state at
@@ -496,6 +487,8 @@ where
     // At this point, we've committed to the claim we're trying to prove, so
     // we can't pull any shenanigans by modifying the claim based on the challenges.
     transcript.commit(claim.encode());
+    let w = F::random(&mut transcript.noise(b"w challenge"));
+    let w_q = setup.product_generator.clone() * &w;
 
     let mut l_r_coms = Vec::<(G, G)>::new();
     let mut a = witness.a;
@@ -510,14 +503,14 @@ where
         let (h_lo, h_hi) = h.split_at_mut(mid);
         let l = G::msm(g_hi, a_lo, strategy)
             + &G::msm(h_lo, b_hi, strategy)
-            + &(setup.product_generator.clone() * &F::msm(a_lo, b_hi, strategy));
+            + &(w_q.clone() * &F::msm(a_lo, b_hi, strategy));
         let r = G::msm(g_lo, a_hi, strategy)
             + &G::msm(h_hi, b_lo, strategy)
-            + &(setup.product_generator.clone() * &F::msm(a_hi, b_lo, strategy));
+            + &(w_q.clone() * &F::msm(a_hi, b_lo, strategy));
         l_r_coms.push((l.clone(), r.clone()));
         transcript.commit(l.encode());
         transcript.commit(r.encode());
-        let u = sample_challenge::<F>(transcript);
+        let u = F::random(&mut transcript.noise(b"u challenge"));
         let u_inv = u.inv();
 
         for (a_lo_i, a_hi_i) in a_lo.iter_mut().zip(a_hi.iter_mut()) {
@@ -663,6 +656,9 @@ where
     }
     transcript.commit(claim.encode());
 
+    let w = F::random(&mut transcript.noise(b"w challenge"));
+    let w_q = setup.product_generator.clone() * &w;
+
     // We reduce verification down to one MSM which needs to equal 0:
     // commitment + product * U + sum(u_i^2 * L_i + u_i^-2 * R_i)
     // - a_final * g_final - b_final * h_final - a_final * b_final * U = 0.
@@ -674,7 +670,7 @@ where
     for (l, r) in l_r_coms {
         transcript.commit(l.encode());
         transcript.commit(r.encode());
-        let u = sample_challenge::<F>(transcript);
+        let u = F::random(transcript.noise(b"u challenge"));
         let u_inv = u.inv();
         us.push((u.clone(), u_inv.clone()));
         let u2 = {
@@ -698,7 +694,7 @@ where
 
     points.extend_from_slice(&setup.g[..claimed_len]);
     points.extend_from_slice(&setup.h[..claimed_len]);
-    points.push(setup.product_generator.clone());
+    points.push(w_q);
 
     let g_h_weights_start = weights.len();
     weights.push(F::one());
@@ -736,7 +732,10 @@ mod tests {
     use super::*;
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_invariants::minifuzz;
-    use commonware_math::test::{F, G};
+    use commonware_math::{
+        algebra::Additive,
+        test::{F, G},
+    };
     use commonware_parallel::Sequential;
 
     const MAX_VECTOR_LG: u8 = 5;
@@ -795,6 +794,36 @@ mod tests {
             self.bad_namespace = true;
         }
 
+        fn tweak_product(&mut self, delta: F) {
+            if delta == F::zero() {
+                return;
+            }
+            self.honest = false;
+            // Normally, we compress the separate product by doing:
+            //
+            //   c w Q + P
+            //
+            // but, if you know w in advance, you can do:
+            //
+            //   (c + d) w Q + (P - d w Q)
+            //
+            // i.e. tweak your commitment to change the product, without changing
+            // the actual vectors that make up your witness.
+            //
+            // One simple case where you know w is if the implementor forgets to multiply
+            // the product generator by this challenge. (I made this mistake myself).
+            self.claim.product -= &delta;
+            self.claim.commitment += &(self.setup.product_generator().clone() * &delta);
+            self.proof = prove(
+                &mut Transcript::new(NAMESPACE),
+                self.setup,
+                &self.claim,
+                self.witness.clone(),
+                &Sequential,
+            )
+            .expect("proving should work after tweaking the public claim");
+        }
+
         fn honest(&self) -> bool {
             self.honest
         }
@@ -841,6 +870,7 @@ mod tests {
             // is the prover going to be malicious at all?
             if u.arbitrary::<bool>()? {
                 match u.arbitrary::<u8>()? {
+                    x if x < 128 => prover.tweak_product(u.arbitrary::<F>()?),
                     _ => prover.bad_namespace(),
                 }
             }
