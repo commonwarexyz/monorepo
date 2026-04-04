@@ -124,6 +124,19 @@ impl Request {
         self.deadline().is_some()
     }
 
+    /// Return whether this request should be treated as orphaned.
+    ///
+    /// A request is orphaned only when its completion receiver has been dropped
+    /// and this request kind stops driving follow-up SQEs in that state.
+    pub fn is_orphaned(&self) -> bool {
+        match self {
+            Self::Send(s) => s.sender.is_closed(),
+            Self::Recv(r) => r.sender.is_closed(),
+            Self::ReadAt(r) => r.sender.is_closed(),
+            Self::WriteAt(_) | Self::Sync(_) => false,
+        }
+    }
+
     /// Build the next SQE for this request, tagged with `waiter_id`.
     pub fn build_sqe(&mut self, waiter_id: WaiterId) -> SqueueEntry {
         let sqe = match self {
@@ -153,11 +166,29 @@ impl Request {
     /// Deliver the stored result to the caller via its oneshot sender.
     pub fn complete(self) {
         match self {
-            Self::Send(s) => s.finish(),
-            Self::Recv(r) => r.finish(),
-            Self::ReadAt(r) => r.finish(),
-            Self::WriteAt(w) => w.finish(),
-            Self::Sync(s) => s.finish(),
+            Self::Send(s) => {
+                let _ = s.sender.send(s.result.unwrap_or(Err(Error::SendFailed)));
+            }
+            Self::Recv(r) => {
+                let result = match r.result.unwrap_or(Err(Error::RecvFailed)) {
+                    Ok(read) => Ok((r.buf, read)),
+                    Err(err) => Err((r.buf, err)),
+                };
+                let _ = r.sender.send(result);
+            }
+            Self::ReadAt(r) => {
+                let result = match r.result.unwrap_or(Err(Error::ReadFailed)) {
+                    Ok(()) => Ok(r.buf),
+                    Err(err) => Err((r.buf, err)),
+                };
+                let _ = r.sender.send(result);
+            }
+            Self::WriteAt(w) => {
+                let _ = w.sender.send(w.result.unwrap_or(Err(Error::WriteFailed)));
+            }
+            Self::Sync(s) => {
+                let _ = s.sender.send(s.result.unwrap_or(Ok(())));
+            }
         }
     }
 
@@ -325,13 +356,6 @@ impl SendRequest {
             }
         }
     }
-
-    /// Deliver the cached terminal send result to the caller.
-    fn finish(self) {
-        let _ = self
-            .sender
-            .send(self.result.unwrap_or(Err(Error::SendFailed)));
-    }
 }
 
 /// Logical network recv request and its in-loop state.
@@ -412,15 +436,6 @@ impl RecvRequest {
             }
         }
     }
-
-    /// Deliver the cached recv result and owned buffer to the caller.
-    fn finish(self) {
-        let result = match self.result.unwrap_or(Err(Error::RecvFailed)) {
-            Ok(read) => Ok((self.buf, read)),
-            Err(err) => Err((self.buf, err)),
-        };
-        let _ = self.sender.send(result);
-    }
 }
 
 /// Logical positioned file read request and its in-loop state.
@@ -492,15 +507,6 @@ impl ReadAtRequest {
                 }
             }
         }
-    }
-
-    /// Deliver the cached read result and owned buffer to the caller.
-    fn finish(self) {
-        let result = match self.result.unwrap_or(Err(Error::ReadFailed)) {
-            Ok(()) => Ok(self.buf),
-            Err(err) => Err((self.buf, err)),
-        };
-        let _ = self.sender.send(result);
     }
 }
 
@@ -581,13 +587,6 @@ impl WriteAtRequest {
             }
         }
     }
-
-    /// Deliver the cached write result to the caller.
-    fn finish(self) {
-        let _ = self
-            .sender
-            .send(self.result.unwrap_or(Err(Error::WriteFailed)));
-    }
 }
 
 /// Logical fsync request and its in-loop state.
@@ -625,11 +624,6 @@ impl SyncRequest {
                 true
             }
         }
-    }
-
-    /// Deliver the cached fsync result to the caller.
-    fn finish(self) {
-        let _ = self.sender.send(self.result.unwrap_or(Ok(())));
     }
 }
 

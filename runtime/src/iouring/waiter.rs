@@ -128,6 +128,12 @@ pub enum StageOutcome {
     /// The waiter was canceled while parked in the ready queue and should
     /// complete locally with timeout rather than issuing another SQE.
     Timeout(Request),
+    /// The original caller dropped its wait handle before this SQE could be
+    /// staged, so the waiter was retired locally.
+    Orphaned {
+        /// Active deadline tracking to remove from the timeout wheel, if any.
+        target_tick: Option<Tick>,
+    },
     /// The waiter is still active and produced an SQE for submission.
     Submit(SqueueEntry),
 }
@@ -251,11 +257,18 @@ impl Waiters {
 
     /// Stage the next SQE for a waiter.
     ///
-    /// If the waiter timed out while parked in the ready queue, this removes it
-    /// from the table and returns the request for local timeout completion.
+    /// This either returns the next SQE to issue, or removes the waiter from
+    /// the table and returns the local action that should happen instead.
     ///
-    /// When this returns [`StageOutcome::Submit`], the waiter is marked as
-    /// having an operation SQE outstanding immediately.
+    /// - [`StageOutcome::Submit`] leaves the waiter tracked and yields the next SQE.
+    /// - [`StageOutcome::Timeout`] removes the waiter and completes it locally with
+    ///   timeout.
+    /// - [`StageOutcome::Orphaned`] removes the waiter because the caller dropped its
+    ///   wait handle before restaging.
+    ///
+    /// When this returns [`StageOutcome::Submit`], the waiter is marked as having an
+    /// operation SQE outstanding immediately, so [`Waiters::is_in_flight`] will return
+    /// `true` for that waiter.
     ///
     /// Panics if `waiter_id` does not refer to a currently tracked waiter or if
     /// the waiter already has an operation SQE outstanding.
@@ -268,22 +281,32 @@ impl Waiters {
             .expect("stage called for untracked waiter");
         assert_eq!(slot.id, waiter_id, "stage called with stale waiter id");
 
-        if slot.state == WaiterState::CancelRequested {
-            StageOutcome::Timeout(self.take(index))
-        } else {
-            assert!(
-                !slot.in_flight,
-                "stage called for waiter with op already in flight"
-            );
-            slot.in_flight = true;
-            StageOutcome::Submit(slot.request.build_sqe(waiter_id))
+        match slot.state {
+            WaiterState::CancelRequested => StageOutcome::Timeout(self.take(index)),
+            WaiterState::Active { target_tick } if slot.request.is_orphaned() => {
+                // The current request still owns all resources, but there is no
+                // caller left to observe more progress, so retire it locally
+                // instead of issuing another SQE.
+                let _ = self.take(index);
+                StageOutcome::Orphaned { target_tick }
+            }
+            WaiterState::Active { .. } => {
+                assert!(
+                    !slot.in_flight,
+                    "stage called for waiter with op already in flight"
+                );
+                slot.in_flight = true;
+                StageOutcome::Submit(slot.request.build_sqe(waiter_id))
+            }
         }
     }
 
     /// Process one CQE for a waiter.
     ///
     /// Cancel CQEs are handled internally. Operation CQEs drive the request
-    /// state machine and return a high-level loop action.
+    /// state machine and return a high-level loop action. If the current SQE
+    /// completed but the original caller already dropped its wait handle, the
+    /// waiter is retired locally instead of requeueing another SQE.
     ///
     /// Panics if a non-cancel CQE does not refer to a currently tracked waiter,
     /// if it uses a stale waiter generation, or if the waiter has no operation
@@ -325,19 +348,23 @@ impl Waiters {
         assert!(slot.in_flight);
         slot.in_flight = false;
 
+        let state = slot.state;
         let completed = slot.request.on_cqe(slot.state, result);
-        if !completed {
-            return CompletionOutcome::Requeue(waiter_id);
-        }
+        if completed || slot.request.is_orphaned() {
+            // Either the request reached a terminal state, or the current SQE
+            // made non-terminal progress for a caller that is already gone. In
+            // both cases, remove the waiter now instead of requeueing another SQE.
+            let target_tick = match state {
+                WaiterState::Active { target_tick } => target_tick,
+                WaiterState::CancelRequested => None,
+            };
 
-        let target_tick = match slot.state {
-            WaiterState::Active { target_tick } => target_tick,
-            WaiterState::CancelRequested => None,
-        };
-
-        CompletionOutcome::Complete {
-            request: self.take(index),
-            target_tick,
+            CompletionOutcome::Complete {
+                request: self.take(index),
+                target_tick,
+            }
+        } else {
+            CompletionOutcome::Requeue(waiter_id)
         }
     }
 

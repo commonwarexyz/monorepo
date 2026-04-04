@@ -577,10 +577,20 @@ impl IoUringLoop {
     ///
     /// If the request was marked for cancellation while sitting in the ready
     /// queue (timeout fired between requeue and staging), it is completed with
-    /// a timeout error instead of issuing a follow-up SQE.
+    /// a timeout error instead of issuing a follow-up SQE. If the original
+    /// caller dropped its wait handle before staging, the request is retired
+    /// locally without issuing another SQE.
     fn stage_request(&mut self, waiter_id: WaiterId, submission_queue: &mut SubmissionQueue<'_>) {
         match self.waiters.stage(waiter_id) {
             StageOutcome::Timeout(request) => request.timeout(),
+            StageOutcome::Orphaned { target_tick } => {
+                // The caller disappeared before another SQE was issued, so all that
+                // remains is to release deadline tracking (the waiter, and associated
+                // resources, were already dropped inside `Waiters`).
+                if let Some(tick) = target_tick {
+                    self.timeout_wheel.remove(tick);
+                }
+            }
             StageOutcome::Submit(sqe) => {
                 // SAFETY:
                 // - All resources are stored in `self.waiters` until CQE processing, so
