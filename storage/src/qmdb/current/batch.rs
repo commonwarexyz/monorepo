@@ -12,7 +12,7 @@ use crate::{
     qmdb::{
         any::{
             self,
-            batch::{DiffEntry, FloorScan},
+            batch::{BitmapScan, DiffEntry},
             operation::{update, Operation},
             ValueEncoding,
         },
@@ -127,52 +127,6 @@ fn apply_push_clear<const N: usize>(
         for (byte, mask) in chunk.iter_mut().zip(clear_mask) {
             *byte &= !mask;
         }
-    }
-}
-
-/// Bitmap-accelerated floor scan. Skips locations where the bitmap bit is
-/// unset, avoiding I/O reads for inactive operations.
-pub(crate) struct BitmapScan<'a, B, const N: usize> {
-    bitmap: &'a B,
-}
-
-impl<'a, B: BitmapReadable<N>, const N: usize> BitmapScan<'a, B, N> {
-    pub(crate) const fn new(bitmap: &'a B) -> Self {
-        Self { bitmap }
-    }
-}
-
-impl<B: BitmapReadable<N>, const N: usize> FloorScan<mmr::Family> for BitmapScan<'_, B, N> {
-    fn next_candidate(&mut self, floor: Location, tip: u64) -> Option<Location> {
-        let loc = *floor;
-        if loc >= tip {
-            return None;
-        }
-        let bitmap_len = self.bitmap.len();
-        // Within the bitmap: find the next set bit at or after floor.
-        // ones_iter_from returns set indices in ascending order so the
-        // first result is the only possible candidate below bound.
-        // tip >= bitmap_len always holds (base_size ==
-        // bitmap_parent.len()), so bound == bitmap_len and the
-        // length check inside the iterator prevents scanning past bound.
-        if loc < bitmap_len {
-            let bound = bitmap_len.min(tip);
-            if let Some(idx) = self.bitmap.ones_iter_from(loc).next() {
-                if idx < bound {
-                    return Some(Location::new(idx));
-                }
-            }
-        }
-        // Beyond the bitmap: uncommitted ops from prior batches in the
-        // chain that aren't tracked by the bitmap yet. Conservatively
-        // treat them as candidates.
-        if bitmap_len < tip {
-            let candidate = loc.max(bitmap_len);
-            if candidate < tip {
-                return Some(Location::new(candidate));
-            }
-        }
-        None
     }
 }
 
@@ -477,6 +431,12 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        assert!(
+            bitmap_parent.len() > *db.any.last_commit_loc,
+            "bitmap ({}) must cover committed range [0, {}]",
+            bitmap_parent.len(),
+            *db.any.last_commit_loc,
+        );
         let scan = BitmapScan::new(&bitmap_parent);
         let inner = inner
             .merkleize_with_floor_scan(metadata, scan, &db.any)
@@ -534,6 +494,12 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        assert!(
+            bitmap_parent.len() > *db.any.last_commit_loc,
+            "bitmap ({}) must cover committed range [0, {}]",
+            bitmap_parent.len(),
+            *db.any.last_commit_loc,
+        );
         let scan = BitmapScan::new(&bitmap_parent);
         let inner = inner
             .merkleize_with_floor_scan(metadata, scan, &db.any)
@@ -1636,23 +1602,7 @@ mod tests {
 
     // ---- FloorScan tests ----
 
-    use crate::qmdb::any::batch::{FloorScan, SequentialScan};
-
-    #[test]
-    fn sequential_scan_returns_floor_when_below_tip() {
-        let mut scan = SequentialScan;
-        assert_eq!(
-            scan.next_candidate(Location::new(5), 10),
-            Some(Location::new(5))
-        );
-    }
-
-    #[test]
-    fn sequential_scan_returns_none_at_tip() {
-        let mut scan = SequentialScan;
-        assert_eq!(scan.next_candidate(Location::new(10), 10), None);
-        assert_eq!(scan.next_candidate(Location::new(11), 10), None);
-    }
+    use crate::qmdb::any::batch::{BitmapScan, FloorScan};
 
     #[test]
     fn bitmap_scan_all_active() {
@@ -1692,25 +1642,6 @@ mod tests {
     }
 
     #[test]
-    fn bitmap_scan_beyond_bitmap_len_returns_candidate() {
-        // Bitmap has 4 bits, but tip is 8. Locations 4..8 are beyond the
-        // bitmap and should be returned as candidates.
-        let bm = make_bitmap(&[false; 4]);
-        let mut scan = BitmapScan::<Bm, N>::new(&bm);
-
-        // All bitmap bits are unset, so 0..4 are skipped.
-        // Location 4 is beyond bitmap -> candidate.
-        assert_eq!(
-            scan.next_candidate(Location::new(0), 8),
-            Some(Location::new(4))
-        );
-        assert_eq!(
-            scan.next_candidate(Location::new(6), 8),
-            Some(Location::new(6))
-        );
-    }
-
-    #[test]
     fn bitmap_scan_respects_tip() {
         let bm = make_bitmap(&[false, false, false, true]);
         let mut scan = BitmapScan::<Bm, N>::new(&bm);
@@ -1743,6 +1674,25 @@ mod tests {
         );
         // Empty bitmap, tip = 0: no candidates.
         assert_eq!(scan.next_candidate(Location::new(0), 0), None);
+    }
+
+    #[test]
+    fn bitmap_scan_beyond_bitmap_len_returns_candidate() {
+        // Bitmap has 4 bits, but tip is 8. Locations 4..8 are beyond the
+        // bitmap and should be returned as candidates.
+        let bm = make_bitmap(&[false; 4]);
+        let mut scan = BitmapScan::<Bm, N>::new(&bm);
+
+        // All bitmap bits are unset, so 0..4 are skipped.
+        // Location 4 is beyond bitmap -> candidate.
+        assert_eq!(
+            scan.next_candidate(Location::new(0), 8),
+            Some(Location::new(4))
+        );
+        assert_eq!(
+            scan.next_candidate(Location::new(6), 8),
+            Some(Location::new(6))
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::{
             ordered::{find_next_key, find_prev_key},
             ValueEncoding,
         },
+        bitmap::{BitmapBatch, ClearSet},
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
@@ -22,6 +23,7 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
+use commonware_utils::bitmap::{self, Readable as BitmapReadable};
 use core::ops::Range;
 use futures::future::try_join_all;
 use std::{
@@ -37,17 +39,44 @@ pub(crate) trait FloorScan<F: Family> {
     fn next_candidate(&mut self, floor: Location<F>, tip: u64) -> Option<Location<F>>;
 }
 
-/// Sequential scan: every location is a candidate.
-// TODO(#1829): Always use bitmap for floor raising.
-pub(crate) struct SequentialScan;
+/// Bitmap-accelerated floor scan. Skips locations where the bitmap bit is
+/// unset, avoiding I/O reads for inactive operations.
+pub(crate) struct BitmapScan<'a, B, const N: usize> {
+    bitmap: &'a B,
+}
 
-impl<F: Family> FloorScan<F> for SequentialScan {
+impl<'a, B: BitmapReadable<N>, const N: usize> BitmapScan<'a, B, N> {
+    pub(crate) const fn new(bitmap: &'a B) -> Self {
+        Self { bitmap }
+    }
+}
+
+impl<F: Family, B: BitmapReadable<N>, const N: usize> FloorScan<F> for BitmapScan<'_, B, N> {
     fn next_candidate(&mut self, floor: Location<F>, tip: u64) -> Option<Location<F>> {
-        if *floor < tip {
-            Some(floor)
-        } else {
-            None
+        let loc = *floor;
+        if loc >= tip {
+            return None;
         }
+        let bitmap_len = self.bitmap.len();
+        // Within the bitmap: find the next set bit at or after floor.
+        if loc < bitmap_len {
+            let bound = bitmap_len.min(tip);
+            if let Some(idx) = self.bitmap.ones_iter_from(loc).next() {
+                if idx < bound {
+                    return Some(Location::new(idx));
+                }
+            }
+        }
+        // Beyond the bitmap: uncommitted ops from prior batches in the
+        // chain that are not tracked by the bitmap yet. Conservatively
+        // treat them as candidates.
+        if bitmap_len < tip {
+            let candidate = loc.max(bitmap_len);
+            if candidate < tip {
+                return Some(Location::new(candidate));
+            }
+        }
+        None
     }
 }
 
@@ -153,6 +182,11 @@ where
 
     /// Active key count before this batch.
     base_active_keys: usize,
+
+    /// Activity bitmap state from the parent (committed DB or prior batch).
+    /// Used for `BitmapScan` during floor raising.
+    /// `None` when the any layer is embedded inside a `current::Db` that provides its own scan.
+    bitmap_parent: Option<BitmapBatch<{ bitmap::DEFAULT_CHUNK_SIZE }>>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -184,6 +218,10 @@ where
 
     /// The database size when the initial batch was created.
     pub(crate) db_size: u64,
+
+    /// Activity bitmap state after this batch (parent bitmap + this batch's layer).
+    /// `None` when the any layer is embedded inside a `current::Db`.
+    bitmap: Option<BitmapBatch<{ bitmap::DEFAULT_CHUNK_SIZE }>>,
 }
 
 /// An owned changeset that can be applied to the database.
@@ -205,6 +243,12 @@ pub struct Changeset<F: Family, K, D: Digest, Item: Send> {
 
     /// The database size when the batch was created. Used to detect stale changesets.
     db_size: u64,
+
+    /// Activity bitmap: bits pushed by this batch chain.
+    pub(crate) bitmap_pushes: Vec<bool>,
+
+    /// Activity bitmap: bit indices cleared by this batch chain, with per-chunk masks.
+    pub(crate) bitmap_clears: ClearSet<{ bitmap::DEFAULT_CHUNK_SIZE }>,
 }
 
 /// Batch-infrastructure state used during merkleization.
@@ -226,6 +270,7 @@ where
     db_size: u64,
     base_inactivity_floor_loc: Location<F>,
     base_active_keys: usize,
+    bitmap_parent: Option<BitmapBatch<{ bitmap::DEFAULT_CHUNK_SIZE }>>,
 }
 
 impl<F: Family, H, U> Merkleizer<F, H, U>
@@ -462,6 +507,7 @@ where
             // operations. `fixed_tip` prevents scanning into floor-raise moves
             // just appended, matching `raise_floor_with_bitmap()` semantics.
             let fixed_tip = self.base_size + ops.len() as u64;
+
             for _ in 0..total_steps {
                 if !self
                     .advance_floor_once(&mut floor, fixed_tip, &mut ops, &mut diff, &mut scan, db)
@@ -499,6 +545,72 @@ where
             diff.entry(k).or_insert(v);
         }
 
+        // Compute activity bitmap mutations for this batch (only when bitmap is maintained
+        // at this layer, i.e. standalone any::Db, not embedded in current::Db).
+        let bitmap = if let Some(mut bitmap_parent) = self.bitmap_parent {
+            let this_segment = self
+                .base_operations
+                .last()
+                .expect("chain should not be empty");
+            let segment_base = *commit_loc + 1 - this_segment.len() as u64;
+            let mut bitmap_pushes = Vec::with_capacity(this_segment.len());
+            let mut bitmap_clears = ClearSet::default();
+
+            // Clear the previous commit bit.
+            bitmap_clears.push(segment_base - 1);
+
+            // Push one bit per operation in this segment.
+            for (i, op) in this_segment.iter().enumerate() {
+                let op_loc = Location::new(segment_base + i as u64);
+                match op {
+                    Operation::Update(update) => {
+                        let is_active = diff
+                            .get(update.key())
+                            .is_some_and(|entry| entry.loc() == Some(op_loc));
+                        bitmap_pushes.push(is_active);
+                    }
+                    Operation::CommitFloor(..) => {
+                        bitmap_pushes.push(true);
+                    }
+                    Operation::Delete(..) => {
+                        bitmap_pushes.push(false);
+                    }
+                }
+            }
+
+            // Clear bits for base-DB operations superseded by this chain's diff.
+            for entry in diff.values() {
+                if let Some(old) = entry.base_old_loc() {
+                    bitmap_clears.push(*old);
+                }
+            }
+
+            // Clear ancestor-segment operations superseded by a later segment (chained batches).
+            let chain = &self.base_operations;
+            if chain.len() > 1 {
+                let mut seg_base = self.db_size;
+                for ancestor_seg in &chain[..chain.len() - 1] {
+                    for (j, op) in ancestor_seg.iter().enumerate() {
+                        if let Some(key) = op.key() {
+                            let ancestor_loc = Location::new(seg_base + j as u64);
+                            if let Some(entry) = diff.get(key) {
+                                if entry.loc() != Some(ancestor_loc) {
+                                    bitmap_clears.push(*ancestor_loc);
+                                }
+                            }
+                        }
+                    }
+                    seg_base += ancestor_seg.len() as u64;
+                }
+            }
+
+            // Build the bitmap state for this batch by pushing a layer.
+            bitmap_parent.push_changeset(bitmap_pushes, bitmap_clears);
+            Some(bitmap_parent)
+        } else {
+            None
+        };
+
         debug_assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(MerkleizedBatch {
             journal_batch: journal,
@@ -508,6 +620,7 @@ where
             total_size: *commit_loc + 1,
             total_active_keys: total_active_keys as usize,
             db_size: self.db_size,
+            bitmap,
         })
     }
 }
@@ -540,6 +653,7 @@ where
                 db_size: self.db_size,
                 base_inactivity_floor_loc: self.base_inactivity_floor_loc,
                 base_active_keys: self.base_active_keys,
+                bitmap_parent: self.bitmap_parent,
             },
         )
     }
@@ -582,6 +696,10 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
+    ///
+    /// Uses the bitmap from `bitmap_parent` (must be `Some`) to create a `BitmapScan` for
+    /// floor raising. For callers that supply their own scan (e.g. `current::Db`), use
+    /// [`merkleize_with_floor_scan`](Self::merkleize_with_floor_scan) instead.
     pub async fn merkleize<E, C, I>(
         self,
         metadata: Option<V::Value>,
@@ -592,8 +710,21 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(metadata, SequentialScan, db)
-            .await
+        // Pre-extend the bitmap to cover user ops so the scan has accurate bits
+        // for the full [0, fixed_tip) range. The bitmap must be present for
+        // standalone any::Db use.
+        let bitmap_parent = self
+            .bitmap_parent
+            .clone()
+            .expect("standalone any::Db must have bitmap");
+        assert!(
+            bitmap_parent.len() >= self.base_size,
+            "bitmap ({}) must cover committed range [0, {})",
+            bitmap_parent.len(),
+            self.base_size,
+        );
+        let scan = BitmapScan::new(&bitmap_parent);
+        self.merkleize_with_floor_scan(metadata, scan, db).await
     }
 
     /// Like [`merkleize`](Self::merkleize) but accepts a custom [`FloorScan`]
@@ -721,6 +852,10 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return a [`MerkleizedBatch`].
+    ///
+    /// Uses the bitmap from `bitmap_parent` (must be `Some`) to create a `BitmapScan` for
+    /// floor raising. For callers that supply their own scan (e.g. `current::Db`), use
+    /// [`merkleize_with_floor_scan`](Self::merkleize_with_floor_scan) instead.
     pub async fn merkleize<E, C, I>(
         self,
         metadata: Option<V::Value>,
@@ -731,8 +866,18 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(metadata, SequentialScan, db)
-            .await
+        let bitmap_parent = self
+            .bitmap_parent
+            .clone()
+            .expect("standalone any::Db must have bitmap");
+        assert!(
+            bitmap_parent.len() >= self.base_size,
+            "bitmap ({}) must cover committed range [0, {})",
+            bitmap_parent.len(),
+            self.base_size,
+        );
+        let scan = BitmapScan::new(&bitmap_parent);
+        self.merkleize_with_floor_scan(metadata, scan, db).await
     }
 
     /// Like [`merkleize`](Self::merkleize) but accepts a custom [`FloorScan`]
@@ -1013,6 +1158,7 @@ where
             db_size: self.db_size,
             base_inactivity_floor_loc: self.new_inactivity_floor_loc,
             base_active_keys: self.total_active_keys,
+            bitmap_parent: self.bitmap.clone(),
         }
     }
 
@@ -1083,6 +1229,11 @@ where
             })
             .sum::<isize>();
 
+        let (bitmap_pushes, bitmap_clears) = self
+            .bitmap
+            .as_ref()
+            .map(|bm| bm.collect_mutations())
+            .unwrap_or_default();
         Changeset {
             journal_finalized: self.journal_batch.finalize(),
             snapshot_diffs,
@@ -1090,6 +1241,8 @@ where
             new_inactivity_floor_loc: self.new_inactivity_floor_loc,
             new_last_commit_loc: self.new_last_commit_loc,
             db_size: self.db_size,
+            bitmap_pushes,
+            bitmap_clears,
         }
     }
 
@@ -1193,6 +1346,18 @@ where
             })
             .sum::<isize>();
 
+        // Collect bitmap mutations, skipping pushes for already-committed operations.
+        // Clears are kept in full since set_bit(loc, false) is idempotent.
+        // When bitmap is None (embedded in current::Db), the any layer has no bitmap
+        // mutations -- the current layer manages its own bitmap.
+        let (bitmap_pushes, bitmap_clears) =
+            self.bitmap
+                .as_ref()
+                .map_or_else(Default::default, |bm| {
+                    let (all_pushes, clears) = bm.collect_mutations();
+                    (all_pushes[items_to_skip as usize..].to_vec(), clears)
+                });
+
         let mmr_base = crate::merkle::Position::try_from(Location::new(current_db_size))
             .expect("valid leaf count");
         Changeset {
@@ -1202,6 +1367,8 @@ where
             new_inactivity_floor_loc: self.new_inactivity_floor_loc,
             new_last_commit_loc: self.new_last_commit_loc,
             db_size: current_db_size,
+            bitmap_pushes,
+            bitmap_clears,
         }
     }
 }
@@ -1229,6 +1396,7 @@ where
             db_size: journal_size,
             base_inactivity_floor_loc: self.inactivity_floor_loc,
             base_active_keys: self.active_keys,
+            bitmap_parent: self.status.clone(),
         }
     }
 }
@@ -1299,7 +1467,12 @@ where
         self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
         self.last_commit_loc = batch.new_last_commit_loc;
 
-        // 4. Return range of operations that were written to the log.
+        // 4. Apply bitmap mutations (only when maintaining a bitmap at this layer).
+        if let Some(status) = &mut self.status {
+            status.push_changeset(batch.bitmap_pushes, batch.bitmap_clears);
+        }
+
+        // 5. Return range of operations that were written to the log.
         let end_loc = Location::new(*self.last_commit_loc + 1);
         Ok(start_loc..end_loc)
     }
@@ -1327,6 +1500,7 @@ where
             total_size: journal_size,
             total_active_keys: self.active_keys,
             db_size: journal_size,
+            bitmap: self.status.clone(),
         }
     }
 }

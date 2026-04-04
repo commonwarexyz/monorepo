@@ -77,11 +77,25 @@ impl<
         log: AuthenticatedLog<F, E, C, H>,
         mut snapshot: I,
     ) -> Result<Self, crate::qmdb::Error<F>> {
+        let mut status = commonware_utils::bitmap::Prunable::new();
+        // Push inactive bits for the range [0, inactivity_floor_loc).
+        for _ in 0..*inactivity_floor_loc {
+            status.push(false);
+        }
         let (active_keys, last_commit_loc) = {
             let reader = log.reader().await;
-            let active_keys =
-                build_snapshot_from_log(inactivity_floor_loc, &reader, &mut snapshot, |_, _| {})
-                    .await?;
+            let active_keys = build_snapshot_from_log(
+                inactivity_floor_loc,
+                &reader,
+                &mut snapshot,
+                |active, old_loc| {
+                    status.push(active);
+                    if let Some(loc) = old_loc {
+                        status.set_bit(*loc, false);
+                    }
+                },
+            )
+            .await?;
             let last_commit_loc = Location::new(
                 reader
                     .bounds()
@@ -99,6 +113,7 @@ impl<
             snapshot,
             last_commit_loc,
             active_keys,
+            status: Some(crate::qmdb::bitmap::BitmapBatch::Base(std::sync::Arc::new(status))),
             _update: core::marker::PhantomData,
         })
     }
