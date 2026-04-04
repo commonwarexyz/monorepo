@@ -1,27 +1,28 @@
-use crate::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Ring, Space};
+use crate::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Random, Ring, Space};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use core::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
+use rand_core::CryptoRngCore;
 
-const P: u8 = 89;
-const Q: u8 = 2 * P + 1;
+const P: u64 = 4_611_686_018_427_389_243;
+const Q: u64 = 9_223_372_036_854_778_487;
 
-fn mul_mod(a: u8, b: u8, p: u8) -> u8 {
-    ((u16::from(a) * u16::from(b)) % u16::from(p)) as u8
+fn mul_mod(a: u64, b: u64, p: u64) -> u64 {
+    ((u128::from(a) * u128::from(b)) % u128::from(p)) as u64
 }
 
-/// The prime field F_89;
+/// The prime field F_p for the test modulus `p`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct F(u8);
+pub struct F(u64);
 
 impl F {
-    pub const MAX: usize = (P - 1) as usize;
+    pub const MAX: u64 = P - 1;
 }
 
 impl FixedSize for F {
-    const SIZE: usize = 1;
+    const SIZE: usize = 8;
 }
 
 impl Write for F {
@@ -37,27 +38,42 @@ impl Read for F {
         buf: &mut impl bytes::Buf,
         _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let byte = u8::read(buf)?;
-        if byte >= P {
+        let value = u64::read(buf)?;
+        if value >= P {
             return Err(commonware_codec::Error::Invalid("F", "out of range"));
         }
-        Ok(Self(byte))
+        Ok(Self(value))
     }
 }
 
 impl From<u8> for F {
     fn from(value: u8) -> Self {
+        Self::from(u64::from(value))
+    }
+}
+
+impl From<u64> for F {
+    fn from(value: u64) -> Self {
         Self(value % P)
     }
 }
 
 impl Object for F {}
 
+impl Random for F {
+    fn random(mut rng: impl CryptoRngCore) -> Self {
+        let mut bytes = [0u8; 8];
+        rng.fill_bytes(&mut bytes);
+        Self(u64::from_le_bytes(bytes) % P)
+    }
+}
+
 impl<'a> Add<&'a Self> for F {
     type Output = Self;
 
     fn add(self, rhs: &'a Self) -> Self::Output {
-        Self((self.0 + rhs.0) % P)
+        let sum = self.0 + rhs.0;
+        Self(if sum >= P { sum - P } else { sum })
     }
 }
 
@@ -71,7 +87,7 @@ impl Neg for F {
     type Output = Self;
 
     fn neg(self) -> Self::Output {
-        Self((P - self.0) % P)
+        Self(if self.0 == 0 { 0 } else { P - self.0 })
     }
 }
 
@@ -119,28 +135,27 @@ impl Ring for F {
 
 impl Field for F {
     fn inv(&self) -> Self {
-        self.exp(&[(P - 2).into()])
+        self.exp(&[P - 2])
     }
 }
 
 #[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for F {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let byte = u.arbitrary::<u8>()? % P;
-        Ok(Self(byte))
+        Ok(Self(u.arbitrary::<u64>()? % P))
     }
 }
 
-/// A prime group of order 89.
+/// A prime group of order `p`.
 ///
-/// This is constructed as a subgroup of the units in F_179.
+/// This is constructed as a subgroup of the units in `F_q`.
 ///
-/// 179 = 2 * 89 + 1, so the group of units has a subgroup of order 89.
+/// `q = 2p + 1`, so the group of units has a subgroup of order `p`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct G(u8);
+pub struct G(u64);
 
 impl FixedSize for G {
-    const SIZE: usize = 1;
+    const SIZE: usize = 8;
 }
 
 impl Write for G {
@@ -156,12 +171,12 @@ impl Read for G {
         buf: &mut impl bytes::Buf,
         _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        let byte = u8::read(buf)?;
-        if byte >= Q {
+        let value = u64::read(buf)?;
+        if value >= Q {
             return Err(commonware_codec::Error::Invalid("G", "out of range"));
         }
-        let out = Self(byte);
-        if out.scale(&[(Q - 1).into()]).0 != 1 {
+        let out = Self(value);
+        if out.0 == 0 || out.scale(&[P]).0 != 1 {
             return Err(commonware_codec::Error::Invalid("G", "not in subgroup"));
         }
         Ok(out)
@@ -188,7 +203,7 @@ impl Neg for G {
     type Output = Self;
 
     fn neg(self) -> Self::Output {
-        self.scale(&[(Q - 2).into()])
+        self.scale(&[Q - 2])
     }
 }
 
@@ -216,7 +231,7 @@ impl<'a> Mul<&'a F> for G {
     type Output = Self;
 
     fn mul(self, rhs: &'a F) -> Self::Output {
-        self.scale(&[rhs.0.into()])
+        self.scale(&[rhs.0])
     }
 }
 
@@ -232,7 +247,9 @@ impl CryptoGroup for G {
     type Scalar = F;
 
     fn generator() -> Self {
-        Self(3)
+        // 4 = 2^2 is a non-trivial quadratic residue, so it generates the
+        // unique subgroup of order p because p is prime.
+        Self(4)
     }
 }
 
