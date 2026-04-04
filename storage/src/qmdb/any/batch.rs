@@ -1232,7 +1232,7 @@ where
         let (bitmap_pushes, bitmap_clears) = self
             .bitmap
             .as_ref()
-            .map(|bm| bm.collect_mutations())
+            .map(|bm| bm.collect_mutations_since(self.db_size))
             .unwrap_or_default();
         Changeset {
             journal_finalized: self.journal_batch.finalize(),
@@ -1354,7 +1354,7 @@ where
             self.bitmap
                 .as_ref()
                 .map_or_else(Default::default, |bm| {
-                    let (all_pushes, clears) = bm.collect_mutations();
+                    let (all_pushes, clears) = bm.collect_mutations_since(self.db_size);
                     (all_pushes[items_to_skip as usize..].to_vec(), clears)
                 });
 

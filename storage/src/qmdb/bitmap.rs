@@ -193,15 +193,21 @@ impl<const N: usize> BitmapBatch<N> {
         }));
     }
 
-    /// Collect all layer pushes and clears from this batch down to the Base.
+    /// Collect layer pushes and clears added after the bitmap reached length
+    /// `cutoff`. Layers whose `parent_len < cutoff` (i.e. pre-existing DB
+    /// layers) are excluded.
+    ///
     /// Returns `(pushed_bits, clear_set)` in base-to-tip order.
-    pub(crate) fn collect_mutations(&self) -> (Vec<bool>, ClearSet<N>) {
+    pub(crate) fn collect_mutations_since(&self, cutoff: u64) -> (Vec<bool>, ClearSet<N>) {
         let mut layers = Vec::new();
         let mut current = self;
         loop {
             match current {
                 Self::Base(_) => break,
                 Self::Layer(layer) => {
+                    if layer.parent_len < cutoff {
+                        break;
+                    }
                     layers.push((&*layer.pushed_bits, &*layer.clears));
                     current = &layer.parent;
                 }
