@@ -2201,6 +2201,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fill_submission_queue_orphans_closed_request_before_first_submit() {
+        // Verify dropping the caller before the loop stages the first SQE
+        // retires both send and read-at requests locally instead of issuing
+        // any I/O.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (handle, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Keep the test focused on request staging instead of wake rearm.
+        iouring.wake_rearm_needed = false;
+
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        handle
+            .enqueue(Request::Send(SendRequest {
+                fd: Arc::new(UnixStream::pair().unwrap().0.into()),
+                write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                deadline: Some(Instant::now() + Duration::from_secs(1)),
+                result: None,
+                sender: tx,
+            }))
+            .await
+            .expect("request should enqueue");
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+
+        // The request should retire locally without consuming waiter or SQ
+        // capacity, and its scheduled deadline should disappear as well.
+        assert!(!at_capacity);
+        assert!(iouring.waiters.is_empty());
+        assert_eq!(ring.submission().len(), 0);
+        assert_eq!(iouring.timeout_wheel.next_deadline(), None);
+
+        let (sock_left, _sock_right) = UnixStream::pair().unwrap();
+        // SAFETY: sock_left is a valid fd that we own. This request is
+        // orphaned before staging, so the file descriptor is never submitted.
+        let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        handle
+            .enqueue(Request::ReadAt(ReadAtRequest {
+                file: Arc::new(file),
+                offset: 0,
+                len: 8,
+                read: 0,
+                buf: IoBufMut::with_capacity(8),
+                result: None,
+                sender: tx,
+            }))
+            .await
+            .expect("request should enqueue");
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+
+        // The read request should take the same orphan path as send.
+        assert!(!at_capacity);
+        assert!(iouring.waiters.is_empty());
+        assert_eq!(ring.submission().len(), 0);
+        assert_eq!(iouring.timeout_wheel.next_deadline(), None);
+    }
+
+    #[tokio::test]
+    async fn test_fill_submission_queue_orphans_closed_ready_queue_entry_locally() {
+        // Verify an orphaned waiter parked in the ready queue retires
+        // locally instead of staging another SQE.
+        let cfg = Config::default();
+        let mut registry = Registry::default();
+        let (_handle, mut iouring) = IoUringLoop::new(cfg.clone(), &mut registry);
+        let mut ring = new_ring(&cfg).expect("unable to create io_uring instance");
+
+        // Keep the test focused on ready-queue staging instead of wake rearm.
+        iouring.wake_rearm_needed = false;
+
+        let (tx, rx) = oneshot::channel();
+        drop(rx);
+        let waiter_id = iouring.waiters.insert(
+            Request::Recv(RecvRequest {
+                fd: Arc::new(UnixStream::pair().unwrap().0.into()),
+                buf: IoBufMut::with_capacity(8),
+                offset: 4,
+                len: 8,
+                exact: true,
+                deadline: None,
+                result: None,
+                sender: tx,
+            }),
+            Some(1),
+        );
+        iouring.timeout_wheel.schedule(waiter_id, 1);
+        iouring.ready_queue.push_back(waiter_id);
+
+        let at_capacity = iouring
+            .fill_submission_queue(&mut ring)
+            .expect("channel should remain connected");
+
+        // Restaging should notice the closed caller, drop the request locally,
+        // and clean up its deadline tracking without touching the SQ.
+        assert!(!at_capacity);
+        assert!(iouring.waiters.is_empty());
+        assert_eq!(ring.submission().len(), 0);
+        assert_eq!(iouring.timeout_wheel.next_deadline(), None);
+    }
+
+    #[tokio::test]
     async fn test_single_issuer() {
         // Verify SINGLE_ISSUER still allows normal request submission and completion.
         let cfg = Config {

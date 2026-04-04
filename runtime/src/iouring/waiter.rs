@@ -381,7 +381,10 @@ impl Waiters {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::request::{Request, SyncRequest};
+    use crate::{
+        iouring::request::{ReadAtRequest, RecvRequest, Request, SendRequest, SyncRequest},
+        IoBuf, IoBufMut, IoBufs,
+    };
     use commonware_utils::channel::oneshot;
     use std::{
         os::fd::{FromRawFd, IntoRawFd},
@@ -639,6 +642,219 @@ mod tests {
         assert!(!waiters.is_in_flight(ready));
         let ready_state = waiter_state(&waiters, ready).expect("ready waiter missing");
         assert!(matches!(ready_state, WaiterState::CancelRequested));
+    }
+
+    #[test]
+    fn test_waiters_stage_orphans_closed_requests() {
+        // Verify closed send and read-at requests are removed locally before
+        // their first SQE is ever staged.
+        {
+            // Send request orphaned before first submit.
+            let mut waiters = Waiters::new(1);
+            let (tx, rx) = oneshot::channel();
+            drop(rx);
+            let waiter_id = waiters.insert(
+                Request::Send(SendRequest {
+                    fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+                    write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                    deadline: None,
+                    result: None,
+                    sender: tx,
+                }),
+                Some(7),
+            );
+
+            match waiters.stage(waiter_id) {
+                StageOutcome::Orphaned {
+                    target_tick: Some(7),
+                } => {}
+                _ => panic!("closed send waiter should be orphaned before staging"),
+            }
+            assert!(waiters.is_empty());
+        }
+
+        {
+            // Read-at request orphaned before first submit.
+            let mut waiters = Waiters::new(1);
+            let (sock_left, _sock_right) =
+                std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
+            // SAFETY: sock_left is a valid fd that we own.
+            let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+            let (tx, rx) = oneshot::channel();
+            drop(rx);
+            let waiter_id = waiters.insert(
+                Request::ReadAt(ReadAtRequest {
+                    file: Arc::new(file),
+                    offset: 0,
+                    len: 8,
+                    read: 0,
+                    buf: IoBufMut::with_capacity(8),
+                    result: None,
+                    sender: tx,
+                }),
+                Some(8),
+            );
+
+            match waiters.stage(waiter_id) {
+                StageOutcome::Orphaned {
+                    target_tick: Some(8),
+                } => {}
+                _ => panic!("closed read waiter should be orphaned before staging"),
+            }
+            assert!(waiters.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_waiters_orphan_closed_requests_after_nonterminal_completion() {
+        // Verify retryable and partial-progress send, recv, and read-at CQEs
+        // remove the waiter instead of requeueing once the caller is gone.
+        {
+            // Send request orphaned after a retryable CQE.
+            let mut waiters = Waiters::new(1);
+            let (tx, rx) = oneshot::channel();
+            let waiter_id = waiters.insert(
+                Request::Send(SendRequest {
+                    fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+                    write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                    deadline: None,
+                    result: None,
+                    sender: tx,
+                }),
+                Some(5),
+            );
+            assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+            drop(rx);
+
+            match waiters.on_completion(waiter_id.user_data(), -libc::EAGAIN) {
+                CompletionOutcome::Complete {
+                    request,
+                    target_tick: Some(5),
+                } => request.complete(),
+                _ => panic!("closed send waiter should be orphaned after retry CQE"),
+            }
+            assert!(waiters.is_empty());
+        }
+
+        {
+            // Send request orphaned after a partial-progress CQE.
+            let mut waiters = Waiters::new(1);
+            let (tx, rx) = oneshot::channel();
+            let waiter_id = waiters.insert(
+                Request::Send(SendRequest {
+                    fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+                    write: IoBufs::from(IoBuf::from(b"hello")).into(),
+                    deadline: None,
+                    result: None,
+                    sender: tx,
+                }),
+                Some(5),
+            );
+            assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+            drop(rx);
+
+            match waiters.on_completion(waiter_id.user_data(), 2) {
+                CompletionOutcome::Complete {
+                    request,
+                    target_tick: Some(5),
+                } => request.complete(),
+                _ => panic!("closed send waiter should be orphaned after partial CQE"),
+            }
+            assert!(waiters.is_empty());
+        }
+
+        {
+            // Exact recv orphaned after a retryable CQE.
+            let mut waiters = Waiters::new(1);
+            let (tx, rx) = oneshot::channel();
+            let waiter_id = waiters.insert(
+                Request::Recv(RecvRequest {
+                    fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+                    buf: IoBufMut::with_capacity(5),
+                    offset: 0,
+                    len: 5,
+                    exact: true,
+                    deadline: None,
+                    result: None,
+                    sender: tx,
+                }),
+                Some(6),
+            );
+            assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+            drop(rx);
+
+            match waiters.on_completion(waiter_id.user_data(), -libc::EAGAIN) {
+                CompletionOutcome::Complete {
+                    request,
+                    target_tick: Some(6),
+                } => request.complete(),
+                _ => panic!("closed recv waiter should be orphaned after retry CQE"),
+            }
+            assert!(waiters.is_empty());
+        }
+
+        {
+            // Exact recv orphaned after a partial-progress CQE.
+            let mut waiters = Waiters::new(1);
+            let (tx, rx) = oneshot::channel();
+            let waiter_id = waiters.insert(
+                Request::Recv(RecvRequest {
+                    fd: Arc::new(std::os::unix::net::UnixStream::pair().unwrap().0.into()),
+                    buf: IoBufMut::with_capacity(5),
+                    offset: 0,
+                    len: 5,
+                    exact: true,
+                    deadline: None,
+                    result: None,
+                    sender: tx,
+                }),
+                Some(6),
+            );
+            assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+            drop(rx);
+
+            match waiters.on_completion(waiter_id.user_data(), 3) {
+                CompletionOutcome::Complete {
+                    request,
+                    target_tick: Some(6),
+                } => request.complete(),
+                _ => panic!("closed recv waiter should be orphaned after partial CQE"),
+            }
+            assert!(waiters.is_empty());
+        }
+
+        {
+            // Read-at request orphaned after a partial-progress CQE.
+            let mut waiters = Waiters::new(1);
+            let (sock_left, _sock_right) =
+                std::os::unix::net::UnixStream::pair().expect("failed to create unix socket pair");
+            // SAFETY: sock_left is a valid fd that we own.
+            let file = unsafe { std::fs::File::from_raw_fd(sock_left.into_raw_fd()) };
+            let (tx, rx) = oneshot::channel();
+            let waiter_id = waiters.insert(
+                Request::ReadAt(ReadAtRequest {
+                    file: Arc::new(file),
+                    offset: 0,
+                    len: 8,
+                    read: 0,
+                    buf: IoBufMut::with_capacity(8),
+                    result: None,
+                    sender: tx,
+                }),
+                Some(9),
+            );
+            assert!(matches!(waiters.stage(waiter_id), StageOutcome::Submit(_)));
+            drop(rx);
+
+            match waiters.on_completion(waiter_id.user_data(), 3) {
+                CompletionOutcome::Complete {
+                    request,
+                    target_tick: Some(9),
+                } => request.complete(),
+                _ => panic!("closed read waiter should be orphaned after partial CQE"),
+            }
+            assert!(waiters.is_empty());
+        }
     }
 
     #[test]
