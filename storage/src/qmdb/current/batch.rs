@@ -28,7 +28,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -42,42 +42,23 @@ type Error = crate::qmdb::Error<mmr::Family>;
 #[derive(Clone, Debug, Default)]
 pub(super) struct ClearSet<const N: usize> {
     locations: Vec<Location>,
-    masks: BTreeMap<usize, [u8; N]>,
+
+    /// Chunk masks used for fast block-clearing operations.
+    ///
+    /// A HashMap is safe to use here because it is exclusively accessed via `.get()`, avoiding any
+    /// iteration-order non-determinism during Merkleization.
+    masks: HashMap<usize, [u8; N]>,
 }
 
 impl<const N: usize> ClearSet<N> {
-    /// Create a clear set with a given capacity.
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            locations: Vec::with_capacity(capacity),
-            masks: BTreeMap::new(),
-        }
-    }
-
     /// Push a location to the clear set.
-    fn push(&mut self, loc: Location) {
+    pub(super) fn push(&mut self, loc: Location) {
         self.locations.push(loc);
 
         let chunk_idx = BitMap::<N>::to_chunk_index(*loc);
         let rel = (*loc % BitMap::<N>::CHUNK_SIZE_BITS) as usize;
         let chunk = self.masks.entry(chunk_idx).or_insert([0u8; N]);
         chunk[rel / 8] |= 1 << (rel % 8);
-    }
-
-    /// Merge another clear set into this one.
-    fn merge(&mut self, other: &Self) {
-        self.locations.extend_from_slice(&other.locations);
-        for (&idx, other_mask) in &other.masks {
-            let chunk = self.masks.entry(idx).or_insert([0u8; N]);
-            for (byte, &m) in chunk.iter_mut().zip(other_mask) {
-                *byte |= m;
-            }
-        }
-    }
-
-    /// Return the number of locations in the clear set.
-    const fn len(&self) -> usize {
-        self.locations.len()
     }
 
     const fn is_empty(&self) -> bool {
@@ -345,12 +326,6 @@ where
     /// The inner any-layer batch that handles mutations, journal, and floor raise.
     inner: any::batch::UnmerkleizedBatch<mmr::Family, H, U>,
 
-    /// Bitmap pushes accumulated by prior batches in the chain.
-    base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
-
-    /// Bitmap clears accumulated by prior batches in the chain.
-    base_bitmap_clears: Vec<Arc<ClearSet<N>>>,
-
     /// Parent's grafted MMR state (owned, Arc-based internally).
     grafted_parent: mmr::batch::MerkleizedBatch<H::Digest>,
 
@@ -370,12 +345,6 @@ where
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
     inner: any::batch::MerkleizedBatch<mmr::Family, D, U>,
 
-    /// Accumulated bitmap pushes from all batches in the chain.
-    bitmap_pushes: Vec<Arc<Vec<bool>>>,
-
-    /// Accumulated bitmap clears from all batches in the chain.
-    bitmap_clears: Vec<Arc<ClearSet<N>>>,
-
     /// Grafted MMR state.
     grafted: mmr::batch::MerkleizedBatch<D>,
 
@@ -390,12 +359,6 @@ where
 pub struct Changeset<K, D: Digest, Item: Send, const N: usize> {
     /// The inner any-layer changeset.
     pub(super) inner: any::batch::Changeset<mmr::Family, K, D, Item>,
-
-    /// One bool per operation in the batch chain (pushes applied before clears).
-    pub(super) bitmap_pushes: Vec<bool>,
-
-    /// Cleared bitmap locations, plus per-chunk masks cached for fast reapplication.
-    pub(super) bitmap_clears: ClearSet<N>,
 
     /// Changeset for the grafted MMR.
     pub(super) grafted_changeset: mmr::Changeset<D>,
@@ -412,15 +375,11 @@ where
 {
     pub(super) const fn new(
         inner: any::batch::UnmerkleizedBatch<mmr::Family, H, U>,
-        base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
-        base_bitmap_clears: Vec<Arc<ClearSet<N>>>,
         grafted_parent: mmr::batch::MerkleizedBatch<H::Digest>,
         bitmap_parent: BitmapBatch<N>,
     ) -> Self {
         Self {
             inner,
-            base_bitmap_pushes,
-            base_bitmap_clears,
             grafted_parent,
             bitmap_parent,
         }
@@ -472,8 +431,6 @@ where
     {
         let Self {
             inner,
-            base_bitmap_pushes,
-            base_bitmap_clears,
             grafted_parent,
             bitmap_parent,
         } = self;
@@ -481,15 +438,7 @@ where
         let inner = inner
             .merkleize_with_floor_scan(metadata, scan, &db.any)
             .await?;
-        compute_current_layer(
-            inner,
-            db,
-            base_bitmap_pushes,
-            base_bitmap_clears,
-            &grafted_parent,
-            &bitmap_parent,
-        )
-        .await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -529,8 +478,6 @@ where
     {
         let Self {
             inner,
-            base_bitmap_pushes,
-            base_bitmap_clears,
             grafted_parent,
             bitmap_parent,
         } = self;
@@ -538,15 +485,7 @@ where
         let inner = inner
             .merkleize_with_floor_scan(metadata, scan, &db.any)
             .await?;
-        compute_current_layer(
-            inner,
-            db,
-            base_bitmap_pushes,
-            base_bitmap_clears,
-            &grafted_parent,
-            &bitmap_parent,
-        )
-        .await
+        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -630,14 +569,10 @@ fn clear_ancestor_superseded<U, B, const N: usize>(
 /// any batch.
 ///
 /// Creates a `BitmapDiff` and grafted MMR batch from the immediate parent's state, and
-/// produces the [`MerkleizedBatch`] directly. The ancestor chain's accumulated bitmap
-/// pushes/clears are stored alongside the batch so that `finalize()` can concatenate them
-/// without recomputation.
+/// produces the [`MerkleizedBatch`] directly.
 async fn compute_current_layer<E, U, C, I, H, const N: usize>(
     inner: any::batch::MerkleizedBatch<mmr::Family, H::Digest, U>,
     current_db: &super::db::Db<E, C, I, H, U, N>,
-    base_bitmap_pushes: Vec<Arc<Vec<bool>>>,
-    base_bitmap_clears: Vec<Arc<ClearSet<N>>>,
     grafted_parent: &mmr::batch::MerkleizedBatch<H::Digest>,
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<MerkleizedBatch<H::Digest, U, N>, Error>
@@ -655,6 +590,7 @@ where
     let chain = &inner.journal_batch.items;
     let this_segment = chain.last().expect("operation chain should not be empty");
     let segment_base = *inner.new_last_commit_loc + 1 - this_segment.len() as u64;
+    bitmap.pushed_bits.reserve(this_segment.len());
 
     // 1. Inactivate previous commit.
     let prev_commit_loc = Location::new(segment_base - 1);
@@ -723,28 +659,18 @@ where
     let canonical_root =
         compute_db_root::<H, _, _, N>(&hasher, &grafted_storage, partial, &ops_root).await?;
 
-    // 8. Extract diff data and build COW bitmap layer + push/clear chain.
+    // 8. Extract diff data and build COW bitmap layer.
     let (parent_len, pushed_bits, clears) = bitmap.into_parts();
-
-    let pushed_bits = Arc::new(pushed_bits);
-    let clears = Arc::new(clears);
-
-    let mut bitmap_pushes = base_bitmap_pushes;
-    bitmap_pushes.push(Arc::clone(&pushed_bits));
-    let mut bitmap_clears = base_bitmap_clears;
-    bitmap_clears.push(Arc::clone(&clears));
 
     let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
         parent: bitmap_parent.clone(),
         parent_len,
-        pushed_bits,
-        clears,
+        pushed_bits: Arc::new(pushed_bits),
+        clears: Arc::new(clears),
     }));
 
     Ok(MerkleizedBatch {
         inner,
-        bitmap_pushes,
-        bitmap_clears,
         grafted: grafted_batch,
         bitmap: bitmap_batch,
         canonical_root,
@@ -841,13 +767,43 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
 }
 
 impl<const N: usize> BitmapBatch<N> {
-    /// Push a changeset as a new layer on top of this bitmap, mutating `self` in place.
+    /// Push a changeset on top of this bitmap, mutating `self` in place.
     ///
-    /// The old value becomes the parent of the new layer.
+    /// When the bitmap is a `Base` with no outstanding clones (typical for
+    /// sequential commit patterns), mutations are applied directly in place,
+    /// keeping the bitmap flat and `get_chunk` O(1). Otherwise a new `Layer`
+    /// is created. `pushed_bits[i]` corresponds to the operation at
+    /// `parent_len + i` in the new committed range.
     pub(super) fn push_changeset(&mut self, pushed_bits: Vec<bool>, clears: ClearSet<N>) {
         if pushed_bits.is_empty() && clears.is_empty() {
             return;
         }
+        if self.try_apply_changeset_in_place(&pushed_bits, &clears) {
+            return;
+        }
+        self.push_changeset_as_layer(pushed_bits, clears);
+    }
+
+    /// Fast path: mutate the committed bitmap directly when we have the only
+    /// reference to the Base allocation.
+    fn try_apply_changeset_in_place(&mut self, pushed_bits: &[bool], clears: &ClearSet<N>) -> bool {
+        let Self::Base(base) = self else {
+            return false;
+        };
+        let Some(bitmap) = Arc::get_mut(base) else {
+            return false;
+        };
+        for &bit in pushed_bits {
+            bitmap.push(bit);
+        }
+        for loc in clears.locations() {
+            bitmap.set_bit(**loc, false);
+        }
+        true
+    }
+
+    /// Slow path: retain the parent bitmap and append a new COW layer.
+    fn push_changeset_as_layer(&mut self, pushed_bits: Vec<bool>, clears: ClearSet<N>) {
         let parent_len = self.len();
         let parent = self.clone();
         *self = Self::Layer(Arc::new(BitmapBatchLayer {
@@ -927,13 +883,8 @@ where
     where
         H: Hasher<Digest = D>,
     {
-        let pushes = self.bitmap_pushes.clone();
-        let clears = self.bitmap_clears.clone();
-
         UnmerkleizedBatch::new(
             self.inner.new_batch::<H>(),
-            pushes,
-            clears,
             self.grafted.clone(),
             self.bitmap.clone(),
         )
@@ -959,23 +910,8 @@ where
     where
         U: 'static,
     {
-        // Flatten accumulated bitmap pushes + clears into flat Vecs.
-        let total_pushes: usize = self.bitmap_pushes.iter().map(|s| s.len()).sum();
-        let mut bitmap_pushes = Vec::with_capacity(total_pushes);
-        for seg in &self.bitmap_pushes {
-            bitmap_pushes.extend_from_slice(seg);
-        }
-
-        let total_clears: usize = self.bitmap_clears.iter().map(|s| s.len()).sum();
-        let mut bitmap_clears = ClearSet::with_capacity(total_clears);
-        for seg in &self.bitmap_clears {
-            bitmap_clears.merge(seg);
-        }
-
         Changeset {
             inner: self.inner.finalize(),
-            bitmap_pushes,
-            bitmap_clears,
             grafted_changeset: self.grafted.finalize(),
             canonical_root: self.canonical_root,
         }
@@ -985,13 +921,12 @@ where
     /// instead of the original DB size when this batch chain was created.
     ///
     /// Use this when an ancestor batch in the chain has already been committed, advancing
-    /// the DB's operation count past the original fork point. Skips bitmap pushes/clears
-    /// and grafted MMR entries from ancestor batches that have already been committed.
+    /// the DB's operation count past the original fork point. Skips grafted MMR entries
+    /// from ancestor batches that have already been committed.
     ///
     /// # Panics
     ///
-    /// Panics if `current_db_size` is less than the DB size when this batch was created,
-    /// or if `items_to_skip` does not align with push segment boundaries.
+    /// Panics if `current_db_size` is less than the DB size when this batch was created.
     pub fn finalize_from(
         self,
         current_db_size: u64,
@@ -1004,43 +939,6 @@ where
             "current_db_size ({current_db_size}) < batch db_size ({})",
             self.inner.db_size
         );
-        let items_to_skip = (current_db_size - self.inner.db_size) as usize;
-
-        // Determine how many complete batch segments have been committed.
-        // Push segments have one entry per operation, so their cumulative
-        // length maps directly to items_to_skip. Committed batches are
-        // always committed as whole units, so items_to_skip always aligns
-        // with segment boundaries.
-        let mut remaining = items_to_skip;
-        let mut segments_to_skip = 0;
-        for seg in &self.bitmap_pushes {
-            if remaining == 0 {
-                break;
-            }
-            assert!(
-                remaining >= seg.len(),
-                "items_to_skip does not align with push segment boundary"
-            );
-            remaining -= seg.len();
-            segments_to_skip += 1;
-        }
-
-        // Flatten uncommitted push segments.
-        let mut bitmap_pushes = Vec::new();
-        for seg in &self.bitmap_pushes[segments_to_skip..] {
-            bitmap_pushes.extend_from_slice(seg);
-        }
-
-        // Flatten uncommitted clear segments (1:1 with push segments).
-        let mut bitmap_clears = ClearSet::with_capacity(
-            self.bitmap_clears[segments_to_skip..]
-                .iter()
-                .map(|s| s.len())
-                .sum(),
-        );
-        for seg in &self.bitmap_clears[segments_to_skip..] {
-            bitmap_clears.merge(seg);
-        }
 
         // The grafted MMR base must reflect the current committed bitmap's
         // complete chunk count (after committed ancestors' pushes).
@@ -1050,9 +948,9 @@ where
         let grafted_changeset = self.grafted.finalize_from(grafted_base);
 
         Changeset {
+            // Bitmap rebasing happens later in current::Db::apply_batch(),
+            // derived from the rebased inner snapshot diffs.
             inner: self.inner.finalize_from(current_db_size),
-            bitmap_pushes,
-            bitmap_clears,
             grafted_changeset,
             canonical_root: self.canonical_root,
         }
@@ -1072,8 +970,6 @@ where
     pub fn to_batch(&self) -> MerkleizedBatch<H::Digest, U, N> {
         MerkleizedBatch {
             inner: self.any.to_batch(),
-            bitmap_pushes: Vec::new(),
-            bitmap_clears: Vec::new(),
             grafted: self.grafted_snapshot(),
             bitmap: self.status.clone(),
             canonical_root: self.root,
@@ -1387,112 +1283,6 @@ mod tests {
     }
 
     #[test]
-    fn clear_set_merge_empty_into_empty() {
-        let mut a = ClearSet::<N>::default();
-        let b = ClearSet::<N>::default();
-        a.merge(&b);
-        assert_eq!(a.len(), 0);
-        assert!(a.is_empty());
-    }
-
-    #[test]
-    fn clear_set_merge_non_empty_into_empty() {
-        let mut a = ClearSet::<N>::default();
-        let mut b = ClearSet::<N>::default();
-        b.push(Location::new(3));
-        b.push(Location::new(7));
-
-        a.merge(&b);
-        assert_eq!(a.len(), 2);
-        assert_eq!(a.locations(), &[Location::new(3), Location::new(7)]);
-        // Both bits in chunk 0.
-        let mask = a.mask(0).unwrap();
-        assert_eq!(mask[0], (1 << 3) | (1 << 7));
-    }
-
-    #[test]
-    fn clear_set_merge_empty_into_non_empty() {
-        let mut a = ClearSet::<N>::default();
-        a.push(Location::new(5));
-        let b = ClearSet::<N>::default();
-
-        a.merge(&b);
-        assert_eq!(a.len(), 1);
-        assert_eq!(a.locations(), &[Location::new(5)]);
-        let mask = a.mask(0).unwrap();
-        assert_eq!(mask[0], 1 << 5);
-    }
-
-    #[test]
-    fn clear_set_merge_disjoint_chunks() {
-        // N=4 -> CHUNK_SIZE_BITS = 32. Bit 2 is in chunk 0, bit 33 is in chunk 1.
-        let mut a = ClearSet::<N>::default();
-        a.push(Location::new(2));
-
-        let mut b = ClearSet::<N>::default();
-        b.push(Location::new(33));
-
-        a.merge(&b);
-        assert_eq!(a.len(), 2);
-        assert_eq!(a.locations(), &[Location::new(2), Location::new(33)]);
-        // Chunk 0: only bit 2.
-        let m0 = a.mask(0).unwrap();
-        assert_eq!(m0[0], 1 << 2);
-        // Chunk 1: bit 33 -> relative bit 1 -> byte 0, bit 1.
-        let m1 = a.mask(1).unwrap();
-        assert_eq!(m1[0], 1 << 1);
-    }
-
-    #[test]
-    fn clear_set_merge_overlapping_chunk() {
-        // Both sets clear bits in the same chunk; masks must be OR'd.
-        let mut a = ClearSet::<N>::default();
-        a.push(Location::new(1));
-        a.push(Location::new(4));
-
-        let mut b = ClearSet::<N>::default();
-        b.push(Location::new(4)); // duplicate with a
-        b.push(Location::new(6));
-
-        a.merge(&b);
-        assert_eq!(a.len(), 4);
-        let mask = a.mask(0).unwrap();
-        // bits 1, 4, 6 (4 appears in both but OR is idempotent for mask)
-        assert_eq!(mask[0], (1 << 1) | (1 << 4) | (1 << 6));
-    }
-
-    #[test]
-    fn clear_set_merge_matches_sequential_push() {
-        // Verify merge produces the same masks as pushing each location individually.
-        let locs_a: Vec<Location> = (0..5).map(Location::new).collect();
-        let locs_b: Vec<Location> = (30..36).map(Location::new).collect(); // spans chunks 0 and 1
-
-        // Build via merge.
-        let mut via_merge = ClearSet::<N>::default();
-        let mut part_a = ClearSet::<N>::default();
-        for &loc in &locs_a {
-            part_a.push(loc);
-        }
-        let mut part_b = ClearSet::<N>::default();
-        for &loc in &locs_b {
-            part_b.push(loc);
-        }
-        via_merge.merge(&part_a);
-        via_merge.merge(&part_b);
-
-        // Build via sequential push.
-        let mut via_push = ClearSet::<N>::default();
-        for &loc in locs_a.iter().chain(&locs_b) {
-            via_push.push(loc);
-        }
-
-        assert_eq!(via_merge.locations(), via_push.locations());
-        for idx in 0..2 {
-            assert_eq!(via_merge.mask(idx), via_push.mask(idx));
-        }
-    }
-
-    #[test]
     fn bitmap_diff_clear_set_tracks_chunk_bits() {
         let base = make_bitmap(&[true; 96]);
         let mut diff = BitmapDiff::<Bm, N>::new(&base, 3);
@@ -1514,12 +1304,7 @@ mod tests {
         clears.push(Location::new(40));
         batch.push_changeset(Vec::new(), clears);
 
-        let BitmapBatch::Layer(layer) = &batch else {
-            panic!("expected layer");
-        };
-        assert_eq!(layer.clears.mask(0).unwrap()[0], 1 << 3);
-        assert_eq!(layer.clears.mask(1).unwrap()[1], 0x01);
-
+        // Verify the cleared bits are reflected in the chunks.
         let chunk0 = batch.get_chunk(0);
         let chunk1 = batch.get_chunk(1);
         assert_eq!(chunk0[0] & (1 << 3), 0);
@@ -1622,7 +1407,7 @@ mod tests {
 
         clear_base_old_locs::<K, u64, Bm, N>(&mut bitmap, &diff);
 
-        assert_eq!(bitmap.clears.len(), 2);
+        assert_eq!(bitmap.clears.locations.len(), 2);
 
         // Verify bits 5 and 10 are cleared.
         let c0 = bitmap.get_chunk(0);

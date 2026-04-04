@@ -19,10 +19,11 @@ use crate::{
     qmdb::{
         any::{
             self,
+            batch::SnapshotDiff,
             operation::{update::Update, Operation},
         },
         current::{
-            batch::BitmapBatch,
+            batch::{BitmapBatch, ClearSet},
             grafting,
             proof::{OperationProof, RangeProof},
         },
@@ -200,8 +201,6 @@ where
     pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<H, U, N> {
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
-            Vec::new(),
-            Vec::new(),
             self.grafted_snapshot(),
             self.status.clone(),
         )
@@ -573,12 +572,26 @@ where
         &mut self,
         batch: super::batch::Changeset<U::Key, H::Digest, Operation<mmr::Family, U>, N>,
     ) -> Result<Range<Location>, Error> {
+        // Reject stale changesets before building bitmap data.
+        let batch_start = *self.any.last_commit_loc + 1;
+        if batch.inner.db_size != batch_start {
+            return Err(crate::qmdb::Error::StaleChangeset {
+                expected: batch.inner.db_size,
+                actual: batch_start,
+            });
+        }
+
+        let (active_bits, clears) = derive_bitmap_changes::<U, N>(
+            self.any.last_commit_loc,
+            batch_start,
+            batch.inner.new_last_commit_loc,
+            &batch.inner.snapshot_diffs,
+        );
+
         // Apply inner any batch (writes ops, updates snapshot).
         let range = self.any.apply_batch(batch.inner).await?;
 
-        // Push bitmap mutations as a layer (O(changeset), no deep clone).
-        self.status
-            .push_changeset(batch.bitmap_pushes, batch.bitmap_clears);
+        self.status.push_changeset(active_bits, clears);
 
         // Push grafted changeset as a layer (O(changeset), no deep clone).
         self.grafted_mmr.push_changeset(batch.grafted_changeset);
@@ -588,6 +601,60 @@ where
 
         Ok(range)
     }
+}
+
+#[inline]
+fn derive_bitmap_changes<U: Update, const N: usize>(
+    previous_commit_loc: Location,
+    batch_start: u64,
+    new_last_commit_loc: Location,
+    snapshot_diffs: &[SnapshotDiff<mmr::Family, U::Key>],
+) -> (Vec<bool>, ClearSet<N>) {
+    let num_ops = (*new_last_commit_loc + 1 - batch_start) as usize;
+    let mut active_bits = vec![false; num_ops];
+    let mut clears = ClearSet::default();
+
+    // The previously committed CommitFloor stops being current once this batch lands.
+    clears.push(previous_commit_loc);
+
+    for diff in snapshot_diffs {
+        match diff {
+            SnapshotDiff::Update {
+                old_loc, new_loc, ..
+            } => {
+                let offset = (**new_loc - batch_start) as usize;
+                assert!(
+                    offset < active_bits.len(),
+                    "snapshot diff points past batch range"
+                );
+                active_bits[offset] = true;
+                clears.push(*old_loc);
+            }
+            SnapshotDiff::Insert { new_loc, .. } => {
+                let offset = (**new_loc - batch_start) as usize;
+                assert!(
+                    offset < active_bits.len(),
+                    "snapshot diff points past batch range"
+                );
+                active_bits[offset] = true;
+            }
+            SnapshotDiff::Delete { old_loc, .. } => {
+                clears.push(*old_loc);
+            }
+        }
+    }
+
+    // `active_bits[i]` describes whether the operation at `batch_start + i`
+    // is active in the post-apply Current view. The trailing CommitFloor is
+    // always current.
+    let commit_offset = (*new_last_commit_loc - batch_start) as usize;
+    assert!(
+        commit_offset < active_bits.len(),
+        "new_last_commit_loc must fall within the batch range"
+    );
+    active_bits[commit_offset] = true;
+
+    (active_bits, clears)
 }
 
 impl<E, U, C, I, H, const N: usize> Persistable for Db<E, C, I, H, U, N>
