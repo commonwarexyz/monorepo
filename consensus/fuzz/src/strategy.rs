@@ -75,6 +75,12 @@ pub trait Strategy: Send + Sync {
     fn repeated_proposal_index(&self, rng: &mut impl Rng, proposals_len: usize) -> Option<usize>;
 
     fn fault_bounds(&self) -> Option<(u64, u64)>;
+
+    /// Maximum number of messages the disrupter may send per view.
+    /// `None` means unlimited.
+    fn max_messages_per_view(&self) -> Option<usize> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -598,6 +604,151 @@ impl Strategy for FutureScope {
 
     fn fault_bounds(&self) -> Option<(u64, u64)> {
         Some((self.fault_rounds, self.fault_rounds_bound))
+    }
+}
+
+/// Like [`SmallScope`] but limits the disrupter to at most 3 messages per view.
+pub struct SmallScopeForTracing {
+    inner: SmallScope,
+}
+
+impl SmallScopeForTracing {
+    pub fn new(fault_rounds: u64, fault_rounds_bound: u64) -> Self {
+        Self {
+            inner: SmallScope {
+                fault_rounds,
+                fault_rounds_bound,
+            },
+        }
+    }
+}
+
+impl Strategy for SmallScopeForTracing {
+    fn random_proposal(
+        &self,
+        rng: &mut impl Rng,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
+    ) -> Proposal<Sha256Digest> {
+        self.inner.random_proposal(
+            rng,
+            last_vote_view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        )
+    }
+
+    fn proposal_with_view(
+        &self,
+        proposal: &Proposal<Sha256Digest>,
+        view: u64,
+    ) -> Proposal<Sha256Digest> {
+        self.inner.proposal_with_view(proposal, view)
+    }
+
+    fn proposal_with_parent_view(
+        &self,
+        proposal: &Proposal<Sha256Digest>,
+        view: u64,
+    ) -> Proposal<Sha256Digest> {
+        self.inner.proposal_with_parent_view(proposal, view)
+    }
+
+    fn mutate_proposal(
+        &self,
+        rng: &mut impl Rng,
+        proposal: &Proposal<Sha256Digest>,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
+    ) -> Proposal<Sha256Digest> {
+        self.inner.mutate_proposal(
+            rng,
+            proposal,
+            last_vote_view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        )
+    }
+
+    fn mutate_nullify_view(
+        &self,
+        rng: &mut impl Rng,
+        last_vote: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
+    ) -> u64 {
+        self.inner.mutate_nullify_view(
+            rng,
+            last_vote,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        )
+    }
+
+    fn random_view_for_proposal(
+        &self,
+        rng: &mut impl Rng,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
+    ) -> u64 {
+        self.inner.random_view_for_proposal(
+            rng,
+            last_vote_view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        )
+    }
+
+    fn random_parent_view(
+        &self,
+        rng: &mut impl Rng,
+        last_vote_view: u64,
+        last_finalized_view: u64,
+        last_notarized_view: u64,
+        last_nullified_view: u64,
+    ) -> u64 {
+        self.inner.random_parent_view(
+            rng,
+            last_vote_view,
+            last_finalized_view,
+            last_notarized_view,
+            last_nullified_view,
+        )
+    }
+
+    fn random_payload(&self, rng: &mut impl Rng) -> Sha256Digest {
+        self.inner.random_payload(rng)
+    }
+
+    fn mutate_certificate_bytes(&self, rng: &mut impl Rng, cert: &[u8]) -> Vec<u8> {
+        self.inner.mutate_certificate_bytes(rng, cert)
+    }
+
+    fn mutate_resolver_bytes(&self, rng: &mut impl Rng, msg: &[u8]) -> Vec<u8> {
+        self.inner.mutate_resolver_bytes(rng, msg)
+    }
+
+    fn repeated_proposal_index(&self, rng: &mut impl Rng, proposals_len: usize) -> Option<usize> {
+        self.inner.repeated_proposal_index(rng, proposals_len)
+    }
+
+    fn fault_bounds(&self) -> Option<(u64, u64)> {
+        self.inner.fault_bounds()
+    }
+
+    fn max_messages_per_view(&self) -> Option<usize> {
+        Some(3)
     }
 }
 

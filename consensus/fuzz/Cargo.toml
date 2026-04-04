@@ -20,7 +20,13 @@ commonware-parallel.workspace = true
 commonware-runtime.workspace = true
 commonware-utils = { workspace = true, features = ["arbitrary"] }
 futures.workspace = true
+kdtree.workspace = true
 libfuzzer-sys.workspace = true
+base64.workspace = true
+reqwest = { workspace = true, features = ["json", "blocking"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha1.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 tracing.workspace = true
@@ -131,6 +137,62 @@ bench = false
 [[bin]]
 name = "simplex_secp256r1"
 path = "fuzz_targets/simplex_secp256r1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_quint_twins"
+path = "fuzz_targets/simplex_ed25519_quint_twins.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_quint_disrupter"
+path = "fuzz_targets/simplex_ed25519_quint_disrupter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_quint_honest"
+path = "fuzz_targets/simplex_ed25519_quint_honest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simplex_ed25519_quint_byzantine"
+path = "fuzz_targets/simplex_ed25519_quint_byzantine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trace_to_quint"
+path = "src/bin/trace_to_quint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replay_trace"
+path = "src/bin/replay_trace.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ist"
+path = "src/bin/ist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "itf_to_trace"
+path = "src/bin/itf_to_trace.rs"
 test = false
 doc = false
 bench = false
