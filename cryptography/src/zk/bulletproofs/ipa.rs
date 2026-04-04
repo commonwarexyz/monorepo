@@ -193,6 +193,20 @@ impl<G: Read> Read for Setup<G> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<G> arbitrary::Arbitrary<'_> for Setup<G>
+where
+    G: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            g: u.arbitrary()?,
+            h: u.arbitrary()?,
+            product_generator: u.arbitrary()?,
+        })
+    }
+}
+
 impl<G> Setup<G> {
     /// Create a new [`Setup`], given specific choices of the generator.
     ///
@@ -258,6 +272,21 @@ impl<F: Read, G: Read> Read for Claim<F, G> {
             commitment: G::read_cfg(buf, g_cfg)?,
             product: F::read_cfg(buf, f_cfg)?,
             log_len: u8::read(buf)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<F, G> arbitrary::Arbitrary<'_> for Claim<F, G>
+where
+    F: for<'a> arbitrary::Arbitrary<'a>,
+    G: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            commitment: u.arbitrary()?,
+            product: u.arbitrary()?,
+            log_len: u.arbitrary()?,
         })
     }
 }
@@ -370,6 +399,22 @@ impl<F: Read, G: Read> Read for Proof<F, G> {
             transcript_summary: Summary::read(buf)?,
             a_final: F::read_cfg(buf, f_cfg)?,
             b_final: F::read_cfg(buf, f_cfg)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<F, G> arbitrary::Arbitrary<'_> for Proof<F, G>
+where
+    F: for<'a> arbitrary::Arbitrary<'a>,
+    G: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            l_r_coms: u.arbitrary()?,
+            transcript_summary: u.arbitrary()?,
+            a_final: u.arbitrary()?,
+            b_final: u.arbitrary()?,
         })
     }
 }
@@ -725,6 +770,19 @@ where
     weights.push(claim.product.clone() - &(a_final * &b_final));
 
     G::msm(&points, &weights, strategy) == -claim.commitment.clone()
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance {
+    use super::{Claim, Proof, Setup};
+    use commonware_codec::conformance::CodecConformance;
+    use commonware_math::test::{F as TestF, G as TestG};
+
+    commonware_conformance::conformance_tests! {
+        CodecConformance<Setup<TestG>>,
+        CodecConformance<Claim<TestF, TestG>>,
+        CodecConformance<Proof<TestF, TestG>>,
+    }
 }
 
 #[commonware_macros::stability(ALPHA)]
