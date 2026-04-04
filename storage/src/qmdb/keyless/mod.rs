@@ -317,7 +317,7 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleChangeset`].
+    /// different fork returns [`Error::StaleBatch`].
     ///
     /// Returns the range of locations written.
     ///
@@ -330,7 +330,7 @@ where
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
         if db_size != batch.db_size && db_size != batch.base_size {
-            return Err(Error::StaleChangeset {
+            return Err(Error::StaleBatch {
                 db_size,
                 batch_db_size: batch.db_size,
                 batch_base_size: batch.base_size,
@@ -873,7 +873,7 @@ pub(crate) mod tests {
         db.apply_batch(batch_a).await.unwrap();
 
         let result = db.apply_batch(batch_b).await;
-        assert!(matches!(result, Err(Error::StaleChangeset { .. })));
+        assert!(matches!(result, Err(Error::StaleBatch { .. })));
 
         db.destroy().await.unwrap();
     }
@@ -901,8 +901,8 @@ pub(crate) mod tests {
         db.apply_batch(a).await.unwrap();
         let result = db.apply_batch(c).await;
         assert!(
-            matches!(result, Err(Error::StaleChangeset { .. })),
-            "expected StaleChangeset for partial ancestor commit, got {result:?}"
+            matches!(result, Err(Error::StaleBatch { .. })),
+            "expected StaleBatch for partial ancestor commit, got {result:?}"
         );
 
         db.destroy().await.unwrap();
@@ -1501,7 +1501,7 @@ pub(crate) mod tests {
         db.apply_batch(child_a).await.unwrap();
         assert!(matches!(
             db.apply_batch(child_b).await,
-            Err(Error::StaleChangeset { .. })
+            Err(Error::StaleBatch { .. })
         ));
 
         db.destroy().await.unwrap();
@@ -1542,7 +1542,7 @@ pub(crate) mod tests {
         db.apply_batch(child).await.unwrap();
         assert!(matches!(
             db.apply_batch(parent).await,
-            Err(Error::StaleChangeset { .. })
+            Err(Error::StaleBatch { .. })
         ));
 
         db.destroy().await.unwrap();

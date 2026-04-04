@@ -1245,7 +1245,7 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`crate::qmdb::Error::StaleChangeset`].
+    /// different fork returns [`crate::qmdb::Error::StaleBatch`].
     ///
     /// This publishes the batch to the in-memory database state and appends it to the
     /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to
@@ -1259,7 +1259,7 @@ where
         // or batch.base_size (all ancestors committed sequentially). Anything else means a
         // different fork was committed, or ancestors were only partially committed.
         if db_size != batch.db_size && db_size != batch.base_size {
-            return Err(crate::qmdb::Error::StaleChangeset {
+            return Err(crate::qmdb::Error::StaleBatch {
                 db_size,
                 batch_db_size: batch.db_size,
                 batch_base_size: batch.base_size,

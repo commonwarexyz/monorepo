@@ -335,8 +335,8 @@ where
     /// Parent batch in the chain. `None` for batches created directly from the DB.
     parent: Option<Weak<MerkleizedBatch<H::Digest, U, N>>>,
 
-    /// Parent's grafted MMR state (owned, Arc-based internally).
-    grafted_parent: mmr::batch::MerkleizedBatch<H::Digest>,
+    /// Parent's grafted MMR state.
+    grafted_parent: Arc<mmr::batch::MerkleizedBatch<H::Digest>>,
 
     /// Parent's bitmap state (COW, Arc-based).
     bitmap_parent: BitmapBatch<N>,
@@ -364,10 +364,7 @@ where
     pub(crate) bitmap_clears: Arc<ClearSet<N>>,
 
     /// Grafted MMR state.
-    pub(crate) grafted: mmr::batch::MerkleizedBatch<D>,
-
-    /// Size of the grafted MMR parent at batch construction time.
-    pub(crate) grafted_parent_size: Position,
+    pub(crate) grafted: Arc<mmr::batch::MerkleizedBatch<D>>,
 
     /// COW bitmap state (for use as a parent in `BitmapDiff`).
     bitmap: BitmapBatch<N>,
@@ -395,8 +392,7 @@ where
             parent: self.parent.clone(),
             bitmap_pushes: Arc::clone(&self.bitmap_pushes),
             bitmap_clears: Arc::clone(&self.bitmap_clears),
-            grafted: self.grafted.clone(),
-            grafted_parent_size: self.grafted_parent_size,
+            grafted: Arc::clone(&self.grafted),
             bitmap: self.bitmap.clone(),
             canonical_root: self.canonical_root,
             ancestor_bitmap_pushes: self.ancestor_bitmap_pushes.clone(),
@@ -414,7 +410,7 @@ where
     pub(super) const fn new(
         inner: any::batch::UnmerkleizedBatch<mmr::Family, H, U>,
         parent: Option<Weak<MerkleizedBatch<H::Digest, U, N>>>,
-        grafted_parent: mmr::batch::MerkleizedBatch<H::Digest>,
+        grafted_parent: Arc<mmr::batch::MerkleizedBatch<H::Digest>>,
         bitmap_parent: BitmapBatch<N>,
     ) -> Self {
         Self {
@@ -616,7 +612,7 @@ async fn compute_current_layer<E, U, C, I, H, const N: usize>(
     inner: Arc<any::batch::MerkleizedBatch<mmr::Family, H::Digest, U>>,
     current_db: &super::db::Db<E, C, I, H, U, N>,
     parent: Option<Weak<MerkleizedBatch<H::Digest, U, N>>>,
-    grafted_parent: &mmr::batch::MerkleizedBatch<H::Digest>,
+    grafted_parent: &Arc<mmr::batch::MerkleizedBatch<H::Digest>>,
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<Arc<MerkleizedBatch<H::Digest, U, N>>, Error>
 where
@@ -707,7 +703,7 @@ where
             }
         }
         let gh = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
-        grafted_batch.merkleize(&gh)
+        grafted_batch.merkleize(&gh, &current_db.grafted_mmr)
     };
 
     // 7. Compute canonical root using the grafted batch directly.
@@ -744,14 +740,12 @@ where
     ancestor_bitmap_pushes.reverse();
     ancestor_bitmap_clears.reverse();
 
-    let grafted_parent_size = grafted_parent.size();
     Ok(Arc::new(MerkleizedBatch {
         inner,
         parent,
         bitmap_pushes: pushed_bits,
         bitmap_clears: clears,
         grafted: grafted_batch,
-        grafted_parent_size,
         bitmap: bitmap_batch,
         canonical_root,
         ancestor_bitmap_pushes,
@@ -938,7 +932,7 @@ where
         UnmerkleizedBatch::new(
             self.inner.new_batch::<H>(),
             Some(Arc::downgrade(self)),
-            self.grafted.clone(),
+            Arc::clone(&self.grafted),
             self.bitmap.clone(),
         )
     }
@@ -971,14 +965,12 @@ where
     /// Create an initial [`MerkleizedBatch`] from the committed DB state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<H::Digest, U, N>> {
         let grafted = self.grafted_snapshot();
-        let grafted_parent_size = grafted.size();
         Arc::new(MerkleizedBatch {
             inner: self.any.to_batch(),
             parent: None,
             bitmap_pushes: Arc::new(Vec::new()),
             bitmap_clears: Arc::new(ClearSet::default()),
             grafted,
-            grafted_parent_size,
             bitmap: self.status.clone(),
             canonical_root: self.root,
             ancestor_bitmap_pushes: Vec::new(),

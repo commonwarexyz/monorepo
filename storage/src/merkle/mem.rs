@@ -72,8 +72,7 @@ impl<F: Family, D: Digest> MemInner<F, D> {
 ///
 /// The structure is always merkleized (its root is always computed). Mutations go through the
 /// batch API: create an [`UnmerkleizedBatch`](batch::UnmerkleizedBatch) via [`Self::new_batch`],
-/// accumulate changes, then apply the resulting [`Changeset`](batch::Changeset) via
-/// [`Self::apply`].
+/// accumulate changes, merkleize, then apply the result via [`Self::apply_batch`].
 #[derive(Clone, Debug)]
 pub struct Mem<F: Family, D: Digest> {
     inner: Arc<MemInner<F, D>>,
@@ -163,7 +162,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     /// Build a pruned structure that retains nodes above the prune boundary.
     ///
     /// Like `from_components` but also accepts retained nodes (stored in the
-    /// `nodes` deque). Used by `flatten()` and the grafted MMR which has no disk fallback.
+    /// `nodes` deque). Used by the grafted MMR which has no disk fallback.
     #[cfg(feature = "std")]
     pub(crate) fn from_pruned_with_retained(
         root: D,
@@ -402,43 +401,57 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
     /// Create a new speculative batch with this structure as its parent.
     ///
-    /// The batch holds a shared reference. If the batch (or any
+    /// The batch holds a shared reference via `Arc`. If the batch (or any
     /// [`MerkleizedBatch`](batch::MerkleizedBatch) derived from it) is still alive when
-    /// [`apply`](Self::apply) or another mutating method is called, the mutation triggers a
-    /// copy-on-write.
+    /// [`apply_batch`](Self::apply_batch) or another mutating method is called, the mutation
+    /// triggers a copy-on-write.
     pub fn new_batch(&self) -> batch::UnmerkleizedBatch<F, D> {
-        let base = batch::MerkleizedBatch::Base(self.clone());
-        batch::UnmerkleizedBatch::new(base)
+        let root = batch::MerkleizedBatch::from_mem(self);
+        root.new_batch()
     }
 
-    /// Apply a changeset produced by
-    /// [`MerkleizedBatch::finalize`](batch::MerkleizedBatch::finalize).
-    ///
-    /// A changeset is only valid if the structure has not been modified since the batch that
-    /// produced it was created. Applying a stale changeset returns [`Error::StaleChangeset`].
-    pub fn apply(&mut self, changeset: batch::Changeset<F, D>) -> Result<(), Error<F>> {
-        if changeset.base_size != self.size() {
-            return Err(Error::StaleChangeset {
-                expected: changeset.base_size,
+    /// Apply a merkleized batch. Already-committed ancestors are skipped automatically.
+    pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D>) -> Result<(), Error<F>> {
+        let skip_ancestors = if self.size() == batch.base_size {
+            false
+        } else if self.size() > batch.base_size && self.size() < batch.size() {
+            true
+        } else {
+            return Err(Error::StaleBatch {
+                expected: batch.base_size,
                 actual: self.size(),
             });
-        }
+        };
 
         let inner = Arc::make_mut(&mut self.inner);
 
-        // 1. Overwrite: write modified digests into surviving base nodes.
-        for (pos, digest) in changeset.overwrites {
+        // Apply ancestor segments (root-to-tip order) if not already committed.
+        if !skip_ancestors {
+            for (appended, overwrites) in batch
+                .ancestor_appended
+                .iter()
+                .zip(&batch.ancestor_overwrites)
+            {
+                for (&pos, &digest) in overwrites.iter() {
+                    let index = inner.pos_to_index(pos);
+                    inner.nodes[index] = digest;
+                }
+                for &digest in appended.iter() {
+                    inner.nodes.push_back(digest);
+                }
+            }
+        }
+
+        // Apply this batch's own data.
+        for (&pos, &digest) in batch.overwrites.iter() {
             let index = inner.pos_to_index(pos);
             inner.nodes[index] = digest;
         }
-
-        // 2. Append: push new nodes onto the end.
-        for digest in changeset.appended {
+        for &digest in batch.appended.iter() {
             inner.nodes.push_back(digest);
         }
 
-        // 3. Update derived state.
-        inner.root = changeset.root;
+        inner.root = batch.root();
         Ok(())
     }
 }
@@ -493,28 +506,28 @@ mod tests {
 
     fn build<F: Family>(hasher: &H, n: u64) -> Mem<F, D> {
         let mut mem = Mem::new(hasher);
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for i in 0u64..n {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(hasher, &element);
             }
-            batch.merkleize(hasher).finalize()
+            batch.merkleize(hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         mem
     }
 
     fn build_raw<F: Family>(hasher: &H, n: u64) -> Mem<F, D> {
         let mut mem = Mem::new(hasher);
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for i in 0u64..n {
                 batch = batch.add(hasher, &i.to_be_bytes());
             }
-            batch.merkleize(hasher).finalize()
+            batch.merkleize(hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         mem
     }
 
@@ -537,12 +550,11 @@ mod tests {
                     "size should be valid at step {i}"
                 );
                 let old_size = mem.size();
-                let changeset = mem
+                let batch = mem
                     .new_batch()
                     .add(&hasher, &i.to_be_bytes())
-                    .merkleize(&hasher)
-                    .finalize();
-                mem.apply(changeset).unwrap();
+                    .merkleize(&hasher, &mem);
+                mem.apply_batch(&batch).unwrap();
                 for size in *old_size + 1..*mem.size() {
                     assert!(
                         !Position::<F>::new(size).is_valid_size(),
@@ -560,12 +572,11 @@ mod tests {
             let mut mem = Mem::<F, D>::new(&hasher);
             for i in 0u64..256 {
                 mem.prune_all();
-                let changeset = mem
+                let batch = mem
                     .new_batch()
                     .add(&hasher, &i.to_be_bytes())
-                    .merkleize(&hasher)
-                    .finalize();
-                mem.apply(changeset).unwrap();
+                    .merkleize(&hasher, &mem);
+                mem.apply_batch(&batch).unwrap();
                 assert_eq!(*mem.leaves(), i + 1);
             }
         });
@@ -674,15 +685,13 @@ mod tests {
                 let cs = reference
                     .new_batch()
                     .add(&hasher, &element)
-                    .merkleize(&hasher)
-                    .finalize();
-                reference.apply(cs).unwrap();
+                    .merkleize(&hasher, &reference);
+                reference.apply_batch(&cs).unwrap();
                 let cs = pruned
                     .new_batch()
                     .add(&hasher, &element)
-                    .merkleize(&hasher)
-                    .finalize();
-                pruned.apply(cs).unwrap();
+                    .merkleize(&hasher, &pruned);
+                pruned.apply_batch(&cs).unwrap();
                 pruned.prune_all();
                 assert_eq!(pruned.root(), reference.root());
             }
@@ -697,7 +706,7 @@ mod tests {
         let element = D::from(*b"01234567012345670123456701234567");
         let root = *mem.root();
 
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             if let Some(ref pool) = pool {
                 batch = batch.with_pool(Some(pool.clone()));
@@ -707,12 +716,12 @@ mod tests {
                     .update_leaf(hasher, Location::new(leaf), &element)
                     .unwrap();
             }
-            batch.merkleize(hasher).finalize()
+            batch.merkleize(hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         assert_ne!(*mem.root(), root);
 
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for leaf in [0u64, 1, 10, 50, 100, 150, 197, 198] {
                 let element = hasher.digest(&leaf.to_be_bytes());
@@ -720,9 +729,9 @@ mod tests {
                     .update_leaf(hasher, Location::new(leaf), &element)
                     .unwrap();
             }
-            batch.merkleize(hasher).finalize()
+            batch.merkleize(hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
         assert_eq!(*mem.root(), root);
     }
 
@@ -752,12 +761,12 @@ mod tests {
         let mut mem = Mem::<F, D>::new(&hasher);
         let mut prev_root = *mem.root();
         for i in 0u64..16 {
-            let changeset = {
+            let batch = {
                 let batch = mem.new_batch();
                 let batch = batch.add(&hasher, &i.to_be_bytes());
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &mem)
             };
-            mem.apply(changeset).unwrap();
+            mem.apply_batch(&batch).unwrap();
             assert_ne!(
                 *mem.root(),
                 prev_root,
@@ -839,14 +848,14 @@ mod tests {
         let mut mem = build_raw::<F>(&hasher, 20);
         mem.prune(Location::new(7)).unwrap();
 
-        let changeset = {
+        let batch = {
             let mut batch = mem.new_batch();
             for i in 20u64..48 {
                 batch = batch.add(&hasher, &i.to_be_bytes());
             }
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         let root = *mem.root();
         for loc in *mem.bounds().start..*mem.leaves() {
@@ -870,14 +879,14 @@ mod tests {
         let mut mem = build_raw::<F>(&hasher, 11);
         let root_before = *mem.root();
 
-        let changeset = {
+        let batch = {
             let batch = mem.new_batch();
             let batch = batch
                 .update_leaf(&hasher, Location::new(5), b"updated-5")
                 .unwrap();
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         assert_ne!(*mem.root(), root_before, "root should change after update");
         assert_eq!(*mem.leaves(), 11);
@@ -913,14 +922,14 @@ mod tests {
         let mut mem = build::<F>(&hasher, n);
 
         for update_loc in 0..n {
-            let changeset = {
+            let batch = {
                 let batch = mem.new_batch();
                 let batch = batch
                     .update_leaf(&hasher, Location::new(update_loc), b"new-value")
                     .unwrap();
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &mem)
             };
-            mem.apply(changeset).unwrap();
+            mem.apply_batch(&batch).unwrap();
 
             let proof = mem.proof(&hasher, Location::new(update_loc)).unwrap();
             assert!(
@@ -963,16 +972,16 @@ mod tests {
         let hasher: H = Standard::new();
         let mut mem = build::<F>(&hasher, 8);
 
-        let changeset = {
+        let batch = {
             let batch = mem.new_batch();
             let batch = batch
                 .update_leaf(&hasher, Location::new(3), b"updated-3")
                 .unwrap();
             let batch = batch.add(&hasher, &100u64.to_be_bytes());
             let batch = batch.add(&hasher, &101u64.to_be_bytes());
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         assert_eq!(*mem.leaves(), 10);
 
@@ -996,32 +1005,32 @@ mod tests {
     fn update_leaf_under_merge_parent<F: Family>() {
         let hasher: H = Standard::new();
         let mut mem = build::<F>(&hasher, 2);
-        let changeset = {
+        let batch = {
             let batch = mem.new_batch();
             let batch = batch.add(&hasher, &2u64.to_be_bytes());
             let batch = batch
                 .update_leaf(&hasher, Location::new(0), b"updated-0")
                 .unwrap();
-            batch.merkleize(&hasher).finalize()
+            batch.merkleize(&hasher, &mem)
         };
-        mem.apply(changeset).unwrap();
+        mem.apply_batch(&batch).unwrap();
 
         let ref_hasher: H = Standard::new();
         let mut ref_mem = build::<F>(&ref_hasher, 2);
         let cs = {
             let batch = ref_mem.new_batch();
             let batch = batch.add(&ref_hasher, &2u64.to_be_bytes());
-            batch.merkleize(&ref_hasher).finalize()
+            batch.merkleize(&ref_hasher, &ref_mem)
         };
-        ref_mem.apply(cs).unwrap();
+        ref_mem.apply_batch(&cs).unwrap();
         let cs = {
             let batch = ref_mem.new_batch();
             let batch = batch
                 .update_leaf(&ref_hasher, Location::new(0), b"updated-0")
                 .unwrap();
-            batch.merkleize(&ref_hasher).finalize()
+            batch.merkleize(&ref_hasher, &ref_mem)
         };
-        ref_mem.apply(cs).unwrap();
+        ref_mem.apply_batch(&cs).unwrap();
 
         assert_eq!(*mem.root(), *ref_mem.root(), "roots must match");
 
@@ -1046,14 +1055,14 @@ mod tests {
                 for update_loc in prune_to..n {
                     // Clone so each update starts from the same pruned state.
                     let mut m = mem.clone();
-                    let changeset = {
+                    let batch = {
                         let batch = m.new_batch();
                         let batch = batch
                             .update_leaf(&hasher, Location::new(update_loc), b"new")
                             .unwrap();
-                        batch.merkleize(&hasher).finalize()
+                        batch.merkleize(&hasher, &m)
                     };
-                    m.apply(changeset).unwrap();
+                    m.apply_batch(&batch).unwrap();
 
                     let proof = m.proof(&hasher, Location::new(update_loc)).unwrap();
                     assert!(

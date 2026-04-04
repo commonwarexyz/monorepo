@@ -112,7 +112,7 @@ pub enum Error<F: Family> {
     #[error(
         "stale batch: db has {db_size} ops, batch requires {batch_db_size} or {batch_base_size}"
     )]
-    StaleChangeset {
+    StaleBatch {
         db_size: u64,
         batch_db_size: u64,
         batch_base_size: u64,

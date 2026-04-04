@@ -424,7 +424,7 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleChangeset`].
+    /// different fork returns [`Error::StaleBatch`].
     ///
     /// Returns the range of locations written.
     ///
@@ -437,7 +437,7 @@ where
     ) -> Result<Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
         if db_size != batch.db_size && db_size != batch.base_size {
-            return Err(Error::StaleChangeset {
+            return Err(Error::StaleBatch {
                 db_size,
                 batch_db_size: batch.db_size,
                 batch_base_size: batch.base_size,
@@ -1721,8 +1721,8 @@ pub(super) mod test {
         // Apply the second -- should fail because the DB was modified.
         let result = db.apply_batch(batch_b).await;
         assert!(
-            matches!(result, Err(Error::StaleChangeset { .. })),
-            "expected StaleChangeset error, got {result:?}"
+            matches!(result, Err(Error::StaleBatch { .. })),
+            "expected StaleBatch error, got {result:?}"
         );
         assert_eq!(db.root(), expected_root);
         assert_eq!(db.bounds().await, expected_bounds);
@@ -1768,8 +1768,8 @@ pub(super) mod test {
         // Child B is stale.
         let result = db.apply_batch(child_b).await;
         assert!(
-            matches!(result, Err(Error::StaleChangeset { .. })),
-            "expected StaleChangeset error, got {result:?}"
+            matches!(result, Err(Error::StaleBatch { .. })),
+            "expected StaleBatch error, got {result:?}"
         );
 
         db.destroy().await.unwrap();
@@ -1806,8 +1806,8 @@ pub(super) mod test {
         db.apply_batch(a).await.unwrap();
         let result = db.apply_batch(c).await;
         assert!(
-            matches!(result, Err(Error::StaleChangeset { .. })),
-            "expected StaleChangeset for partial ancestor commit, got {result:?}"
+            matches!(result, Err(Error::StaleBatch { .. })),
+            "expected StaleBatch for partial ancestor commit, got {result:?}"
         );
 
         db.destroy().await.unwrap();
@@ -1915,8 +1915,8 @@ pub(super) mod test {
         // Parent is stale.
         let result = db.apply_batch(parent_m).await;
         assert!(
-            matches!(result, Err(Error::StaleChangeset { .. })),
-            "expected StaleChangeset error, got {result:?}"
+            matches!(result, Err(Error::StaleBatch { .. })),
+            "expected StaleBatch error, got {result:?}"
         );
 
         db.destroy().await.unwrap();

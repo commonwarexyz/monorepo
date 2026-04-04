@@ -29,7 +29,7 @@
 //! let fork_b = parent.new_batch::<Sha256>().write(k3, Some(v3)).merkleize(None, &db).await?;
 //!
 //! db.apply_batch(fork_a).await?;           // OK -- includes parent
-//! assert!(db.apply_batch(fork_b).is_err()) // StaleChangeset
+//! assert!(db.apply_batch(fork_b).is_err()) // StaleBatch
 //! ```
 //!
 //! ```ignore
@@ -48,7 +48,7 @@
 //! let child = parent.new_batch::<Sha256>().write(k2, Some(v2)).merkleize(None, &db).await?;
 //!
 //! db.apply_batch(child).await?;            // OK -- includes parent
-//! assert!(db.apply_batch(parent).is_err()) // StaleChangeset
+//! assert!(db.apply_batch(parent).is_err()) // StaleBatch
 //! ```
 //!
 //! ```ignore
@@ -60,7 +60,7 @@
 //! let b2 = b1.new_batch::<Sha256>().write(k4, Some(v4)).merkleize(None, &db).await?;
 //!
 //! db.apply_batch(a2).await?;               // OK -- includes a1
-//! assert!(db.apply_batch(b2).is_err())     // StaleChangeset
+//! assert!(db.apply_batch(b2).is_err())     // StaleBatch
 //! ```
 
 use crate::{

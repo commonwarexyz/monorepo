@@ -316,7 +316,7 @@ where
     Ok(db::Db {
         any,
         status: batch::BitmapBatch::Base(Arc::new(status)),
-        grafted_mmr: crate::mmr::batch::MerkleizedBatch::Base(grafted_mmr),
+        grafted_mmr,
         metadata: AsyncMutex::new(metadata),
         thread_pool,
         root,
@@ -930,8 +930,8 @@ pub mod tests {
 
             let result = db.apply_batch(batch_b).await;
             assert!(
-                matches!(result, Err(Error::StaleChangeset { .. })),
-                "expected StaleChangeset error, got {result:?}"
+                matches!(result, Err(Error::StaleBatch { .. })),
+                "expected StaleBatch error, got {result:?}"
             );
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.bounds().await, expected_bounds);

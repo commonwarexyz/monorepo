@@ -126,7 +126,7 @@ cfg_if::cfg_if! {
 
 use crate::merkle;
 pub use crate::merkle::Readable;
-pub use batch::{Changeset, MerkleizedBatch, UnmerkleizedBatch};
+pub use batch::{MerkleizedBatch, UnmerkleizedBatch};
 
 /// MMB-specific type alias for `merkle::proof::Proof`.
 pub type Proof<D> = merkle::proof::Proof<Family, D>;

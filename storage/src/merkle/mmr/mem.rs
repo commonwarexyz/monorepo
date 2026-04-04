@@ -29,13 +29,13 @@ mod tests {
             let element = <Sha256 as Hasher>::Digest::from(*b"01234567012345670123456701234567");
             let mut leaves: Vec<Location> = Vec::new();
             for _ in 0..11 {
-                let changeset = {
+                let batch = {
                     let mut batch = mmr.new_batch();
                     leaves.push(batch.leaves());
                     batch = batch.add(&hasher, &element);
-                    batch.merkleize(&hasher).finalize()
+                    batch.merkleize(&hasher, &mmr)
                 };
-                mmr.apply(changeset).unwrap();
+                mmr.apply_batch(&batch).unwrap();
                 let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
                 assert_ne!(peaks.len(), 0);
                 assert!(peaks.len() as u64 <= mmr.size());
@@ -131,15 +131,15 @@ mod tests {
 
             let mut batched_mmr = Mmr::new(&hasher);
 
-            let changeset = {
+            let batch = {
                 let mut batch = batched_mmr.new_batch();
                 for i in 0..NUM_ELEMENTS {
                     let element = hasher.digest(&i.to_be_bytes());
                     batch = batch.add(&hasher, &element);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &batched_mmr)
             };
-            batched_mmr.apply(changeset).unwrap();
+            batched_mmr.apply_batch(&batch).unwrap();
 
             assert_eq!(
                 batched_mmr.root(),
@@ -173,15 +173,15 @@ mod tests {
             )
             .unwrap();
 
-            let changeset = {
+            let batch = {
                 let mut batch = mmr.new_batch().with_pool(Some(pool));
                 for i in 0u64..NUM_ELEMENTS {
                     let element = hasher.digest(&i.to_be_bytes());
                     batch = batch.add(&hasher, &element);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &mmr)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             assert_eq!(
                 mmr.root(),
                 expected_root,
@@ -232,14 +232,14 @@ mod tests {
             .is_ok());
 
             let mut mmr = Mmr::new(&hasher);
-            let changeset = {
+            let batch = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..64 {
                     batch = batch.add(&hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &mmr)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             assert_eq!(mmr.size(), 127);
             let nodes: Vec<_> = (0..127)
                 .map(|i| mmr.get_node(Position::new(i)).unwrap())
@@ -255,14 +255,14 @@ mod tests {
             .is_ok());
 
             let mut mmr = Mmr::new(&hasher);
-            let changeset = {
+            let batch = {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..11 {
                     batch = batch.add(&hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &mmr)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             mmr.prune(Location::new(4)).unwrap();
             let nodes: Vec<_> = (7..*mmr.size())
                 .map(|i| mmr.get_node(Position::new(i)).unwrap())

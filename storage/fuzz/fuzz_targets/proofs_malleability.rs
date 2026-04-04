@@ -125,14 +125,14 @@ fn fuzz(input: FuzzInput) {
         ProofType::Mmr => {
             let hasher = Standard::<Sha256>::new();
             let mut mmr = Mmr::new(&hasher);
-            let changeset = {
+            let batch = {
                 let mut batch = mmr.new_batch();
                 for digest in &digests {
                     batch = batch.add(&hasher, digest);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &mmr)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             let root = mmr.root();
 
             for (leaf, element) in digests.iter().enumerate() {
@@ -154,14 +154,14 @@ fn fuzz(input: FuzzInput) {
         ProofType::MmrMulti => {
             let hasher = Standard::<Sha256>::new();
             let mut mmr = Mmr::new(&hasher);
-            let changeset = {
+            let batch = {
                 let mut batch = mmr.new_batch();
                 for digest in &digests {
                     batch = batch.add(&hasher, digest);
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher, &mmr)
             };
-            mmr.apply(changeset).unwrap();
+            mmr.apply_batch(&batch).unwrap();
             let root = mmr.root();
 
             let (start_idx, range_len) = if digests.is_empty() || input.positions.is_empty() {

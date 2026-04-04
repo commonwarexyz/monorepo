@@ -78,10 +78,7 @@ pub struct Db<
     ///
     /// Internal nodes are hashed using their position in the ops MMR rather than their
     /// grafted position.
-    ///
-    /// Stored as a [`mmr::batch::MerkleizedBatch`] so that `apply_batch` can push layers
-    /// in O(changeset) instead of deep-cloning.
-    pub(super) grafted_mmr: mmr::batch::MerkleizedBatch<H::Digest>,
+    pub(super) grafted_mmr: mmr::mem::Mmr<H::Digest>,
 
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
@@ -181,19 +178,8 @@ where
     }
 
     /// Snapshot of the grafted MMR for use in batch chains.
-    ///
-    /// Wraps in a `Checkpoint` when the state has layers, so that `base_size() == size()` for
-    /// the batch chain. When the state is already `Base`, `base_size()` naturally equals the tip.
-    pub(super) fn grafted_snapshot(&self) -> mmr::batch::MerkleizedBatch<H::Digest> {
-        let state = self.grafted_mmr.clone();
-        if matches!(state, mmr::batch::MerkleizedBatch::Base(_)) {
-            return state;
-        }
-        let size = state.size();
-        mmr::batch::MerkleizedBatch::Checkpoint {
-            inner: Arc::new(state),
-            base: size,
-        }
+    pub(super) fn grafted_snapshot(&self) -> Arc<mmr::batch::MerkleizedBatch<H::Digest>> {
+        mmr::batch::MerkleizedBatch::from_mem(&self.grafted_mmr)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -297,7 +283,6 @@ where
     /// pruning should call this periodically.
     pub fn flatten(&mut self) {
         self.status.flatten();
-        self.grafted_mmr.flatten();
     }
 
     /// Prunes historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -320,11 +305,11 @@ where
         let pruned_chunks = self.status.pruned_chunks() as u64;
         if pruned_chunks > 0 {
             let prune_loc_grafted = Location::new(pruned_chunks);
-            let bounds_start = self.grafted_mmr.pruning_boundary();
+            let bounds_start = self.grafted_mmr.bounds().start;
             let grafted_prune_pos =
                 Position::try_from(prune_loc_grafted).expect("valid leaf count");
             if prune_loc_grafted > bounds_start {
-                let root = self.grafted_mmr.root();
+                let root = *self.grafted_mmr.root();
                 let size = self.grafted_mmr.size();
 
                 let mut pinned = BTreeMap::new();
@@ -344,13 +329,12 @@ where
                             .expect("retained node must exist"),
                     );
                 }
-                self.grafted_mmr =
-                    mmr::batch::MerkleizedBatch::Base(mmr::mem::Mmr::from_pruned_with_retained(
-                        root,
-                        grafted_prune_pos,
-                        pinned,
-                        retained,
-                    ));
+                self.grafted_mmr = mmr::mem::Mmr::from_pruned_with_retained(
+                    root,
+                    grafted_prune_pos,
+                    pinned,
+                    retained,
+                );
             }
         }
 
@@ -473,7 +457,7 @@ where
         let ops_root = self.any.log.root();
         let root = compute_db_root(&hasher, &storage, partial_chunk, &ops_root).await?;
 
-        self.grafted_mmr = mmr::batch::MerkleizedBatch::Base(grafted_mmr);
+        self.grafted_mmr = grafted_mmr;
         self.root = root;
 
         Ok(())
@@ -562,7 +546,7 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleChangeset`].
+    /// different fork returns [`Error::StaleBatch`].
     ///
     /// This publishes the batch to the in-memory Current view and appends it to the journal,
     /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
@@ -600,12 +584,7 @@ where
         }
 
         // 3. Apply grafted MMR.
-        let grafted_cs = if skip_ancestors {
-            batch.grafted.finalize_from(batch.grafted_parent_size)
-        } else {
-            batch.grafted.finalize()
-        };
-        self.grafted_mmr.push_changeset(grafted_cs);
+        self.grafted_mmr.apply_batch(&batch.grafted)?;
 
         // 4. Canonical root.
         self.root = batch.canonical_root;
@@ -834,14 +813,14 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
 
     // Add each grafted leaf digest.
     if !leaves.is_empty() {
-        let changeset = {
+        let batch = {
             let mut batch = grafted_mmr.new_batch().with_pool(pool.cloned());
             for &(_ops_pos, digest) in &leaves {
                 batch = batch.add_leaf_digest(digest);
             }
-            batch.merkleize(&grafted_hasher).finalize()
+            batch.merkleize(&grafted_hasher, &grafted_mmr)
         };
-        grafted_mmr.apply(changeset)?;
+        grafted_mmr.apply_batch(&batch)?;
     }
 
     Ok(grafted_mmr)

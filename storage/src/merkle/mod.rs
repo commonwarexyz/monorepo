@@ -139,10 +139,10 @@ pub enum Error<F: Family> {
     #[error("invalid pinned nodes")]
     InvalidPinnedNodes,
 
-    /// Changeset was created against a different state.
-    #[error("stale changeset: expected size {expected}, actual {actual}")]
-    StaleChangeset {
-        /// The size the changeset was built against.
+    /// Batch was created against a different state.
+    #[error("stale batch: expected size {expected}, actual {actual}")]
+    StaleBatch {
+        /// The size the batch was built against.
         expected: Position<F>,
         /// The current size.
         actual: Position<F>,

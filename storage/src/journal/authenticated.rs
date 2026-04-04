@@ -48,6 +48,8 @@ pub struct UnmerkleizedBatch<F: Family, H: Hasher, Item: Send + Sync> {
     items: Vec<Item>,
     // This batch's parent, or None if the parent is the journal itself.
     parent: Option<Arc<MerkleizedBatch<F, H::Digest, Item>>>,
+    // The committed Mem when the batch chain was forked, passed to inner merkleize.
+    committed_mem: merkle::mem::Mem<F, H::Digest>,
 }
 
 impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, Item> {
@@ -84,13 +86,14 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
 
     /// Merkleize the batch, computing the root digest.
     pub fn merkleize(self) -> MerkleizedBatch<F, H::Digest, Item> {
-        let merkle = self.inner.merkleize(&self.hasher);
+        let merkle = self.inner.merkleize(&self.hasher, &self.committed_mem);
         let ancestor_items = Self::collect_ancestor_items(&self.parent);
         MerkleizedBatch {
             inner: merkle,
             items: Arc::new(self.items),
             parent: self.parent.as_ref().map(Arc::downgrade),
             ancestor_items,
+            committed_mem: self.committed_mem,
         }
     }
 
@@ -116,13 +119,14 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
             let encoded = item.encode();
             self.inner = self.inner.add(&self.hasher, &encoded);
         }
-        let merkle = self.inner.merkleize(&self.hasher);
+        let merkle = self.inner.merkleize(&self.hasher, &self.committed_mem);
         let ancestor_items = Self::collect_ancestor_items(&self.parent);
         MerkleizedBatch {
             inner: merkle,
             items,
             parent: self.parent.as_ref().map(Arc::downgrade),
             ancestor_items,
+            committed_mem: self.committed_mem,
         }
     }
 }
@@ -131,23 +135,26 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
 #[derive(Debug)]
 pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync> {
     /// The inner batch of Merkle leaf digests.
-    pub(crate) inner: batch::MerkleizedBatch<F, D>,
+    pub(crate) inner: Arc<batch::MerkleizedBatch<F, D>>,
     /// The items to append from this batch.
     items: Arc<Vec<Item>>,
     /// This batch's parent, or None if the parent is the journal itself.
     parent: Option<Weak<Self>>,
     /// Ancestor item segments collected at merkleize time (root-to-tip order).
     pub(crate) ancestor_items: Vec<Arc<Vec<Item>>>,
+    /// The committed Mem when the batch chain was forked, inherited by all descendants.
+    committed_mem: merkle::mem::Mem<F, D>,
 }
 
 // Manual Clone: derive would require Item: Clone, but Arc::clone doesn't.
 impl<F: Family, D: Digest, Item: Send + Sync> Clone for MerkleizedBatch<F, D, Item> {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            inner: Arc::clone(&self.inner),
             items: Arc::clone(&self.items),
             parent: self.parent.clone(),
             ancestor_items: self.ancestor_items.clone(),
+            committed_mem: self.committed_mem.clone(),
         }
     }
 }
@@ -178,6 +185,7 @@ impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
             hasher: StandardHasher::new(),
             items: Vec::new(),
             parent: Some(Arc::clone(self)),
+            committed_mem: self.committed_mem.clone(),
         }
     }
 }
@@ -264,11 +272,14 @@ where
     where
         C::Item: Encode,
     {
+        let committed_mem = self.merkle.mem();
+        let root = self.merkle.to_batch();
         UnmerkleizedBatch {
-            inner: self.merkle.to_batch().new_batch(),
+            inner: root.new_batch(),
             hasher: StandardHasher::new(),
             items: Vec::new(),
             parent: None,
+            committed_mem,
         }
     }
 
@@ -277,11 +288,13 @@ where
     /// The batch has no items (the committed items are on disk, not in memory).
     /// This is the starting point for building owned batch chains.
     pub(crate) fn to_merkleized_batch(&self) -> MerkleizedBatch<F, H::Digest, C::Item> {
+        let committed_mem = self.merkle.mem();
         MerkleizedBatch {
             inner: self.merkle.to_batch(),
             items: Arc::new(Vec::new()),
             parent: None,
             ancestor_items: Vec::new(),
+            committed_mem,
         }
     }
 }
@@ -362,7 +375,7 @@ where
 
             let reader = journal.reader().await;
             while merkle_leaves < journal_size {
-                let changeset = {
+                let batch = {
                     let mut batch = merkle.new_batch();
                     let mut count = 0u64;
                     while count < apply_batch_size && merkle_leaves < journal_size {
@@ -371,9 +384,9 @@ where
                         merkle_leaves += 1;
                         count += 1;
                     }
-                    batch.merkleize(hasher).finalize()
+                    batch.merkleize(hasher)
                 };
-                merkle.apply(changeset)?;
+                merkle.apply_batch(&batch)?;
             }
             return Ok(());
         }
@@ -390,13 +403,12 @@ where
 
         // Append item to the journal, then update the Merkle structure state.
         let loc = self.journal.append(item).await?;
-        let changeset = self
+        let batch = self
             .merkle
             .new_batch()
             .add(&self.hasher, &encoded_item)
-            .merkleize(&self.hasher)
-            .finalize();
-        self.merkle.apply(changeset)?;
+            .merkleize(&self.hasher);
+        self.merkle.apply_batch(&batch)?;
 
         Ok(Location::new(loc))
     }
@@ -426,7 +438,7 @@ where
         } else {
             // Merkle is at an incompatible position (a sibling or unrelated
             // fork was committed). Eagerly reject to avoid mutating the journal.
-            return Err(merkle::Error::StaleChangeset {
+            return Err(merkle::Error::StaleBatch {
                 expected: base_size,
                 actual: merkle_size,
             }
@@ -442,12 +454,7 @@ where
             self.journal.append_many(&batch.items).await?;
         }
 
-        let merkle_cs = if skip_ancestors {
-            batch.inner.finalize_from(merkle_size)
-        } else {
-            batch.inner.finalize()
-        };
-        self.merkle.apply(merkle_cs)?;
+        self.merkle.apply_batch(&batch.inner)?;
         assert_eq!(*self.merkle.leaves(), self.journal.size().await);
         Ok(())
     }
@@ -960,7 +967,7 @@ mod tests {
 
         // Add 20 operations to both Merkle and journal
         {
-            let changeset = {
+            let batch = {
                 let mut batch = merkle.new_batch();
                 for i in 0..20 {
                     let op = create_operation::<F>(i as u8);
@@ -968,9 +975,9 @@ mod tests {
                     batch = batch.add(&hasher, &encoded);
                     journal.append(&op).await.unwrap();
                 }
-                batch.merkleize(&hasher).finalize()
+                batch.merkleize(&hasher)
             };
-            merkle.apply(changeset).unwrap();
+            merkle.apply_batch(&batch).unwrap();
         }
 
         // Add commit operation to journal only (making journal ahead)
@@ -2288,9 +2295,9 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(super::Error::Merkle(merkle::Error::StaleChangeset { .. }))
+                Err(super::Error::Merkle(merkle::Error::StaleBatch { .. }))
             ),
-            "expected StaleChangeset, got {result:?}"
+            "expected StaleBatch, got {result:?}"
         );
 
         // The stale batch must not mutate the journal or desync it from the Merkle.
@@ -2341,9 +2348,9 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(super::Error::Merkle(merkle::Error::StaleChangeset { .. }))
+                Err(super::Error::Merkle(merkle::Error::StaleBatch { .. }))
             ),
-            "expected StaleChangeset for sibling, got {result:?}"
+            "expected StaleBatch for sibling, got {result:?}"
         );
     }
 
@@ -2417,9 +2424,9 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(super::Error::Merkle(merkle::Error::StaleChangeset { .. }))
+                Err(super::Error::Merkle(merkle::Error::StaleBatch { .. }))
             ),
-            "expected StaleChangeset for parent after child applied, got {result:?}"
+            "expected StaleBatch for parent after child applied, got {result:?}"
         );
     }
 

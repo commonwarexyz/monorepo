@@ -480,8 +480,8 @@ pub(crate) mod test {
             // Apply the second -- should fail because the DB was modified.
             let result = db.apply_batch(batch_b).await;
             assert!(
-                matches!(result, Err(Error::StaleChangeset { .. })),
-                "expected StaleChangeset error, got {result:?}"
+                matches!(result, Err(Error::StaleBatch { .. })),
+                "expected StaleBatch error, got {result:?}"
             );
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.bounds().await, expected_bounds);
@@ -525,8 +525,8 @@ pub(crate) mod test {
             db.apply_batch(batch_a).await.unwrap();
             let result = db.apply_batch(batch_b).await;
             assert!(
-                matches!(result, Err(Error::StaleChangeset { .. })),
-                "expected StaleChangeset for asymmetric sibling, got {result:?}"
+                matches!(result, Err(Error::StaleBatch { .. })),
+                "expected StaleBatch for asymmetric sibling, got {result:?}"
             );
 
             db.destroy().await.unwrap();
@@ -570,8 +570,8 @@ pub(crate) mod test {
             db.apply_batch(a).await.unwrap();
             let result = db.apply_batch(c).await;
             assert!(
-                matches!(result, Err(Error::StaleChangeset { .. })),
-                "expected StaleChangeset for partial ancestor commit, got {result:?}"
+                matches!(result, Err(Error::StaleBatch { .. })),
+                "expected StaleBatch for partial ancestor commit, got {result:?}"
             );
 
             db.destroy().await.unwrap();
@@ -622,8 +622,8 @@ pub(crate) mod test {
             db.apply_batch(child_a).await.unwrap();
             let result = db.apply_batch(child_b).await;
             assert!(
-                matches!(result, Err(Error::StaleChangeset { .. })),
-                "expected StaleChangeset error for sibling, got {result:?}"
+                matches!(result, Err(Error::StaleBatch { .. })),
+                "expected StaleBatch error for sibling, got {result:?}"
             );
 
             db.destroy().await.unwrap();
@@ -694,8 +694,8 @@ pub(crate) mod test {
             db.apply_batch(child).await.unwrap();
             let result = db.apply_batch(parent).await;
             assert!(
-                matches!(result, Err(Error::StaleChangeset { .. })),
-                "expected StaleChangeset for parent after child applied, got {result:?}"
+                matches!(result, Err(Error::StaleBatch { .. })),
+                "expected StaleBatch for parent after child applied, got {result:?}"
             );
 
             db.destroy().await.unwrap();
