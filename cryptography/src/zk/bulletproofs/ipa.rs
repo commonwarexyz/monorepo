@@ -740,7 +740,8 @@ mod tests {
 
     const MAX_VECTOR_LG: u8 = 5;
     const MAX_VECTOR_LEN: usize = 1 << MAX_VECTOR_LG;
-    const NUM_GENERATORS: usize = 2 * MAX_VECTOR_LEN + 1;
+    const MAX_SETUP_VECTOR_LEN: usize = 2 * MAX_VECTOR_LEN;
+    const NUM_GENERATORS: usize = 2 * MAX_SETUP_VECTOR_LEN + 1;
     const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_IPA";
     const BAD_NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_IPA_BUT_DIFFERENT";
 
@@ -824,6 +825,57 @@ mod tests {
             .expect("proving should work after tweaking the public claim");
         }
 
+        fn increase_length(&mut self) {
+            self.honest = false;
+            let longer_log_len = self
+                .claim
+                .log_len
+                .checked_add(1)
+                .expect("test vectors should support doubling the witness length");
+            let longer_len = 1usize
+                .checked_shl(u32::from(longer_log_len))
+                .expect("witness length should fit into usize");
+            self.witness.a.resize_with(longer_len, F::zero);
+            self.witness.b.resize_with(longer_len, F::zero);
+
+            // Padding with zeros preserves the commitment and product, but the
+            // regenerated proof is now bound to a different claimed length.
+            let longer_claim = Claim {
+                commitment: self.claim.commitment.clone(),
+                product: self.claim.product.clone(),
+                log_len: longer_log_len,
+            };
+            self.proof = prove(
+                &mut Transcript::new(NAMESPACE),
+                self.setup,
+                &longer_claim,
+                self.witness.clone(),
+                &Sequential,
+            )
+            .expect("proving should work after increasing the witness length");
+        }
+
+        fn tweak_l_r_coms<'b>(&mut self, u: &mut Unstructured<'b>) -> arbitrary::Result<()> {
+            let Some(last_round) = self.proof.l_r_coms.len().checked_sub(1) else {
+                return Ok(());
+            };
+            let round = u.int_in_range(0..=last_round)?;
+            let tweak_left = u.arbitrary::<bool>()?;
+            let delta = u.arbitrary::<G>()?;
+            if delta == G::zero() {
+                return Ok(());
+            }
+
+            self.honest = false;
+            let (l, r) = &mut self.proof.l_r_coms[round];
+            if tweak_left {
+                *l += &delta;
+            } else {
+                *r += &delta;
+            }
+            Ok(())
+        }
+
         fn honest(&self) -> bool {
             self.honest
         }
@@ -870,7 +922,9 @@ mod tests {
             // is the prover going to be malicious at all?
             if u.arbitrary::<bool>()? {
                 match u.arbitrary::<u8>()? {
-                    x if x < 128 => prover.tweak_product(u.arbitrary::<F>()?),
+                    x if x < 64 => prover.tweak_product(u.arbitrary::<F>()?),
+                    x if x < 128 => prover.increase_length(),
+                    x if x < 192 => prover.tweak_l_r_coms(u)?,
                     _ => prover.bad_namespace(),
                 }
             }
