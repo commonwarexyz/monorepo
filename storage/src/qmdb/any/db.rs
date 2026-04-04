@@ -87,7 +87,11 @@ pub struct Db<
     /// Activity bitmap for optimized floor raising. Tracks which operations are active (bit=1)
     /// or inactive (bit=0), allowing `BitmapScan` to skip inactive operations during floor
     /// raising instead of reading them from the journal.
-    pub(crate) status: BitmapBatch<{ commonware_utils::bitmap::DEFAULT_CHUNK_SIZE }>,
+    ///
+    /// `None` when this `any::Db` is embedded inside a `current::Db`, which maintains its own
+    /// bitmap with a different chunk size (for authenticated proofs). In that case the caller
+    /// injects a floor scan externally via [`crate::qmdb::any::batch::UnmerkleizedBatch::merkleize_with_floor_scan`].
+    pub(crate) status: Option<BitmapBatch<{ commonware_utils::bitmap::DEFAULT_CHUNK_SIZE }>>,
 
     /// Marker for the update type parameter.
     pub(crate) _update: core::marker::PhantomData<U>,
@@ -199,11 +203,13 @@ where
         }
 
         // Flatten bitmap layers and prune chunks below the inactivity floor.
-        self.status.flatten();
-        let BitmapBatch::Base(base) = &mut self.status else {
-            unreachable!("flatten() guarantees Base");
-        };
-        Arc::make_mut(base).prune_to_bit(*self.inactivity_floor_loc);
+        if let Some(status) = &mut self.status {
+            status.flatten();
+            let BitmapBatch::Base(base) = status else {
+                unreachable!("flatten() guarantees Base");
+            };
+            Arc::make_mut(base).prune_to_bit(*self.inactivity_floor_loc);
+        }
 
         self.log.prune(prune_loc).await?;
 
@@ -282,14 +288,18 @@ where
             }
 
             // Ensure the rewind target is above the bitmap pruning boundary.
-            let pruned_bits = self.status.pruned_bits();
-            if rewind_size < pruned_bits {
-                return Err(Error::<F>::Journal(JournalError::ItemPruned(
-                    rewind_size - 1,
-                )));
-            }
-            if *rewind_floor < pruned_bits {
-                return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
+            if let Some(status) = &self.status {
+                let pruned_bits = status.pruned_bits();
+                if rewind_size < pruned_bits {
+                    return Err(Error::<F>::Journal(JournalError::ItemPruned(
+                        rewind_size - 1,
+                    )));
+                }
+                if *rewind_floor < pruned_bits {
+                    return Err(Error::<F>::Journal(JournalError::ItemPruned(
+                        *rewind_floor,
+                    )));
+                }
             }
 
             let mut undos = Vec::with_capacity((current_size - rewind_size) as usize);
@@ -388,17 +398,19 @@ where
         self.inactivity_floor_loc = rewind_floor;
 
         // Patch the activity bitmap: truncate to rewound size, mark restored locs as active.
-        self.status.flatten();
-        let BitmapBatch::Base(base) = &mut self.status else {
-            unreachable!("flatten() guarantees Base");
-        };
-        let bm = Arc::make_mut(base);
-        bm.truncate(rewind_size);
-        for loc in &restored_locs {
-            bm.set_bit(**loc, true);
+        if let Some(status) = &mut self.status {
+            status.flatten();
+            let BitmapBatch::Base(base) = status else {
+                unreachable!("flatten() guarantees Base");
+            };
+            let bm = Arc::make_mut(base);
+            bm.truncate(rewind_size);
+            for loc in &restored_locs {
+                bm.set_bit(**loc, true);
+            }
+            // Mark the new tip commit as active.
+            bm.set_bit(rewind_size - 1, true);
         }
-        // Mark the new tip commit as active.
-        bm.set_bit(rewind_size - 1, true);
 
         Ok(restored_locs)
     }
@@ -445,12 +457,15 @@ where
                 .expect("commit should exist");
             let last_commit = reader.read(last_commit_loc).await?;
             let inactivity_floor_loc = last_commit.has_floor().expect("should be a commit");
-            if let Some(known_inactivity_floor) = known_inactivity_floor {
-                (*known_inactivity_floor..*inactivity_floor_loc).for_each(|_| {
-                    status.push(false);
-                    callback(false, None);
-                });
-            }
+            // Push inactive bits for the range [0, inactivity_floor_loc). When a known
+            // inactivity floor is provided (e.g. from a persisted bitmap pruning boundary),
+            // only the gap between it and the current floor needs to be filled. Otherwise,
+            // the full prefix must be initialized.
+            let bitmap_start = known_inactivity_floor.map_or(0, |loc| *loc);
+            (bitmap_start..*inactivity_floor_loc).for_each(|_| {
+                status.push(false);
+                callback(false, None);
+            });
 
             let active_keys = build_snapshot_from_log(
                 inactivity_floor_loc,
@@ -478,7 +493,7 @@ where
             snapshot: index,
             last_commit_loc,
             active_keys,
-            status: BitmapBatch::Base(Arc::new(status)),
+            status: Some(BitmapBatch::Base(Arc::new(status))),
             _update: core::marker::PhantomData,
         })
     }

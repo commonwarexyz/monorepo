@@ -145,7 +145,7 @@ where
     // init_from_log replays the operations, building the snapshot (index) and invoking
     // our callback for each operation to populate the bitmap.
     let known_inactivity_floor = Location::new(status.len());
-    let any: AnyDb<mmr::Family, E, J, I, H, U> = AnyDb::init_from_log(
+    let mut any: AnyDb<mmr::Family, E, J, I, H, U> = AnyDb::init_from_log(
         index,
         log,
         Some(known_inactivity_floor),
@@ -157,6 +157,10 @@ where
         },
     )
     .await?;
+
+    // When embedded inside a current::Db, the any layer does not need its own bitmap --
+    // current maintains its own bitmap with a different chunk size for authenticated proofs.
+    any.status = None;
 
     // Extract grafted pinned nodes from the ops MMR.
     //

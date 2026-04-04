@@ -12,7 +12,7 @@ use crate::{
     qmdb::{
         any::{
             self,
-            batch::DiffEntry,
+            batch::{BitmapScan, DiffEntry},
             operation::{update, Operation},
             ValueEncoding,
         },
@@ -431,7 +431,16 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let inner = inner.merkleize(metadata, &db.any).await?;
+        assert!(
+            bitmap_parent.len() > *db.any.last_commit_loc,
+            "bitmap ({}) must cover committed range [0, {}]",
+            bitmap_parent.len(),
+            *db.any.last_commit_loc,
+        );
+        let scan = BitmapScan::new(&bitmap_parent);
+        let inner = inner
+            .merkleize_with_floor_scan(metadata, scan, &db.any)
+            .await?;
         compute_current_layer(
             inner,
             db,
@@ -485,7 +494,16 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let inner = inner.merkleize(metadata, &db.any).await?;
+        assert!(
+            bitmap_parent.len() > *db.any.last_commit_loc,
+            "bitmap ({}) must cover committed range [0, {}]",
+            bitmap_parent.len(),
+            *db.any.last_commit_loc,
+        );
+        let scan = BitmapScan::new(&bitmap_parent);
+        let inner = inner
+            .merkleize_with_floor_scan(metadata, scan, &db.any)
+            .await?;
         compute_current_layer(
             inner,
             db,
@@ -1649,8 +1667,32 @@ mod tests {
         let bm = Bm::new();
         let mut scan = BitmapScan::<Bm, N>::new(&bm);
 
+        // Empty bitmap, but tip > 0: all locations are beyond bitmap.
+        assert_eq!(
+            scan.next_candidate(Location::new(0), 5),
+            Some(Location::new(0))
+        );
         // Empty bitmap, tip = 0: no candidates.
         assert_eq!(scan.next_candidate(Location::new(0), 0), None);
+    }
+
+    #[test]
+    fn bitmap_scan_beyond_bitmap_len_returns_candidate() {
+        // Bitmap has 4 bits, but tip is 8. Locations 4..8 are beyond the
+        // bitmap and should be returned as candidates.
+        let bm = make_bitmap(&[false; 4]);
+        let mut scan = BitmapScan::<Bm, N>::new(&bm);
+
+        // All bitmap bits are unset, so 0..4 are skipped.
+        // Location 4 is beyond bitmap -> candidate.
+        assert_eq!(
+            scan.next_candidate(Location::new(0), 8),
+            Some(Location::new(4))
+        );
+        assert_eq!(
+            scan.next_candidate(Location::new(6), 8),
+            Some(Location::new(6))
+        );
     }
 
     #[test]

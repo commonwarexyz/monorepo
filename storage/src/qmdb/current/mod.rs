@@ -338,7 +338,7 @@ where
 
     // Initialize the anydb with a callback that populates the status bitmap.
     let last_known_inactivity_floor = Location::new(status.len());
-    let any = any::init(
+    let mut any = any::init(
         context.with_label("any"),
         config.into(),
         Some(last_known_inactivity_floor),
@@ -350,6 +350,10 @@ where
         },
     )
     .await?;
+
+    // When embedded inside a current::Db, the any layer does not need its own bitmap --
+    // current maintains its own bitmap with a different chunk size for authenticated proofs.
+    any.status = None;
 
     // Build the grafted MMR from the bitmap and ops MMR.
     let hasher = StandardHasher::<H>::new();
