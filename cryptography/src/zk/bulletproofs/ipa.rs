@@ -727,16 +727,17 @@ where
     G::msm(&points, &weights, strategy) == -claim.commitment.clone()
 }
 
-#[cfg(test)]
-mod tests {
+#[commonware_macros::stability(ALPHA)]
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
     use super::*;
     use arbitrary::{Arbitrary, Unstructured};
-    use commonware_invariants::minifuzz;
     use commonware_math::{
         algebra::Additive,
         test::{F, G},
     };
     use commonware_parallel::Sequential;
+    use std::sync::OnceLock;
 
     const MAX_VECTOR_LG: u8 = 5;
     const MAX_VECTOR_LEN: usize = 1 << MAX_VECTOR_LG;
@@ -745,19 +746,21 @@ mod tests {
     const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_IPA";
     const BAD_NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_IPA_BUT_DIFFERENT";
 
-    fn test_setup() -> Setup<G> {
-        let generators = (1..=NUM_GENERATORS)
-            .map(|i| G::generator() * &F::from(i as u8))
-            .collect::<Vec<_>>();
-        Setup::new(
-            generators[0],
-            generators[1..]
-                .chunks_exact(2)
-                .map(|chunk| (chunk[0], chunk[1])),
-        )
+    fn test_setup() -> &'static Setup<G> {
+        static TEST_SETUP: OnceLock<Setup<G>> = OnceLock::new();
+        TEST_SETUP.get_or_init(|| {
+            let generators = (1..=NUM_GENERATORS)
+                .map(|i| G::generator() * &F::from(i as u8))
+                .collect::<Vec<_>>();
+            Setup::new(
+                generators[0],
+                generators[1..]
+                    .chunks_exact(2)
+                    .map(|chunk| (chunk[0], chunk[1])),
+            )
+        })
     }
 
-    #[allow(dead_code)]
     struct Prover<'a> {
         setup: &'a Setup<G>,
         witness: Witness<F>,
@@ -790,6 +793,7 @@ mod tests {
             }
         }
 
+        #[allow(clippy::missing_const_for_fn)]
         fn bad_namespace(&mut self) {
             self.honest = false;
             self.bad_namespace = true;
@@ -814,7 +818,7 @@ mod tests {
             // One simple case where you know w is if the implementor forgets to multiply
             // the product generator by this challenge. (I made this mistake myself).
             self.claim.product -= &delta;
-            self.claim.commitment += &(self.setup.product_generator().clone() * &delta);
+            self.claim.commitment += &(*self.setup.product_generator() * &delta);
             self.proof = prove(
                 &mut Transcript::new(NAMESPACE),
                 self.setup,
@@ -841,8 +845,8 @@ mod tests {
             // Padding with zeros preserves the commitment and product, but the
             // regenerated proof is now bound to a different claimed length.
             let longer_claim = Claim {
-                commitment: self.claim.commitment.clone(),
-                product: self.claim.product.clone(),
+                commitment: self.claim.commitment,
+                product: self.claim.product,
                 log_len: longer_log_len,
             };
             self.proof = prove(
@@ -876,6 +880,7 @@ mod tests {
             Ok(())
         }
 
+        #[allow(clippy::missing_const_for_fn)]
         fn honest(&self) -> bool {
             self.honest
         }
@@ -897,7 +902,7 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct Plan {
+    pub struct Plan {
         a: Vec<F>,
         b: Vec<F>,
     }
@@ -917,7 +922,8 @@ mod tests {
     }
 
     impl Plan {
-        fn run<'a>(self, setup: &Setup<G>, u: &mut Unstructured<'a>) -> arbitrary::Result<()> {
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            let setup = test_setup();
             let mut prover = Prover::new(setup, &self.a, &self.b);
             // is the prover going to be malicious at all?
             if u.arbitrary::<bool>()? {
@@ -938,8 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn minifuzz_plan() {
-        let setup = test_setup();
-        minifuzz::test(move |u| u.arbitrary::<Plan>()?.run(&setup, u));
+    fn test_fuzz() {
+        commonware_invariants::minifuzz::test(|u| u.arbitrary::<Plan>()?.run(u));
     }
 }
