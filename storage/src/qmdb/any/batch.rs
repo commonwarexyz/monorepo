@@ -192,7 +192,7 @@ pub struct Changeset<F: Family, K, D: Digest, Item: Send> {
     journal_finalized: authenticated::Changeset<F, D, Item>,
 
     /// Snapshot mutations to apply, in order.
-    snapshot_diffs: Vec<SnapshotDiff<F, K>>,
+    pub(crate) snapshot_diffs: Vec<SnapshotDiff<F, K>>,
 
     /// Net change in active key count.
     active_keys_delta: isize,
@@ -201,10 +201,10 @@ pub struct Changeset<F: Family, K, D: Digest, Item: Send> {
     new_inactivity_floor_loc: Location<F>,
 
     /// Location of the CommitFloor operation appended by this batch.
-    new_last_commit_loc: Location<F>,
+    pub(crate) new_last_commit_loc: Location<F>,
 
     /// The database size when the batch was created. Used to detect stale changesets.
-    db_size: u64,
+    pub(crate) db_size: u64,
 }
 
 /// Batch-infrastructure state used during merkleization.
@@ -1269,20 +1269,20 @@ where
         self.log.apply_batch(batch.journal_finalized).await?;
 
         // 2. Apply snapshot diffs to the in-memory index.
-        for diff in batch.snapshot_diffs {
+        for diff in &batch.snapshot_diffs {
             match diff {
                 SnapshotDiff::Update {
                     key,
                     old_loc,
                     new_loc,
                 } => {
-                    update_known_loc::<F, _>(&mut self.snapshot, &key, old_loc, new_loc);
+                    update_known_loc::<F, _>(&mut self.snapshot, key, *old_loc, *new_loc);
                 }
                 SnapshotDiff::Insert { key, new_loc } => {
-                    self.snapshot.insert(&key, new_loc);
+                    self.snapshot.insert(key, *new_loc);
                 }
                 SnapshotDiff::Delete { key, old_loc } => {
-                    delete_known_loc::<F, _>(&mut self.snapshot, &key, old_loc);
+                    delete_known_loc::<F, _>(&mut self.snapshot, key, *old_loc);
                 }
             }
         }
