@@ -16,7 +16,10 @@ use crate::{
     },
     Context, Persistable,
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use core::num::NonZeroU64;
@@ -57,13 +60,37 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
         self
     }
 
+    /// Collect ancestor items from the parent chain before downgrading.
+    fn collect_ancestor_items(
+        parent: &Option<Arc<MerkleizedBatch<F, H::Digest, Item>>>,
+    ) -> Vec<Arc<Vec<Item>>> {
+        let Some(parent) = parent else {
+            return Vec::new();
+        };
+        let mut items = Vec::new();
+        if !parent.items.is_empty() {
+            items.push(Arc::clone(&parent.items));
+        }
+        let mut current = parent.parent.as_ref().and_then(Weak::upgrade);
+        while let Some(batch) = current {
+            if !batch.items.is_empty() {
+                items.push(Arc::clone(&batch.items));
+            }
+            current = batch.parent.as_ref().and_then(Weak::upgrade);
+        }
+        items.reverse();
+        items
+    }
+
     /// Merkleize the batch, computing the root digest.
     pub fn merkleize(self) -> MerkleizedBatch<F, H::Digest, Item> {
         let merkle = self.inner.merkleize(&self.hasher);
+        let ancestor_items = Self::collect_ancestor_items(&self.parent);
         MerkleizedBatch {
             inner: merkle,
             items: Arc::new(self.items),
-            parent: self.parent,
+            parent: self.parent.as_ref().map(Arc::downgrade),
+            ancestor_items,
         }
     }
 
@@ -90,10 +117,12 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
             self.inner = self.inner.add(&self.hasher, &encoded);
         }
         let merkle = self.inner.merkleize(&self.hasher);
+        let ancestor_items = Self::collect_ancestor_items(&self.parent);
         MerkleizedBatch {
             inner: merkle,
             items,
-            parent: self.parent,
+            parent: self.parent.as_ref().map(Arc::downgrade),
+            ancestor_items,
         }
     }
 }
@@ -102,11 +131,13 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
 #[derive(Debug)]
 pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync> {
     /// The inner batch of Merkle leaf digests.
-    inner: batch::MerkleizedBatch<F, D>,
-    /// The items to append.
+    pub(crate) inner: batch::MerkleizedBatch<F, D>,
+    /// The items to append from this batch.
     items: Arc<Vec<Item>>,
     /// This batch's parent, or None if the parent is the journal itself.
-    parent: Option<Arc<Self>>,
+    parent: Option<Weak<Self>>,
+    /// Ancestor item segments collected at merkleize time (root-to-tip order).
+    pub(crate) ancestor_items: Vec<Arc<Vec<Item>>>,
 }
 
 // Manual Clone: derive would require Item: Clone, but Arc::clone doesn't.
@@ -116,6 +147,7 @@ impl<F: Family, D: Digest, Item: Send + Sync> Clone for MerkleizedBatch<F, D, It
             inner: self.inner.clone(),
             items: Arc::clone(&self.items),
             parent: self.parent.clone(),
+            ancestor_items: self.ancestor_items.clone(),
         }
     }
 }
@@ -137,7 +169,7 @@ impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
     }
 
     /// Create a new speculative batch of operations with this batch as its parent.
-    pub fn new_batch<H: Hasher<Digest = D>>(&self) -> UnmerkleizedBatch<F, H, Item>
+    pub fn new_batch<H: Hasher<Digest = D>>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, Item>
     where
         Item: Encode,
     {
@@ -145,48 +177,8 @@ impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
             inner: self.inner.new_batch(),
             hasher: StandardHasher::new(),
             items: Vec::new(),
-            // Strong ref keeps the parent chain alive during merkleize.
-            // Clone is cheap: inner is Arc-based, items and parent are Arc.
-            parent: Some(Arc::new(self.clone())),
+            parent: Some(Arc::clone(self)),
         }
-    }
-
-    /// Return a [`Changeset`] that can apply the batch's changes to the journal.
-    pub fn finalize(&self) -> Changeset<F, D, Item> {
-        let items = self.collect_items();
-        Changeset {
-            changeset: self.inner.finalize(),
-            items,
-        }
-    }
-
-    /// Produce a changeset relative to `committed_leaves`, returning only this batch's items.
-    /// Callers must commit ancestor batches in chain order before calling this; intermediate
-    /// items are not included.
-    pub fn finalize_from(&self, committed_leaves: Location<F>) -> Changeset<F, D, Item> {
-        let base = Position::try_from(committed_leaves).expect("valid committed_leaves");
-        Changeset {
-            changeset: self.inner.finalize_from(base),
-            items: if self.items.is_empty() {
-                Vec::new()
-            } else {
-                vec![Arc::clone(&self.items)]
-            },
-        }
-    }
-
-    /// Walk the parent chain and collect all item segments in root-to-tip order.
-    fn collect_items(&self) -> Vec<Arc<Vec<Item>>> {
-        let mut segments = Vec::new();
-        let mut current = Some(self);
-        while let Some(batch) = current {
-            if !batch.items.is_empty() {
-                segments.push(Arc::clone(&batch.items));
-            }
-            current = batch.parent.as_deref();
-        }
-        segments.reverse();
-        segments
     }
 }
 
@@ -226,14 +218,6 @@ impl<F: Family, D: Digest, Item: Send + Sync> Readable for MerkleizedBatch<F, D,
     ) -> Result<Proof<F, D>, merkle::Error<F>> {
         self.inner.range_proof(hasher, range)
     }
-}
-
-/// An owned changeset that can be applied to the journal.
-pub struct Changeset<F: Family, D: Digest, Item> {
-    // The inner Merkle changeset.
-    changeset: batch::Changeset<F, D>,
-    // The items to append.
-    items: Vec<Arc<Vec<Item>>>,
 }
 
 /// An append-only data structure that maintains a sequential journal of items alongside a
@@ -297,6 +281,7 @@ where
             inner: self.merkle.to_batch(),
             items: Arc::new(Vec::new()),
             parent: None,
+            ancestor_items: Vec::new(),
         }
     }
 }
@@ -416,29 +401,53 @@ where
         Ok(Location::new(loc))
     }
 
-    /// Apply a changeset to the journal.
+    /// Apply a batch to the journal.
     ///
-    /// A changeset is only valid if the journal has not been modified since the
+    /// A batch is only valid if the journal has not been modified since the
     /// batch that produced it was created. Multiple batches can be forked from the
     /// same parent for speculative execution, but only one may be applied. Applying
-    /// a stale changeset returns an error.
+    /// a stale batch returns an error.
     pub async fn apply_batch(
         &mut self,
-        batch: Changeset<F, H::Digest, C::Item>,
+        batch: &MerkleizedBatch<F, H::Digest, C::Item>,
     ) -> Result<(), Error<F>> {
-        let actual = self.merkle.size();
-        if batch.changeset.base_size != actual {
+        let merkle_size = self.merkle.size();
+        let base_size = batch.inner.base_size();
+
+        // Determine whether ancestors have already been committed.
+        // `base_size` is the merkle size when the batch chain was forked.
+        // If the merkle has advanced past the fork point, ancestors are
+        // already on disk; check that the current size is reachable from
+        // the batch chain before skipping them.
+        let skip_ancestors = if merkle_size == base_size {
+            false
+        } else if merkle_size > base_size && merkle_size < batch.inner.size() {
+            true
+        } else {
+            // Merkle is at an incompatible position (a sibling or unrelated
+            // fork was committed). Eagerly reject to avoid mutating the journal.
             return Err(merkle::Error::StaleChangeset {
-                expected: batch.changeset.base_size,
-                actual,
+                expected: base_size,
+                actual: merkle_size,
             }
             .into());
+        };
+
+        if !skip_ancestors {
+            for seg in &batch.ancestor_items {
+                self.journal.append_many(seg).await?;
+            }
+        }
+        if !batch.items.is_empty() {
+            self.journal.append_many(&batch.items).await?;
         }
 
-        for items in &batch.items {
-            self.journal.append_many(items).await?;
-        }
-        self.merkle.apply(batch.changeset)?;
+        let merkle_cs = if skip_ancestors {
+            batch.inner.finalize_from(merkle_size)
+        } else {
+            batch.inner.finalize()
+        };
+        self.merkle.apply(merkle_cs)?;
         assert_eq!(*self.merkle.leaves(), self.journal.size().await);
         Ok(())
     }
@@ -2158,10 +2167,9 @@ mod tests {
         // Journal root should be unchanged (batches are speculative).
         assert_eq!(journal.root(), original_root);
 
-        // Finalize batch 1 and apply.
+        // Apply batch 1.
         let expected_root = m1.root();
-        let finalized = m1.finalize();
-        journal.apply_batch(finalized).await.unwrap();
+        journal.apply_batch(&m1).await.unwrap();
 
         // Journal should now match the applied batch's root.
         assert_eq!(journal.root(), expected_root);
@@ -2188,18 +2196,16 @@ mod tests {
         let op_a = create_operation::<F>(100);
         let op_b = create_operation::<F>(200);
 
-        let (expected_root, finalized) = {
+        let merkleized_b = {
             let batch_a = journal.new_batch();
-            let merkleized_a = batch_a.add(op_a.clone()).merkleize();
+            let merkleized_a = Arc::new(batch_a.add(op_a.clone()).merkleize());
 
             let batch_b = merkleized_a.new_batch::<Sha256>();
-            let merkleized_b = batch_b.add(op_b.clone()).merkleize();
-
-            let root = merkleized_b.root();
-            (root, merkleized_b.finalize())
+            batch_b.add(op_b.clone()).merkleize()
         };
 
-        journal.apply_batch(finalized).await.unwrap();
+        let expected_root = merkleized_b.root();
+        journal.apply_batch(&merkleized_b).await.unwrap();
 
         assert_eq!(journal.root(), expected_root);
         assert_eq!(*journal.size().await, 12);
@@ -2233,13 +2239,13 @@ mod tests {
 
         // Apply batch A.
         let merkleized_a = journal.new_batch().add(op_a.clone()).merkleize();
-        journal.apply_batch(merkleized_a.finalize()).await.unwrap();
+        journal.apply_batch(&merkleized_a).await.unwrap();
         assert_eq!(*journal.size().await, 11);
 
         // Apply batch B (built on top of the committed A).
         let merkleized_b = journal.new_batch().add(op_b.clone()).merkleize();
         let expected_root = merkleized_b.root();
-        journal.apply_batch(merkleized_b.finalize()).await.unwrap();
+        journal.apply_batch(&merkleized_b).await.unwrap();
 
         assert_eq!(journal.root(), expected_root);
         assert_eq!(*journal.size().await, 12);
@@ -2269,16 +2275,16 @@ mod tests {
         let op_b = create_operation::<F>(2);
 
         // Create two batches from the same base.
-        let finalized_a = journal.new_batch().add(op_a.clone()).merkleize().finalize();
-        let finalized_b = journal.new_batch().add(op_b).merkleize().finalize();
+        let merkleized_a = journal.new_batch().add(op_a.clone()).merkleize();
+        let merkleized_b = journal.new_batch().add(op_b).merkleize();
 
         // Apply A -- should succeed.
-        journal.apply_batch(finalized_a).await.unwrap();
+        journal.apply_batch(&merkleized_a).await.unwrap();
         let expected_root = journal.root();
         let expected_size = journal.size().await;
 
         // Apply B -- should fail (stale).
-        let result = journal.apply_batch(finalized_b).await;
+        let result = journal.apply_batch(&merkleized_b).await;
         assert!(
             matches!(
                 result,
@@ -2313,25 +2319,25 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "stale-chained", 5).await;
 
         // Parent batch, then fork two children.
-        let parent = journal
-            .new_batch()
-            .add(create_operation::<F>(10))
-            .merkleize();
+        let parent = Arc::new(
+            journal
+                .new_batch()
+                .add(create_operation::<F>(10))
+                .merkleize(),
+        );
         let child_a = parent
             .new_batch::<Sha256>()
             .add(create_operation::<F>(20))
-            .merkleize()
-            .finalize();
+            .merkleize();
         let child_b = parent
             .new_batch::<Sha256>()
             .add(create_operation::<F>(30))
-            .merkleize()
-            .finalize();
+            .merkleize();
         drop(parent);
 
         // Apply child_a, then child_b should be stale.
-        journal.apply_batch(child_a).await.unwrap();
-        let result = journal.apply_batch(child_b).await;
+        journal.apply_batch(&child_a).await.unwrap();
+        let result = journal.apply_batch(&child_b).await;
         assert!(
             matches!(
                 result,
@@ -2357,29 +2363,25 @@ mod tests {
         let mut journal = create_empty_journal::<F>(context, "stale-parent-first").await;
 
         // Create parent, then child.
-        let (parent_finalized, child_finalized) = {
-            let parent = journal
+        let parent = Arc::new(
+            journal
                 .new_batch()
                 .add(create_operation::<F>(1))
-                .merkleize();
-            let child = parent
-                .new_batch::<Sha256>()
-                .add(create_operation::<F>(2))
-                .merkleize()
-                .finalize();
-            (parent.finalize(), child)
-        };
-
-        // Apply parent first -- child should now be stale.
-        journal.apply_batch(parent_finalized).await.unwrap();
-        let result = journal.apply_batch(child_finalized).await;
-        assert!(
-            matches!(
-                result,
-                Err(super::Error::Merkle(merkle::Error::StaleChangeset { .. }))
-            ),
-            "expected StaleChangeset for child after parent applied, got {result:?}"
+                .merkleize(),
         );
+        let child = parent
+            .new_batch::<Sha256>()
+            .add(create_operation::<F>(2))
+            .merkleize();
+
+        let expected_root = child.root();
+
+        // Apply parent, then child (sequential commit).
+        journal.apply_batch(&parent).await.unwrap();
+        journal.apply_batch(&child).await.unwrap();
+
+        assert_eq!(journal.root(), expected_root);
+        assert_eq!(*journal.size().await, 2);
     }
 
     #[test_traced("INFO")]
@@ -2398,22 +2400,20 @@ mod tests {
         let mut journal = create_empty_journal::<F>(context, "stale-child-first").await;
 
         // Create parent, then child.
-        let (parent_finalized, child_finalized) = {
-            let parent = journal
+        let parent = Arc::new(
+            journal
                 .new_batch()
                 .add(create_operation::<F>(1))
-                .merkleize();
-            let child = parent
-                .new_batch::<Sha256>()
-                .add(create_operation::<F>(2))
-                .merkleize()
-                .finalize();
-            (parent.finalize(), child)
-        };
+                .merkleize(),
+        );
+        let child = parent
+            .new_batch::<Sha256>()
+            .add(create_operation::<F>(2))
+            .merkleize();
 
-        // Apply child first -- parent should now be stale.
-        journal.apply_batch(child_finalized).await.unwrap();
-        let result = journal.apply_batch(parent_finalized).await;
+        // Apply child first (full chain) -- parent should now be stale.
+        journal.apply_batch(&child).await.unwrap();
+        let result = journal.apply_batch(&parent).await;
         assert!(
             matches!(
                 result,
@@ -2435,16 +2435,18 @@ mod tests {
         executor.start(test_stale_batch_child_before_parent_inner::<mmb::Family>);
     }
 
-    /// `finalize_from` produces a changeset with only the child's items.
+    /// Apply parent then child: child skips already-committed ancestor items.
     async fn test_finalize_from_skip_ancestor_items_inner<F: Family + PartialEq>(context: Context) {
         let mut journal = create_journal_with_ops::<F>(context, "rp-skip", 3).await;
 
         // Parent: 2 items.
-        let parent = journal
-            .new_batch()
-            .add(create_operation::<F>(10))
-            .add(create_operation::<F>(11))
-            .merkleize();
+        let parent = Arc::new(
+            journal
+                .new_batch()
+                .add(create_operation::<F>(10))
+                .add(create_operation::<F>(11))
+                .merkleize(),
+        );
 
         // Child: 3 more items.
         let child = parent
@@ -2455,17 +2457,10 @@ mod tests {
             .merkleize();
 
         // Apply parent.
-        let parent_size = parent.size();
-        journal.apply_batch(parent.finalize()).await.unwrap();
+        journal.apply_batch(&parent).await.unwrap();
 
-        // Finalize child relative to committed parent -- should contain
-        // exactly the 3 child items.
-        let changeset = child.finalize_from(Location::new(parent_size));
-        let total_items: usize = changeset.items.iter().map(|s| s.len()).sum();
-        assert_eq!(total_items, 3);
-
-        // Apply child.
-        journal.apply_batch(changeset).await.unwrap();
+        // Apply child (ancestor items already committed, skipped automatically).
+        journal.apply_batch(&child).await.unwrap();
 
         // Verify all items are present.
         let (_, ops) = journal
@@ -2492,19 +2487,23 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "rp-cross", 2).await;
 
         // Grandparent: 3 items.
-        let grandparent = journal
-            .new_batch()
-            .add(create_operation::<F>(3))
-            .add(create_operation::<F>(4))
-            .add(create_operation::<F>(5))
-            .merkleize();
+        let grandparent = Arc::new(
+            journal
+                .new_batch()
+                .add(create_operation::<F>(3))
+                .add(create_operation::<F>(4))
+                .add(create_operation::<F>(5))
+                .merkleize(),
+        );
 
         // Parent: 2 items.
-        let parent = grandparent
-            .new_batch::<Sha256>()
-            .add(create_operation::<F>(6))
-            .add(create_operation::<F>(7))
-            .merkleize();
+        let parent = Arc::new(
+            grandparent
+                .new_batch::<Sha256>()
+                .add(create_operation::<F>(6))
+                .add(create_operation::<F>(7))
+                .merkleize(),
+        );
 
         // Child: 1 item.
         let child = parent
@@ -2513,21 +2512,13 @@ mod tests {
             .merkleize();
 
         // Apply grandparent, then parent, then child sequentially.
-        let gp_size = grandparent.size();
-        let p_size = parent.size();
-        journal.apply_batch(grandparent.finalize()).await.unwrap();
+        journal.apply_batch(&grandparent).await.unwrap();
 
-        // Apply parent relative to committed grandparent (2 items).
-        let changeset = parent.finalize_from(Location::new(gp_size));
-        let parent_items: usize = changeset.items.iter().map(|s| s.len()).sum();
-        assert_eq!(parent_items, 2);
-        journal.apply_batch(changeset).await.unwrap();
+        // Apply parent (ancestor items already committed, skipped automatically).
+        journal.apply_batch(&parent).await.unwrap();
 
-        // Apply child relative to committed parent (1 item).
-        let changeset = child.finalize_from(Location::new(p_size));
-        let child_items: usize = changeset.items.iter().map(|s| s.len()).sum();
-        assert_eq!(child_items, 1);
-        journal.apply_batch(changeset).await.unwrap();
+        // Apply child (ancestor items already committed, skipped automatically).
+        journal.apply_batch(&child).await.unwrap();
 
         // All 8 items (2 base + 3 + 2 + 1) should be present.
         assert_eq!(*journal.size().await, 8);
@@ -2597,7 +2588,7 @@ mod tests {
         let merkleized = journal.new_batch().merkleize_with(Arc::new(ops.clone()));
 
         let expected_root = merkleized.root();
-        journal.apply_batch(merkleized.finalize()).await.unwrap();
+        journal.apply_batch(&merkleized).await.unwrap();
 
         assert_eq!(journal.root(), expected_root);
         assert_eq!(*journal.size().await, 7);

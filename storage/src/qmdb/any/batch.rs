@@ -206,7 +206,7 @@ where
     Operation<F, U>: Send + Sync,
 {
     /// Merkleized authenticated journal batch (provides the speculative Merkle root).
-    pub(crate) journal_batch: authenticated::MerkleizedBatch<F, D, Operation<F, U>>,
+    pub(crate) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<F, U>>>,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     pub(crate) diff: Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>,
@@ -254,7 +254,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            journal_batch: self.journal_batch.clone(),
+            journal_batch: Arc::clone(&self.journal_batch),
             diff: Arc::clone(&self.diff),
             parent: self.parent.clone(),
             new_inactivity_floor_loc: self.new_inactivity_floor_loc,
@@ -608,7 +608,7 @@ where
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
         let ops = Arc::new(ops);
-        let journal = self.journal_batch.merkleize_with(ops);
+        let journal = Arc::new(self.journal_batch.merkleize_with(ops));
 
         // Precompute ancestor_locs: for each key in this batch's diff that an ancestor also
         // touched, record the ancestor's location. Used by apply_batch when ancestors have
@@ -1272,12 +1272,7 @@ where
         let start_loc = Location::new(db_size);
 
         // 1. Apply journal.
-        let journal_cs = if skip_ancestors {
-            batch.journal_batch.finalize_from(Location::new(db_size))
-        } else {
-            batch.journal_batch.finalize()
-        };
-        self.log.apply_batch(journal_cs).await?;
+        self.log.apply_batch(&batch.journal_batch).await?;
 
         // 2. Apply snapshot diffs.
         let mut seen = BTreeSet::<&U::Key>::new();
@@ -1339,7 +1334,7 @@ where
         // The DB is always committed, so journal size = last_commit_loc + 1.
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
-            journal_batch: self.log.to_merkleized_batch(),
+            journal_batch: Arc::new(self.log.to_merkleized_batch()),
             diff: Arc::new(BTreeMap::new()),
             parent: None,
             new_inactivity_floor_loc: self.inactivity_floor_loc,

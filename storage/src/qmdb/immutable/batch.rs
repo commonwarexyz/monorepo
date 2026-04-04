@@ -57,7 +57,7 @@ where
 /// in contrast to [`UnmerkleizedBatch`].
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// Authenticated journal batch (Merkle state + local items).
-    pub(super) journal_batch: authenticated::MerkleizedBatch<F, D, Operation<K, V>>,
+    pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<K, V>>>,
 
     /// This batch's local key-level changes only (not accumulated from ancestors).
     pub(super) diff: Arc<BTreeMap<K, DiffEntry<F, V::Value>>>,
@@ -84,7 +84,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
 impl<F: Family, D: Digest, K: Key, V: ValueEncoding> Clone for MerkleizedBatch<F, D, K, V> {
     fn clone(&self) -> Self {
         Self {
-            journal_batch: self.journal_batch.clone(),
+            journal_batch: Arc::clone(&self.journal_batch),
             diff: Arc::clone(&self.diff),
             parent: self.parent.clone(),
             base_size: self.base_size,
@@ -187,13 +187,16 @@ where
         for op in &ops {
             journal_batch = journal_batch.add(op.clone());
         }
-        let journal_merkleized = journal_batch.merkleize();
+        let journal_merkleized = Arc::new(journal_batch.merkleize());
 
-        let ancestor_diffs = self.parent.as_ref().map_or_else(Vec::new, |parent| {
-            let mut diffs = vec![Arc::clone(&parent.diff)];
-            diffs.extend(parent.ancestor_diffs.iter().cloned());
-            diffs
-        });
+        let mut ancestor_diffs = Vec::new();
+        if let Some(parent) = &self.parent {
+            ancestor_diffs.push(Arc::clone(&parent.diff));
+            for batch in parent.ancestors() {
+                ancestor_diffs.push(Arc::clone(&batch.diff));
+            }
+            ancestor_diffs.reverse();
+        }
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal_merkleized,
@@ -280,7 +283,7 @@ where
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V>> {
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
-            journal_batch: self.journal.to_merkleized_batch(),
+            journal_batch: Arc::new(self.journal.to_merkleized_batch()),
             diff: Arc::new(BTreeMap::new()),
             parent: None,
             base_size: journal_size,

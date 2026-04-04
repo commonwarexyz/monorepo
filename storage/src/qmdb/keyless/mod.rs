@@ -305,7 +305,7 @@ where
     pub fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, H::Digest, V>> {
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(batch::MerkleizedBatch {
-            journal_batch: self.journal.to_merkleized_batch(),
+            journal_batch: Arc::new(self.journal.to_merkleized_batch()),
             parent: None,
             base_size: journal_size,
             total_size: journal_size,
@@ -336,15 +336,9 @@ where
                 batch_base_size: batch.base_size,
             });
         }
-        let skip_ancestors = db_size > batch.db_size;
         let start_loc = self.last_commit_loc + 1;
 
-        let journal_cs = if skip_ancestors {
-            batch.journal_batch.finalize_from(Location::new(db_size))
-        } else {
-            batch.journal_batch.finalize()
-        };
-        self.journal.apply_batch(journal_cs).await?;
+        self.journal.apply_batch(&batch.journal_batch).await?;
 
         self.last_commit_loc = Location::new(batch.total_size - 1);
         let end_loc = Location::new(batch.total_size);

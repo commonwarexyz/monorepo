@@ -47,7 +47,7 @@ where
     Operation<V>: EncodeShared,
 {
     /// Authenticated journal batch (Merkle state + local items).
-    pub(super) journal_batch: authenticated::MerkleizedBatch<F, D, Operation<V>>,
+    pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<V>>>,
 
     /// The parent batch in the chain, if any.
     pub(super) parent: Option<Weak<Self>>,
@@ -69,7 +69,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            journal_batch: self.journal_batch.clone(),
+            journal_batch: Arc::clone(&self.journal_batch),
             parent: self.parent.clone(),
             base_size: self.base_size,
             total_size: self.total_size,
@@ -212,7 +212,7 @@ where
         for op in &ops {
             journal_batch = journal_batch.add(op.clone());
         }
-        let journal = journal_batch.merkleize();
+        let journal = Arc::new(journal_batch.merkleize());
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,

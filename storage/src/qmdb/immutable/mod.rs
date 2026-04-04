@@ -447,12 +447,7 @@ where
         let start_loc = Location::new(db_size);
 
         // Apply journal.
-        let journal_cs = if skip_ancestors {
-            batch.journal_batch.finalize_from(Location::new(db_size))
-        } else {
-            batch.journal_batch.finalize()
-        };
-        self.journal.apply_batch(journal_cs).await?;
+        self.journal.apply_batch(&batch.journal_batch).await?;
 
         // Apply snapshot inserts by reference.
         let bounds = self.journal.reader().await.bounds();
