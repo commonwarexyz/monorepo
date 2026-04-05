@@ -1269,20 +1269,20 @@ where
         self.log.apply_batch(batch.journal_finalized).await?;
 
         // 2. Apply snapshot diffs to the in-memory index.
-        for diff in &batch.snapshot_diffs {
+        for diff in batch.snapshot_diffs {
             match diff {
                 SnapshotDiff::Update {
                     key,
                     old_loc,
                     new_loc,
                 } => {
-                    update_known_loc::<F, _>(&mut self.snapshot, key, *old_loc, *new_loc);
+                    update_known_loc::<F, _>(&mut self.snapshot, &key, old_loc, new_loc);
                 }
                 SnapshotDiff::Insert { key, new_loc } => {
-                    self.snapshot.insert(key, *new_loc);
+                    self.snapshot.insert(&key, new_loc);
                 }
                 SnapshotDiff::Delete { key, old_loc } => {
-                    delete_known_loc::<F, _>(&mut self.snapshot, key, *old_loc);
+                    delete_known_loc::<F, _>(&mut self.snapshot, &key, old_loc);
                 }
             }
         }

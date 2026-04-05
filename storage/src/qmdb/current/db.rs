@@ -572,7 +572,7 @@ where
         &mut self,
         batch: super::batch::Changeset<U::Key, H::Digest, Operation<mmr::Family, U>, N>,
     ) -> Result<Range<Location>, Error> {
-        // Reject stale changesets before building bitmap data.
+        // Check for staleness before trying to derive the bitmap changes, otherwise it could panic.
         let batch_start = *self.any.last_commit_loc + 1;
         if batch.inner.db_size != batch_start {
             return Err(crate::qmdb::Error::StaleChangeset {
@@ -603,40 +603,51 @@ where
     }
 }
 
-#[inline]
+/// Derives the bitmap changes (pushed bits and clears) from a batch's snapshot diffs.
+///
+/// # Panics
+///
+/// This function assumes `batch_start` exactly matches the base size against which `snapshot_diffs`
+/// and `new_last_commit_loc` were derived, and may panic or produce incorrect results otherwise.
 fn derive_bitmap_changes<U: Update, const N: usize>(
     previous_commit_loc: Location,
     batch_start: u64,
     new_last_commit_loc: Location,
     snapshot_diffs: &[SnapshotDiff<mmr::Family, U::Key>],
 ) -> (Vec<bool>, ClearSet<N>) {
-    let num_ops = (*new_last_commit_loc + 1 - batch_start) as usize;
-    let mut active_bits = vec![false; num_ops];
     let mut clears = ClearSet::default();
 
-    // The previously committed CommitFloor stops being current once this batch lands.
+    // We push one bit for each new operation in the batch.
+    let num_ops = (*new_last_commit_loc)
+        .checked_sub(batch_start)
+        .expect("batch start exceeds new last commit loc") as usize
+        + 1;
+    let mut pushed_bits = vec![false; num_ops];
+
+    // The last operation is the new_last_commit_loc, and should always be set to active.
+    pushed_bits[num_ops - 1] = true;
+
+    // The previous CommitFloor stops being current once this batch is applied.
     clears.push(previous_commit_loc);
 
+    // Iterate over the diffs to find which historical bits need to be cleared, and which pushed
+    // bits need to be flipped to true.
     for diff in snapshot_diffs {
         match diff {
             SnapshotDiff::Update {
                 old_loc, new_loc, ..
             } => {
-                let offset = (**new_loc - batch_start) as usize;
-                assert!(
-                    offset < active_bits.len(),
-                    "snapshot diff points past batch range"
-                );
-                active_bits[offset] = true;
+                let offset = (**new_loc)
+                    .checked_sub(batch_start)
+                    .expect("new_loc is before batch start") as usize;
+                pushed_bits[offset] = true;
                 clears.push(*old_loc);
             }
             SnapshotDiff::Insert { new_loc, .. } => {
-                let offset = (**new_loc - batch_start) as usize;
-                assert!(
-                    offset < active_bits.len(),
-                    "snapshot diff points past batch range"
-                );
-                active_bits[offset] = true;
+                let offset = (**new_loc)
+                    .checked_sub(batch_start)
+                    .expect("new_loc is before batch start") as usize;
+                pushed_bits[offset] = true;
             }
             SnapshotDiff::Delete { old_loc, .. } => {
                 clears.push(*old_loc);
@@ -644,17 +655,7 @@ fn derive_bitmap_changes<U: Update, const N: usize>(
         }
     }
 
-    // `active_bits[i]` describes whether the operation at `batch_start + i`
-    // is active in the post-apply Current view. The trailing CommitFloor is
-    // always current.
-    let commit_offset = (*new_last_commit_loc - batch_start) as usize;
-    assert!(
-        commit_offset < active_bits.len(),
-        "new_last_commit_loc must fall within the batch range"
-    );
-    active_bits[commit_offset] = true;
-
-    (active_bits, clears)
+    (pushed_bits, clears)
 }
 
 impl<E, U, C, I, H, const N: usize> Persistable for Db<E, C, I, H, U, N>
@@ -951,11 +952,30 @@ pub(super) async fn init_metadata<E: Context, D: Digest>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::qmdb::{
+        any::{batch::SnapshotDiff, operation::update, value::FixedEncoding},
+        current::batch::BitmapBatch,
+    };
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256, Sha256};
-    use commonware_utils::bitmap::Prunable as PrunableBitMap;
+    use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::FixedBytes};
+    use std::sync::Arc;
 
     const N: usize = sha256::Digest::SIZE;
+    type TestKey = FixedBytes<4>;
+    type TestUpdate = update::Unordered<TestKey, FixedEncoding<u64>>;
+
+    fn key(byte: u8) -> TestKey {
+        FixedBytes::from([byte, 0, 0, 0])
+    }
+
+    fn all_true_bitmap(len: u64) -> PrunableBitMap<N> {
+        let mut bitmap = PrunableBitMap::<N>::new();
+        for _ in 0..len {
+            bitmap.push(true);
+        }
+        bitmap
+    }
 
     #[test]
     fn partial_chunk_single_bit() {
@@ -1025,5 +1045,77 @@ mod tests {
         let r1 = combine_roots(&h1, &ops_a, &grafted, None);
         let r2 = combine_roots(&h2, &ops_b, &grafted, None);
         assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn derive_bitmap_changes_mixed_diffs() {
+        let diffs = vec![
+            SnapshotDiff::Insert {
+                key: key(1),
+                new_loc: Location::new(10),
+            },
+            SnapshotDiff::Update {
+                key: key(2),
+                old_loc: Location::new(3),
+                new_loc: Location::new(11),
+            },
+            SnapshotDiff::Delete {
+                key: key(3),
+                old_loc: Location::new(8),
+            },
+        ];
+
+        let (pushed_bits, clears) =
+            derive_bitmap_changes::<TestUpdate, N>(Location::new(9), 10, Location::new(13), &diffs);
+
+        assert_eq!(pushed_bits, vec![true, true, false, true]);
+
+        let mut bitmap = BitmapBatch::Base(Arc::new(all_true_bitmap(10)));
+        bitmap.push_changeset(pushed_bits, clears);
+
+        assert!(!bitmap.get_bit(3));
+        assert!(!bitmap.get_bit(8));
+        assert!(!bitmap.get_bit(9));
+        assert!(bitmap.get_bit(10));
+        assert!(bitmap.get_bit(11));
+        assert!(!bitmap.get_bit(12));
+        assert!(bitmap.get_bit(13));
+    }
+
+    #[test]
+    fn derive_bitmap_changes_delete_only_batch() {
+        let diffs = vec![SnapshotDiff::Delete {
+            key: key(7),
+            old_loc: Location::new(4),
+        }];
+
+        let (pushed_bits, clears) = derive_bitmap_changes::<TestUpdate, N>(
+            Location::new(19),
+            20,
+            Location::new(21),
+            &diffs,
+        );
+
+        assert_eq!(pushed_bits, vec![false, true]);
+
+        let mut bitmap = BitmapBatch::Base(Arc::new(all_true_bitmap(20)));
+        bitmap.push_changeset(pushed_bits, clears);
+
+        assert!(!bitmap.get_bit(4));
+        assert!(!bitmap.get_bit(19));
+        assert!(!bitmap.get_bit(20));
+        assert!(bitmap.get_bit(21));
+    }
+
+    #[test]
+    #[should_panic(expected = "new_loc is before batch start")]
+    fn derive_bitmap_changes_panics_when_new_loc_precedes_batch_start() {
+        let diffs = vec![SnapshotDiff::Insert {
+            key: key(9),
+            new_loc: Location::new(9),
+        }];
+
+        let _ =
+            derive_bitmap_changes::<TestUpdate, N>(Location::new(9), 10, Location::new(10), &diffs);
     }
 }

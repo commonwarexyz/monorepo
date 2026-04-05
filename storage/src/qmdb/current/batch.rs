@@ -45,7 +45,7 @@ pub(super) struct ClearSet<const N: usize> {
 
     /// Chunk masks used for fast block-clearing operations.
     ///
-    /// A HashMap is safe to use here because it is exclusively accessed via `.get()`, avoiding any
+    /// A HashMap is safe to use here because it is exclusively accessed by key, avoiding any
     /// iteration-order non-determinism during Merkleization.
     masks: HashMap<usize, [u8; N]>,
 }
@@ -769,41 +769,27 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
 impl<const N: usize> BitmapBatch<N> {
     /// Push a changeset on top of this bitmap, mutating `self` in place.
     ///
-    /// When the bitmap is a `Base` with no outstanding clones (typical for
-    /// sequential commit patterns), mutations are applied directly in place,
-    /// keeping the bitmap flat and `get_chunk` O(1). Otherwise a new `Layer`
-    /// is created. `pushed_bits[i]` corresponds to the operation at
-    /// `parent_len + i` in the new committed range.
+    /// When the bitmap is a [Self::Base] variant with no outstanding clones (typical for sequential
+    /// commit patterns), mutations are applied directly in place, keeping the bitmap flat and
+    /// `get_chunk` O(1). Otherwise a new [Self::Layer] is created. `pushed_bits[i]` corresponds to
+    /// the operation at `parent_len + i` in the new committed range.
     pub(super) fn push_changeset(&mut self, pushed_bits: Vec<bool>, clears: ClearSet<N>) {
         if pushed_bits.is_empty() && clears.is_empty() {
             return;
         }
-        if self.try_apply_changeset_in_place(&pushed_bits, &clears) {
-            return;
-        }
-        self.push_changeset_as_layer(pushed_bits, clears);
-    }
 
-    /// Fast path: mutate the committed bitmap directly when we have the only
-    /// reference to the Base allocation.
-    fn try_apply_changeset_in_place(&mut self, pushed_bits: &[bool], clears: &ClearSet<N>) -> bool {
-        let Self::Base(base) = self else {
-            return false;
-        };
-        let Some(bitmap) = Arc::get_mut(base) else {
-            return false;
-        };
-        for &bit in pushed_bits {
-            bitmap.push(bit);
+        if let Self::Base(base) = self {
+            if let Some(bitmap) = Arc::get_mut(base) {
+                for &bit in &pushed_bits {
+                    bitmap.push(bit);
+                }
+                for loc in clears.locations() {
+                    bitmap.set_bit(**loc, false);
+                }
+                return;
+            }
         }
-        for loc in clears.locations() {
-            bitmap.set_bit(**loc, false);
-        }
-        true
-    }
 
-    /// Slow path: retain the parent bitmap and append a new COW layer.
-    fn push_changeset_as_layer(&mut self, pushed_bits: Vec<bool>, clears: ClearSet<N>) {
         let parent_len = self.len();
         let parent = self.clone();
         *self = Self::Layer(Arc::new(BitmapBatchLayer {
@@ -948,8 +934,8 @@ where
         let grafted_changeset = self.grafted.finalize_from(grafted_base);
 
         Changeset {
-            // Bitmap rebasing happens later in current::Db::apply_batch(),
-            // derived from the rebased inner snapshot diffs.
+            // Bitmap rebasing happens later in current::Db::apply_batch(), derived from the rebased
+            // inner snapshot diffs.
             inner: self.inner.finalize_from(current_db_size),
             grafted_changeset,
             canonical_root: self.canonical_root,
