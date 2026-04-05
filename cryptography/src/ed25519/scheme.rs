@@ -31,15 +31,15 @@ const L: [u8; 32] = [
 ];
 
 fn is_canonical_s(s: &[u8; 32]) -> bool {
-    for i in (0..32).rev() {
-        if s[i] < L[i] {
-            return true;
-        }
-        if s[i] > L[i] {
-            return false;
-        }
+    // Constant-time s < L via subtraction with borrow (little-endian, LSB first).
+    // borrow is 1 when the subtraction at position i underflowed, 0 otherwise.
+    // After all 32 bytes, a non-zero borrow means s < L.
+    let mut borrow: u16 = 0;
+    for i in 0..32 {
+        let diff = (s[i] as u16).wrapping_sub(L[i] as u16).wrapping_sub(borrow);
+        borrow = (diff >> 8) & 1;
     }
-    false
+    borrow != 0
 }
 
 /// Ed25519 Private Key.
