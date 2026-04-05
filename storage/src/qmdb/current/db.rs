@@ -480,7 +480,7 @@ where
     }
 
     /// Sync the metadata to disk.
-    pub(crate) async fn sync_metadata(&self) -> Result<(), Error> {
+    pub(super) async fn sync_metadata(&self) -> Result<(), Error> {
         let mut metadata = self.metadata.lock().await;
         metadata.clear();
 

@@ -113,12 +113,12 @@ fn apply_push_clear<const N: usize>(
 
 /// Bitmap-accelerated floor scan. Skips locations where the bitmap bit is
 /// unset, avoiding I/O reads for inactive operations.
-pub(crate) struct BitmapScan<'a, B, const N: usize> {
+struct BitmapScan<'a, B, const N: usize> {
     bitmap: &'a B,
 }
 
 impl<'a, B: BitmapReadable<N>, const N: usize> BitmapScan<'a, B, N> {
-    pub(crate) const fn new(bitmap: &'a B) -> Self {
+    const fn new(bitmap: &'a B) -> Self {
         Self { bitmap }
     }
 }
@@ -681,7 +681,7 @@ where
 ///
 /// Mirrors the [`crate::mmr::batch::MerkleizedBatch`] pattern.
 #[derive(Clone, Debug)]
-pub(crate) enum BitmapBatch<const N: usize> {
+pub(super) enum BitmapBatch<const N: usize> {
     /// Committed bitmap (chain terminal).
     Base(Arc<BitMap<N>>),
     /// Speculative layer on top of a parent batch.
@@ -690,7 +690,7 @@ pub(crate) enum BitmapBatch<const N: usize> {
 
 /// The data behind a [`BitmapBatch::Layer`].
 #[derive(Debug)]
-pub(crate) struct BitmapBatchLayer<const N: usize> {
+pub(super) struct BitmapBatchLayer<const N: usize> {
     parent: BitmapBatch<N>,
     /// Cached `parent.len()` at layer creation time.
     parent_len: u64,
