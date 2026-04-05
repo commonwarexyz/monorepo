@@ -582,7 +582,13 @@ where
         }
 
         // 3. Apply grafted MMR.
-        self.grafted_mmr.apply_batch(&batch.grafted)?;
+        if skip_ancestors && self.grafted_mmr.size() == batch.grafted.size() {
+            // Ancestors committed (validated by any-layer). Batch has only
+            // overwrites -- apply_batch rejects self.size() == batch.size().
+            self.grafted_mmr.apply_overwrites(&batch.grafted);
+        } else {
+            self.grafted_mmr.apply_batch(&batch.grafted)?;
+        }
 
         // 4. Canonical root.
         self.root = batch.canonical_root;

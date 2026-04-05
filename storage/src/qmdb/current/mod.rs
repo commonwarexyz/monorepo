@@ -2343,4 +2343,65 @@ pub mod tests {
             db2.destroy().await.unwrap();
         });
     }
+
+    /// Regression: C's precomputed bitmap clears can target a chunk that
+    /// was pruned after parent P was committed.
+    ///
+    /// With N=32, CHUNK_SIZE_BITS=256. Seed places key(0) at loc 255
+    /// (end of chunk 0). P overwrites keys 1..254, whose floor raise
+    /// moves key(0) from 255 to tip, pushing the floor past chunk 0.
+    /// C is built from P and writes key(0); its base_old_loc is 255.
+    /// After committing P and pruning chunk 0, C's clear at 255 targets
+    /// the pruned chunk.
+    #[test_traced("WARN")]
+    fn test_current_stale_bitmap_clears_after_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ctx.clone(),
+                variable_config::<OneCap>("stale-clears", &ctx),
+            )
+            .await
+            .unwrap();
+
+            // Seed: 255 keys in one batch. key(0) lands at loc 255 (chunk 0).
+            let mut seed = db.new_batch();
+            for i in 0u64..255 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed_m = seed.merkleize(None, &db).await.unwrap();
+            db.apply_batch(seed_m).await.unwrap();
+            db.commit().await.unwrap();
+
+            // P: overwrite keys 1..254. Does NOT touch key(0), but P's floor
+            // raise moves key(0) from 255, advancing the floor past chunk 0.
+            let mut p = db.new_batch();
+            for i in 1u64..255 {
+                p = p.write(key(i), Some(val(i + 10000)));
+            }
+            let p_m = p.merkleize(None, &db).await.unwrap();
+
+            // C: built from P. Writes key(0). base_old_loc = 255 (chunk 0).
+            let c_m = p_m
+                .new_batch::<Sha256>()
+                .write(key(0), Some(val(9999)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            // Commit P, prune chunk 0, then apply C.
+            db.apply_batch(p_m).await.unwrap();
+            db.commit().await.unwrap();
+
+            let floor = *db.inactivity_floor_loc();
+            assert!(floor >= 256, "floor must be past chunk 0: floor={floor}",);
+
+            db.prune(db.inactivity_floor_loc()).await.unwrap();
+            db.apply_batch(c_m).await.unwrap();
+            db.flatten();
+
+            db.destroy().await.unwrap();
+        });
+    }
 }

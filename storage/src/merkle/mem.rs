@@ -442,8 +442,12 @@ impl<F: Family, D: Digest> Mem<F, D> {
             }
         }
 
-        // Apply this batch's own data.
+        // Apply this batch's own data. Pruned overwrites are skipped when
+        // ancestors were already committed (the Mem may have been pruned).
         for (&pos, &digest) in batch.overwrites.iter() {
+            if skip_ancestors && pos < inner.pruning_boundary {
+                continue;
+            }
             let index = inner.pos_to_index(pos);
             inner.nodes[index] = digest;
         }
@@ -453,6 +457,28 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
         inner.root = batch.root();
         Ok(())
+    }
+
+    /// Apply only the batch's overwrites (skipping pruned positions) and
+    /// set the root. Does not check staleness, process ancestors, or
+    /// append nodes.
+    ///
+    /// Use when staleness has been verified externally and the batch has
+    /// no new appended nodes (only overwrites).
+    pub(crate) fn apply_overwrites(&mut self, batch: &batch::MerkleizedBatch<F, D>) {
+        assert!(
+            batch.appended.is_empty(),
+            "apply_overwrites called on batch with appended nodes"
+        );
+        let inner = Arc::make_mut(&mut self.inner);
+        for (&pos, &digest) in batch.overwrites.iter() {
+            if pos < inner.pruning_boundary {
+                continue;
+            }
+            let index = inner.pos_to_index(pos);
+            inner.nodes[index] = digest;
+        }
+        inner.root = batch.root();
     }
 }
 

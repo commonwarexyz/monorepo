@@ -898,7 +898,11 @@ impl<const N: usize> BitmapBatch<N> {
                 bitmap.push(bit);
             }
             for &loc in clears.locations() {
-                bitmap.set_bit(*loc, false);
+                // Clears computed before a prune may reference pruned chunks.
+                // Those bits are already inactive; skip them.
+                if BitMap::<N>::to_chunk_index(*loc) >= bitmap.pruned_chunks() {
+                    bitmap.set_bit(*loc, false);
+                }
             }
         }
         *self = Self::Base(Arc::new(bitmap));
