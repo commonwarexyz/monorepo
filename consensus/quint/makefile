@@ -1,7 +1,7 @@
 FUZZ_TRACES_ROOT ?= ../fuzz/artifacts/traces
 FUZZ_CORPUS ?= ../fuzz/corpus
 TRACES_DIR ?= traces
-TRACE_TARGET ?= simplex_ed25519_quint_twins
+TRACE_TARGET ?= simplex_ed25519_quint_byzantine
 TRACE_TARGETS ?= [simplex_ed25519_quint_honest,simplex_ed25519_quint_disrupter, simplex_ed25519_quint_byzantine, simplex_ed25519_quint_twins]
 FUZZ_RUNS ?= -1
 TRACE_SELECTION_STRATEGY ?= smallscope
@@ -208,7 +208,7 @@ generate_itf_test:
 	@echo "Generated ITF traces in $(ITF_DIR)/"
 
 conformance_roundtrip: clean_mbt_traces clean_fuzz_traces clean_traces
-	$(MAKE) FUZZ_RUNS=100 get_fuzz_traces
+	$(MAKE) FUZZ_RUNS=1000 get_fuzz_traces
 	$(MAKE) build_quint_tests_from_fuzz_traces
 	OUT_ITF_DIR=$(ITF_DIR) ./scripts/test_traces.sh
 	$(MAKE) convert_itf

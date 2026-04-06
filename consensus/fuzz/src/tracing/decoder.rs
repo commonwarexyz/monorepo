@@ -612,6 +612,7 @@ pub fn extract_expected_state(
                     last_finalized,
                     committed_sequence,
                     certified: data.certified.clone(),
+                    successful_certifications: data.successful_certifications.clone(),
                     notarize_signers: data.notarize_signers.clone(),
                     nullify_signers: data.nullify_signers.clone(),
                     finalize_signers: data.finalize_signers.clone(),
@@ -724,7 +725,7 @@ pub fn extract_reporter_states(
             }
         }
 
-        let certified = replica_state_entries
+        let successful_certifications = replica_state_entries
             .iter()
             .find(|(k, _)| k.as_str() == Some(node.as_str()))
             .map(|(_, v)| {
@@ -734,6 +735,13 @@ pub fn extract_reporter_states(
                     .collect()
             })
             .unwrap_or_default();
+
+        let certified = notarizations
+            .keys()
+            .copied()
+            .chain(nullifications.iter().copied())
+            .chain(finalizations.keys().copied())
+            .collect();
 
         let max_finalized_view = finalizations.keys().copied().max().unwrap_or(0);
 
@@ -751,6 +759,7 @@ pub fn extract_reporter_states(
                 finalizations,
                 finalization_signature_counts,
                 certified,
+                successful_certifications,
                 notarize_signers,
                 nullify_signers,
                 finalize_signers,
@@ -906,8 +915,8 @@ pub fn decode_itf(
 
 #[cfg(test)]
 mod tests {
-    use super::block_to_hex;
-    use std::collections::HashMap;
+    use super::{block_to_hex, decode_itf};
+    use std::{collections::HashMap, fs};
 
     #[test]
     fn block_to_hex_returns_full_deterministic_digest() {
@@ -920,5 +929,36 @@ mod tests {
         assert_eq!(first.len(), 64);
         assert_eq!(first, second);
         assert_ne!(first, other);
+    }
+
+    #[test]
+    fn decode_itf_splits_certificate_presence_from_successful_certification() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../quint/itf_traces/trace_roundtrip_test_26ba90da8575272103245a2ed669f37fd98f7597.itf.json"
+        );
+        let json = fs::read_to_string(path).expect("fixture must exist");
+
+        let (trace, expected) = decode_itf(&json, 0, 0).expect("fixture must decode");
+
+        let reporter_state = trace
+            .reporter_states
+            .get("n1")
+            .expect("n1 reporter state must exist");
+        assert_eq!(reporter_state.certified, [1, 2, 3, 4, 5, 6].into_iter().collect());
+        assert_eq!(
+            reporter_state.successful_certifications,
+            [2, 3, 4, 6].into_iter().collect()
+        );
+
+        let expected_node = expected.nodes.get("n1").expect("n1 expected state must exist");
+        assert_eq!(
+            expected_node.certified,
+            [1, 2, 3, 4, 5, 6].into_iter().collect()
+        );
+        assert_eq!(
+            expected_node.successful_certifications,
+            [2, 3, 4, 6].into_iter().collect()
+        );
     }
 }

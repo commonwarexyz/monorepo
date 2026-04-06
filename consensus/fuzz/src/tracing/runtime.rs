@@ -37,7 +37,7 @@ use futures::future::join_all;
 use kdtree::{distance::squared_euclidean, KdTree};
 use sha1::Digest;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -669,7 +669,7 @@ fn encode_reporter_states(
         .map(|(idx, state)| {
             let node_id = format!("n{}", faults + idx);
             let max_finalized_view = state.finalizations.keys().copied().max().unwrap_or(0);
-            let notarizations = state
+            let notarizations: BTreeMap<u64, TraceProposalData> = state
                 .notarizations
                 .iter()
                 .map(|(view, cert)| {
@@ -683,18 +683,18 @@ fn encode_reporter_states(
                     )
                 })
                 .collect();
-            let notarization_signature_counts = state
+            let notarization_signature_counts: BTreeMap<u64, Option<usize>> = state
                 .notarizations
                 .iter()
                 .map(|(view, cert)| (*view, cert.signature_count))
                 .collect();
-            let nullifications = state.nullifications.keys().copied().collect();
-            let nullification_signature_counts = state
+            let nullifications: BTreeSet<u64> = state.nullifications.keys().copied().collect();
+            let nullification_signature_counts: BTreeMap<u64, Option<usize>> = state
                 .nullifications
                 .iter()
                 .map(|(view, cert)| (*view, cert.signature_count))
                 .collect();
-            let finalizations = state
+            let finalizations: BTreeMap<u64, TraceProposalData> = state
                 .finalizations
                 .iter()
                 .map(|(view, cert)| {
@@ -708,7 +708,7 @@ fn encode_reporter_states(
                     )
                 })
                 .collect();
-            let finalization_signature_counts = state
+            let finalization_signature_counts: BTreeMap<u64, Option<usize>> = state
                 .finalizations
                 .iter()
                 .map(|(view, cert)| (*view, cert.signature_count))
@@ -721,6 +721,7 @@ fn encode_reporter_states(
                 finalizations,
                 finalization_signature_counts,
                 certified: state.certified.into_iter().collect(),
+                successful_certifications: BTreeSet::new(),
                 notarize_signers: state.notarize_signers.into_iter().collect(),
                 nullify_signers: state.nullify_signers.into_iter().collect(),
                 finalize_signers: state.finalize_signers.into_iter().collect(),

@@ -22,9 +22,12 @@ pub struct ExpectedNodeState {
     pub last_finalized: u64,
     /// Committed block sequence (views in finalization order).
     pub committed_sequence: Vec<u64>,
-    /// Views that the replica marked as certified.
+    /// Views for which the replica observed any certificate.
     #[serde(default)]
     pub certified: BTreeSet<u64>,
+    /// Views that the replica marked as successfully certified.
+    #[serde(default)]
+    pub successful_certifications: BTreeSet<u64>,
     /// Per-view set of node IDs that sent notarize votes to this node.
     #[serde(default)]
     pub notarize_signers: BTreeMap<u64, BTreeSet<String>>,
@@ -486,6 +489,7 @@ mod tests {
                     last_finalized: 4,
                     committed_sequence: vec![4],
                     certified: BTreeSet::from([3, 4]),
+                    successful_certifications: BTreeSet::from([4]),
                     notarize_signers: BTreeMap::new(),
                     nullify_signers: BTreeMap::new(),
                     finalize_signers: BTreeMap::new(),

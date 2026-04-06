@@ -20,6 +20,9 @@ pub struct ReporterReplicaStateData {
     /// Views that have any certificate (notarization, nullification, or finalization).
     #[serde(default)]
     pub certified: BTreeSet<u64>,
+    /// Views that are successfully certified for parent selection.
+    #[serde(default)]
+    pub successful_certifications: BTreeSet<u64>,
     pub notarize_signers: BTreeMap<u64, BTreeSet<String>>,
     pub nullify_signers: BTreeMap<u64, BTreeSet<String>>,
     pub finalize_signers: BTreeMap<u64, BTreeSet<String>>,
