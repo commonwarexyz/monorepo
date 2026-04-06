@@ -217,6 +217,13 @@ where
         let block_digest = block.digest();
         let parent_digest = block.parent();
 
+        // If the block has already been executed, don't execute again.
+        if self.pending.contains_key(&block_digest) {
+            timer.cancel();
+            response.send_lossy(true);
+            return;
+        }
+
         // The voter may ask us to verify blocks that are at or below the
         // already-processed height. This happens because marshal/state sync and
         // simplex advance on different message streams.
@@ -524,6 +531,11 @@ where
         round: Round,
         merkleized: PendingBatches<A, E>,
     ) {
+        if let Some(existing) = self.pending.get(&digest) {
+            debug_assert_eq!(existing.parent, parent, "pending parent changed for digest");
+            debug_assert_eq!(existing.round, round, "pending round changed for digest");
+            return;
+        }
         self.pending.insert(
             digest,
             PendingEntry {
