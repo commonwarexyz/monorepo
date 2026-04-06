@@ -3819,6 +3819,251 @@ mod tests {
         no_recertification_after_replay::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
+    /// After restart, a recovered notarization for a leader-owned round should still
+    /// skip application certification.
+    fn local_recovered_notarization_skips_certify_after_restart<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"local_recovered_notarization_skips_certify_after_restart".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let me = participants[0].clone();
+            let elector = RoundRobin::<Sha256>::default();
+            let built_elector: RoundRobinElector<S> = elector
+                .clone()
+                .build(&participants.clone().try_into().unwrap());
+            let reporter_cfg = mocks::reporter::Config {
+                participants: participants.clone().try_into().unwrap(),
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+            };
+            let reporter =
+                mocks::reporter::Reporter::new(context.with_label("reporter"), reporter_cfg);
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let partition = "local_recovered_notarization_skips_certify_after_restart".to_string();
+            let epoch = Epoch::new(333);
+
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Always,
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app_initial"), app_cfg);
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: elector.clone(),
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter: reporter.clone(),
+                partition: partition.clone(),
+                epoch,
+                mailbox_size: 128,
+                leader_timeout: Duration::from_secs(5),
+                certification_timeout: Duration::from_secs(5),
+                timeout_retry: Duration::from_mins(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter_initial"), voter_cfg);
+
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(0, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            let handle = voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            if let batcher::Message::Update { response, .. } =
+                batcher_receiver.recv().await.unwrap()
+            {
+                response.send(None).unwrap();
+            }
+
+            let target_view = View::new(2);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+            assert_eq!(
+                built_elector.elect(Round::new(epoch, target_view), None),
+                Participant::new(0),
+                "we should be leader at view 2"
+            );
+
+            handle.abort();
+
+            let certify_calls: Arc<Mutex<Vec<Sha256Digest>>> = Arc::new(Mutex::new(Vec::new()));
+            let tracker = certify_calls.clone();
+            let app_cfg = mocks::application::Config {
+                hasher: Sha256::default(),
+                relay: relay.clone(),
+                me: me.clone(),
+                propose_latency: (1.0, 0.0),
+                verify_latency: (1.0, 0.0),
+                certify_latency: (1.0, 0.0),
+                should_certify: mocks::application::Certifier::Custom(Box::new(move |digest| {
+                    tracker.lock().push(digest);
+                    false
+                })),
+            };
+            let (app_actor, application) =
+                mocks::application::Application::new(context.with_label("app_restarted"), app_cfg);
+            app_actor.start();
+
+            let voter_cfg = Config {
+                scheme: schemes[0].clone(),
+                elector,
+                blocker: oracle.control(me.clone()),
+                automaton: application.clone(),
+                relay: application.clone(),
+                reporter,
+                partition,
+                epoch,
+                mailbox_size: 128,
+                leader_timeout: Duration::from_secs(100),
+                certification_timeout: Duration::from_secs(100),
+                timeout_retry: Duration::from_mins(60),
+                activity_timeout: ViewDelta::new(10),
+                replay_buffer: NZUsize!(1024 * 1024),
+                write_buffer: NZUsize!(1024 * 1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+            let (voter, mut mailbox) = Actor::new(context.with_label("voter_restarted"), voter_cfg);
+
+            let (resolver_sender, _resolver_receiver) = mpsc::channel(8);
+            let (batcher_sender, mut batcher_receiver) = mpsc::channel(8);
+            let (vote_sender, _) = oracle
+                .control(me.clone())
+                .register(2, TEST_QUOTA)
+                .await
+                .unwrap();
+            let (cert_sender, _) = oracle
+                .control(me.clone())
+                .register(3, TEST_QUOTA)
+                .await
+                .unwrap();
+
+            voter.start(
+                batcher::Mailbox::new(batcher_sender),
+                resolver::Mailbox::new(resolver_sender),
+                vote_sender,
+                cert_sender,
+            );
+
+            if let batcher::Message::Update { response, .. } =
+                batcher_receiver.recv().await.unwrap()
+            {
+                response.send(None).unwrap();
+            }
+
+            let proposal = Proposal::new(
+                Round::new(epoch, target_view),
+                target_view.previous().unwrap(),
+                Sha256::hash(b"recovered_local_leader_proposal"),
+            );
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .recovered(Certificate::Notarization(notarization))
+                .await;
+
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Finalize(finalize))
+                            if finalize.view() == target_view =>
+                        {
+                            assert_eq!(finalize.proposal, proposal);
+                            break;
+                        }
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            panic!(
+                                "leader-owned recovered proposal should finalize instead of nullifying view {target_view}"
+                            );
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected finalize for recovered leader proposal at view {target_view}");
+                    },
+                }
+            }
+
+            assert_eq!(
+                certify_calls.lock().len(),
+                0,
+                "application certify should not run for a recovered leader proposal",
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_local_recovered_notarization_skips_certify_after_restart() {
+        local_recovered_notarization_skips_certify_after_restart::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        local_recovered_notarization_skips_certify_after_restart::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        local_recovered_notarization_skips_certify_after_restart::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        local_recovered_notarization_skips_certify_after_restart::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        local_recovered_notarization_skips_certify_after_restart::<_, _>(ed25519::fixture);
+        local_recovered_notarization_skips_certify_after_restart::<_, _>(secp256r1::fixture);
+    }
+
     /// Test that in-flight certification requests are cancelled when finalization occurs.
     ///
     /// 1. Use a very long certify latency to ensure certification is in-flight.

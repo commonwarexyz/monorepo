@@ -67,6 +67,11 @@ where
         self.proposed_locally
     }
 
+    /// Updates whether the tracked proposal belongs to the local participant.
+    pub const fn set_proposed_locally(&mut self, proposed_locally: bool) {
+        self.proposed_locally = proposed_locally;
+    }
+
     /// Returns whether the slot contains a concrete proposal and no equivocation.
     pub fn has_unequivocated_proposal(&self) -> bool {
         self.proposal.is_some() && self.status != Status::Equivocated
