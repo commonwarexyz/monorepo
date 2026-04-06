@@ -9,10 +9,10 @@ module twins {
 
   // A specification instance for n=4, f=1 with 3 correct replicas and 1 byzantine replica.
   import replica(
-    CORRECT = Set("n0", "n1", "n2", "n3_1", "n3_2"),
+    CORRECT = Set("n1", "n2", "n3_1", "n3_2"),
     REPLICA_KEYS = Map("n0"->"n0", "n1"->"n1", "n2"->"n2", "n3_1"->"n3", "n3_2"->"n3"),
     // Faulty set must be empty in this case
-    BYZANTINE = Set(),
+    BYZANTINE = Set("n0"),
     N = 4,
     F = 1,
     Q = 3,
@@ -34,7 +34,6 @@ module twins {
     assert(i::N + 1 == i::CORRECT.size()),
     assert(i::BYZANTINE.size()==0)
   }
-
 
   action step = i::correct_replica_step
 
