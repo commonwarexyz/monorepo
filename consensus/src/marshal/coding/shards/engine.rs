@@ -4842,7 +4842,7 @@ mod tests {
             );
             network.start();
 
-            let mut private_keys = (0..2)
+            let mut private_keys = (0..4)
                 .map(|i| PrivateKey::from_seed(i as u64))
                 .collect::<Vec<_>>();
             private_keys.sort_by_key(|s| s.public_key());
