@@ -46,8 +46,8 @@
 //! `index`. This is useful, for instance, during transitions like distributed key generation
 //! (DKG) where connections to both old and new peer sets are needed simultaneously.
 //! Secondary peers remain visible in [`PeerSetUpdate`](crate::PeerSetUpdate) notifications and can
-//! use established transport connections, but outbound dialing and the gossip bit-vector namespace
-//! stay primary-oriented.
+//! use established transport connections, including discovery gossip once connected, but outbound
+//! dialing and the gossip bit-vector namespace stay primary-oriented.
 //!
 //! Upon receiving a `BitVec` message, a peer compares it against its own knowledge for the same
 //! index. If the receiving peer knows addresses that the sender marked as '0' (unknown), it
