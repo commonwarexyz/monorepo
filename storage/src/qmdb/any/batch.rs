@@ -1307,12 +1307,12 @@ where
             }
         }
 
-        // 3. Update DB metadata.
+        // 5. Update DB metadata.
         self.active_keys = batch.total_active_keys;
         self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
         self.last_commit_loc = batch.new_last_commit_loc;
 
-        // 4. Return range of operations that were written to the log.
+        // 6. Return range of operations that were written to the log.
         let end_loc = Location::new(*self.last_commit_loc + 1);
         Ok(start_loc..end_loc)
     }

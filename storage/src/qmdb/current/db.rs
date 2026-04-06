@@ -560,20 +560,23 @@ where
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
         // 2. Apply bitmap. Skip committed ancestor segments using ancestor_seg_ends
-        //    from the inner any-layer batch.
+        //    from the inner any-layer batch. Bitmap ancestors are in root-to-tip order
+        //    while ancestor_seg_ends is parent-first, so reverse the index.
         {
             let mut pushes = Vec::new();
             let mut clears = super::batch::ClearSet::with_capacity(0);
+            let n_ancestors = batch.ancestor_bitmap_pushes.len();
             for (i, (p, c)) in batch
                 .ancestor_bitmap_pushes
                 .iter()
                 .zip(&batch.ancestor_bitmap_clears)
                 .enumerate()
             {
+                let seg_idx = n_ancestors - 1 - i;
                 if batch
                     .inner
                     .ancestor_seg_ends
-                    .get(i)
+                    .get(seg_idx)
                     .is_some_and(|&seg_end| seg_end <= db_size)
                 {
                     continue;

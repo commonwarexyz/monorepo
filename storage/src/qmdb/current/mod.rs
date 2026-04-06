@@ -2449,4 +2449,93 @@ pub mod tests {
             db.destroy().await.unwrap();
         });
     }
+
+    /// Regression: bitmap ancestor data is root-to-tip but ancestor_seg_ends is
+    /// parent-first. Without reversing the index, the wrong segment is skipped and
+    /// the bitmap diverges from the expected state. Requires a 3-ancestor chain
+    /// (A->B->C->D) to expose the ordering mismatch.
+    #[test_traced("INFO")]
+    fn test_current_partial_ancestor_bitmap_ordering() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("bmo", &ctx))
+                    .await
+                    .unwrap();
+
+            // Build A -> B -> C -> D. Each writes a distinct key.
+            let a = db
+                .new_batch()
+                .write(key(0), Some(val(0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+            let b = a
+                .new_batch::<Sha256>()
+                .write(key(1), Some(val(1)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+            let c = b
+                .new_batch::<Sha256>()
+                .write(key(2), Some(val(2)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+            let d = c
+                .new_batch::<Sha256>()
+                .write(key(3), Some(val(3)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            // Apply A only, then apply D (B and C uncommitted).
+            // D has 3 ancestors: [C, B, A] (parent-first) with seg_ends [C.total, B.total, A.total].
+            // Bitmap ancestors are [A, B, C] (root-to-tip after reverse).
+            // Without the reversed index, index 0 of bitmap (A's pushes) would be checked
+            // against seg_ends[0] (C's total_size) -- wrong ancestor, wrong skip decision.
+            db.apply_batch(a).await.unwrap();
+            db.apply_batch(d.clone()).await.unwrap();
+
+            // Build a new batch E on top of the current state. If the bitmap was
+            // corrupted by the ordering bug (A's pushes duplicated or B/C's pushes
+            // missing), merkleize will compute a different root than a reference
+            // that applied all ancestors sequentially.
+            let e = db
+                .new_batch()
+                .write(key(4), Some(val(4)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+            db.apply_batch(e).await.unwrap();
+
+            // Reference: apply all five sequentially.
+            let ref_ctx = context.with_label("ref");
+            let mut ref_db: UnorderedVariableDb = UnorderedVariableDb::init(
+                ref_ctx.clone(),
+                variable_config::<OneCap>("bmo_ref", &ref_ctx),
+            )
+            .await
+            .unwrap();
+            for i in 0..5 {
+                let batch = ref_db
+                    .new_batch()
+                    .write(key(i), Some(val(i)))
+                    .merkleize(None, &ref_db)
+                    .await
+                    .unwrap();
+                ref_db.apply_batch(batch).await.unwrap();
+            }
+
+            assert_eq!(
+                db.root(),
+                ref_db.root(),
+                "root mismatch: bitmap ordering bug"
+            );
+
+            db.destroy().await.unwrap();
+            ref_db.destroy().await.unwrap();
+        });
+    }
 }
