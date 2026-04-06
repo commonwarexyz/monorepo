@@ -341,18 +341,18 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_stale_changeset_rejected() {
+    fn test_fixed_stale_batch_rejected() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_stale_changeset_rejected(ctx, open::<mmr::Family>).await;
+            test::test_immutable_stale_batch_rejected(ctx, open::<mmr::Family>).await;
         });
     }
 
     #[test_traced]
-    fn test_fixed_stale_changeset_chained() {
+    fn test_fixed_stale_batch_chained() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_stale_changeset_chained(ctx, open::<mmr::Family>).await;
+            test::test_immutable_stale_batch_chained(ctx, open::<mmr::Family>).await;
         });
     }
 
@@ -366,14 +366,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_stale_changeset_child_applied_before_parent() {
+    fn test_fixed_stale_batch_child_applied_before_parent() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_stale_changeset_child_applied_before_parent(
-                ctx,
-                open::<mmr::Family>,
-            )
-            .await;
+            test::test_immutable_stale_batch_child_applied_before_parent(ctx, open::<mmr::Family>)
+                .await;
         });
     }
 
@@ -605,18 +602,18 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_stale_changeset_rejected_mmb() {
+    fn test_fixed_stale_batch_rejected_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_stale_changeset_rejected(ctx, open::<mmb::Family>).await;
+            test::test_immutable_stale_batch_rejected(ctx, open::<mmb::Family>).await;
         });
     }
 
     #[test_traced]
-    fn test_fixed_stale_changeset_chained_mmb() {
+    fn test_fixed_stale_batch_chained_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_stale_changeset_chained(ctx, open::<mmb::Family>).await;
+            test::test_immutable_stale_batch_chained(ctx, open::<mmb::Family>).await;
         });
     }
 
@@ -630,14 +627,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_stale_changeset_child_applied_before_parent_mmb() {
+    fn test_fixed_stale_batch_child_applied_before_parent_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_stale_changeset_child_applied_before_parent(
-                ctx,
-                open::<mmb::Family>,
-            )
-            .await;
+            test::test_immutable_stale_batch_child_applied_before_parent(ctx, open::<mmb::Family>)
+                .await;
         });
     }
 

@@ -130,7 +130,7 @@ fn fuzz(input: FuzzInput) {
                 for digest in &digests {
                     batch = batch.add(&hasher, digest);
                 }
-                batch.merkleize(&hasher, &mmr)
+                batch.merkleize(&mmr, &hasher)
             };
             mmr.apply_batch(&batch).unwrap();
             let root = mmr.root();
@@ -159,7 +159,7 @@ fn fuzz(input: FuzzInput) {
                 for digest in &digests {
                     batch = batch.add(&hasher, digest);
                 }
-                batch.merkleize(&hasher, &mmr)
+                batch.merkleize(&mmr, &hasher)
             };
             mmr.apply_batch(&batch).unwrap();
             let root = mmr.root();

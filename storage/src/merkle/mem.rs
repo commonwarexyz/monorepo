@@ -486,7 +486,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(hasher, &element);
             }
-            batch.merkleize(hasher, &mem)
+            batch.merkleize(&mem, hasher)
         };
         mem.apply_batch(&batch).unwrap();
         mem
@@ -499,7 +499,7 @@ mod tests {
             for i in 0u64..n {
                 batch = batch.add(hasher, &i.to_be_bytes());
             }
-            batch.merkleize(hasher, &mem)
+            batch.merkleize(&mem, hasher)
         };
         mem.apply_batch(&batch).unwrap();
         mem
@@ -527,7 +527,7 @@ mod tests {
                 let batch = mem
                     .new_batch()
                     .add(&hasher, &i.to_be_bytes())
-                    .merkleize(&hasher, &mem);
+                    .merkleize(&mem, &hasher);
                 mem.apply_batch(&batch).unwrap();
                 for size in *old_size + 1..*mem.size() {
                     assert!(
@@ -549,7 +549,7 @@ mod tests {
                 let batch = mem
                     .new_batch()
                     .add(&hasher, &i.to_be_bytes())
-                    .merkleize(&hasher, &mem);
+                    .merkleize(&mem, &hasher);
                 mem.apply_batch(&batch).unwrap();
                 assert_eq!(*mem.leaves(), i + 1);
             }
@@ -659,12 +659,12 @@ mod tests {
                 let cs = reference
                     .new_batch()
                     .add(&hasher, &element)
-                    .merkleize(&hasher, &reference);
+                    .merkleize(&reference, &hasher);
                 reference.apply_batch(&cs).unwrap();
                 let cs = pruned
                     .new_batch()
                     .add(&hasher, &element)
-                    .merkleize(&hasher, &pruned);
+                    .merkleize(&pruned, &hasher);
                 pruned.apply_batch(&cs).unwrap();
                 pruned.prune_all();
                 assert_eq!(pruned.root(), reference.root());
@@ -690,7 +690,7 @@ mod tests {
                     .update_leaf(hasher, Location::new(leaf), &element)
                     .unwrap();
             }
-            batch.merkleize(hasher, &mem)
+            batch.merkleize(&mem, hasher)
         };
         mem.apply_batch(&batch).unwrap();
         assert_ne!(*mem.root(), root);
@@ -703,7 +703,7 @@ mod tests {
                     .update_leaf(hasher, Location::new(leaf), &element)
                     .unwrap();
             }
-            batch.merkleize(hasher, &mem)
+            batch.merkleize(&mem, hasher)
         };
         mem.apply_batch(&batch).unwrap();
         assert_eq!(*mem.root(), root);
@@ -738,7 +738,7 @@ mod tests {
             let batch = {
                 let batch = mem.new_batch();
                 let batch = batch.add(&hasher, &i.to_be_bytes());
-                batch.merkleize(&hasher, &mem)
+                batch.merkleize(&mem, &hasher)
             };
             mem.apply_batch(&batch).unwrap();
             assert_ne!(
@@ -827,7 +827,7 @@ mod tests {
             for i in 20u64..48 {
                 batch = batch.add(&hasher, &i.to_be_bytes());
             }
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
 
@@ -858,7 +858,7 @@ mod tests {
             let batch = batch
                 .update_leaf(&hasher, Location::new(5), b"updated-5")
                 .unwrap();
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
 
@@ -901,7 +901,7 @@ mod tests {
                 let batch = batch
                     .update_leaf(&hasher, Location::new(update_loc), b"new-value")
                     .unwrap();
-                batch.merkleize(&hasher, &mem)
+                batch.merkleize(&mem, &hasher)
             };
             mem.apply_batch(&batch).unwrap();
 
@@ -953,7 +953,7 @@ mod tests {
                 .unwrap();
             let batch = batch.add(&hasher, &100u64.to_be_bytes());
             let batch = batch.add(&hasher, &101u64.to_be_bytes());
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
 
@@ -985,7 +985,7 @@ mod tests {
             let batch = batch
                 .update_leaf(&hasher, Location::new(0), b"updated-0")
                 .unwrap();
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
 
@@ -994,7 +994,7 @@ mod tests {
         let cs = {
             let batch = ref_mem.new_batch();
             let batch = batch.add(&ref_hasher, &2u64.to_be_bytes());
-            batch.merkleize(&ref_hasher, &ref_mem)
+            batch.merkleize(&ref_mem, &ref_hasher)
         };
         ref_mem.apply_batch(&cs).unwrap();
         let cs = {
@@ -1002,7 +1002,7 @@ mod tests {
             let batch = batch
                 .update_leaf(&ref_hasher, Location::new(0), b"updated-0")
                 .unwrap();
-            batch.merkleize(&ref_hasher, &ref_mem)
+            batch.merkleize(&ref_mem, &ref_hasher)
         };
         ref_mem.apply_batch(&cs).unwrap();
 
@@ -1034,7 +1034,7 @@ mod tests {
                         let batch = batch
                             .update_leaf(&hasher, Location::new(update_loc), b"new")
                             .unwrap();
-                        batch.merkleize(&hasher, &m)
+                        batch.merkleize(&m, &hasher)
                     };
                     m.apply_batch(&batch).unwrap();
 
@@ -1060,9 +1060,9 @@ mod tests {
         let mut mem = Mem::<F, D>::new(&hasher);
 
         // Chain: Mem -> A -> B -> C
-        let a = mem.new_batch().add(&hasher, b"a").merkleize(&hasher, &mem);
-        let b = a.new_batch().add(&hasher, b"b").merkleize(&hasher, &mem);
-        let c = b.new_batch().add(&hasher, b"c").merkleize(&hasher, &mem);
+        let a = mem.new_batch().add(&hasher, b"a").merkleize(&mem, &hasher);
+        let b = a.new_batch().add(&hasher, b"b").merkleize(&mem, &hasher);
+        let c = b.new_batch().add(&hasher, b"c").merkleize(&mem, &hasher);
 
         // Apply A, then apply C directly (skipping B's apply_batch).
         // C's ancestor segments carry [A.data, B.data]. A is already committed
@@ -1077,7 +1077,7 @@ mod tests {
             for leaf in [b"a".as_slice(), b"b", b"c"] {
                 batch = batch.add(&hasher, leaf);
             }
-            batch.merkleize(&hasher, &reference)
+            batch.merkleize(&reference, &hasher)
         };
         reference.apply_batch(&full).unwrap();
         assert_eq!(mem.root(), reference.root());

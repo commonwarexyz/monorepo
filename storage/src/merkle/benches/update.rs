@@ -68,7 +68,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                                     leaf_locations.push(loc);
                                     batch = batch.add(&h, &digest);
                                 }
-                                batch.merkleize(&h, &mem)
+                                batch.merkleize(&mem, &h)
                             };
                             mem.apply_batch(&batch).unwrap();
 
@@ -90,7 +90,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                                     for (loc, element) in &leaf_map {
                                         let batch =
                                             mem.new_batch().update_leaf(&h, *loc, element).unwrap();
-                                        let batch = batch.merkleize(&h, &mem);
+                                        let batch = batch.merkleize(&mem, &h);
                                         mem.apply_batch(&batch).unwrap();
                                     }
                                 }
@@ -105,7 +105,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                                             batch = batch.with_pool(Some(p.clone()));
                                         }
                                         batch = batch.update_leaf_batched(&updates).unwrap();
-                                        batch.merkleize(&h, &mem)
+                                        batch.merkleize(&mem, &h)
                                     };
                                     mem.apply_batch(&batch).unwrap();
                                 }

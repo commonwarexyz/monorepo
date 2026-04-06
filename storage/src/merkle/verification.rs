@@ -294,7 +294,7 @@ mod tests {
                 for element in &elements {
                     batch = batch.add(&hasher, element);
                 }
-                batch.merkleize(&hasher, &mmr)
+                batch.merkleize(&mmr, &hasher)
             };
             mmr.apply_batch(&batch).unwrap();
             let root = mmr.root();
@@ -354,7 +354,7 @@ mod tests {
                 for element in &elements {
                     batch = batch.add(&hasher, element);
                 }
-                batch.merkleize(&hasher, &mmr)
+                batch.merkleize(&mmr, &hasher)
             };
             mmr.apply_batch(&batch).unwrap();
             let root = mmr.root();
@@ -404,7 +404,7 @@ mod tests {
                 for element in &elements {
                     batch = batch.add(&hasher, element);
                 }
-                batch.merkleize(&hasher, &mmb)
+                batch.merkleize(&mmb, &hasher)
             };
             mmb.apply_batch(&batch).unwrap();
             let root = mmb.root();

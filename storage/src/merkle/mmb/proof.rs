@@ -22,7 +22,7 @@ mod tests {
             for i in 0..n {
                 batch = batch.add(&hasher, &i.to_be_bytes());
             }
-            batch.merkleize(&hasher, &mmb)
+            batch.merkleize(&mmb, &hasher)
         };
         mmb.apply_batch(&batch).unwrap();
         (hasher, mmb)
@@ -70,7 +70,7 @@ mod tests {
                 for i in n..n + 100 {
                     batch = batch.add(&hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&hasher, &mmb)
+                batch.merkleize(&mmb, &hasher)
             };
             mmb.apply_batch(&batch).unwrap();
             n += 100;

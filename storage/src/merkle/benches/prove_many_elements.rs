@@ -29,7 +29,7 @@ fn bench_prove_many_elements_family<F: Family>(c: &mut Criterion, family: &str) 
                     batch = batch.add(&hasher, &element);
                     elements.push(element);
                 }
-                batch.merkleize(&hasher, &mem)
+                batch.merkleize(&mem, &hasher)
             };
             mem.apply_batch(&batch).unwrap();
         });

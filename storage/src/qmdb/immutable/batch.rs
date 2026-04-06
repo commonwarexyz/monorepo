@@ -200,8 +200,6 @@ where
                 ancestor_diffs.push(Arc::clone(&batch.diff));
                 ancestor_seg_ends.push(batch.total_size);
             }
-            ancestor_diffs.reverse();
-            ancestor_seg_ends.reverse();
         }
 
         Arc::new(MerkleizedBatch {

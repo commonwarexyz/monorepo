@@ -19,7 +19,7 @@
 //!                           v
 //!                    UnmerkleizedBatch          (accumulate mutations)
 //!                           |
-//!                  merkleize(hasher, &mem)
+//!                  merkleize(&mem, hasher)
 //!                           |
 //!                           v
 //!                 Arc<MerkleizedBatch>           (immutable, has root)
@@ -65,10 +65,10 @@
 //! // Fork two independent speculative chains from the same base.
 //! let a1 = mmr.new_batch()
 //!     .add(&hasher, b"a1")
-//!     .merkleize(&hasher, &mmr);
+//!     .merkleize(&mmr, &hasher);
 //! let b1 = mmr.new_batch()
 //!     .add(&hasher, b"b1")
-//!     .merkleize(&hasher, &mmr);
+//!     .merkleize(&mmr, &hasher);
 //!
 //! // Commit A1.
 //! mmr.apply_batch(&a1).unwrap();
@@ -141,7 +141,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     }
 
     /// Resolve a node: own data -> parent chain -> `base` fallback.
-    fn get_node(&self, pos: Position<F>, base: &Mem<F, D>) -> Option<D> {
+    fn get_node(&self, base: &Mem<F, D>, pos: Position<F>) -> Option<D> {
         if pos >= self.size() {
             return None;
         }
@@ -291,30 +291,30 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     /// `base` provides committed node data as fallback during hash computation.
     pub fn merkleize(
         mut self,
-        hasher: &impl Hasher<F, Digest = D>,
         base: &Mem<F, D>,
+        hasher: &impl Hasher<F, Digest = D>,
     ) -> Arc<MerkleizedBatch<F, D>> {
         let dirty: Vec<_> = core::mem::take(&mut self.dirty_nodes).into_iter().collect();
 
         #[cfg(feature = "std")]
         if let Some(pool) = self.pool.take() {
             if dirty.len() >= MIN_TO_PARALLELIZE {
-                self.merkleize_parallel(hasher, &pool, &dirty, base);
+                self.merkleize_parallel(base, hasher, &pool, &dirty);
             } else {
-                self.merkleize_serial(hasher, &dirty, base);
+                self.merkleize_serial(base, hasher, &dirty);
             }
             self.pool = Some(pool);
         } else {
-            self.merkleize_serial(hasher, &dirty, base);
+            self.merkleize_serial(base, hasher, &dirty);
         }
 
         #[cfg(not(feature = "std"))]
-        self.merkleize_serial(hasher, &dirty, base);
+        self.merkleize_serial(base, hasher, &dirty);
 
         // Compute root from peaks.
         let leaves = self.leaves();
         let peaks: Vec<D> = F::peaks(self.size())
-            .map(|(peak_pos, _)| self.get_node(peak_pos, base).expect("peak missing"))
+            .map(|(peak_pos, _)| self.get_node(base, peak_pos).expect("peak missing"))
             .collect();
         let root = hasher.root(leaves, peaks.iter());
 
@@ -340,14 +340,14 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     /// Compute digests for dirty internal nodes, bottom-up by height.
     fn merkleize_serial(
         &mut self,
+        base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         dirty: &[(u32, Position<F>)],
-        base: &Mem<F, D>,
     ) {
         for &(height, pos) in dirty {
             let (left, right) = F::children(pos, height);
-            let left_d = self.get_node(left, base).expect("left child missing");
-            let right_d = self.get_node(right, base).expect("right child missing");
+            let left_d = self.get_node(base, left).expect("left child missing");
+            let right_d = self.get_node(base, right).expect("right child missing");
             let digest = hasher.node_digest(pos, &left_d, &right_d);
             self.store_node(pos, digest);
         }
@@ -358,10 +358,10 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     #[cfg(feature = "std")]
     fn merkleize_parallel(
         &mut self,
+        base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         pool: &ThreadPool,
         dirty: &[(u32, Position<F>)],
-        base: &Mem<F, D>,
     ) {
         let mut same_height = Vec::new();
         let mut current_height = dirty.first().map_or(1, |&(h, _)| h);
@@ -371,32 +371,32 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
                 continue;
             }
             if same_height.len() < MIN_TO_PARALLELIZE {
-                self.merkleize_serial(hasher, &dirty[i - same_height.len()..], base);
+                self.merkleize_serial(base, hasher, &dirty[i - same_height.len()..]);
                 return;
             }
-            self.compute_height_parallel(hasher, pool, &same_height, current_height, base);
+            self.compute_height_parallel(base, hasher, pool, &same_height, current_height);
             same_height.clear();
             current_height = height;
             same_height.push(pos);
         }
 
         if same_height.len() < MIN_TO_PARALLELIZE {
-            self.merkleize_serial(hasher, &dirty[dirty.len() - same_height.len()..], base);
+            self.merkleize_serial(base, hasher, &dirty[dirty.len() - same_height.len()..]);
             return;
         }
 
-        self.compute_height_parallel(hasher, pool, &same_height, current_height, base);
+        self.compute_height_parallel(base, hasher, pool, &same_height, current_height);
     }
 
     /// Compute digests for nodes at the same height in parallel, then store sequentially.
     #[cfg(feature = "std")]
     fn compute_height_parallel(
         &mut self,
+        base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         pool: &ThreadPool,
         same_height: &[Position<F>],
         height: u32,
-        base: &Mem<F, D>,
     ) {
         let computed: Vec<(Position<F>, D)> = pool.install(|| {
             same_height
@@ -405,8 +405,8 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
                     || hasher.clone(),
                     |hasher, &pos| {
                         let (left, right) = F::children(pos, height);
-                        let left_d = self.get_node(left, base).expect("left child missing");
-                        let right_d = self.get_node(right, base).expect("right child missing");
+                        let left_d = self.get_node(base, left).expect("left child missing");
+                        let right_d = self.get_node(base, right).expect("right child missing");
                         let digest = hasher.node_digest(pos, &left_d, &right_d);
                         (pos, digest)
                     },
@@ -648,7 +648,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(hasher, &element);
             }
-            batch.merkleize(hasher, &mem)
+            batch.merkleize(&mem, hasher)
         };
         mem.apply_batch(&batch).unwrap();
         mem
@@ -666,7 +666,7 @@ mod tests {
                     let element = hasher.digest(&i.to_be_bytes());
                     batch = batch.add(&hasher, &element);
                 }
-                let merkleized = batch.merkleize(&hasher, &base);
+                let merkleized = batch.merkleize(&base, &hasher);
                 let mut result = Mem::<F, D>::new(&hasher);
                 result.apply_batch(&merkleized).unwrap();
                 assert_eq!(result.root(), reference.root(), "root mismatch for n={n}");
@@ -685,7 +685,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(&hasher, &element);
             }
-            let merkleized = batch.merkleize(&hasher, &base);
+            let merkleized = batch.merkleize(&base, &hasher);
             assert_ne!(merkleized.root(), base_root);
             assert_eq!(*base.root(), base_root);
             // Apply and verify proof from the resulting Mem.
@@ -708,7 +708,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(&hasher, &element);
             }
-            let merkleized = batch.merkleize(&hasher, &base);
+            let merkleized = batch.merkleize(&base, &hasher);
             let batch_root = merkleized.root();
             base.apply_batch(&merkleized).unwrap();
             assert_eq!(*base.root(), batch_root);
@@ -728,13 +728,13 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 ba = ba.add(&hasher, &element);
             }
-            let ma = ba.merkleize(&hasher, &base);
+            let ma = ba.merkleize(&base, &hasher);
             let mut bb = base.new_batch();
             for i in 100u64..105 {
                 let element = hasher.digest(&i.to_be_bytes());
                 bb = bb.add(&hasher, &element);
             }
-            let mb = bb.merkleize(&hasher, &base);
+            let mb = bb.merkleize(&base, &hasher);
             assert_ne!(ma.root(), mb.root());
             assert_ne!(ma.root(), base_root);
             assert_eq!(*base.root(), base_root);
@@ -751,13 +751,13 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 ba = ba.add(&hasher, &element);
             }
-            let ma = ba.merkleize(&hasher, &base);
+            let ma = ba.merkleize(&base, &hasher);
             let mut bb = ma.new_batch();
             for i in 60u64..70 {
                 let element = hasher.digest(&i.to_be_bytes());
                 bb = bb.add(&hasher, &element);
             }
-            let mb = bb.merkleize(&hasher, &base);
+            let mb = bb.merkleize(&base, &hasher);
             let reference = build_reference::<F>(&hasher, 70);
             assert_eq!(mb.root(), *reference.root());
             // Apply both batches and verify proofs from the resulting Mem.
@@ -784,7 +784,7 @@ mod tests {
                 .new_batch()
                 .update_leaf_digest(Location::new(5), updated)
                 .unwrap()
-                .merkleize(&hasher, &base);
+                .merkleize(&base, &hasher);
             assert_ne!(m.root(), base_root);
             let pos5 = Position::<F>::try_from(Location::new(5)).unwrap();
             let original = base.get_node(pos5).unwrap();
@@ -792,7 +792,7 @@ mod tests {
                 .new_batch()
                 .update_leaf_digest(Location::new(5), original)
                 .unwrap()
-                .merkleize(&hasher, &base);
+                .merkleize(&base, &hasher);
             assert_eq!(m2.root(), base_root);
         });
     }
@@ -812,7 +812,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(&hasher, &element);
             }
-            let m = batch.merkleize(&hasher, &base);
+            let m = batch.merkleize(&base, &hasher);
             assert_ne!(m.root(), base_root);
             let pos10 = Position::<F>::try_from(Location::new(10)).unwrap();
             assert_eq!(m.get_node(pos10), Some(updated));
@@ -833,7 +833,7 @@ mod tests {
                 .new_batch()
                 .update_leaf_batched(&updates)
                 .unwrap()
-                .merkleize(&hasher, &base);
+                .merkleize(&base, &hasher);
             assert_ne!(m.root(), base_root);
             let restore: Vec<(Location<F>, D)> = locs
                 .iter()
@@ -846,7 +846,7 @@ mod tests {
                 .new_batch()
                 .update_leaf_batched(&restore)
                 .unwrap()
-                .merkleize(&hasher, &base);
+                .merkleize(&base, &hasher);
             assert_eq!(m2.root(), base_root);
         });
     }
@@ -861,7 +861,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(&hasher, &element);
             }
-            let m = batch.merkleize(&hasher, &base);
+            let m = batch.merkleize(&base, &hasher);
             // Apply and verify proofs from the resulting Mem.
             let mut applied = base;
             applied.apply_batch(&m).unwrap();
@@ -884,7 +884,7 @@ mod tests {
             let hasher: H = Standard::new();
             let base = build_reference::<F>(&hasher, 50);
             let base_root = *base.root();
-            let m = base.new_batch().merkleize(&hasher, &base);
+            let m = base.new_batch().merkleize(&base, &hasher);
             assert_eq!(m.root(), base_root);
         });
     }
@@ -899,7 +899,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(&hasher, &element);
             }
-            let merkleized = batch.merkleize(&hasher, &base);
+            let merkleized = batch.merkleize(&base, &hasher);
             let mut batch_again = merkleized.new_batch();
             for i in 55u64..60 {
                 let element = hasher.digest(&i.to_be_bytes());
@@ -907,7 +907,7 @@ mod tests {
             }
             let reference = build_reference::<F>(&hasher, 60);
             assert_eq!(
-                batch_again.merkleize(&hasher, &base).root(),
+                batch_again.merkleize(&base, &hasher).root(),
                 *reference.root()
             );
         });
@@ -923,14 +923,14 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 b1 = b1.add(&hasher, &element);
             }
-            let m1 = b1.merkleize(&hasher, &base);
+            let m1 = b1.merkleize(&base, &hasher);
             base.apply_batch(&m1).unwrap();
             let mut b2 = base.new_batch();
             for i in 60u64..70 {
                 let element = hasher.digest(&i.to_be_bytes());
                 b2 = b2.add(&hasher, &element);
             }
-            let m2 = b2.merkleize(&hasher, &base);
+            let m2 = b2.merkleize(&base, &hasher);
             base.apply_batch(&m2).unwrap();
             let reference = build_reference::<F>(&hasher, 70);
             assert_eq!(base.root(), reference.root());
@@ -948,7 +948,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(&hasher, &element);
             }
-            let m = batch.merkleize(&hasher, &base);
+            let m = batch.merkleize(&base, &hasher);
             // Apply and verify proofs from the resulting Mem.
             let mut applied = base;
             applied.apply_batch(&m).unwrap();
@@ -974,18 +974,18 @@ mod tests {
                 .new_batch()
                 .update_leaf_digest(Location::new(5), da)
                 .unwrap()
-                .merkleize(&hasher, &base);
+                .merkleize(&base, &hasher);
             let mb = ma
                 .new_batch()
                 .update_leaf_digest(Location::new(10), db)
                 .unwrap()
-                .merkleize(&hasher, &base);
+                .merkleize(&base, &hasher);
             let mut bc = mb.new_batch();
             for i in 300u64..310 {
                 let element = hasher.digest(&i.to_be_bytes());
                 bc = bc.add(&hasher, &element);
             }
-            let mc = bc.merkleize(&hasher, &base);
+            let mc = bc.merkleize(&base, &hasher);
             let c_root = mc.root();
             base.apply_batch(&mc).unwrap();
             assert_eq!(*base.root(), c_root);
@@ -1003,12 +1003,12 @@ mod tests {
                 .new_batch()
                 .update_leaf_digest(Location::new(5), dx)
                 .unwrap()
-                .merkleize(&hasher, &base);
+                .merkleize(&base, &hasher);
             let mb = ma
                 .new_batch()
                 .update_leaf_digest(Location::new(5), dy)
                 .unwrap()
-                .merkleize(&hasher, &base);
+                .merkleize(&base, &hasher);
             let b_root = mb.root();
             base.apply_batch(&mb).unwrap();
             assert_eq!(*base.root(), b_root);
@@ -1031,7 +1031,7 @@ mod tests {
             let m = batch
                 .update_leaf_digest(Location::new(52), updated)
                 .unwrap()
-                .merkleize(&hasher, &base);
+                .merkleize(&base, &hasher);
             let pos52 = Position::<F>::try_from(Location::new(52)).unwrap();
             assert_eq!(m.get_node(pos52), Some(updated));
             let mut reference = build_reference::<F>(&hasher, 60);
@@ -1039,7 +1039,7 @@ mod tests {
                 .new_batch()
                 .update_leaf_digest(Location::new(52), updated)
                 .unwrap()
-                .merkleize(&hasher, &reference);
+                .merkleize(&reference, &hasher);
             reference.apply_batch(&batch).unwrap();
             assert_eq!(m.root(), *reference.root());
         });
@@ -1056,14 +1056,14 @@ mod tests {
                 .new_batch()
                 .update_leaf(&hasher, Location::new(5), element)
                 .unwrap()
-                .merkleize(&hasher, &base);
+                .merkleize(&base, &hasher);
             assert_ne!(m.root(), base_root);
             let mut base = base;
             let batch = base
                 .new_batch()
                 .update_leaf(&hasher, Location::new(5), element)
                 .unwrap()
-                .merkleize(&hasher, &base);
+                .merkleize(&base, &hasher);
             base.apply_batch(&batch).unwrap();
             assert_eq!(m.root(), *base.root());
         });

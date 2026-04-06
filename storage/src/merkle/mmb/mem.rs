@@ -26,7 +26,7 @@ mod tests {
             for i in 0..n {
                 batch = batch.add(&hasher, &i.to_be_bytes());
             }
-            batch.merkleize(&hasher, &mmb)
+            batch.merkleize(&mmb, &hasher)
         };
         mmb.apply_batch(&batch).unwrap();
         (hasher, mmb)
@@ -43,7 +43,7 @@ mod tests {
                 let loc = batch.leaves();
                 batch = batch.add(&hasher, &i.to_be_bytes());
                 assert_eq!(*loc, i);
-                batch.merkleize(&hasher, &mmb)
+                batch.merkleize(&mmb, &hasher)
             };
             mmb.apply_batch(&batch).unwrap();
         }

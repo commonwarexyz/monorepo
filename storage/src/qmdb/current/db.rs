@@ -559,34 +559,28 @@ where
         // 1. Apply inner any-layer batch (handles snapshot + journal partial skipping).
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
-        // 2. Apply bitmap. Skip committed ancestor segments using ancestor_seg_ends
-        //    from the inner any-layer batch. Bitmap ancestors are in root-to-tip order
-        //    while ancestor_seg_ends is parent-first, so reverse the index.
+        // 2. Apply bitmap. Both ancestor_bitmap_{pushes,clears} and ancestor_seg_ends
+        //    are in parent-first order. Iterate in reverse (root-to-tip) so that
+        //    pushes are concatenated in chronological order.
         {
             let mut pushes = Vec::new();
             let mut clears = super::batch::ClearSet::with_capacity(0);
             let n_ancestors = batch.ancestor_bitmap_pushes.len();
-            for (i, (p, c)) in batch
-                .ancestor_bitmap_pushes
-                .iter()
-                .zip(&batch.ancestor_bitmap_clears)
-                .enumerate()
-            {
-                let seg_idx = n_ancestors - 1 - i;
+            for i in (0..n_ancestors).rev() {
                 if batch
                     .inner
                     .ancestor_seg_ends
-                    .get(seg_idx)
+                    .get(i)
                     .is_some_and(|&seg_end| seg_end <= db_size)
                 {
                     continue;
                 }
-                pushes.extend_from_slice(p);
-                clears.merge(c);
+                pushes.extend_from_slice(&batch.ancestor_bitmap_pushes[i]);
+                clears.merge(&batch.ancestor_bitmap_clears[i]);
             }
             pushes.extend_from_slice(&batch.bitmap_pushes);
             clears.merge(&batch.bitmap_clears);
-            self.status.push_changeset(pushes, clears);
+            self.status.push_batch(pushes, clears);
         }
 
         // 3. Apply grafted MMR (merkle layer handles partial ancestor skipping).
@@ -824,7 +818,7 @@ pub(super) async fn build_grafted_mmr<H: Hasher, const N: usize>(
             for &(_ops_pos, digest) in &leaves {
                 batch = batch.add_leaf_digest(digest);
             }
-            batch.merkleize(&grafted_hasher, &grafted_mmr)
+            batch.merkleize(&grafted_mmr, &grafted_hasher)
         };
         grafted_mmr.apply_batch(&batch)?;
     }

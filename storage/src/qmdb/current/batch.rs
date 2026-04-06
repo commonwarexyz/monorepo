@@ -46,14 +46,14 @@ pub(crate) struct ClearSet<const N: usize> {
 }
 
 impl<const N: usize> ClearSet<N> {
-    pub(super) fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             locations: Vec::with_capacity(capacity),
             masks: BTreeMap::new(),
         }
     }
 
-    fn push(&mut self, loc: Location) {
+    pub(crate) fn push(&mut self, loc: Location) {
         self.locations.push(loc);
         let chunk_idx = BitMap::<N>::to_chunk_index(*loc);
         let rel = (*loc % BitMap::<N>::CHUNK_SIZE_BITS) as usize;
@@ -61,7 +61,7 @@ impl<const N: usize> ClearSet<N> {
         chunk[rel / 8] |= 1 << (rel % 8);
     }
 
-    pub(super) fn merge(&mut self, other: &Self) {
+    pub(crate) fn merge(&mut self, other: &Self) {
         self.locations.extend_from_slice(&other.locations);
         for (&idx, other_mask) in &other.masks {
             let chunk = self.masks.entry(idx).or_insert([0u8; N]);
@@ -71,15 +71,15 @@ impl<const N: usize> ClearSet<N> {
         }
     }
 
-    const fn is_empty(&self) -> bool {
+    pub(crate) const fn is_empty(&self) -> bool {
         self.locations.is_empty()
     }
 
-    fn locations(&self) -> &[Location] {
+    pub(crate) fn locations(&self) -> &[Location] {
         &self.locations
     }
 
-    fn mask(&self, idx: usize) -> Option<&[u8; N]> {
+    pub(crate) fn mask(&self, idx: usize) -> Option<&[u8; N]> {
         self.masks.get(&idx)
     }
 }
@@ -424,11 +424,13 @@ where
     pub(crate) canonical_root: D,
 
     /// Arc refs to each ancestor's bitmap pushes, collected during
-    /// `compute_current_layer()` while the parent is alive.
+    /// `compute_current_layer()` while the parent is alive. Parent-first order
+    /// (matching `ancestor_seg_ends`).
     pub(crate) ancestor_bitmap_pushes: Vec<Arc<Vec<bool>>>,
 
     /// Arc refs to each ancestor's bitmap clears, collected during
-    /// `compute_current_layer()` while the parent is alive.
+    /// `compute_current_layer()` while the parent is alive. Parent-first order
+    /// (matching `ancestor_seg_ends`).
     pub(crate) ancestor_bitmap_clears: Vec<Arc<ClearSet<N>>>,
 }
 
@@ -734,7 +736,7 @@ where
             }
         }
         let gh = grafting::GraftedHasher::new(hasher.clone(), grafting_height);
-        grafted_batch.merkleize(&gh, &current_db.grafted_mmr)
+        grafted_batch.merkleize(&current_db.grafted_mmr, &gh)
     };
 
     // 7. Compute canonical root. The grafted batch alone cannot resolve committed nodes,
@@ -763,8 +765,7 @@ where
 
     // Collect ancestor bitmap data by walking the Weak parent chain. Dead refs
     // truncate the walk (committed-and-dropped ancestors are skipped). The walk
-    // yields tip-to-root order; reverse to root-to-tip so that apply_batch
-    // concatenates pushes in the correct positional order.
+    // yields parent-first order, matching ancestor_seg_ends.
     let mut ancestor_bitmap_pushes = Vec::new();
     let mut ancestor_bitmap_clears = Vec::new();
     let mut current = parent.as_ref().and_then(Weak::upgrade);
@@ -773,8 +774,6 @@ where
         ancestor_bitmap_clears.push(Arc::clone(&batch.bitmap_clears));
         current = batch.parent.as_ref().and_then(Weak::upgrade);
     }
-    ancestor_bitmap_pushes.reverse();
-    ancestor_bitmap_clears.reverse();
 
     Ok(Arc::new(MerkleizedBatch {
         inner,
@@ -879,10 +878,10 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
 }
 
 impl<const N: usize> BitmapBatch<N> {
-    /// Push a changeset as a new layer on top of this bitmap, mutating `self` in place.
+    /// Push a batch as a new layer on top of this bitmap, mutating `self` in place.
     ///
     /// The old value becomes the parent of the new layer.
-    pub(super) fn push_changeset(&mut self, pushed_bits: Vec<bool>, clears: ClearSet<N>) {
+    pub(super) fn push_batch(&mut self, pushed_bits: Vec<bool>, clears: ClearSet<N>) {
         if pushed_bits.is_empty() && clears.is_empty() {
             return;
         }

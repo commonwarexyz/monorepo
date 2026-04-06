@@ -448,7 +448,7 @@ pub(crate) mod test {
     }
 
     #[test_traced]
-    fn test_stale_changeset_rejected() {
+    fn test_stale_batch_rejected() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
@@ -495,7 +495,7 @@ pub(crate) mod test {
     /// Sibling batches with different operation counts are still detected
     /// as stale.
     #[test_traced]
-    fn test_stale_changeset_rejected_different_sizes() {
+    fn test_stale_batch_rejected_different_sizes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
@@ -582,7 +582,7 @@ pub(crate) mod test {
     }
 
     #[test_traced]
-    fn test_stale_changeset_chained() {
+    fn test_stale_batch_chained() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
@@ -671,7 +671,7 @@ pub(crate) mod test {
     }
 
     #[test_traced]
-    fn test_stale_changeset_child_applied_before_parent() {
+    fn test_stale_batch_child_applied_before_parent() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;

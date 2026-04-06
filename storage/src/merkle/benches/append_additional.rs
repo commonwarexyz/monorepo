@@ -40,7 +40,7 @@ fn bench_append_additional_family<F: Family>(c: &mut Criterion, family: &str) {
                                     for digest in &elements {
                                         batch = batch.add(&h, digest);
                                     }
-                                    batch.merkleize(&h, &mem)
+                                    batch.merkleize(&mem, &h)
                                 };
                                 mem.apply_batch(&batch).unwrap();
                             });
@@ -53,7 +53,7 @@ fn bench_append_additional_family<F: Family>(c: &mut Criterion, family: &str) {
                                 for digest in &additional {
                                     batch = batch.add(&h, digest);
                                 }
-                                batch.merkleize(&h, &mem);
+                                batch.merkleize(&mem, &h);
                             });
                         },
                         criterion::BatchSize::SmallInput,

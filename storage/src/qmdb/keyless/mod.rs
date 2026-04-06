@@ -866,7 +866,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_stale_changeset<F: Family, V, C, H>(
+    pub(crate) async fn test_keyless_stale_batch<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1503,7 +1503,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_stale_changeset_chained<F: Family, V, C>(
+    pub(crate) async fn test_keyless_stale_batch_chained<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -1554,7 +1554,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_stale_changeset_child_before_parent<F: Family, V, C>(
+    pub(crate) async fn test_keyless_stale_batch_child_before_parent<F: Family, V, C>(
         mut db: Keyless<F, deterministic::Context, V, C, Sha256>,
     ) where
         V: ValueEncoding<Value: TestValue>,

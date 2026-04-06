@@ -1700,7 +1700,7 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_immutable_stale_changeset_rejected<F: Family, V, C>(
+    pub(crate) async fn test_immutable_stale_batch_rejected<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1744,7 +1744,7 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_immutable_stale_changeset_chained<F: Family, V, C>(
+    pub(crate) async fn test_immutable_stale_batch_chained<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1904,11 +1904,7 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_immutable_stale_changeset_child_applied_before_parent<
-        F: Family,
-        V,
-        C,
-    >(
+    pub(crate) async fn test_immutable_stale_batch_child_applied_before_parent<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,

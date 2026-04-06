@@ -590,7 +590,7 @@ where
         let ops = Arc::new(ops);
         let journal = db
             .log
-            .with_mem(|base| self.journal_batch.merkleize_with(ops, base));
+            .with_mem(|base| self.journal_batch.merkleize_with(base, ops));
 
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
         let ancestor_seg_ends: Vec<_> = self.ancestors.iter().map(|a| a.total_size).collect();

@@ -98,7 +98,7 @@ fn historical_root<F: MerkleFamily>(
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
             batch = batch.add(&hasher, element);
         }
-        batch.merkleize(&hasher, &mem)
+        batch.merkleize(&mem, &hasher)
     };
     mem.apply_batch(&batch).unwrap();
     *mem.root()
@@ -141,7 +141,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let batch = merkle.new_batch();
                         let loc = batch.leaves();
                         let batch = merkle.with_mem(|mem| {
-                            batch.add(&hasher, limited_data).merkleize(&hasher, mem)
+                            batch.add(&hasher, limited_data).merkleize(mem, &hasher)
                         });
                         merkle.apply_batch(&batch).unwrap();
                         leaves.push(limited_data.to_vec());
@@ -177,7 +177,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                             }
                             (
                                 locations,
-                                merkle.with_mem(|mem| batch.merkleize(&hasher, mem)),
+                                merkle.with_mem(|mem| batch.merkleize(mem, &hasher)),
                             )
                         };
                         merkle.apply_batch(&batch).unwrap();

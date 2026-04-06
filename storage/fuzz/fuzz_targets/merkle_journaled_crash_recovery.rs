@@ -130,7 +130,7 @@ async fn run_operations<F: MerkleFamily>(
         let failed = match op {
             MerkleOperation::Add { data } => {
                 let batch = merkle
-                    .with_mem(|mem| merkle.new_batch().add(hasher, data).merkleize(hasher, mem));
+                    .with_mem(|mem| merkle.new_batch().add(hasher, data).merkleize(mem, hasher));
                 merkle.apply_batch(&batch).unwrap();
                 max_size = max_size.max(merkle.size().as_u64());
                 max_leaves = max_leaves.max(merkle.leaves().as_u64());
@@ -332,7 +332,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             merkle
                 .new_batch()
                 .add(&hasher, &test_data)
-                .merkleize(&hasher, mem)
+                .merkleize(mem, &hasher)
         });
         merkle.apply_batch(&batch).unwrap();
         merkle.destroy().await.expect("should be able to destroy");

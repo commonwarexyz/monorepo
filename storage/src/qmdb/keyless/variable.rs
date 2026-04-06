@@ -278,18 +278,18 @@ mod test {
     }
 
     #[test_traced]
-    fn test_keyless_stale_changeset() {
+    fn test_keyless_stale_batch() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_stale_changeset(db).await;
+            tests::test_keyless_stale_batch(db).await;
         });
     }
 
     #[test_traced]
-    fn test_stale_changeset_chained() {
+    fn test_stale_batch_chained() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_stale_changeset_chained(db).await;
+            tests::test_keyless_stale_batch_chained(db).await;
         });
     }
 
@@ -302,10 +302,10 @@ mod test {
     }
 
     #[test_traced]
-    fn test_stale_changeset_child_applied_before_parent() {
+    fn test_stale_batch_child_applied_before_parent() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_stale_changeset_child_before_parent(db).await;
+            tests::test_keyless_stale_batch_child_before_parent(db).await;
         });
     }
 
@@ -529,18 +529,18 @@ mod test {
     }
 
     #[test_traced]
-    fn test_keyless_stale_changeset_mmb() {
+    fn test_keyless_stale_batch_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_stale_changeset(db).await;
+            tests::test_keyless_stale_batch(db).await;
         });
     }
 
     #[test_traced]
-    fn test_stale_changeset_chained_mmb() {
+    fn test_stale_batch_chained_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_stale_changeset_chained(db).await;
+            tests::test_keyless_stale_batch_chained(db).await;
         });
     }
 
@@ -553,10 +553,10 @@ mod test {
     }
 
     #[test_traced]
-    fn test_stale_changeset_child_applied_before_parent_mmb() {
+    fn test_stale_batch_child_applied_before_parent_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmb::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_stale_changeset_child_before_parent(db).await;
+            tests::test_keyless_stale_batch_child_before_parent(db).await;
         });
     }
 

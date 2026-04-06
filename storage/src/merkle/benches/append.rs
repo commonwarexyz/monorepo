@@ -31,7 +31,7 @@ fn bench_append_family<F: Family>(c: &mut Criterion, family: &str) {
                         for digest in &elements {
                             batch = batch.add(&h, digest);
                         }
-                        batch.merkleize(&h, &mem)
+                        batch.merkleize(&mem, &h)
                     };
                     mem.apply_batch(&batch).unwrap();
                     mem

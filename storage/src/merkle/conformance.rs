@@ -24,7 +24,7 @@ where
             let element = hasher.digest(&i.to_be_bytes());
             batch = batch.add(hasher, &element);
         }
-        batch.merkleize(hasher, &mem)
+        batch.merkleize(&mem, hasher)
     };
     mem.apply_batch(&batch).unwrap();
     mem

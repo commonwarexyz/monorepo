@@ -217,7 +217,6 @@ where
             for batch in parent.ancestors() {
                 ancestor_seg_ends.push(batch.total_size);
             }
-            ancestor_seg_ends.reverse();
         }
 
         Arc::new(MerkleizedBatch {

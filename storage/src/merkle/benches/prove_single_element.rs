@@ -28,7 +28,7 @@ fn bench_prove_single_element_family<F: Family>(c: &mut Criterion, family: &str)
                     batch = batch.add(&hasher, &element);
                     elements.push((i, element));
                 }
-                batch.merkleize(&hasher, &mem)
+                batch.merkleize(&mem, &hasher)
             };
             mem.apply_batch(&batch).unwrap();
         });

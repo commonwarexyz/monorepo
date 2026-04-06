@@ -151,7 +151,7 @@ mod tests {
                 batch = batch.add(&hasher, &digest);
                 positions.push(Position::try_from(loc).unwrap());
             }
-            (batch.merkleize(&hasher, &mmr), positions)
+            (batch.merkleize(&mmr, &hasher), positions)
         };
         mmr.apply_batch(&batch).unwrap();
 
@@ -212,7 +212,7 @@ mod tests {
             let batch = mmr
                 .new_batch()
                 .add(&hasher, &digest)
-                .merkleize(&hasher, &mmr);
+                .merkleize(&mmr, &hasher);
             mmr.apply_batch(&batch).unwrap();
         }
     }

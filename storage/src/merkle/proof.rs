@@ -834,7 +834,7 @@ mod tests {
             for i in 0..n {
                 batch = batch.add(hasher, &i.to_be_bytes());
             }
-            batch.merkleize(hasher, &mem)
+            batch.merkleize(&mem, hasher)
         };
         mem.apply_batch(&batch).unwrap();
         mem
@@ -869,7 +869,7 @@ mod tests {
             for _ in 0..11 {
                 batch = batch.add(&hasher, &element);
             }
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
         let root = mem.root();
@@ -959,7 +959,7 @@ mod tests {
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
         let root = mem.root();
@@ -1068,7 +1068,7 @@ mod tests {
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
 
@@ -1106,7 +1106,7 @@ mod tests {
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
 
@@ -1143,7 +1143,7 @@ mod tests {
             for element in &new_elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
         elements.extend(new_elements);
@@ -1174,7 +1174,7 @@ mod tests {
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
 
@@ -1241,7 +1241,7 @@ mod tests {
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
 
@@ -1396,7 +1396,7 @@ mod tests {
             for element in &elements {
                 batch = batch.add(&hasher, element);
             }
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
 
@@ -1446,7 +1446,7 @@ mod tests {
             for e in &elements {
                 batch = batch.add(&hasher, e);
             }
-            batch.merkleize(&hasher, &mem)
+            batch.merkleize(&mem, &hasher)
         };
         mem.apply_batch(&batch).unwrap();
         let root = mem.root();

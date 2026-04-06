@@ -361,7 +361,7 @@ mod tests {
                         leaf_hasher.hash([chunk.as_ref(), ops_subtree_root.as_ref()]),
                     );
                 }
-                batch.merkleize(&grafted_hasher, &grafted_mmr)
+                batch.merkleize(&grafted_mmr, &grafted_hasher)
             };
             grafted_mmr.apply_batch(&batch).unwrap();
         }
@@ -512,7 +512,7 @@ mod tests {
             for i in 0u8..4 {
                 batch = batch.add(&standard, &Sha256::fill(i));
             }
-            batch.merkleize(&standard, &ops_mmr)
+            batch.merkleize(&ops_mmr, &standard)
         };
         ops_mmr.apply_batch(&batch).unwrap();
 
@@ -535,7 +535,7 @@ mod tests {
             let sub1 = ops_mmr.get_node(pos1).unwrap();
             batch
                 .add_leaf_digest(leaf_hasher.hash([c2.as_ref(), sub1.as_ref()]))
-                .merkleize(&grafted_hasher, &grafted)
+                .merkleize(&grafted, &grafted_hasher)
         };
         grafted.apply_batch(&batch).unwrap();
 
@@ -569,7 +569,7 @@ mod tests {
                 batch = batch.add(&hasher, &b2);
                 batch = batch.add(&hasher, &b3);
                 batch = batch.add(&hasher, &b4);
-                batch.merkleize(&hasher, &ops_mmr)
+                batch.merkleize(&ops_mmr, &hasher)
             };
 
             ops_mmr.apply_batch(&batch).unwrap();
@@ -702,7 +702,7 @@ mod tests {
             let batch = {
                 let mut batch = ops_mmr.new_batch();
                 batch = batch.add(&hasher, &b5);
-                batch.merkleize(&hasher, &ops_mmr)
+                batch.merkleize(&ops_mmr, &hasher)
             };
 
             ops_mmr.apply_batch(&batch).unwrap();
@@ -758,7 +758,7 @@ mod tests {
             .new_batch()
             .add_leaf_digest(d0)
             .add_leaf_digest(d1)
-            .merkleize(&grafted_hasher, &grafted);
+            .merkleize(&grafted, &grafted_hasher);
         grafted.apply_batch(&batch).unwrap();
 
         // Check that grafted leaves are retrievable via grafted-space positions.
@@ -802,7 +802,7 @@ mod tests {
         let batch = grafted
             .new_batch()
             .add_leaf_digest(d4)
-            .merkleize(&grafted_hasher, &grafted);
+            .merkleize(&grafted, &grafted_hasher);
         grafted.apply_batch(&batch).unwrap();
 
         // The pinned peak should be at grafted position 6.

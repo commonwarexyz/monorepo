@@ -361,7 +361,7 @@ mod tests {
             let batch = {
                 let mut batch = mmr.new_batch();
                 batch = batch.add(&hasher, &digest);
-                batch.merkleize(&hasher, &mmr)
+                batch.merkleize(&mmr, &hasher)
             };
             mmr.apply_batch(&batch).unwrap();
             size_to_check += 1;

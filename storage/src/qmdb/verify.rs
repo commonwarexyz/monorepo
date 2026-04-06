@@ -151,7 +151,7 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            let batch = batch.merkleize(&hasher, &merkle);
+            let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
@@ -220,7 +220,7 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            let batch = batch.merkleize(&hasher, &merkle);
+            let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
         let start_loc = Location::<F>::new(5u64);
@@ -266,7 +266,7 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            let batch = batch.merkleize(&hasher, &merkle);
+            let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
@@ -322,7 +322,7 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            let batch = batch.merkleize(&hasher, &merkle);
+            let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
@@ -378,7 +378,7 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            let batch = batch.merkleize(&hasher, &merkle);
+            let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
         let range = Location::<F>::new(0)..Location::<F>::new(2);
@@ -420,7 +420,7 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            let batch = batch.merkleize(&hasher, &merkle);
+            let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
@@ -482,7 +482,7 @@ mod tests {
             for op in &operations {
                 batch = batch.add(&hasher, &op.encode());
             }
-            let batch = batch.merkleize(&hasher, &merkle);
+            let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
@@ -566,7 +566,7 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            let batch = batch.merkleize(&hasher, &merkle);
+            let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
@@ -653,7 +653,7 @@ mod tests {
             for op in &operations {
                 batch = batch.add(&hasher, &op.encode());
             }
-            let batch = batch.merkleize(&hasher, &merkle);
+            let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();
@@ -692,7 +692,7 @@ mod tests {
                 let encoded = op.encode();
                 batch = batch.add(&hasher, &encoded);
             }
-            let batch = batch.merkleize(&hasher, &merkle);
+            let batch = batch.merkleize(&merkle, &hasher);
             merkle.apply_batch(&batch).unwrap();
         }
         let root = merkle.root();

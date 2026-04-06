@@ -88,7 +88,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
         self,
         base: &merkle::mem::Mem<F, H::Digest>,
     ) -> Arc<MerkleizedBatch<F, H::Digest, Item>> {
-        let merkle = self.inner.merkleize(&self.hasher, base);
+        let merkle = self.inner.merkleize(base, &self.hasher);
         let ancestor_items = Self::collect_ancestor_items(&self.parent);
         Arc::new(MerkleizedBatch {
             inner: merkle,
@@ -110,8 +110,8 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
     /// Panics if items were previously added via [`add`](Self::add).
     pub(crate) fn merkleize_with(
         mut self,
-        items: Arc<Vec<Item>>,
         base: &merkle::mem::Mem<F, H::Digest>,
+        items: Arc<Vec<Item>>,
     ) -> Arc<MerkleizedBatch<F, H::Digest, Item>> {
         assert!(
             self.items.is_empty(),
@@ -121,7 +121,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
             let encoded = item.encode();
             self.inner = self.inner.add(&self.hasher, &encoded);
         }
-        let merkle = self.inner.merkleize(&self.hasher, base);
+        let merkle = self.inner.merkleize(base, &self.hasher);
         let ancestor_items = Self::collect_ancestor_items(&self.parent);
         Arc::new(MerkleizedBatch {
             inner: merkle,
@@ -372,7 +372,7 @@ where
                     }
                     batch
                 };
-                let batch = merkle.with_mem(|mem| batch.merkleize(hasher, mem));
+                let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
                 merkle.apply_batch(&batch)?;
             }
             return Ok(());
@@ -393,7 +393,7 @@ where
         let unmerkleized_batch = self.merkle.new_batch().add(&self.hasher, &encoded_item);
         let batch = self
             .merkle
-            .with_mem(|mem| unmerkleized_batch.merkleize(&self.hasher, mem));
+            .with_mem(|mem| unmerkleized_batch.merkleize(mem, &self.hasher));
         self.merkle.apply_batch(&batch)?;
 
         Ok(Location::new(loc))
@@ -970,7 +970,7 @@ mod tests {
                 }
                 batch
             };
-            let batch = merkle.with_mem(|mem| batch.merkleize(&hasher, mem));
+            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
             merkle.apply_batch(&batch).unwrap();
         }
 
@@ -2545,7 +2545,7 @@ mod tests {
         let batch = journal.new_batch();
         let actual = journal
             .merkle
-            .with_mem(|mem| batch.merkleize_with(Arc::new(ops), mem));
+            .with_mem(|mem| batch.merkleize_with(mem, Arc::new(ops)));
 
         assert_eq!(actual.root(), expected.root());
     }
@@ -2570,7 +2570,7 @@ mod tests {
         let batch = journal.new_batch();
         let merkleized = journal
             .merkle
-            .with_mem(|mem| batch.merkleize_with(Arc::new(ops.clone()), mem));
+            .with_mem(|mem| batch.merkleize_with(mem, Arc::new(ops.clone())));
 
         let expected_root = merkleized.root();
         journal.apply_batch(&merkleized).await.unwrap();
@@ -2605,7 +2605,7 @@ mod tests {
         let batch = journal.new_batch();
         let merkleized = journal
             .merkle
-            .with_mem(|mem| batch.merkleize_with(ops_clone, mem));
+            .with_mem(|mem| batch.merkleize_with(mem, ops_clone));
 
         // The batch should hold the same Arc allocation, not a copy.
         assert!(Arc::ptr_eq(&merkleized.items, &ops));

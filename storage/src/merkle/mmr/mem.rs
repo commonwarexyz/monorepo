@@ -33,7 +33,7 @@ mod tests {
                     let mut batch = mmr.new_batch();
                     leaves.push(batch.leaves());
                     batch = batch.add(&hasher, &element);
-                    batch.merkleize(&hasher, &mmr)
+                    batch.merkleize(&mmr, &hasher)
                 };
                 mmr.apply_batch(&batch).unwrap();
                 let peaks: Vec<(Position, u32)> = mmr.peak_iterator().collect();
@@ -137,7 +137,7 @@ mod tests {
                     let element = hasher.digest(&i.to_be_bytes());
                     batch = batch.add(&hasher, &element);
                 }
-                batch.merkleize(&hasher, &batched_mmr)
+                batch.merkleize(&batched_mmr, &hasher)
             };
             batched_mmr.apply_batch(&batch).unwrap();
 
@@ -179,7 +179,7 @@ mod tests {
                     let element = hasher.digest(&i.to_be_bytes());
                     batch = batch.add(&hasher, &element);
                 }
-                batch.merkleize(&hasher, &mmr)
+                batch.merkleize(&mmr, &hasher)
             };
             mmr.apply_batch(&batch).unwrap();
             assert_eq!(
@@ -237,7 +237,7 @@ mod tests {
                 for i in 0u64..64 {
                     batch = batch.add(&hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&hasher, &mmr)
+                batch.merkleize(&mmr, &hasher)
             };
             mmr.apply_batch(&batch).unwrap();
             assert_eq!(mmr.size(), 127);
@@ -260,7 +260,7 @@ mod tests {
                 for i in 0u64..11 {
                     batch = batch.add(&hasher, &i.to_be_bytes());
                 }
-                batch.merkleize(&hasher, &mmr)
+                batch.merkleize(&mmr, &hasher)
             };
             mmr.apply_batch(&batch).unwrap();
             mmr.prune(Location::new(4)).unwrap();

@@ -893,10 +893,10 @@ pub mod tests {
         });
     }
 
-    /// Run `test_stale_changeset_side_effect_free` against a database factory.
+    /// Run `test_stale_batch_side_effect_free` against a database factory.
     ///
     /// The stale batch must be rejected without mutating the committed state.
-    pub fn test_stale_changeset_side_effect_free<C, F, Fut>(mut open_db: F)
+    pub fn test_stale_batch_side_effect_free<C, F, Fut>(mut open_db: F)
     where
         C: DbAny<mmr::Family>,
         C::Key: TestKey,
@@ -1105,10 +1105,10 @@ pub mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_all_variants_stale_changeset_side_effect_free() {
+    fn test_all_variants_stale_batch_side_effect_free() {
         let executor = deterministic::Runner::default();
         executor.start(|_context| async move {
-            for_all_variants!(simple: test_stale_changeset_side_effect_free);
+            for_all_variants!(simple: test_stale_batch_side_effect_free);
         });
     }
 
@@ -2450,10 +2450,9 @@ pub mod tests {
         });
     }
 
-    /// Regression: bitmap ancestor data is root-to-tip but ancestor_seg_ends is
-    /// parent-first. Without reversing the index, the wrong segment is skipped and
-    /// the bitmap diverges from the expected state. Requires a 3-ancestor chain
-    /// (A->B->C->D) to expose the ordering mismatch.
+    /// Regression: bitmap ancestor skip logic must correctly pair each ancestor's
+    /// bitmap data with its seg_end. Requires a 3-ancestor chain (A->B->C->D)
+    /// to expose ordering bugs.
     #[test_traced("INFO")]
     fn test_current_partial_ancestor_bitmap_ordering() {
         let executor = deterministic::Runner::default();
@@ -2492,9 +2491,7 @@ pub mod tests {
 
             // Apply A only, then apply D (B and C uncommitted).
             // D has 3 ancestors: [C, B, A] (parent-first) with seg_ends [C.total, B.total, A.total].
-            // Bitmap ancestors are [A, B, C] (root-to-tip after reverse).
-            // Without the reversed index, index 0 of bitmap (A's pushes) would be checked
-            // against seg_ends[0] (C's total_size) -- wrong ancestor, wrong skip decision.
+            // Bitmap ancestors are also parent-first: [C, B, A].
             db.apply_batch(a).await.unwrap();
             db.apply_batch(d.clone()).await.unwrap();
 
