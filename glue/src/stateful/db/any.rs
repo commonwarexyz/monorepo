@@ -313,7 +313,7 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<mmr::Family>> {
         self.apply_batch(batch.inner).await?;
-        self.commit().await?;
+        self.sync().await?;
         Ok(())
     }
 
@@ -330,7 +330,7 @@ where
         target: Self::SyncTarget,
     ) -> Result<(), Error<mmr::Family>> {
         self.rewind(target.range.end()).await?;
-        self.commit().await?;
+        self.sync().await?;
 
         let rewound_target = self.sync_target().await;
         assert_eq!(
@@ -395,7 +395,7 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<mmr::Family>> {
         self.apply_batch(batch.inner).await?;
-        self.commit().await?;
+        self.sync().await?;
         Ok(())
     }
 
@@ -412,7 +412,7 @@ where
         target: Self::SyncTarget,
     ) -> Result<(), Error<mmr::Family>> {
         self.rewind(target.range.end()).await?;
-        self.commit().await?;
+        self.sync().await?;
 
         let rewound_target = self.sync_target().await;
         assert_eq!(
