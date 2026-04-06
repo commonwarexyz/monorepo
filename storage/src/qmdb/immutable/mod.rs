@@ -456,9 +456,6 @@ where
         let bounds = self.journal.reader().await.bounds();
         let mut seen = BTreeSet::new();
         for (key, entry) in batch.diff.iter() {
-            if *entry.loc < db_size {
-                continue;
-            }
             seen.insert(key.clone());
             self.snapshot
                 .insert_and_prune(key, entry.loc, |v| *v < bounds.start);

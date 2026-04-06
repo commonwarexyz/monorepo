@@ -1259,9 +1259,6 @@ where
         // 3. Apply child's diff (child wins via seen set).
         let mut seen = BTreeSet::<&U::Key>::new();
         for (key, entry) in batch.diff.iter() {
-            if entry.loc().is_some_and(|loc| *loc < db_size) {
-                continue;
-            }
             seen.insert(key);
             let base_old_loc = committed_locs
                 .get(key)
