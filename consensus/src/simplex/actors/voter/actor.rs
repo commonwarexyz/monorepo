@@ -859,6 +859,9 @@ impl<
                     let view = round.view();
                     debug!(%view, "attempting certification");
                     let result = if self.state.proposed_locally(view) {
+                        // The proposer should always be willing to certify their own
+                        // proposals. Reaching out to the automaton is unnecessary and
+                        // creates duplicate work.
                         Either::Left(ready(Ok(true)))
                     } else {
                         let receiver = self.automaton.certify(round, proposal.payload).await;
