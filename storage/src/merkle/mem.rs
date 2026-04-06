@@ -425,10 +425,17 @@ impl<F: Family, D: Digest> Mem<F, D> {
     ///
     /// Use when staleness has been verified externally and the batch has
     /// no new appended nodes (only overwrites).
+    #[cfg(feature = "std")]
     pub(crate) fn apply_overwrites(&mut self, batch: &batch::MerkleizedBatch<F, D>) {
         assert!(
             batch.appended.is_empty(),
             "apply_overwrites called on batch with appended nodes"
+        );
+        assert!(
+            self.size() == batch.size(),
+            "apply_overwrites: size mismatch (self={:?}, batch={:?})",
+            self.size(),
+            batch.size(),
         );
         for (&pos, &digest) in batch.overwrites.iter() {
             if pos < self.pruning_boundary {
