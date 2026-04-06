@@ -592,8 +592,20 @@ where
             .log
             .with_mem(|base| self.journal_batch.merkleize_with(base, ops));
 
-        let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
-        let ancestor_seg_ends: Vec<_> = self.ancestors.iter().map(|a| a.total_size).collect();
+        // Build ancestor diffs/seg_ends from the parent's stored values (which were
+        // captured when the parent was merkleized and its own ancestors were alive).
+        // This avoids relying on the Weak chain which may be truncated.
+        // Parent-first order: nearest ancestor first, so `seen` gives nearest precedence.
+        let (ancestor_diffs, ancestor_seg_ends) = self.ancestors.first().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |parent| {
+                let mut diffs = vec![Arc::clone(&parent.diff)];
+                diffs.extend(parent.ancestor_diffs.iter().cloned());
+                let mut seg_ends = vec![parent.total_size];
+                seg_ends.extend(parent.ancestor_seg_ends.iter().copied());
+                (diffs, seg_ends)
+            },
+        );
 
         debug_assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(Arc::new(MerkleizedBatch {

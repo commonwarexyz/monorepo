@@ -191,15 +191,13 @@ where
         }
         let journal_merkleized = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
-        let mut ancestor_diffs = Vec::new();
-        let mut ancestor_seg_ends = Vec::new();
+        let (mut ancestor_diffs, mut ancestor_seg_ends) = self.parent.as_ref().map_or_else(
+            || (Vec::new(), Vec::new()),
+            |p| (p.ancestor_diffs.clone(), p.ancestor_seg_ends.clone()),
+        );
         if let Some(parent) = &self.parent {
             ancestor_diffs.push(Arc::clone(&parent.diff));
             ancestor_seg_ends.push(parent.total_size);
-            for batch in parent.ancestors() {
-                ancestor_diffs.push(Arc::clone(&batch.diff));
-                ancestor_seg_ends.push(batch.total_size);
-            }
         }
 
         Arc::new(MerkleizedBatch {

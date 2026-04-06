@@ -1083,6 +1083,42 @@ mod tests {
         assert_eq!(mem.root(), reference.root());
     }
 
+    /// Dropping an uncommitted ancestor before merkleizing a descendant must not
+    /// lose the ancestor's data. The descendant's ancestor segments should be
+    /// complete regardless of Weak chain liveness.
+    fn apply_batch_after_ancestor_dropped<F: Family>() {
+        let hasher: H = Standard::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
+
+        // Chain: Mem -> A -> B -> C
+        let a = mem.new_batch().add(&hasher, b"a").merkleize(&mem, &hasher);
+        let b = a.new_batch().add(&hasher, b"b").merkleize(&mem, &hasher);
+        drop(a); // A freed — B.parent Weak<A> is now dead
+        let c = b.new_batch().add(&hasher, b"c").merkleize(&mem, &hasher);
+
+        // Apply C directly. A's data should be present via B's stored ancestors.
+        mem.apply_batch(&c).unwrap();
+
+        // Verify against a reference that applied all three sequentially.
+        let mut reference = Mem::<F, D>::new(&hasher);
+        let full = {
+            let mut batch = reference.new_batch();
+            for leaf in [b"a".as_slice(), b"b", b"c"] {
+                batch = batch.add(&hasher, leaf);
+            }
+            batch.merkleize(&reference, &hasher)
+        };
+        reference.apply_batch(&full).unwrap();
+
+        // Check size (not just root — root is set unconditionally and masks data loss).
+        assert_eq!(
+            mem.size(),
+            reference.size(),
+            "size mismatch: ancestor data was lost"
+        );
+        assert_eq!(mem.root(), reference.root());
+    }
+
     // --- MMR tests ---
 
     #[test]
@@ -1168,6 +1204,10 @@ mod tests {
     #[test]
     fn mmr_apply_batch_skips_only_committed_ancestors() {
         apply_batch_skips_only_committed_ancestors::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_apply_batch_after_ancestor_dropped() {
+        apply_batch_after_ancestor_dropped::<crate::mmr::Family>();
     }
 
     // --- MMB tests ---
@@ -1255,5 +1295,9 @@ mod tests {
     #[test]
     fn mmb_apply_batch_skips_only_committed_ancestors() {
         apply_batch_skips_only_committed_ancestors::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_after_ancestor_dropped() {
+        apply_batch_after_ancestor_dropped::<crate::mmb::Family>();
     }
 }

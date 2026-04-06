@@ -33,19 +33,19 @@
 //! # Parent chain and memory
 //!
 //! Each [`MerkleizedBatch`] stores its own local data (appended nodes and overwrites)
-//! plus `Arc` refs to each ancestor's data, collected during
-//! [`UnmerkleizedBatch::merkleize`]. These ancestor segments are used by
-//! [`Mem::apply_batch`] to replay uncommitted ancestors without requiring the
-//! ancestor batches to still be alive.
+//! plus `Arc` refs to each ancestor's data. These ancestor segments are inherited
+//! from the parent's stored segments during [`UnmerkleizedBatch::merkleize`], so
+//! they are always complete regardless of whether ancestors have been dropped.
+//! [`Mem::apply_batch`] uses these segments to replay uncommitted ancestors without
+//! requiring the ancestor batches to still be alive.
 //!
 //! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
-//! (used during a child's merkleize) and for walking the chain to collect ancestor
-//! segments. Committed-and-dropped ancestors truncate the `Weak` walk, but their
-//! data is already captured in `ancestor_appended` / `ancestor_overwrites`.
+//! (used during a child's merkleize to resolve sibling nodes in the parent chain).
 //!
-//! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`
-//! (keeping it alive for the walk), and the `Weak` chain is walked to collect
-//! ancestor data. After merkleize, the parent is downgraded to `Weak`.
+//! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`.
+//! The child's ancestor segments are built from the parent's stored
+//! `ancestor_appended` / `ancestor_overwrites` plus the parent's own data.
+//! After merkleize, the parent `Arc` is downgraded to `Weak`.
 //!
 //! In a pipelining pattern (build next batch from prev, apply prev, repeat), each batch
 //! holds at most one ancestor segment (its immediate parent's data, as an `Arc` ref).
@@ -318,7 +318,7 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
             .collect();
         let root = hasher.root(leaves, peaks.iter());
 
-        // Collect ancestor segments by walking the parent chain (strong Arc + Weak walk).
+        // Inherit ancestor segments from the parent's stored data + the parent's own data.
         let (ancestor_appended, ancestor_overwrites) = collect_ancestor_segments(&self.parent);
 
         let parent_size = self.parent.size();
@@ -419,34 +419,25 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
     }
 }
 
-/// Collect ancestor segments by walking the parent + its Weak chain.
+/// Collect ancestor segments from the parent's stored data.
 /// Returns (appended, overwrites) in root-to-tip order. Skips empty segments
 /// (e.g. root batches from `from_mem`).
+///
+/// Uses the parent's already-collected `ancestor_appended`/`ancestor_overwrites`
+/// (which were captured when the parent was merkleized and its own ancestors were
+/// alive), then appends the parent's own data. No Weak walk needed.
 #[allow(clippy::type_complexity)]
 fn collect_ancestor_segments<F: Family, D: Digest>(
     parent: &Arc<MerkleizedBatch<F, D>>,
 ) -> (Vec<Arc<Vec<D>>>, Vec<Arc<BTreeMap<Position<F>, D>>>) {
-    let mut appended = Vec::new();
-    let mut overwrites = Vec::new();
+    let mut appended = parent.ancestor_appended.clone();
+    let mut overwrites = parent.ancestor_overwrites.clone();
 
-    // Parent is alive (strong Arc held by UnmerkleizedBatch).
     if !parent.appended.is_empty() || !parent.overwrites.is_empty() {
         appended.push(Arc::clone(&parent.appended));
         overwrites.push(Arc::clone(&parent.overwrites));
     }
 
-    // Walk Weak chain for grandparents+.
-    let mut current = parent.parent.as_ref().and_then(Weak::upgrade);
-    while let Some(batch) = current {
-        if !batch.appended.is_empty() || !batch.overwrites.is_empty() {
-            appended.push(Arc::clone(&batch.appended));
-            overwrites.push(Arc::clone(&batch.overwrites));
-        }
-        current = batch.parent.as_ref().and_then(Weak::upgrade);
-    }
-
-    appended.reverse();
-    overwrites.reverse();
     (appended, overwrites)
 }
 

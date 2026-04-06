@@ -405,9 +405,6 @@ where
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
     pub(crate) inner: Arc<any::batch::MerkleizedBatch<mmr::Family, D, U>>,
 
-    /// The parent batch in the chain, if any.
-    pub(crate) parent: Option<Weak<Self>>,
-
     /// This batch's local bitmap pushes.
     pub(crate) bitmap_pushes: Arc<Vec<bool>>,
 
@@ -763,21 +760,20 @@ where
         clears: Arc::clone(&clears),
     }));
 
-    // Collect ancestor bitmap data by walking the Weak parent chain. Dead refs
-    // truncate the walk (committed-and-dropped ancestors are skipped). The walk
-    // yields parent-first order, matching ancestor_seg_ends.
+    // Collect ancestor bitmap data from the parent's stored segments (which were
+    // captured when the parent was merkleized and its own ancestors were alive).
+    // Parent-first order (matching ancestor_seg_ends).
     let mut ancestor_bitmap_pushes = Vec::new();
     let mut ancestor_bitmap_clears = Vec::new();
-    let mut current = parent.as_ref().and_then(Weak::upgrade);
-    while let Some(batch) = current {
-        ancestor_bitmap_pushes.push(Arc::clone(&batch.bitmap_pushes));
-        ancestor_bitmap_clears.push(Arc::clone(&batch.bitmap_clears));
-        current = batch.parent.as_ref().and_then(Weak::upgrade);
+    if let Some(parent) = parent.as_ref().and_then(Weak::upgrade) {
+        ancestor_bitmap_pushes.push(Arc::clone(&parent.bitmap_pushes));
+        ancestor_bitmap_clears.push(Arc::clone(&parent.bitmap_clears));
+        ancestor_bitmap_pushes.extend(parent.ancestor_bitmap_pushes.iter().cloned());
+        ancestor_bitmap_clears.extend(parent.ancestor_bitmap_clears.iter().cloned());
     }
 
     Ok(Arc::new(MerkleizedBatch {
         inner,
-        parent,
         bitmap_pushes: pushed_bits,
         bitmap_clears: clears,
         grafted: grafted_batch,
@@ -1006,7 +1002,6 @@ where
         let grafted = self.grafted_snapshot();
         Arc::new(MerkleizedBatch {
             inner: self.any.to_batch(),
-            parent: None,
             bitmap_pushes: Arc::new(Vec::new()),
             bitmap_clears: Arc::new(ClearSet::default()),
             grafted,

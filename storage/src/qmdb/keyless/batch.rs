@@ -211,12 +211,12 @@ where
         }
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
-        let mut ancestor_seg_ends = Vec::new();
+        let mut ancestor_seg_ends = self
+            .parent
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.ancestor_seg_ends.clone());
         if let Some(parent) = &self.parent {
             ancestor_seg_ends.push(parent.total_size);
-            for batch in parent.ancestors() {
-                ancestor_seg_ends.push(batch.total_size);
-            }
         }
 
         Arc::new(MerkleizedBatch {

@@ -16,10 +16,7 @@ use crate::{
     },
     Context, Persistable,
 };
-use alloc::{
-    sync::{Arc, Weak},
-    vec::Vec,
-};
+use alloc::{sync::Arc, vec::Vec};
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use core::num::NonZeroU64;
@@ -60,25 +57,17 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
         self
     }
 
-    /// Collect ancestor items from the parent chain before downgrading.
+    /// Collect ancestor items from the parent's stored data.
     fn collect_ancestor_items(
         parent: &Option<Arc<MerkleizedBatch<F, H::Digest, Item>>>,
     ) -> Vec<Arc<Vec<Item>>> {
         let Some(parent) = parent else {
             return Vec::new();
         };
-        let mut items = Vec::new();
+        let mut items = parent.ancestor_items.clone();
         if !parent.items.is_empty() {
             items.push(Arc::clone(&parent.items));
         }
-        let mut current = parent.parent.as_ref().and_then(Weak::upgrade);
-        while let Some(batch) = current {
-            if !batch.items.is_empty() {
-                items.push(Arc::clone(&batch.items));
-            }
-            current = batch.parent.as_ref().and_then(Weak::upgrade);
-        }
-        items.reverse();
         items
     }
 
@@ -93,7 +82,6 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
         Arc::new(MerkleizedBatch {
             inner: merkle,
             items: Arc::new(self.items),
-            parent: self.parent.as_ref().map(Arc::downgrade),
             ancestor_items,
         })
     }
@@ -126,7 +114,6 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
         Arc::new(MerkleizedBatch {
             inner: merkle,
             items,
-            parent: self.parent.as_ref().map(Arc::downgrade),
             ancestor_items,
         })
     }
@@ -139,8 +126,6 @@ pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync> {
     pub(crate) inner: Arc<batch::MerkleizedBatch<F, D>>,
     /// The items to append from this batch.
     items: Arc<Vec<Item>>,
-    /// This batch's parent, or None if the parent is the journal itself.
-    parent: Option<Weak<Self>>,
     /// Ancestor item segments collected at merkleize time (root-to-tip order).
     pub(crate) ancestor_items: Vec<Arc<Vec<Item>>>,
 }
@@ -279,7 +264,6 @@ where
         Arc::new(MerkleizedBatch {
             inner: self.merkle.to_batch(),
             items: Arc::new(Vec::new()),
-            parent: None,
             ancestor_items: Vec::new(),
         })
     }
