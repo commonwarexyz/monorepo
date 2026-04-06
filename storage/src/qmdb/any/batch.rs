@@ -683,13 +683,18 @@ where
 
         // Process creates: remaining mutations (fresh keys) plus parent-deleted
         // keys being re-created. Both get an Update op and active_keys_delta += 1.
-        let fresh = mutations
-            .into_iter()
-            .filter_map(|(k, v)| v.map(|v| (k, v, None)));
-        let recreates = parent_deleted_creates
-            .into_iter()
-            .map(|(k, (v, loc))| (k, v, loc));
-        for (key, value, base_old_loc) in fresh.chain(recreates) {
+        // Merge into a single BTreeMap so iteration order is deterministic
+        // regardless of whether the parent is pending or committed.
+        let mut creates: BTreeMap<K, (V::Value, Option<Location<F>>)> = BTreeMap::new();
+        for (key, value) in mutations {
+            if let Some(value) = value {
+                creates.insert(key, (value, None));
+            }
+        }
+        for (key, (value, base_old_loc)) in parent_deleted_creates {
+            creates.insert(key, (value, base_old_loc));
+        }
+        for (key, (value, base_old_loc)) in creates {
             let new_loc = Location::new(m.base_size + ops.len() as u64);
             ops.push(Operation::Update(update::Unordered(
                 key.clone(),
@@ -1745,6 +1750,83 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(db.root(), committed_child.root());
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression test for issue #3519 / #3520: when a parent batch deletes a
+    /// key that has a collision sibling and the child re-creates that key, the
+    /// `fresh.chain(recreates)` iterator produced operations in a different
+    /// order depending on whether the parent was pending or committed.
+    #[test]
+    fn recreate_deleted_key_with_collision_sibling_root_matches() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+            >;
+
+            let config = fixed_db_config::<OneCap>("recreate-deleted-collision", &context);
+            let mut db = TestDb::init(context, config).await.unwrap();
+
+            // Two colliding keys: K0 (suffix 0) and K6 (suffix 6).
+            let k0 = colliding_digest(0xAA, 0);
+            let k6 = colliding_digest(0xAA, 6);
+
+            // Seed both keys so the snapshot bucket contains two entries.
+            let initial = db
+                .new_batch()
+                .write(k0, Some(colliding_digest(0xBB, 0)))
+                .write(k6, Some(colliding_digest(0xBB, 6)))
+                .merkleize(None, &db)
+                .await
+                .unwrap()
+                .finalize();
+            db.apply_batch(initial).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Parent: delete K0. K6 remains untouched.
+            let parent = db
+                .new_batch()
+                .write(k0, None)
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            // Child (pending parent): re-create K0 and write a new colliding key K29.
+            let k29 = colliding_digest(0xAA, 29);
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(k0, Some(colliding_digest(0xCC, 0)))
+                .write(k29, Some(colliding_digest(0xCC, 29)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            // Commit the parent, then rebuild the same child.
+            db.apply_batch(parent.finalize()).await.unwrap();
+            db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(k0, Some(colliding_digest(0xCC, 0)))
+                .write(k29, Some(colliding_digest(0xCC, 29)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                pending_child.root(),
+                committed_child.root(),
+                "root depended on pending-vs-committed parent path \
+                 when re-creating a deleted key with collision siblings"
+            );
 
             db.destroy().await.unwrap();
         });
