@@ -152,8 +152,9 @@ where
             network.1,
         );
         // Subscribe immediately, but keep draining mailbox and network traffic even if no peer set
-        // has been tracked yet. Remote senders are gated at insertion time, so polling here avoids
-        // unnecessary backpressure without making pre-peer-set traffic resident.
+        // has been tracked yet. Remote senders are gated by the latest primary set, so polling
+        // here avoids unnecessary backpressure without making traffic from untracked peers
+        // resident.
         let peer_set_subscription = &mut self.peer_provider.subscribe().await;
 
         select_loop! {
@@ -322,7 +323,8 @@ where
             return false;
         }
 
-        // Get the relevant deque for the peer
+        // Get the relevant deque for the peer. Remote peers only reach this point if they are in
+        // the latest primary set, so allocating lazily here does not widen cache eligibility.
         let deque = self
             .deques
             .entry(peer)
