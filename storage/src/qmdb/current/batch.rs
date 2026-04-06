@@ -489,8 +489,8 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub async fn merkleize<E, C, I>(
         self,
-        metadata: Option<V::Value>,
         db: &super::db::Db<E, C, I, H, update::Unordered<K, V>, N>,
+        metadata: Option<V::Value>,
     ) -> Result<Arc<MerkleizedBatch<H::Digest, update::Unordered<K, V>, N>>, Error>
     where
         E: Context,
@@ -505,7 +505,7 @@ where
         } = self;
         let scan = BitmapScan::new(&bitmap_parent);
         let inner = inner
-            .merkleize_with_floor_scan(metadata, scan, &db.any)
+            .merkleize_with_floor_scan(&db.any, metadata, scan)
             .await?;
         compute_current_layer(inner, db, parent, &grafted_parent, &bitmap_parent).await
     }
@@ -536,8 +536,8 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub async fn merkleize<E, C, I>(
         self,
-        metadata: Option<V::Value>,
         db: &super::db::Db<E, C, I, H, update::Ordered<K, V>, N>,
+        metadata: Option<V::Value>,
     ) -> Result<Arc<MerkleizedBatch<H::Digest, update::Ordered<K, V>, N>>, Error>
     where
         E: Context,
@@ -552,7 +552,7 @@ where
         } = self;
         let scan = BitmapScan::new(&bitmap_parent);
         let inner = inner
-            .merkleize_with_floor_scan(metadata, scan, &db.any)
+            .merkleize_with_floor_scan(&db.any, metadata, scan)
             .await?;
         compute_current_layer(inner, db, parent, &grafted_parent, &bitmap_parent).await
     }
@@ -1058,11 +1058,11 @@ mod trait_impls {
 
         fn merkleize(
             self,
-            metadata: Option<V::Value>,
             db: &CurrentDb<E, C, I, H, update::Unordered<K, V>, N>,
+            metadata: Option<V::Value>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<mmr::Family>>>
         {
-            self.merkleize(metadata, db)
+            self.merkleize(db, metadata)
         }
     }
 
@@ -1091,11 +1091,11 @@ mod trait_impls {
 
         fn merkleize(
             self,
-            metadata: Option<V::Value>,
             db: &CurrentDb<E, C, I, H, update::Ordered<K, V>, N>,
+            metadata: Option<V::Value>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<mmr::Family>>>
         {
-            self.merkleize(metadata, db)
+            self.merkleize(db, metadata)
         }
     }
 

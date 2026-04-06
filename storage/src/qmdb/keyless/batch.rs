@@ -186,8 +186,8 @@ where
     /// Resolve appends into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub fn merkleize<E, C>(
         self,
-        metadata: Option<V::Value>,
         db: &Keyless<F, E, V, C, H>,
+        metadata: Option<V::Value>,
     ) -> Arc<MerkleizedBatch<F, H::Digest, V>>
     where
         E: Context,

@@ -125,7 +125,7 @@ fn fuzz(input: FuzzInput) {
                 Some(value_from_bytes(write.value)),
             );
         }
-        let initial = batch.merkleize(None, &db).await.unwrap();
+        let initial = batch.merkleize(&db, None).await.unwrap();
         db.apply_batch(initial).await.unwrap();
         db.commit().await.unwrap();
 
@@ -141,7 +141,7 @@ fn fuzz(input: FuzzInput) {
                 Mutation::Delete { key } => batch.write(key_from_seed(*key), None),
             };
         }
-        let parent = batch.merkleize(None, &db).await.unwrap();
+        let parent = batch.merkleize(&db, None).await.unwrap();
         let mut batch = parent.new_batch::<Sha256>();
         for mutation in &input.child {
             batch = match mutation {
@@ -151,7 +151,7 @@ fn fuzz(input: FuzzInput) {
                 Mutation::Delete { key } => batch.write(key_from_seed(*key), None),
             };
         }
-        let pending_child = batch.merkleize(None, &db).await.unwrap();
+        let pending_child = batch.merkleize(&db, None).await.unwrap();
 
         // Commit the parent, then rebuild the same logical child from the
         // committed DB state. Both speculative roots must match.
@@ -167,7 +167,7 @@ fn fuzz(input: FuzzInput) {
                 Mutation::Delete { key } => batch.write(key_from_seed(*key), None),
             };
         }
-        let committed_child = batch.merkleize(None, &db).await.unwrap();
+        let committed_child = batch.merkleize(&db, None).await.unwrap();
 
         assert_eq!(
             pending_child.root(),

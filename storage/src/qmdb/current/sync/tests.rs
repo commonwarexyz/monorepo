@@ -85,7 +85,7 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(None::<Digest>, &db).await.unwrap();
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
             db
         }
@@ -154,7 +154,7 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(None::<Digest>, &db).await.unwrap();
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
             db
         }
@@ -221,7 +221,7 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(None::<Digest>, &db).await.unwrap();
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
             db
         }
@@ -290,7 +290,7 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(None::<Digest>, &db).await.unwrap();
+            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
             db
         }

@@ -67,7 +67,7 @@ async fn commit_pending<F: MerkleFamily>(
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(metadata, db).await.unwrap();
+    let merkleized = batch.merkleize(db, metadata).await.unwrap();
     db.apply_batch(merkleized)
         .await
         .expect("commit should not fail");

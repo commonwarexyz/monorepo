@@ -195,7 +195,7 @@ fn fuzz(input: FuzzInput) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(metadata_bytes.clone(), &db).await.unwrap();
+                    let merkleized = batch.merkleize(&db, metadata_bytes.clone()).await.unwrap();
                     db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -223,7 +223,7 @@ fn fuzz(input: FuzzInput) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(None, &db).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
                     db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -249,7 +249,7 @@ fn fuzz(input: FuzzInput) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(None, &db).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
                     db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -282,7 +282,7 @@ fn fuzz(input: FuzzInput) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(None, &db).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
                     db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -304,7 +304,7 @@ fn fuzz(input: FuzzInput) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(None, &db).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None).await.unwrap();
                     db.apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -337,7 +337,7 @@ fn fuzz(input: FuzzInput) {
         for (k, v) in pending_writes.drain(..) {
             batch = batch.write(k, v);
         }
-        let merkleized = batch.merkleize(None, &db).await.unwrap();
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
         db.apply_batch(merkleized)
             .await
             .expect("commit should not fail");

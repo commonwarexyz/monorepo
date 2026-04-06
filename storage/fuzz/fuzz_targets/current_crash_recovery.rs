@@ -157,7 +157,7 @@ async fn commit_pending(
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = match batch.merkleize(None, db).await {
+    let merkleized = match batch.merkleize(db, None).await {
         Ok(m) => m,
         Err(_) => {
             forget_pending(pending, committed);
@@ -345,7 +345,7 @@ fn fuzz(input: FuzzInput) {
             let batch = db
                 .new_batch()
                 .write(test_key, Some(test_value))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             db.apply_batch(batch)

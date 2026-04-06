@@ -36,8 +36,8 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
     /// Resolve mutations, compute the new root, and return a merkleized batch.
     fn merkleize(
         self,
-        metadata: Option<Self::Metadata>,
         db: &Db,
+        metadata: Option<Self::Metadata>,
     ) -> impl Future<Output = Result<Self::Merkleized, Error<Self::Family>>>;
 }
 

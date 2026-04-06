@@ -159,8 +159,8 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub fn merkleize<E, C, T>(
         self,
-        metadata: Option<V::Value>,
         db: &Immutable<F, E, K, V, C, H, T>,
+        metadata: Option<V::Value>,
     ) -> Arc<MerkleizedBatch<F, H::Digest, K, V>>
     where
         E: Context,

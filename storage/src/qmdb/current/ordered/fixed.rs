@@ -156,7 +156,7 @@ pub mod test {
                 let merkleized = db
                     .new_batch()
                     .write(key, Some(value))
-                    .merkleize(None, &db)
+                    .merkleize(&db, None)
                     .await
                     .unwrap();
                 db.apply_batch(merkleized).await.unwrap();

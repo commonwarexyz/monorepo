@@ -275,7 +275,7 @@ pub(crate) mod test {
                 }
             }
         }
-        let merkleized = batch.merkleize(None, db).await.unwrap();
+        let merkleized = batch.merkleize(db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
     }
 
@@ -336,7 +336,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), Some(val))
                 .write(key3.clone(), Some(val))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
@@ -349,7 +349,7 @@ pub(crate) mod test {
             let merkleized = db
                 .new_batch()
                 .write(key2.clone(), Some(val))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
@@ -388,7 +388,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), Some(val1))
                 .write(key3.clone(), Some(val3))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
@@ -397,7 +397,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), None)
                 .write(key2.clone(), Some(val2))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
@@ -417,7 +417,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), Some(val1))
                 .write(key3.clone(), Some(val3))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
@@ -426,7 +426,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key2.clone(), Some(val2))
                 .write(key3.clone(), None)
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
@@ -472,7 +472,7 @@ pub(crate) mod test {
             let parent_batch = base
                 .new_batch::<Sha256>()
                 .write(key_a, Some(val_a.clone()))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -482,7 +482,7 @@ pub(crate) mod test {
             let child_batch = parent_batch
                 .new_batch::<Sha256>()
                 .write(key_b, Some(val_b.clone()))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -520,14 +520,14 @@ pub(crate) mod test {
             let parent_batch = base
                 .new_batch::<Sha256>()
                 .write(key_x, Some(val_x.clone()))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
             let child_batch = parent_batch
                 .new_batch::<Sha256>()
                 .write(key_x, None)
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -564,7 +564,7 @@ pub(crate) mod test {
             let parent_batch = base
                 .new_batch::<Sha256>()
                 .write(key_x, Some(val_a.clone()))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -572,7 +572,7 @@ pub(crate) mod test {
             let child_batch = parent_batch
                 .new_batch::<Sha256>()
                 .write(key_x, Some(val_b.clone()))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 

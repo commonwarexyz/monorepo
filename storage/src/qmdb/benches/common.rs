@@ -509,7 +509,7 @@ pub async fn gen_random_kv<M>(
             let k = Sha256::hash(&i.to_be_bytes());
             batch = batch.write(k, Some(make_value(&mut rng)));
         }
-        let merkleized = batch.merkleize(None, db).await.unwrap();
+        let merkleized = batch.merkleize(db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
     }
 
@@ -525,13 +525,13 @@ pub async fn gen_random_kv<M>(
             batch = batch.write(rand_key, Some(make_value(&mut rng)));
             if let Some(freq) = commit_frequency {
                 if rng.next_u32() % freq == 0 {
-                    let merkleized = batch.merkleize(None, db).await.unwrap();
+                    let merkleized = batch.merkleize(db, None).await.unwrap();
                     db.apply_batch(merkleized).await.unwrap();
                     batch = db.new_batch();
                 }
             }
         }
-        let merkleized = batch.merkleize(None, db).await.unwrap();
+        let merkleized = batch.merkleize(db, None).await.unwrap();
         db.apply_batch(merkleized).await.unwrap();
     }
 }

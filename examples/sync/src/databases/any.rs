@@ -104,7 +104,7 @@ where
                     batch = batch.write(key, None);
                 }
                 Operation::CommitFloor(metadata, _) => {
-                    let merkleized = batch.merkleize(metadata, self).await?;
+                    let merkleized = batch.merkleize(self, metadata).await?;
                     self.apply_batch(merkleized).await?;
                     self.commit().await?;
                     batch = self.new_batch();

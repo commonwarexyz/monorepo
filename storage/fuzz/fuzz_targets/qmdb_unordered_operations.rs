@@ -68,7 +68,7 @@ async fn commit_pending<F: MerkleFamily>(
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(None, db).await.unwrap();
+    let merkleized = batch.merkleize(db, None).await.unwrap();
     db.apply_batch(merkleized)
         .await
         .expect("commit should not fail");
@@ -247,7 +247,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 }
             }
 
-            let batch = db.new_batch().merkleize(None, &db).await.unwrap();
+            let batch = db.new_batch().merkleize(&db, None).await.unwrap();
             db.apply_batch(batch).await.expect("final commit should not fail");
             db.destroy().await.expect("destroy should not fail");
         }

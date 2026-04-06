@@ -706,15 +706,15 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub async fn merkleize<E, C, I>(
         self,
-        metadata: Option<V::Value>,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>>,
+        metadata: Option<V::Value>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(metadata, SequentialScan, db)
+        self.merkleize_with_floor_scan(db, metadata, SequentialScan)
             .await
     }
 
@@ -722,9 +722,9 @@ where
     /// to accelerate floor raising.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, S: FloorScan<F>>(
         self,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>>,
         metadata: Option<V::Value>,
         scan: S,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -844,15 +844,15 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub async fn merkleize<E, C, I>(
         self,
-        metadata: Option<V::Value>,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>>,
+        metadata: Option<V::Value>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(metadata, SequentialScan, db)
+        self.merkleize_with_floor_scan(db, metadata, SequentialScan)
             .await
     }
 
@@ -860,9 +860,9 @@ where
     /// to accelerate floor raising.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, S: FloorScan<F>>(
         self,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>>,
         metadata: Option<V::Value>,
         scan: S,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1371,10 +1371,10 @@ mod trait_impls {
 
         fn merkleize(
             self,
-            metadata: Option<V::Value>,
             db: &Db<F, E, C, I, H, update::Unordered<K, V>>,
+            metadata: Option<V::Value>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
-            self.merkleize(metadata, db)
+            self.merkleize(db, metadata)
         }
     }
 
@@ -1403,10 +1403,10 @@ mod trait_impls {
 
         fn merkleize(
             self,
-            metadata: Option<V::Value>,
             db: &Db<F, E, C, I, H, update::Ordered<K, V>>,
+            metadata: Option<V::Value>,
         ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
-            self.merkleize(metadata, db)
+            self.merkleize(db, metadata)
         }
     }
 
@@ -1606,7 +1606,7 @@ mod tests {
             for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
             }
-            let initial = initial.merkleize(None, &db).await.unwrap();
+            let initial = initial.merkleize(&db, None).await.unwrap();
             db.apply_batch(initial).await.unwrap();
             db.commit().await.unwrap();
 
@@ -1616,7 +1616,7 @@ mod tests {
             let parent = db
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xCC, 1)))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             assert!(
@@ -1633,7 +1633,7 @@ mod tests {
                 .new_batch::<Sha256>()
                 .write(key_a, Some(colliding_digest(0xDD, 1)))
                 .write(key_b, Some(colliding_digest(0xDD, 0)))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -1646,7 +1646,7 @@ mod tests {
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xDD, 1)))
                 .write(key_b, Some(colliding_digest(0xDD, 0)))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -1685,7 +1685,7 @@ mod tests {
             for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
             }
-            let initial = initial.merkleize(None, &db).await.unwrap();
+            let initial = initial.merkleize(&db, None).await.unwrap();
             db.apply_batch(initial).await.unwrap();
             db.commit().await.unwrap();
 
@@ -1695,7 +1695,7 @@ mod tests {
             let parent = db
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xCC, 1)))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             assert!(
@@ -1709,7 +1709,7 @@ mod tests {
                 .new_batch::<Sha256>()
                 .write(key_a, Some(colliding_digest(0xDD, 1)))
                 .write(key_b, Some(colliding_digest(0xDD, 0)))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -1722,7 +1722,7 @@ mod tests {
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xDD, 1)))
                 .write(key_b, Some(colliding_digest(0xDD, 0)))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -1759,7 +1759,7 @@ mod tests {
             let seed = db
                 .new_batch()
                 .write(colliding_digest(0x01, 0), Some(colliding_digest(0x01, 1)))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             db.apply_batch(seed).await.unwrap();
@@ -1771,7 +1771,7 @@ mod tests {
             let batch_a = db
                 .new_batch()
                 .write(key_a, Some(val_a))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -1781,7 +1781,7 @@ mod tests {
             let batch_b = batch_a
                 .new_batch::<Sha256>()
                 .write(key_b, Some(val_b))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -1792,7 +1792,7 @@ mod tests {
             let committed_b = db
                 .new_batch()
                 .write(key_b, Some(val_b))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             assert_eq!(batch_b.root(), committed_b.root());
@@ -1828,7 +1828,7 @@ mod tests {
             let seed = db
                 .new_batch()
                 .write(key, Some(colliding_digest(0x10, 1)))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             db.apply_batch(seed).await.unwrap();
@@ -1839,7 +1839,7 @@ mod tests {
             let batch_a = db
                 .new_batch()
                 .write(key, Some(val_a))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -1853,7 +1853,7 @@ mod tests {
             let batch_b = batch_a
                 .new_batch::<Sha256>()
                 .write(key, Some(val_b))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -1866,7 +1866,7 @@ mod tests {
             let committed_b = db
                 .new_batch()
                 .write(key, Some(val_b))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             assert_eq!(batch_b.root(), committed_b.root());
@@ -1900,7 +1900,7 @@ mod tests {
             let seed = db
                 .new_batch()
                 .write(colliding_digest(0x20, 0), Some(colliding_digest(0x20, 1)))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             db.apply_batch(seed).await.unwrap();
@@ -1912,7 +1912,7 @@ mod tests {
             let batch_a = db
                 .new_batch()
                 .write(key_a, Some(val_a))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -1922,7 +1922,7 @@ mod tests {
             let batch_b = batch_a
                 .new_batch::<Sha256>()
                 .write(key_b, Some(val_b))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             let key_c = colliding_digest(0x23, 0);
@@ -1930,7 +1930,7 @@ mod tests {
             let batch_c = batch_a
                 .new_batch::<Sha256>()
                 .write(key_c, Some(val_c))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -1941,7 +1941,7 @@ mod tests {
             let committed_b = db
                 .new_batch()
                 .write(key_b, Some(val_b))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             assert_eq!(batch_b.root(), committed_b.root());
@@ -1949,7 +1949,7 @@ mod tests {
             let committed_c = db
                 .new_batch()
                 .write(key_c, Some(val_c))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
             assert_eq!(batch_c.root(), committed_c.root());
@@ -1981,7 +1981,7 @@ mod tests {
                 .new_batch()
                 .write(colliding_digest(0x01, 0), Some(colliding_digest(0x01, 1)))
                 .write(colliding_digest(0x02, 0), Some(colliding_digest(0x02, 1)))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -1989,7 +1989,7 @@ mod tests {
             let parent = grandparent
                 .new_batch::<Sha256>()
                 .write(colliding_digest(0x03, 0), Some(colliding_digest(0x03, 1)))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 
@@ -1997,7 +1997,7 @@ mod tests {
             let child = parent
                 .new_batch::<Sha256>()
                 .write(colliding_digest(0x04, 0), Some(colliding_digest(0x04, 1)))
-                .merkleize(None, &db)
+                .merkleize(&db, None)
                 .await
                 .unwrap();
 

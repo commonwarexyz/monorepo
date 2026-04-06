@@ -135,12 +135,12 @@ fn bench_keyless_generate(c: &mut Criterion) {
                             let v = make_var_value(&mut rng);
                             batch = batch.append(v);
                             if rng.next_u32() % KEYLESS_COMMIT_FREQ == 0 {
-                                let merkleized = batch.merkleize(None, &db);
+                                let merkleized = batch.merkleize(&db, None);
                                 db.apply_batch(merkleized).await.unwrap();
                                 batch = db.new_batch();
                             }
                         }
-                        let merkleized = batch.merkleize(None, &db);
+                        let merkleized = batch.merkleize(&db, None);
                         db.apply_batch(merkleized).await.unwrap();
                         db.sync().await.unwrap();
 

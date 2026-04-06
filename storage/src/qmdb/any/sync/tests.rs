@@ -1718,7 +1718,7 @@ mod harnesses {
             >,
         ) -> Self::Db {
             crate::qmdb::any::ordered::fixed::test::apply_ops(&mut db, ops).await;
-            let merkleized = db.new_batch().merkleize(None::<Digest>, &db).await.unwrap();
+            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
             db
         }
@@ -1780,7 +1780,7 @@ mod harnesses {
             crate::qmdb::any::ordered::variable::test::apply_ops(&mut db, ops).await;
             let merkleized = db
                 .new_batch()
-                .merkleize(None::<Vec<u8>>, &db)
+                .merkleize(&db, None::<Vec<u8>>)
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();
@@ -1839,7 +1839,7 @@ mod harnesses {
             >,
         ) -> Self::Db {
             crate::qmdb::any::unordered::fixed::test::apply_ops(&mut db, ops).await;
-            let merkleized = db.new_batch().merkleize(None::<Digest>, &db).await.unwrap();
+            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
             db.apply_batch(merkleized).await.unwrap();
             db
         }
@@ -1906,7 +1906,7 @@ mod harnesses {
             crate::qmdb::any::unordered::variable::test::apply_ops(&mut db, ops).await;
             let merkleized = db
                 .new_batch()
-                .merkleize(None::<Vec<u8>>, &db)
+                .merkleize(&db, None::<Vec<u8>>)
                 .await
                 .unwrap();
             db.apply_batch(merkleized).await.unwrap();

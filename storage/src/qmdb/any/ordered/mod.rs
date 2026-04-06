@@ -355,7 +355,7 @@ mod test {
 
         // Test applying an empty batch on an empty db.
         let metadata = Sha256::fill(3u8);
-        let merkleized = db.new_batch().merkleize(Some(metadata), &db).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db, Some(metadata)).await.unwrap();
         let range = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         assert_eq!(range.start, Location::new(1));
@@ -373,11 +373,11 @@ mod test {
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
         for _ in 1..100 {
-            let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
             let _ = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap();
         }
-        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         db.destroy().await.unwrap();
@@ -404,7 +404,7 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val1))
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
@@ -416,7 +416,7 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(val2))
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
@@ -427,7 +427,7 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), None)
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
@@ -439,7 +439,7 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(new_val))
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
@@ -449,7 +449,7 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(new_val))
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
@@ -457,7 +457,7 @@ mod test {
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // Empty commit batch (no preceding uncommitted writes).
-        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
@@ -469,7 +469,7 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), None)
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
@@ -478,7 +478,7 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key2.clone(), None)
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
@@ -487,7 +487,7 @@ mod test {
         assert!(db.get(&key2).await.unwrap().is_none());
 
         // Empty commit batch.
-        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
@@ -499,7 +499,7 @@ mod test {
         assert!(db.get(&key3).await.unwrap().is_none());
 
         // Make sure closing/reopening gets us back to the same state.
-        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         let op_count = db.bounds().await.end;
@@ -512,7 +512,7 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val1))
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
@@ -521,7 +521,7 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(val2))
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
@@ -530,7 +530,7 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), None)
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
@@ -539,7 +539,7 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(val1))
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
@@ -548,14 +548,14 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val2))
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
         // Empty commit batch.
-        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
@@ -569,7 +569,7 @@ mod test {
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
-        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
 
@@ -603,7 +603,7 @@ mod test {
             .write(key1.clone(), Some(val))
             .write(key2.clone(), Some(val))
             .write(key3.clone(), Some(val))
-            .merkleize(None, &db)
+            .merkleize(&db, None)
             .await
             .unwrap();
         db.apply_batch(merkleized).await.unwrap();
@@ -612,7 +612,7 @@ mod test {
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
-        let merkleized = db.new_batch().merkleize(None, &db).await.unwrap();
+        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let _ = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         db.destroy().await.unwrap();

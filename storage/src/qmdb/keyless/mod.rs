@@ -7,7 +7,7 @@
 //! ```ignore
 //! // Simple mode: apply a batch, then durably commit it.
 //! let batch = db.new_batch().append(value);
-//! let merkleized = batch.merkleize(None, &db);
+//! let merkleized = batch.merkleize(&db, None);
 //! db.apply_batch(merkleized).await?;
 //! db.commit().await?;
 //! ```
@@ -15,15 +15,15 @@
 //! ```ignore
 //! // Batches can still fork before you apply them.
 //! let parent = db.new_batch().append(value_a);
-//! let parent = parent.merkleize(None, &db);
+//! let parent = parent.merkleize(&db, None);
 //!
 //! let child_a = parent.new_batch();
 //! let child_a = child_a.append(value_b);
-//! let child_a = child_a.merkleize(None, &db);
+//! let child_a = child_a.merkleize(&db, None);
 //!
 //! let child_b = parent.new_batch();
 //! let child_b = child_b.append(value_c);
-//! let child_b = child_b.merkleize(None, &db);
+//! let child_b = child_b.merkleize(&db, None);
 //!
 //! db.apply_batch(child_a).await?;
 //! db.commit().await?;
@@ -32,9 +32,9 @@
 //! ```ignore
 //! // Sequential commit: apply parent then child.
 //! let parent = db.new_batch().append(value_a);
-//! let parent_m = parent.merkleize(None, &db);
+//! let parent_m = parent.merkleize(&db, None);
 //! let child = parent_m.new_batch().append(value_b);
-//! let child_m = child.merkleize(None, &db);
+//! let child_m = child.merkleize(&db, None);
 //!
 //! db.apply_batch(parent_m).await?;
 //! db.apply_batch(child_m).await?;
@@ -416,7 +416,7 @@ pub(crate) mod tests {
 
         // Test calling commit on an empty db which should make it (durably) non-empty.
         let metadata = V::Value::make(99);
-        let merkleized = db.new_batch().merkleize(Some(metadata.clone()), &db);
+        let merkleized = db.new_batch().merkleize(&db, Some(metadata.clone()));
         db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
         assert_eq!(db.bounds().await.end, 2); // 2 commit ops
@@ -459,7 +459,7 @@ pub(crate) mod tests {
             let batch = batch.append(v2.clone());
             assert_eq!(loc1, Location::new(1));
             assert_eq!(loc2, Location::new(2));
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
 
         // Make sure closing/reopening gets us back to the same state.
@@ -517,7 +517,7 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i + 100));
             }
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
         db.commit().await.unwrap();
         let root = db.root();
@@ -541,7 +541,7 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i + 300));
             }
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
         db.commit().await.unwrap();
         let root = db.root();
@@ -570,7 +570,7 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i));
             }
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
         let root = db.root();
 
@@ -603,11 +603,11 @@ pub(crate) mod tests {
         let merkleized = db
             .new_batch()
             .append(V::Value::make(1))
-            .merkleize(Some(metadata.clone()), &db);
+            .merkleize(&db, Some(metadata.clone()));
         db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
-        let merkleized = db.new_batch().merkleize(None, &db);
+        let merkleized = db.new_batch().merkleize(&db, None);
         db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap(), None);
 
@@ -634,7 +634,7 @@ pub(crate) mod tests {
             .new_batch()
             .append(V::Value::make(1))
             .append(V::Value::make(2))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
         db.apply_batch(merkleized).await.unwrap();
 
         // op_count is 4 (initial_commit, v1, v2, commit), last_commit_loc is 3.
@@ -644,7 +644,7 @@ pub(crate) mod tests {
         let merkleized = db
             .new_batch()
             .append(V::Value::make(3))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
         db.apply_batch(merkleized).await.unwrap();
 
         // Test valid prune (at previous commit location 3).
@@ -728,7 +728,7 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i + 2000));
             }
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
         db.commit().await.unwrap();
         let db = reopen(context.with_label("db6")).await;
@@ -754,7 +754,7 @@ pub(crate) mod tests {
             for i in 0..10u64 {
                 batch = batch.append(V::Value::make(i));
             }
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
         db.commit().await.unwrap();
         let committed_root = db.root();
@@ -791,7 +791,7 @@ pub(crate) mod tests {
                 loc, committed_size,
                 "New append should get the expected location"
             );
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
         db.commit().await.unwrap();
 
@@ -845,14 +845,14 @@ pub(crate) mod tests {
         let parent = db.new_batch();
         let loc1 = parent.size();
         let parent = parent.append(v1.clone());
-        let parent_m = parent.merkleize(None, &db);
+        let parent_m = parent.merkleize(&db, None);
 
         let child = parent_m.new_batch::<Sha256>();
         let loc2 = child.size();
         let child = child.append(v2.clone());
         let loc3 = child.size();
         let child = child.append(v3.clone());
-        let child_m = child.merkleize(None, &db);
+        let child_m = child.merkleize(&db, None);
         let child_root = child_m.root();
 
         db.apply_batch(child_m).await.unwrap();
@@ -877,11 +877,11 @@ pub(crate) mod tests {
         let batch_a = db
             .new_batch()
             .append(V::Value::make(10))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
         let batch_b = db
             .new_batch()
             .append(V::Value::make(20))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
 
         db.apply_batch(batch_a).await.unwrap();
 
@@ -903,15 +903,15 @@ pub(crate) mod tests {
         let a = db
             .new_batch()
             .append(V::Value::make(10))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
         let b = a
             .new_batch::<H>()
             .append(V::Value::make(20))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
         let c = b
             .new_batch::<H>()
             .append(V::Value::make(30))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
 
         let expected_root = c.root();
 
@@ -935,7 +935,7 @@ pub(crate) mod tests {
         let batch = db.new_batch();
         let loc1 = batch.size();
         let batch = batch.append(V::Value::make(10));
-        db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+        db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
 
         let snapshot = db.to_batch();
         assert_eq!(snapshot.root(), db.root());
@@ -943,7 +943,7 @@ pub(crate) mod tests {
         let child_batch = snapshot.new_batch::<Sha256>();
         let loc2 = child_batch.size();
         let child_batch = child_batch.append(V::Value::make(20));
-        db.apply_batch(child_batch.merkleize(None, &db))
+        db.apply_batch(child_batch.merkleize(&db, None))
             .await
             .unwrap();
 
@@ -970,7 +970,7 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i));
             }
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
         db.commit().await.unwrap();
         let root = db.root();
@@ -1026,7 +1026,7 @@ pub(crate) mod tests {
             for i in 0..ELEMENTS {
                 batch = batch.append(V::Value::make(i + 3000));
             }
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
         db.commit().await.unwrap();
         let db = reopen(context.with_label("db5")).await;
@@ -1054,7 +1054,7 @@ pub(crate) mod tests {
             for i in 0u64..ELEMENTS {
                 batch = batch.append(V::Value::make(i));
             }
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
 
         // Test that historical proof fails with op_count > number of operations.
@@ -1127,7 +1127,7 @@ pub(crate) mod tests {
             for i in 0u64..ELEMENTS {
                 batch = batch.append(V::Value::make(i));
             }
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
 
         {
@@ -1135,7 +1135,7 @@ pub(crate) mod tests {
             for i in ELEMENTS..ELEMENTS * 2 {
                 batch = batch.append(V::Value::make(i));
             }
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
         let root = db.root();
 
@@ -1200,7 +1200,7 @@ pub(crate) mod tests {
             .new_batch()
             .append(V::Value::make(1))
             .append(V::Value::make(2))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
         db.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(
@@ -1234,7 +1234,7 @@ pub(crate) mod tests {
                 batch = batch.append(v.clone());
                 base_locs.push(loc);
             }
-            db.apply_batch(batch.merkleize(None, &db)).await.unwrap();
+            db.apply_batch(batch.merkleize(&db, None)).await.unwrap();
         }
 
         let batch = db.new_batch();
@@ -1270,7 +1270,7 @@ pub(crate) mod tests {
         let parent = db.new_batch();
         let loc1 = parent.size();
         let parent = parent.append(v1.clone());
-        let parent_m = parent.merkleize(None, &db);
+        let parent_m = parent.merkleize(&db, None);
 
         let child = parent_m.new_batch::<Sha256>();
         assert_eq!(child.get(loc1, &db).await.unwrap(), Some(v1));
@@ -1295,7 +1295,7 @@ pub(crate) mod tests {
         for i in 0u64..10 {
             batch = batch.append(V::Value::make(i));
         }
-        let merkleized = batch.merkleize(None, &db);
+        let merkleized = batch.merkleize(&db, None);
         let speculative = merkleized.root();
         db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.root(), speculative);
@@ -1303,7 +1303,7 @@ pub(crate) mod tests {
         let merkleized = db
             .new_batch()
             .append(V::Value::make(100))
-            .merkleize(Some(V::Value::make(55)), &db);
+            .merkleize(&db, Some(V::Value::make(55)));
         let speculative = merkleized.root();
         db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.root(), speculative);
@@ -1319,11 +1319,11 @@ pub(crate) mod tests {
         Operation<V>: EncodeShared,
     {
         let base_val = V::Value::make(10);
-        let merkleized = db.new_batch().append(base_val.clone()).merkleize(None, &db);
+        let merkleized = db.new_batch().append(base_val.clone()).merkleize(&db, None);
         db.apply_batch(merkleized).await.unwrap();
 
         let new_val = V::Value::make(20);
-        let merkleized = db.new_batch().append(new_val.clone()).merkleize(None, &db);
+        let merkleized = db.new_batch().append(new_val.clone()).merkleize(&db, None);
 
         assert_eq!(
             merkleized.get(Location::new(1), &db).await.unwrap(),
@@ -1352,7 +1352,7 @@ pub(crate) mod tests {
         let parent = db.new_batch();
         let loc1 = parent.size();
         let parent = parent.append(v1.clone());
-        let parent_m = parent.merkleize(None, &db);
+        let parent_m = parent.merkleize(&db, None);
         let parent_root = parent_m.root();
 
         db.apply_batch(parent_m).await.unwrap();
@@ -1362,7 +1362,7 @@ pub(crate) mod tests {
         let batch2 = db.new_batch();
         let loc2 = batch2.size();
         let batch2 = batch2.append(v2.clone());
-        let batch2_m = batch2.merkleize(None, &db);
+        let batch2_m = batch2.merkleize(&db, None);
         let batch2_root = batch2_m.root();
         db.apply_batch(batch2_m).await.unwrap();
         assert_eq!(db.root(), batch2_root);
@@ -1394,7 +1394,7 @@ pub(crate) mod tests {
                 all_values.push(v);
                 all_locs.push(loc);
             }
-            let merkleized = batch.merkleize(None, &db);
+            let merkleized = batch.merkleize(&db, None);
             db.apply_batch(merkleized).await.unwrap();
         }
 
@@ -1421,12 +1421,12 @@ pub(crate) mod tests {
         let merkleized = db
             .new_batch()
             .append(V::Value::make(1))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
         db.apply_batch(merkleized).await.unwrap();
         let root_before = db.root();
         let size_before = db.bounds().await.end;
 
-        let merkleized = db.new_batch().merkleize(None, &db);
+        let merkleized = db.new_batch().merkleize(&db, None);
         let speculative = merkleized.root();
         db.apply_batch(merkleized).await.unwrap();
 
@@ -1445,19 +1445,19 @@ pub(crate) mod tests {
         Operation<V>: EncodeShared,
     {
         let base_val = V::Value::make(10);
-        db.apply_batch(db.new_batch().append(base_val.clone()).merkleize(None, &db))
+        db.apply_batch(db.new_batch().append(base_val.clone()).merkleize(&db, None))
             .await
             .unwrap();
 
         let v1 = V::Value::make(1);
         let parent = db.new_batch();
         let loc1 = parent.size();
-        let parent_m = parent.append(v1.clone()).merkleize(None, &db);
+        let parent_m = parent.append(v1.clone()).merkleize(&db, None);
 
         let v2 = V::Value::make(2);
         let child = parent_m.new_batch::<Sha256>();
         let loc2 = child.size();
-        let child_m = child.append(v2.clone()).merkleize(None, &db);
+        let child_m = child.append(v2.clone()).merkleize(&db, None);
 
         assert_eq!(
             child_m.get(Location::new(1), &db).await.unwrap(),
@@ -1488,7 +1488,7 @@ pub(crate) mod tests {
             batch = batch.append(v.clone());
             values.push(v);
         }
-        let merkleized = batch.merkleize(None, &db);
+        let merkleized = batch.merkleize(&db, None);
         db.apply_batch(merkleized).await.unwrap();
 
         for (i, loc) in locs.iter().enumerate() {
@@ -1513,15 +1513,15 @@ pub(crate) mod tests {
         let parent = db
             .new_batch()
             .append(V::Value::make(1))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
         let child_a = parent
             .new_batch::<Sha256>()
             .append(V::Value::make(2))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
         let child_b = parent
             .new_batch::<Sha256>()
             .append(V::Value::make(3))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
 
         db.apply_batch(child_a).await.unwrap();
         assert!(matches!(
@@ -1542,11 +1542,11 @@ pub(crate) mod tests {
         let parent = db
             .new_batch()
             .append(V::Value::make(1))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
         let child = parent
             .new_batch::<Sha256>()
             .append(V::Value::make(2))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
 
         db.apply_batch(parent).await.unwrap();
         db.apply_batch(child).await.unwrap();
@@ -1564,11 +1564,11 @@ pub(crate) mod tests {
         let parent = db
             .new_batch()
             .append(V::Value::make(1))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
         let child = parent
             .new_batch::<Sha256>()
             .append(V::Value::make(2))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
 
         db.apply_batch(child).await.unwrap();
         assert!(matches!(
@@ -1590,11 +1590,11 @@ pub(crate) mod tests {
         let parent = db
             .new_batch()
             .append(V::Value::make(1))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
         let pending_child = parent
             .new_batch::<Sha256>()
             .append(V::Value::make(2))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
 
         // Commit the parent, then rebuild the same logical child from the
         // committed DB state and compare roots.
@@ -1604,7 +1604,7 @@ pub(crate) mod tests {
         let committed_child = db
             .new_batch()
             .append(V::Value::make(2))
-            .merkleize(None, &db);
+            .merkleize(&db, None);
 
         assert_eq!(pending_child.root(), committed_child.root());
 
@@ -1626,7 +1626,7 @@ pub(crate) mod tests {
         for value in values {
             batch = batch.append(value);
         }
-        let range = db.apply_batch(batch.merkleize(metadata, db)).await.unwrap();
+        let range = db.apply_batch(batch.merkleize(db, metadata)).await.unwrap();
         db.commit().await.unwrap();
         range
     }
