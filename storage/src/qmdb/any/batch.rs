@@ -25,12 +25,15 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{self, Readable as BitmapReadable};
 use core::ops::Range;
-use futures::future::try_join_all;
+use futures::{future::try_join_all, stream::FuturesOrdered, StreamExt as _};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
 use tracing::debug;
+
+/// Maximum number of journal reads to issue concurrently during floor raising.
+const MAX_CONCURRENT_READS: u64 = 64;
 
 /// Strategy for finding the next active location during floor raising.
 pub(crate) trait FloorScan<F: Family> {
@@ -421,57 +424,6 @@ where
         creates
     }
 
-    /// Scan forward from `floor` to find the next active operation, re-append it at the tip.
-    /// The `scan` parameter controls which locations are considered as potentially active,
-    /// allowing implementations to skip locations known to be inactive without reading them.
-    /// Returns `true` if an active op was found and moved, `false` if the floor reached
-    /// `fixed_tip`.
-    async fn advance_floor_once<E, C, I, S: FloorScan<F>>(
-        &self,
-        floor: &mut Location<F>,
-        fixed_tip: u64,
-        ops: &mut Vec<Operation<F, U>>,
-        diff: &mut BTreeMap<U::Key, DiffEntry<F, U::Value>>,
-        scan: &mut S,
-        db: &Db<F, E, C, I, H, U>,
-    ) -> Result<bool, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        loop {
-            let Some(candidate) = scan.next_candidate(*floor, fixed_tip) else {
-                return Ok(false);
-            };
-            *floor = Location::new(*candidate + 1);
-
-            let op = self.read_op(candidate, ops, db).await?;
-            let Some(key) = op.key().cloned() else {
-                continue; // skip CommitFloor and other non-keyed ops
-            };
-
-            if self.is_active_at(&key, candidate, diff, db) {
-                let new_loc = Location::new(self.base_size + ops.len() as u64);
-                let base_old_loc = diff
-                    .get(&key)
-                    .or_else(|| self.base_diff.get(&key))
-                    .map_or(Some(candidate), DiffEntry::base_old_loc);
-                let value = extract_update_value(&op);
-                ops.push(op);
-                diff.insert(
-                    key,
-                    DiffEntry::Active {
-                        value,
-                        loc: new_loc,
-                        base_old_loc,
-                    },
-                );
-                return Ok(true);
-            }
-        }
-    }
-
     /// Shared final phases of merkleization: floor raise, CommitFloor, journal
     /// merkleize, diff merge, and `MerkleizedBatch` construction.
     #[allow(clippy::too_many_arguments)]
@@ -497,17 +449,67 @@ where
         let mut floor = self.base_inactivity_floor_loc;
 
         if total_active_keys > 0 {
-            // Floor raise: advance the inactivity floor by `total_steps` active
-            // operations. `fixed_tip` prevents scanning into floor-raise moves
-            // just appended, matching `raise_floor_with_bitmap()` semantics.
+            // Floor raise: advance the inactivity floor by `total_steps` active operations.
+            // `fixed_tip` prevents scanning into floor-raise moves just appended.
             let fixed_tip = self.base_size + ops.len() as u64;
+            let mut moved = 0u64;
 
-            for _ in 0..total_steps {
-                if !self
-                    .advance_floor_once(&mut floor, fixed_tip, &mut ops, &mut diff, &mut scan, db)
-                    .await?
-                {
+            while moved < total_steps {
+                // Collect candidates, capped to bound concurrent I/O.
+                let mut candidates = Vec::new();
+                let limit = (total_steps - moved).min(MAX_CONCURRENT_READS) as usize;
+                while candidates.len() < limit {
+                    let Some(candidate) = scan.next_candidate(floor, fixed_tip) else {
+                        break;
+                    };
+                    candidates.push(candidate);
+                    floor = Location::new(*candidate + 1);
+                }
+                if candidates.is_empty() {
                     break;
+                }
+
+                // Perform on-disk reads concurrently via FuturesOrdered so results are yielded in
+                // insertion order as they resolve.
+                let reader = db.log.reader().await;
+                let mut disk_reads: FuturesOrdered<_> = candidates
+                    .iter()
+                    .filter(|loc| **loc < self.db_size)
+                    .map(|loc| reader.read(**loc))
+                    .collect();
+
+                // Process results in order, moving active ops to the tip.
+                for candidate in candidates {
+                    let op = if *candidate < self.db_size {
+                        disk_reads.next().await.unwrap()?
+                    } else {
+                        self.read_op(candidate, &ops, db).await?
+                    };
+                    let Some(key) = op.key().cloned() else {
+                        continue; // skip CommitFloor and other non-keyed ops
+                    };
+                    if !self.is_active_at(&key, candidate, &diff, db) {
+                        continue;
+                    }
+                    let new_loc = Location::new(self.base_size + ops.len() as u64);
+                    let base_old_loc = diff
+                        .get(&key)
+                        .or_else(|| self.base_diff.get(&key))
+                        .map_or(Some(candidate), DiffEntry::base_old_loc);
+                    let value = extract_update_value(&op);
+                    ops.push(op);
+                    diff.insert(
+                        key,
+                        DiffEntry::Active {
+                            value,
+                            loc: new_loc,
+                            base_old_loc,
+                        },
+                    );
+                    moved += 1;
+                    if moved >= total_steps {
+                        break;
+                    }
                 }
             }
         } else {
@@ -548,7 +550,8 @@ where
                 .expect("chain should not be empty");
             let segment_base = *commit_loc + 1 - this_segment.len() as u64;
             let mut bitmap_pushes = Vec::with_capacity(this_segment.len());
-            let mut bitmap_clears: ClearSet<F, { bitmap::DEFAULT_CHUNK_SIZE }> = ClearSet::default();
+            let mut bitmap_clears: ClearSet<F, { bitmap::DEFAULT_CHUNK_SIZE }> =
+                ClearSet::default();
 
             // Clear the previous commit bit.
             bitmap_clears.push(Location::new(segment_base - 1));
@@ -1960,8 +1963,7 @@ mod tests {
 
     mod derive_bitmap {
         use super::*;
-        use crate::qmdb::any::operation::update;
-        use crate::qmdb::any::value::FixedEncoding;
+        use crate::qmdb::any::{operation::update, value::FixedEncoding};
         use commonware_codec::FixedSize;
         use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::FixedBytes};
         use std::sync::Arc;
@@ -2001,10 +2003,12 @@ mod tests {
                 },
             ];
 
-            let (pushed_bits, clears) =
-                derive_bitmap_changes::<mmr::Family, TestUpdate, N>(
-                    Loc::new(9), 10, Loc::new(13), &diffs,
-                );
+            let (pushed_bits, clears) = derive_bitmap_changes::<mmr::Family, TestUpdate, N>(
+                Loc::new(9),
+                10,
+                Loc::new(13),
+                &diffs,
+            );
 
             assert_eq!(pushed_bits, vec![true, true, false, true]);
 
@@ -2027,10 +2031,12 @@ mod tests {
                 old_loc: Loc::new(4),
             }];
 
-            let (pushed_bits, clears) =
-                derive_bitmap_changes::<mmr::Family, TestUpdate, N>(
-                    Loc::new(19), 20, Loc::new(21), &diffs,
-                );
+            let (pushed_bits, clears) = derive_bitmap_changes::<mmr::Family, TestUpdate, N>(
+                Loc::new(19),
+                20,
+                Loc::new(21),
+                &diffs,
+            );
 
             assert_eq!(pushed_bits, vec![false, true]);
 
@@ -2052,7 +2058,10 @@ mod tests {
             }];
 
             let _ = derive_bitmap_changes::<mmr::Family, TestUpdate, N>(
-                Loc::new(9), 10, Loc::new(10), &diffs,
+                Loc::new(9),
+                10,
+                Loc::new(10),
+                &diffs,
             );
         }
     }

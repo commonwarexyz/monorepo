@@ -698,7 +698,11 @@ impl<const N: usize> BitmapBatch<N> {
     /// commit patterns), mutations are applied directly in place, keeping the bitmap flat and
     /// `get_chunk` O(1). Otherwise a new [Self::Layer] is created. `pushed_bits[i]` corresponds to
     /// the operation at `parent_len + i` in the new committed range.
-    pub(super) fn push_changeset(&mut self, pushed_bits: Vec<bool>, clears: ClearSet<mmr::Family, N>) {
+    pub(super) fn push_changeset(
+        &mut self,
+        pushed_bits: Vec<bool>,
+        clears: ClearSet<mmr::Family, N>,
+    ) {
         if pushed_bits.is_empty() && clears.is_empty() {
             return;
         }

@@ -978,5 +978,4 @@ mod tests {
         let r2 = combine_roots(&h2, &ops_b, &grafted, None);
         assert_ne!(r1, r2);
     }
-
 }

@@ -113,7 +113,9 @@ impl<
             snapshot,
             last_commit_loc,
             active_keys,
-            status: Some(crate::qmdb::bitmap::BitmapBatch::Base(std::sync::Arc::new(status))),
+            status: Some(crate::qmdb::bitmap::BitmapBatch::Base(std::sync::Arc::new(
+                status,
+            ))),
             _update: core::marker::PhantomData,
         })
     }

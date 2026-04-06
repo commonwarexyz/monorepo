@@ -296,9 +296,7 @@ where
                     )));
                 }
                 if *rewind_floor < pruned_bits {
-                    return Err(Error::<F>::Journal(JournalError::ItemPruned(
-                        *rewind_floor,
-                    )));
+                    return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
                 }
             }
 
