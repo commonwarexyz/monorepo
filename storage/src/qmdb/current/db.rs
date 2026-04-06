@@ -19,6 +19,7 @@ use crate::{
     qmdb::{
         any::{
             self,
+            batch::derive_bitmap_changes,
             operation::{update::Update, Operation},
         },
         current::{
@@ -200,8 +201,6 @@ where
     pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<H, U, N> {
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
-            Vec::new(),
-            Vec::new(),
             self.grafted_snapshot(),
             self.status.clone(),
         )
@@ -446,7 +445,7 @@ where
             let BitmapBatch::Base(base) = &mut self.status else {
                 unreachable!("flatten() guarantees Base");
             };
-            let status = Arc::get_mut(base).expect("flatten ensures sole owner");
+            let status = Arc::make_mut(base);
             status.truncate(rewind_size);
             for loc in &restored_locs {
                 status.set_bit(**loc, true);
@@ -481,7 +480,7 @@ where
     }
 
     /// Sync the metadata to disk.
-    pub(crate) async fn sync_metadata(&self) -> Result<(), Error> {
+    pub(super) async fn sync_metadata(&self) -> Result<(), Error> {
         let mut metadata = self.metadata.lock().await;
         metadata.clear();
 
@@ -573,12 +572,32 @@ where
         &mut self,
         batch: super::batch::Changeset<U::Key, H::Digest, Operation<mmr::Family, U>, N>,
     ) -> Result<Range<Location>, Error> {
+        // Check for staleness before trying to derive the bitmap changes, otherwise it could panic.
+        let batch_start = *self.any.last_commit_loc + 1;
+        if batch.inner.db_size != batch_start {
+            return Err(crate::qmdb::Error::StaleChangeset {
+                expected: batch.inner.db_size,
+                actual: batch_start,
+            });
+        }
+
+        // Zero-op changeset (e.g. from to_batch().finalize()) — nothing to apply.
+        let start_loc = Location::new(batch_start);
+        if *batch.inner.new_last_commit_loc < batch_start {
+            return Ok(start_loc..start_loc);
+        }
+
+        let (active_bits, clears) = derive_bitmap_changes::<mmr::Family, U, N>(
+            self.any.last_commit_loc,
+            batch_start,
+            batch.inner.new_last_commit_loc,
+            &batch.inner.snapshot_diffs,
+        );
+
         // Apply inner any batch (writes ops, updates snapshot).
         let range = self.any.apply_batch(batch.inner).await?;
 
-        // Push bitmap mutations as a layer (O(changeset), no deep clone).
-        self.status
-            .push_changeset(batch.bitmap_pushes, batch.bitmap_clears);
+        self.status.push_changeset(active_bits, clears);
 
         // Push grafted changeset as a layer (O(changeset), no deep clone).
         self.grafted_mmr.push_changeset(batch.grafted_changeset);
