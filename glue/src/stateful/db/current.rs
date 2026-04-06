@@ -302,7 +302,7 @@ where
         let current_size = *self.bounds().await.end;
         let changeset = batch.batch.finalize_from(current_size);
         self.apply_batch(changeset).await?;
-        self.commit().await?;
+        self.sync().await?;
         Ok(())
     }
 
@@ -319,7 +319,7 @@ where
         target: Self::SyncTarget,
     ) -> Result<(), Error<mmr::Family>> {
         self.rewind(target.range.end()).await?;
-        self.commit().await?;
+        self.sync().await?;
 
         let rewound_target = self.sync_target().await;
         assert_eq!(
@@ -435,7 +435,7 @@ where
         let current_size = *self.bounds().await.end;
         let changeset = batch.batch.finalize_from(current_size);
         self.apply_batch(changeset).await?;
-        self.commit().await?;
+        self.sync().await?;
         Ok(())
     }
 
@@ -452,7 +452,7 @@ where
         target: Self::SyncTarget,
     ) -> Result<(), Error<mmr::Family>> {
         self.rewind(target.range.end()).await?;
-        self.commit().await?;
+        self.sync().await?;
 
         let rewound_target = self.sync_target().await;
         assert_eq!(
