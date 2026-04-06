@@ -6,7 +6,7 @@ use crate::{
     invariants,
     tracing::{
         data::TraceData,
-        sniffer::{TraceEntry, TracedCert},
+        sniffer::TraceEntry,
     },
     types::ReplayedReplicaState,
 };
@@ -28,7 +28,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner};
 use commonware_utils::{NZUsize, NZU16};
 use injected::{channel, NullBlocker, NullSender, PendingReceiver};
-use messages::ParentTracker;
+use messages::build_proposal_parents;
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
@@ -139,20 +139,9 @@ pub fn replay_trace(trace: &TraceData) -> Vec<ReplayedReplicaState> {
             );
         }
 
-        // Build parent tracker from trace entries
-        let mut parent_tracker = ParentTracker::default();
-        for entry in &trace.entries {
-            let view = entry.view();
-            parent_tracker.set_parent(view);
-            // Track finalizations for parent computation
-            if let TraceEntry::Certificate {
-                cert: TracedCert::Finalization { view, .. },
-                ..
-            } = entry
-            {
-                parent_tracker.record_finalization(*view);
-            }
-        }
+        // Reconstruct proposal parents with the same per-(view, block)
+        // heuristic used by the tracing encoder.
+        let proposal_parents = build_proposal_parents(&trace.entries);
 
         // Replay trace entries
         for entry in &trace.entries {
@@ -191,7 +180,7 @@ pub fn replay_trace(trace: &TraceData) -> Vec<ReplayedReplicaState> {
                 &schemes,
                 &participants,
                 epoch,
-                parent_tracker.parents(),
+                &proposal_parents,
             );
 
             if msg.is_certificate {

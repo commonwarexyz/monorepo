@@ -3,7 +3,7 @@
 //! for replay against the Rust simplex engine.
 
 use super::{
-    data::TraceData,
+    data::{ReporterReplicaStateData, TraceData, TraceProposalData},
     sniffer::{TraceEntry, TracedCert, TracedVote},
 };
 use crate::replayer::compare::{ExpectedNodeState, ExpectedState};
@@ -119,15 +119,27 @@ pub fn parse_map(v: &Value) -> Vec<(&Value, &Value)> {
     }
 }
 
-/// Converts a Quint block name (e.g. "val_b0") to a deterministic hex digest
-/// (16 chars = 8 bytes). Uses SHA-1 for determinism.
+/// Parses a Quint option value represented as `None` or `{ tag: "Some", value: ... }`.
+pub fn parse_option(v: &Value) -> Option<&Value> {
+    match v {
+        Value::Object(obj) if obj.get("tag").and_then(|t| t.as_str()) == Some("Some") => {
+            obj.get("value")
+        }
+        _ => None,
+    }
+}
+
+/// Converts a Quint block name (e.g. "val_b0") to a deterministic full
+/// SHA-256 hex digest (64 chars) so ITF conversion and Rust replay use the
+/// same payload representation end to end.
 pub fn block_to_hex(name: &str, map: &mut HashMap<String, String>) -> String {
     if let Some(hex) = map.get(name) {
         return hex.clone();
     }
-    use sha1::Digest;
-    let hash = sha1::Sha1::digest(name.as_bytes());
-    let hex: String = hash[..8].iter().map(|b| format!("{:02x}", b)).collect();
+    use commonware_cryptography::{Hasher, Sha256};
+    let hash = Sha256::hash(name.as_bytes());
+    let bytes: &[u8] = hash.as_ref();
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     map.insert(name.to_string(), hex.clone());
     hex
 }
@@ -548,18 +560,89 @@ pub fn extract_expected_state(
     correct_nodes: &[String],
     block_map: &HashMap<String, String>,
 ) -> ExpectedState {
+    let reporter_states = extract_reporter_states(state, correct_nodes, block_map);
+    let nodes = reporter_states
+        .into_iter()
+        .map(|(node, data)| {
+            let committed_entries = parse_map(get_var(state, "ghost_committed_blocks"));
+            let last_finalized = parse_map(get_var(state, "replica_state"))
+                .iter()
+                .find(|(k, _)| k.as_str() == Some(node.as_str()))
+                .map(|(_, v)| parse_int(&v["last_finalized"]))
+                .unwrap_or(0);
+
+            let committed_sequence = committed_entries
+                .iter()
+                .find(|(k, _)| k.as_str() == Some(node.as_str()))
+                .and_then(|(_, v)| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|entry| {
+                            if entry.is_object() {
+                                Some(parse_int(&entry["view"]))
+                            } else {
+                                let block_name = entry.as_str()?;
+                                data.finalizations
+                                    .iter()
+                                    .find(|(_, proposal)| proposal.payload == block_map.get(block_name).cloned().unwrap_or_default())
+                                    .map(|(&v, _)| v)
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            (
+                node,
+                ExpectedNodeState {
+                    notarizations: data
+                        .notarizations
+                        .iter()
+                        .map(|(view, proposal)| (*view, proposal.payload.clone()))
+                        .collect(),
+                    nullifications: data.nullifications.clone(),
+                    finalizations: data
+                        .finalizations
+                        .iter()
+                        .map(|(view, proposal)| (*view, proposal.payload.clone()))
+                        .collect(),
+                    notarization_signature_counts: data.notarization_signature_counts.clone(),
+                    nullification_signature_counts: data.nullification_signature_counts.clone(),
+                    finalization_signature_counts: data.finalization_signature_counts.clone(),
+                    last_finalized,
+                    committed_sequence,
+                    certified: data.certified.clone(),
+                    notarize_signers: data.notarize_signers.clone(),
+                    nullify_signers: data.nullify_signers.clone(),
+                    finalize_signers: data.finalize_signers.clone(),
+                },
+            )
+        })
+        .collect();
+
+    ExpectedState { nodes }
+}
+
+/// Extracts reporter-like observable state from the final ITF state so traces
+/// converted from Quint keep the same JSON shape as runtime-generated traces.
+pub fn extract_reporter_states(
+    state: &Value,
+    correct_nodes: &[String],
+    block_map: &HashMap<String, String>,
+) -> BTreeMap<String, ReporterReplicaStateData> {
     let store_cert_map = collect_store_certificate(state);
     let store_vote_map = collect_store_vote(state);
     let sent_votes = collect_sent_vote(state);
     let replica_state_entries = parse_map(get_var(state, "replica_state"));
-    let committed_entries = parse_map(get_var(state, "ghost_committed_blocks"));
 
     let mut nodes = BTreeMap::new();
     for node in correct_nodes {
-        // Extract notarized/nullified/finalized from store_certificate
         let mut notarizations = BTreeMap::new();
+        let mut notarization_signature_counts = BTreeMap::new();
         let mut nullifications = BTreeSet::new();
+        let mut nullification_signature_counts = BTreeMap::new();
         let mut finalizations = BTreeMap::new();
+        let mut finalization_signature_counts = BTreeMap::new();
 
         if let Some(certs) = store_cert_map.get(node) {
             for cert_val in certs {
@@ -577,17 +660,34 @@ pub fn extract_expected_state(
                                 .map(|proposal| &proposal["view"])
                                 .unwrap_or(&inner["view"]),
                         );
+                        let parent = parse_int(
+                            inner
+                                .get("proposal")
+                                .map(|proposal| &proposal["parent"])
+                                .unwrap_or(&Value::Null),
+                        );
                         let block_name = inner
                             .get("proposal")
                             .and_then(|proposal| proposal["payload"].as_str())
                             .or_else(|| inner["block"].as_str())
                             .unwrap_or("");
                         let hex = block_map.get(block_name).cloned().unwrap_or_default();
-                        notarizations.insert(view, hex);
+                        let signature_count = parse_set(&inner["signatures"]).len();
+                        notarizations.insert(
+                            view,
+                            TraceProposalData {
+                                view,
+                                parent,
+                                payload: hex,
+                            },
+                        );
+                        notarization_signature_counts.insert(view, Some(signature_count));
                     }
                     "Nullification" => {
                         let view = parse_int(&inner["view"]);
+                        let signature_count = parse_set(&inner["signatures"]).len();
                         nullifications.insert(view);
+                        nullification_signature_counts.insert(view, Some(signature_count));
                     }
                     "Finalization" => {
                         let view = parse_int(
@@ -596,53 +696,46 @@ pub fn extract_expected_state(
                                 .map(|proposal| &proposal["view"])
                                 .unwrap_or(&inner["view"]),
                         );
+                        let parent = parse_int(
+                            inner
+                                .get("proposal")
+                                .map(|proposal| &proposal["parent"])
+                                .unwrap_or(&Value::Null),
+                        );
                         let block_name = inner
                             .get("proposal")
                             .and_then(|proposal| proposal["payload"].as_str())
                             .or_else(|| inner["block"].as_str())
                             .unwrap_or("");
                         let hex = block_map.get(block_name).cloned().unwrap_or_default();
-                        finalizations.insert(view, hex);
+                        let signature_count = parse_set(&inner["signatures"]).len();
+                        finalizations.insert(
+                            view,
+                            TraceProposalData {
+                                view,
+                                parent,
+                                payload: hex,
+                            },
+                        );
+                        finalization_signature_counts.insert(view, Some(signature_count));
                     }
                     _ => {}
                 }
             }
         }
 
-        // Extract last_finalized from replica_state
-        let last_finalized = replica_state_entries
+        let certified = replica_state_entries
             .iter()
             .find(|(k, _)| k.as_str() == Some(node.as_str()))
-            .map(|(_, v)| parse_int(&v["last_finalized"]))
-            .unwrap_or(0);
-
-        // Extract committed sequence from ghost_committed_blocks.
-        // Older specs stored payload strings; the current spec stores proposals.
-        let committed_sequence = committed_entries
-            .iter()
-            .find(|(k, _)| k.as_str() == Some(node.as_str()))
-            .and_then(|(_, v)| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|entry| {
-                        if entry.is_object() {
-                            Some(parse_int(&entry["view"]))
-                        } else {
-                            let block_name = entry.as_str()?;
-                            finalizations
-                                .iter()
-                                .find(|(_, hex)| {
-                                    block_map
-                                        .get(block_name)
-                                        .map(|h| h == hex.as_str())
-                                        .unwrap_or(false)
-                                })
-                                .map(|(&v, _)| v)
-                        }
-                    })
+            .map(|(_, v)| {
+                parse_map(&v["certified"])
+                    .into_iter()
+                    .filter_map(|(view, value)| parse_option(value).map(|_| parse_int(view)))
                     .collect()
             })
             .unwrap_or_default();
+
+        let max_finalized_view = finalizations.keys().copied().max().unwrap_or(0);
 
         // Extract vote signers from store_vote + sent_vote
         let (notarize_signers, nullify_signers, finalize_signers) =
@@ -650,20 +743,23 @@ pub fn extract_expected_state(
 
         nodes.insert(
             node.clone(),
-            ExpectedNodeState {
+            ReporterReplicaStateData {
                 notarizations,
+                notarization_signature_counts,
                 nullifications,
+                nullification_signature_counts,
                 finalizations,
-                last_finalized,
-                committed_sequence,
+                finalization_signature_counts,
+                certified,
                 notarize_signers,
                 nullify_signers,
                 finalize_signers,
+                max_finalized_view,
             },
         );
     }
 
-    ExpectedState { nodes }
+    nodes
 }
 
 /// Identifies the correct node set from the ITF state.
@@ -793,6 +889,7 @@ pub fn decode_itf(
     // Extract expected state from final state
     let final_state = states.last().unwrap();
     let expected = extract_expected_state(final_state, &correct_nodes, &block_map);
+    let reporter_states = extract_reporter_states(final_state, &correct_nodes, &block_map);
 
     let trace_data = TraceData {
         n,
@@ -801,8 +898,27 @@ pub fn decode_itf(
         max_view,
         entries,
         required_containers: 0,
-        reporter_states: Default::default(),
+        reporter_states,
     };
 
     Ok((trace_data, expected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::block_to_hex;
+    use std::collections::HashMap;
+
+    #[test]
+    fn block_to_hex_returns_full_deterministic_digest() {
+        let mut map = HashMap::new();
+
+        let first = block_to_hex("val_b0", &mut map);
+        let second = block_to_hex("val_b0", &mut map);
+        let other = block_to_hex("val_b1", &mut map);
+
+        assert_eq!(first.len(), 64);
+        assert_eq!(first, second);
+        assert_ne!(first, other);
+    }
 }

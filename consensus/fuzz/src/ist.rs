@@ -36,7 +36,7 @@ use crate::{
             diff_store_certificate, diff_store_vote, extract_expected_state, extract_leader_map,
             identify_correct_nodes,
         },
-        sniffer::{TraceEntry, TracedCert},
+        sniffer::TraceEntry,
     },
 };
 use commonware_consensus::{
@@ -279,7 +279,7 @@ fn inject_entry(
     schemes: &[ed25519::Scheme],
     participants: &[commonware_cryptography::ed25519::PublicKey],
     epoch: u64,
-    parents: &HashMap<u64, commonware_consensus::types::View>,
+    parents: &messages::ProposalParents,
 ) {
     // Skip self-votes
     if let TraceEntry::Vote {
@@ -552,7 +552,7 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
                                 receiver,
                                 vote,
                             };
-                            parent_tracker.set_parent(entry.view());
+                            parent_tracker.observe_entry(&entry);
                             step_entries.push(entry);
                         }
                         for (receiver, sender, cert) in cert_entries {
@@ -562,14 +562,7 @@ pub fn run_ist(cfg: &IstConfig) -> Result<IstReport, Error> {
                                 receiver,
                                 cert,
                             };
-                            parent_tracker.set_parent(entry.view());
-                            if let TraceEntry::Certificate {
-                                cert: TracedCert::Finalization { view, .. },
-                                ..
-                            } = &entry
-                            {
-                                parent_tracker.record_finalization(*view);
-                            }
+                            parent_tracker.observe_entry(&entry);
                             step_entries.push(entry);
                         }
 
