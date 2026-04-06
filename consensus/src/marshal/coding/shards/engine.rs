@@ -311,6 +311,9 @@ where
     state: BTreeMap<Commitment, ReconstructionState<P, C, H>>,
 
     /// Per-peer ring buffers for shards received before leader announcement.
+    ///
+    /// Empty buffers are retained for active peers and only evicted when the
+    /// peer leaves `latest.primary`.
     peer_buffers: BTreeMap<P, VecDeque<Shard<C, H>>>,
 
     /// Maximum buffered pre-leader shards per peer.
@@ -725,7 +728,6 @@ where
                 buffered.push((peer.clone(), shard));
             }
         }
-        self.peer_buffers.retain(|_, queue| !queue.is_empty());
 
         let Some(state) = self.state.get_mut(&commitment) else {
             return false;
@@ -4822,6 +4824,95 @@ mod tests {
             assert!(
                 mailbox.get(commitment).await.is_none(),
                 "block should not reconstruct from evicted buffers"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_empty_peer_buffer_is_retained_until_peer_leaves_latest_primary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
+                context.with_label("network"),
+                simulated::Config {
+                    max_size: MAX_SHARD_SIZE as u32,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: commonware_utils::NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let mut private_keys = (0..2)
+                .map(|i| PrivateKey::from_seed(i as u64))
+                .collect::<Vec<_>>();
+            private_keys.sort_by_key(|s| s.public_key());
+            let peer_keys: Vec<P> = private_keys.iter().map(|c| c.public_key()).collect();
+            let receiver_pk = peer_keys[0].clone();
+            let sender_pk = peer_keys[1].clone();
+            let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
+
+            let receiver_control = oracle.control(receiver_pk.clone());
+            let scheme = Scheme::signer(
+                SCHEME_NAMESPACE,
+                participants.clone(),
+                private_keys[0].clone(),
+            )
+            .expect("signer scheme should be created");
+
+            let config: Config<_, _, _, _, C, _, _, _> = Config {
+                scheme_provider: MultiEpochProvider::single(scheme),
+                blocker: receiver_control,
+                shard_codec_cfg: CodecConfig {
+                    maximum_shard_size: MAX_SHARD_SIZE,
+                },
+                block_codec_cfg: (),
+                strategy: STRATEGY,
+                mailbox_size: 16,
+                peer_buffer_size: NZUsize!(4),
+                background_channel_capacity: 16,
+                peer_provider: oracle.manager(),
+            };
+
+            let (mut engine, _mailbox) = ShardEngine::new(context.with_label("engine"), config);
+            engine.update_latest_primary_peers(Set::from_iter_dedup([sender_pk.clone()]));
+
+            let inner = B::new::<H>((), Sha256Digest::EMPTY, Height::new(1), 100);
+            let coded_block = CodedBlock::<B, C, H>::new(
+                inner,
+                coding_config_for_participants(participants.len() as u16),
+                &STRATEGY,
+            );
+            let commitment = coded_block.commitment();
+            let shard = coded_block.shard(0).expect("missing shard");
+
+            engine.buffer_peer_shard(sender_pk.clone(), shard);
+            assert_eq!(
+                engine.peer_buffers.get(&sender_pk).map(VecDeque::len),
+                Some(1),
+                "peer buffer should contain the buffered shard"
+            );
+
+            let progressed = engine.ingest_buffered_shards(commitment).await;
+            assert!(
+                !progressed,
+                "ingest should not progress without reconstruction state"
+            );
+            assert!(
+                engine.peer_buffers.contains_key(&sender_pk),
+                "empty peer buffer should be retained while sender remains in latest.primary"
+            );
+            assert!(
+                engine
+                    .peer_buffers
+                    .get(&sender_pk)
+                    .is_some_and(VecDeque::is_empty),
+                "retained peer buffer should now be empty"
+            );
+
+            engine.update_latest_primary_peers(Set::default());
+            assert!(
+                !engine.peer_buffers.contains_key(&sender_pk),
+                "peer buffer should be evicted once sender leaves latest.primary"
             );
         });
     }
