@@ -376,7 +376,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 None
             }
             ProposalChange::Equivocated { dropped, retained } => {
-                self.proposal.set_proposed_locally(proposed_locally);
+                self.proposal.set_proposed_locally(false);
                 // Receiving a certificate for a conflicting proposal means the
                 // leader signed two different payloads for the same (epoch,
                 // view).
@@ -1160,6 +1160,40 @@ mod tests {
 
         assert!(round.try_certify().is_some());
         assert!(round.proposed_locally());
+    }
+
+    #[test]
+    fn recovered_conflicting_certificate_clears_local_marker() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519::fixture(&mut rng, namespace, 4);
+        let local_scheme = schemes[0].clone();
+
+        let now = SystemTime::UNIX_EPOCH;
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let local_proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([5u8; 32]));
+        let conflicting = Proposal::new(round_info, View::new(0), Sha256Digest::from([6u8; 32]));
+
+        let mut round = Round::new(local_scheme, round_info, now);
+        round.set_leader(Participant::new(0));
+        assert!(round.proposed(local_proposal));
+        assert!(round.proposed_locally());
+
+        let notarization_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, conflicting.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
+        let (added, equivocator) = round.add_notarization(notarization);
+        assert!(added);
+        assert!(equivocator.is_some());
+
+        assert_eq!(round.proposal.status(), ProposalStatus::Equivocated);
+        assert!(!round.proposed_locally());
     }
 
     #[test]
