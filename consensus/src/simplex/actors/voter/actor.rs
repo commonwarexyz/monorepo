@@ -32,7 +32,10 @@ use commonware_utils::{
     futures::AbortablePool,
 };
 use core::{future::Future, panic};
-use futures::{pin_mut, StreamExt};
+use futures::{
+    future::{ready, Either},
+    pin_mut, StreamExt,
+};
 use prometheus_client::metrics::{counter::Counter, family::Family, histogram::Histogram};
 use rand_core::CryptoRngCore;
 use std::{
@@ -855,8 +858,13 @@ impl<
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
-                    let receiver = self.automaton.certify(round, proposal.payload).await;
-                    let handle = certify_pool.push(async move { (round, receiver.await) });
+                    let result = if self.state.proposed_locally(view) {
+                        Either::Left(ready(Ok(true)))
+                    } else {
+                        let receiver = self.automaton.certify(round, proposal.payload).await;
+                        Either::Right(receiver)
+                    };
+                    let handle = certify_pool.push(async move { (round, result.await) });
                     self.state.set_certify_handle(view, handle);
                 }
 

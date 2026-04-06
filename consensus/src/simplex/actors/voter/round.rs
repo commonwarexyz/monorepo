@@ -219,6 +219,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         matches!(self.certify, CertifyState::Certified(true))
     }
 
+    /// Returns whether this round's proposal was built by the local participant.
+    pub const fn proposed_locally(&self) -> bool {
+        self.proposal.proposed_locally()
+    }
+
     /// Returns true if certification was aborted due to finalization.
     #[cfg(test)]
     pub const fn is_certify_aborted(&self) -> bool {
@@ -1083,6 +1088,39 @@ mod tests {
         // Has notarization and proposal came from certificate
         // try_certify returns the proposal from the certificate
         assert!(round.try_certify().is_some());
+        assert!(!round.proposed_locally());
+    }
+
+    #[test]
+    fn locally_built_proposals_stay_marked_local_for_certification() {
+        let mut rng = test_rng();
+        let namespace = b"ns";
+        let Fixture {
+            schemes, verifier, ..
+        } = ed25519::fixture(&mut rng, namespace, 4);
+        let local_scheme = schemes[0].clone();
+
+        let now = SystemTime::UNIX_EPOCH;
+        let round_info = Rnd::new(Epoch::new(1), View::new(1));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([7u8; 32]));
+
+        let mut round = Round::new(local_scheme, round_info, now);
+        round.set_leader(Participant::new(0));
+        assert!(round.proposed(proposal.clone()));
+        assert!(round.proposed_locally());
+
+        let notarization_votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        let notarization =
+            Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
+                .unwrap();
+        let (added, _) = round.add_notarization(notarization);
+        assert!(added);
+
+        assert!(round.try_certify().is_some());
+        assert!(round.proposed_locally());
     }
 
     #[test]

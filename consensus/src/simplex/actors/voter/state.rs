@@ -575,6 +575,13 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .unwrap_or(false)
     }
 
+    /// Returns whether this view's proposal was built by the local participant.
+    pub fn proposed_locally(&self, view: View) -> bool {
+        self.views
+            .get(&view)
+            .is_some_and(|round| round.proposed_locally())
+    }
+
     /// Store the abort handle for an in-flight certification request.
     pub fn set_certify_handle(&mut self, view: View, handle: Aborter) {
         let Some(round) = self.views.get_mut(&view) else {

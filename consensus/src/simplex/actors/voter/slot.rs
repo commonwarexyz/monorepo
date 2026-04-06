@@ -37,6 +37,7 @@ where
     status: Status,
     requested_build: bool,
     requested_verify: bool,
+    proposed_locally: bool,
 }
 
 impl<D> Slot<D>
@@ -49,6 +50,7 @@ where
             status: Status::None,
             requested_build: false,
             requested_verify: false,
+            proposed_locally: false,
         }
     }
 
@@ -58,6 +60,11 @@ where
 
     pub const fn status(&self) -> Status {
         self.status
+    }
+
+    /// Returns whether the tracked proposal was built by the local participant.
+    pub const fn proposed_locally(&self) -> bool {
+        self.proposed_locally
     }
 
     /// Returns whether the slot contains a concrete proposal and no equivocation.
@@ -93,6 +100,7 @@ where
         self.status = Status::Verified;
         self.requested_build = true;
         self.requested_verify = true;
+        self.proposed_locally = true;
     }
 
     pub const fn request_verify(&mut self) -> bool {
@@ -125,6 +133,7 @@ where
             None => {
                 self.proposal = Some(proposal.clone());
                 self.status = Status::Unverified;
+                self.proposed_locally = false;
                 Change::New
             }
             Some(existing) if existing == proposal => Change::Unchanged,
@@ -137,6 +146,7 @@ where
                     self.proposal = Some(retained.clone());
                     self.requested_build = true;
                     self.requested_verify = true;
+                    self.proposed_locally = false;
                 } else {
                     // If this isn't a certificate, we keep the proposal as-is.
                     (retained, dropped) = (dropped, retained);
@@ -186,6 +196,7 @@ mod tests {
             None => panic!("proposal missing after recording"),
         }
         assert_eq!(slot.status(), Status::Verified);
+        assert!(slot.proposed_locally());
         assert!(!slot.should_build());
         assert!(!slot.request_verify());
     }
@@ -200,6 +211,7 @@ mod tests {
 
         assert_eq!(slot.proposal(), Some(&proposal));
         assert_eq!(slot.status(), Status::Verified);
+        assert!(slot.proposed_locally());
         assert!(!slot.should_build());
         assert!(!slot.request_verify());
     }
@@ -215,6 +227,7 @@ mod tests {
 
         assert!(!slot.should_build());
         assert_eq!(slot.status(), Status::Verified);
+        assert!(slot.proposed_locally());
         assert_eq!(slot.proposal(), Some(&proposal));
     }
 
@@ -251,6 +264,7 @@ mod tests {
         }
         assert_eq!(slot.status(), Status::Equivocated);
         assert_eq!(slot.proposal(), Some(&proposal_a));
+        assert!(!slot.proposed_locally());
     }
 
     #[test]
@@ -268,6 +282,7 @@ mod tests {
         assert!(matches!(slot.update(&compromised, true), Change::New));
         assert_eq!(slot.status(), Status::Unverified);
         assert_eq!(slot.proposal(), Some(&compromised));
+        assert!(!slot.proposed_locally());
 
         // Once we finally finish proposing our honest payload, the slot should just
         // ignore it (the equivocation was already detected when the certificate
@@ -275,6 +290,7 @@ mod tests {
         slot.built(honest);
         assert_eq!(slot.status(), Status::Unverified);
         assert_eq!(slot.proposal(), Some(&compromised));
+        assert!(!slot.proposed_locally());
     }
 
     #[test]
@@ -298,6 +314,7 @@ mod tests {
             other => panic!("expected equivocation, got {other:?}"),
         }
         assert_eq!(slot.status(), Status::Equivocated);
+        assert!(!slot.proposed_locally());
         // Verifier completion arriving afterwards must be ignored.
         assert!(!slot.mark_verified());
         assert!(matches!(slot.update(&conflicting, true), Change::Skipped));
@@ -320,6 +337,7 @@ mod tests {
         }
         assert_eq!(slot.status(), Status::Equivocated);
         assert_eq!(slot.proposal(), Some(&proposal_b));
+        assert!(!slot.proposed_locally());
         assert!(!slot.should_build());
     }
 

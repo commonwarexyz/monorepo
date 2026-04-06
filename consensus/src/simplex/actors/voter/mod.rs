@@ -4758,6 +4758,133 @@ mod tests {
         certification_after_notarize_timeout_as_leader::<_, _>(secp256r1::fixture);
     }
 
+    /// A leader should certify its own proposal after notarization without asking
+    /// the application certifier again.
+    fn local_proposal_certifies_without_application_certify<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"local_proposal_certifies_without_application_certify".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.with_label("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: None,
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            let elector = RoundRobin::<Sha256>::default();
+            let built_elector: RoundRobinElector<S> = elector
+                .clone()
+                .build(&participants.clone().try_into().unwrap());
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_secs(100),
+                Duration::from_secs(100),
+                Duration::from_secs(100),
+                mocks::application::Certifier::Custom(Box::new(|_| false)),
+            )
+            .await;
+
+            let target_view = View::new(2);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+            assert_eq!(
+                built_elector.elect(Round::new(Epoch::new(333), target_view), None),
+                Participant::new(0),
+                "we should be leader at view 2"
+            );
+
+            let proposal = loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Notarize(notarize))
+                            if notarize.view() == target_view =>
+                        {
+                            break notarize.proposal.clone();
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected local notarize vote for view {target_view}");
+                    },
+                }
+            };
+
+            let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+            mailbox
+                .resolved(Certificate::Notarization(notarization))
+                .await;
+
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => match msg.unwrap() {
+                        batcher::Message::Constructed(Vote::Finalize(finalize))
+                            if finalize.view() == target_view =>
+                        {
+                            assert_eq!(finalize.proposal, proposal);
+                            break;
+                        }
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == target_view =>
+                        {
+                            panic!(
+                                "local proposal should certify immediately instead of nullifying view {target_view}"
+                            );
+                        }
+                        batcher::Message::Update { response, .. } => response.send(None).unwrap(),
+                        _ => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected finalize vote for locally proposed view {target_view}");
+                    },
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_local_proposal_certifies_without_application_certify() {
+        local_proposal_certifies_without_application_certify::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        local_proposal_certifies_without_application_certify::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        local_proposal_certifies_without_application_certify::<_, _>(
+            bls12381_multisig::fixture::<MinPk, _>,
+        );
+        local_proposal_certifies_without_application_certify::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        local_proposal_certifies_without_application_certify::<_, _>(ed25519::fixture);
+        local_proposal_certifies_without_application_certify::<_, _>(secp256r1::fixture);
+    }
+
     /// Tests that when certification returns a cancelled receiver, the voter doesn't hang
     /// and continues to make progress (via voting to nullify the view that could not be certified).
     fn cancelled_certification_does_not_hang<S, F>(mut fixture: F, traces: TraceStorage)
