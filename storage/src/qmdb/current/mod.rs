@@ -1691,12 +1691,7 @@ pub mod tests {
             let size_before = db.bounds().await.end;
             let root_before = db.root();
 
-            commit_writes_with_metadata(
-                &mut db,
-                [(key(0), Some(val(100)))],
-                None,
-            )
-            .await;
+            commit_writes_with_metadata(&mut db, [(key(0), Some(val(100)))], None).await;
 
             // Hold a live snapshot that shares the Base bitmap Arc.
             let _live_batch = db.new_batch();
@@ -1708,6 +1703,35 @@ pub mod tests {
             assert_eq!(db.root(), root_before);
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
             assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Regression: applying a finalized committed snapshot (to_batch().finalize())
+    /// must not panic. It is a zero-op changeset and should return an empty range.
+    #[test_traced("INFO")]
+    fn test_current_apply_zero_op_changeset() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-zero-op-changeset";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            commit_writes_with_metadata(&mut db, [(key(0), Some(val(0)))], None).await;
+            let size_before = db.bounds().await.end;
+            let root_before = db.root();
+
+            let snapshot = db.to_batch();
+            let changeset = snapshot.finalize();
+            let range = db.apply_batch(changeset).await.unwrap();
+
+            assert!(range.is_empty());
+            assert_eq!(db.bounds().await.end, size_before);
+            assert_eq!(db.root(), root_before);
 
             db.destroy().await.unwrap();
         });

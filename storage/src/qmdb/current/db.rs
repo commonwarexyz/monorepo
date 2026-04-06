@@ -581,6 +581,12 @@ where
             });
         }
 
+        // Zero-op changeset (e.g. from to_batch().finalize()) — nothing to apply.
+        let start_loc = Location::new(batch_start);
+        if *batch.inner.new_last_commit_loc < batch_start {
+            return Ok(start_loc..start_loc);
+        }
+
         let (active_bits, clears) = derive_bitmap_changes::<U, N>(
             self.any.last_commit_loc,
             batch_start,
