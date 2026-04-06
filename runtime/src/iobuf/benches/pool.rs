@@ -1,5 +1,5 @@
 use commonware_runtime::{
-    tokio, BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _,
+    tokio, BufferPool, BufferPoolConfig, BufferPoolThreadCache, BufferPooler, IoBufMut, Runner as _,
 };
 use commonware_utils::NZUsize;
 use criterion::Criterion;
@@ -14,6 +14,10 @@ use std::{
 const MIN_BENCH_THREADS: usize = 2;
 const MAX_BENCH_THREADS: usize = 8;
 const SIZES: &[usize] = &[256, 1024, 4096, 65536, 1024 * 1024, 8 * 1024 * 1024];
+
+const GLOBAL_FREELIST_SIZES: &[usize] = &[1024, 4096, 65536];
+const GLOBAL_FREELIST_THREAD_CACHE_CAPACITIES: &[usize] = &[0, 8, 16, 32];
+const GLOBAL_FREELIST_BATCH_FACTOR: usize = 4;
 
 #[derive(Clone, Copy)]
 enum Metric {
@@ -133,6 +137,28 @@ pub fn bench(c: &mut Criterion) {
             }
         }
     }
+
+    bench_global_freelist(c, threads, threadings);
+}
+
+fn bench_global_freelist(c: &mut Criterion, threads: usize, threadings: &[Threading]) {
+    for &size in GLOBAL_FREELIST_SIZES {
+        for &thread_cache_capacity in GLOBAL_FREELIST_THREAD_CACHE_CAPACITIES {
+            let pool = build_global_freelist_pool(size, threads, thread_cache_capacity);
+            let batch_size = global_freelist_batch_size(thread_cache_capacity);
+
+            for &threading in threadings {
+                bench_global_freelist_case(
+                    c,
+                    size,
+                    threading,
+                    thread_cache_capacity,
+                    batch_size,
+                    pool.clone(),
+                );
+            }
+        }
+    }
 }
 
 fn bench_case(
@@ -172,6 +198,56 @@ fn bench_case(
 
             full.saturating_sub(baseline)
         });
+    });
+}
+
+fn bench_global_freelist_case(
+    c: &mut Criterion,
+    size: usize,
+    threading: Threading,
+    thread_cache_capacity: usize,
+    batch_size: usize,
+    pool: BufferPool,
+) {
+    let name = global_freelist_bench_name(size, threading, thread_cache_capacity);
+    c.bench_function(&name, |b| {
+        b.iter_custom(|iters| {
+            if thread_cache_capacity == 0 {
+                let pool = pool.clone();
+                return measure(
+                    iters,
+                    threading,
+                    || BufferPoolThreadCache::flush(),
+                    |_| {
+                        let buffer = pool
+                            .try_alloc(size)
+                            .expect("buffer pool exhausted during global freelist benchmark");
+                        drop(black_box(buffer));
+                    },
+                );
+            }
+
+            let pool = pool.clone();
+            measure(
+                iters,
+                threading,
+                || {
+                    BufferPoolThreadCache::flush();
+                    Vec::with_capacity(batch_size)
+                },
+                |buffers: &mut Vec<IoBufMut>| {
+                    for _ in 0..batch_size {
+                        let buffer = pool
+                            .try_alloc(size)
+                            .expect("buffer pool exhausted during global freelist benchmark");
+                        buffers.push(black_box(buffer));
+                    }
+
+                    buffers.clear();
+                    BufferPoolThreadCache::flush();
+                },
+            )
+        })
     });
 }
 
@@ -282,6 +358,22 @@ fn bench_name(mode: Mode, metric: Metric, size: usize, threading: Threading) -> 
     name
 }
 
+fn global_freelist_bench_name(
+    size: usize,
+    threading: Threading,
+    thread_cache_capacity: usize,
+) -> String {
+    let threads = threading.threads();
+    let mut name = format!(
+        "{}::global_freelist/size={size} threads={threads} cache={thread_cache_capacity}",
+        module_path!(),
+    );
+    if let Threading::Multi { pattern, .. } = threading {
+        name.push_str(&format!(" pattern={}", pattern.as_str()));
+    }
+    name
+}
+
 fn build_pool(size: usize, threads: usize) -> BufferPool {
     let cfg = BufferPoolConfig::for_network()
         .with_pool_min_size(1024)
@@ -296,6 +388,46 @@ fn build_pool(size: usize, threads: usize) -> BufferPool {
         .with_network_buffer_pool_config(cfg);
 
     tokio::Runner::new(runner_cfg).start(|ctx| async move { ctx.network_buffer_pool().clone() })
+}
+
+fn build_global_freelist_pool(
+    size: usize,
+    threads: usize,
+    thread_cache_capacity: usize,
+) -> BufferPool {
+    let batch_size = global_freelist_batch_size(thread_cache_capacity);
+    let max_per_class = (threads * batch_size * 2).max(1);
+    let cfg = if thread_cache_capacity == 0 {
+        BufferPoolConfig::for_network()
+            .with_pool_min_size(0)
+            .with_min_size(NZUsize!(size))
+            .with_max_size(NZUsize!(size))
+            .with_max_per_class(NZUsize!(max_per_class))
+            .with_thread_cache_disabled()
+            .with_prefill(true)
+    } else {
+        BufferPoolConfig::for_network()
+            .with_pool_min_size(0)
+            .with_min_size(NZUsize!(size))
+            .with_max_size(NZUsize!(size))
+            .with_max_per_class(NZUsize!(max_per_class))
+            .with_thread_cache_capacity(NZUsize!(thread_cache_capacity))
+            .with_prefill(true)
+    };
+
+    let runner_cfg = tokio::Config::default()
+        .with_worker_threads(1)
+        .with_network_buffer_pool_config(cfg);
+
+    tokio::Runner::new(runner_cfg).start(|ctx| async move { ctx.network_buffer_pool().clone() })
+}
+
+const fn global_freelist_batch_size(thread_cache_capacity: usize) -> usize {
+    if thread_cache_capacity == 0 {
+        1
+    } else {
+        thread_cache_capacity * GLOBAL_FREELIST_BATCH_FACTOR
+    }
 }
 
 #[allow(clippy::missing_const_for_fn)]
