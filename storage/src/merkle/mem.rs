@@ -378,6 +378,9 @@ impl<F: Family, D: Digest> Mem<F, D> {
             false
         } else if self.size() > batch.base_size && self.size() < batch.size() {
             true
+        } else if self.size() == batch.size() && batch.appended.is_empty() {
+            // All ancestors committed and this batch has overwrites only (no appends).
+            true
         } else {
             return Err(Error::StaleBatch {
                 expected: batch.base_size,
@@ -385,25 +388,32 @@ impl<F: Family, D: Digest> Mem<F, D> {
             });
         };
 
-        // Apply ancestor segments (root-to-tip order) if not already committed.
-        if !skip_ancestors {
-            for (appended, overwrites) in batch
-                .ancestor_appended
-                .iter()
-                .zip(&batch.ancestor_overwrites)
-            {
-                for (&pos, &digest) in overwrites.iter() {
-                    let index = self.pos_to_index(pos);
-                    self.nodes[index] = digest;
+        // Apply ancestor segments in root-to-tip order. Already-committed
+        // segments (whose appended nodes are already in the Mem) are skipped
+        // by tracking a running position through the ancestor chain.
+        let mut seg_pos = *batch.base_size;
+        for (appended, overwrites) in batch
+            .ancestor_appended
+            .iter()
+            .zip(&batch.ancestor_overwrites)
+        {
+            seg_pos += appended.len() as u64;
+            if skip_ancestors && seg_pos <= *self.size() {
+                continue;
+            }
+            for (&pos, &digest) in overwrites.iter() {
+                if pos < self.pruning_boundary {
+                    continue;
                 }
-                for &digest in appended.iter() {
-                    self.nodes.push_back(digest);
-                }
+                let index = self.pos_to_index(pos);
+                self.nodes[index] = digest;
+            }
+            for &digest in appended.iter() {
+                self.nodes.push_back(digest);
             }
         }
 
-        // Apply this batch's own data. Pruned overwrites are skipped when
-        // ancestors were already committed (the Mem may have been pruned).
+        // Apply this batch's own data.
         for (&pos, &digest) in batch.overwrites.iter() {
             if skip_ancestors && pos < self.pruning_boundary {
                 continue;
@@ -417,34 +427,6 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
         self.root = batch.root();
         Ok(())
-    }
-
-    /// Apply only the batch's overwrites (skipping pruned positions) and
-    /// set the root. Does not check staleness, process ancestors, or
-    /// append nodes.
-    ///
-    /// Use when staleness has been verified externally and the batch has
-    /// no new appended nodes (only overwrites).
-    #[cfg(feature = "std")]
-    pub(crate) fn apply_overwrites(&mut self, batch: &batch::MerkleizedBatch<F, D>) {
-        assert!(
-            batch.appended.is_empty(),
-            "apply_overwrites called on batch with appended nodes"
-        );
-        assert!(
-            self.size() == batch.size(),
-            "apply_overwrites: size mismatch (self={:?}, batch={:?})",
-            self.size(),
-            batch.size(),
-        );
-        for (&pos, &digest) in batch.overwrites.iter() {
-            if pos < self.pruning_boundary {
-                continue;
-            }
-            let index = self.pos_to_index(pos);
-            self.nodes[index] = digest;
-        }
-        self.root = batch.root();
     }
 }
 
@@ -1071,6 +1053,36 @@ mod tests {
         }
     }
 
+    /// Applying C (child of B, grandchild of A) after only A is applied
+    /// must apply B's uncommitted data + C's data, skipping only A.
+    fn apply_batch_skips_only_committed_ancestors<F: Family>() {
+        let hasher: H = Standard::new();
+        let mut mem = Mem::<F, D>::new(&hasher);
+
+        // Chain: Mem -> A -> B -> C
+        let a = mem.new_batch().add(&hasher, b"a").merkleize(&hasher, &mem);
+        let b = a.new_batch().add(&hasher, b"b").merkleize(&hasher, &mem);
+        let c = b.new_batch().add(&hasher, b"c").merkleize(&hasher, &mem);
+
+        // Apply A, then apply C directly (skipping B's apply_batch).
+        // C's ancestor segments carry [A.data, B.data]. A is already committed
+        // so only B + C should be applied.
+        mem.apply_batch(&a).unwrap();
+        mem.apply_batch(&c).unwrap();
+
+        // Verify against a reference that applied all three in order.
+        let mut reference = Mem::<F, D>::new(&hasher);
+        let full = {
+            let mut batch = reference.new_batch();
+            for leaf in [b"a".as_slice(), b"b", b"c"] {
+                batch = batch.add(&hasher, leaf);
+            }
+            batch.merkleize(&hasher, &reference)
+        };
+        reference.apply_batch(&full).unwrap();
+        assert_eq!(mem.root(), reference.root());
+    }
+
     // --- MMR tests ---
 
     #[test]
@@ -1152,6 +1164,10 @@ mod tests {
     #[test]
     fn mmr_update_leaf_after_prune() {
         update_leaf_after_prune::<crate::mmr::Family>();
+    }
+    #[test]
+    fn mmr_apply_batch_skips_only_committed_ancestors() {
+        apply_batch_skips_only_committed_ancestors::<crate::mmr::Family>();
     }
 
     // --- MMB tests ---
@@ -1235,5 +1251,9 @@ mod tests {
     #[test]
     fn mmb_update_leaf_after_prune() {
         update_leaf_after_prune::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_apply_batch_skips_only_committed_ancestors() {
+        apply_batch_skips_only_committed_ancestors::<crate::mmb::Family>();
     }
 }

@@ -436,37 +436,41 @@ where
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V>>,
     ) -> Result<Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        if db_size != batch.db_size && db_size != batch.base_size {
+        let valid = db_size == batch.db_size
+            || db_size == batch.base_size
+            || batch.ancestor_seg_ends.contains(&db_size);
+        if !valid {
             return Err(Error::StaleBatch {
                 db_size,
                 batch_db_size: batch.db_size,
                 batch_base_size: batch.base_size,
             });
         }
-        let skip_ancestors = db_size > batch.db_size;
         let start_loc = Location::new(db_size);
 
         // Apply journal.
         self.journal.apply_batch(&batch.journal_batch).await?;
 
-        // Apply snapshot inserts by reference.
+        // Apply snapshot inserts. Child first (child wins via `seen`), then
+        // uncommitted ancestor segments.
         let bounds = self.journal.reader().await.bounds();
         let mut seen = BTreeSet::new();
         for (key, entry) in batch.diff.iter() {
-            if skip_ancestors && *entry.loc < db_size {
+            if *entry.loc < db_size {
                 continue;
             }
             seen.insert(key.clone());
             self.snapshot
                 .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
         }
-        if !skip_ancestors {
-            for ancestor_diff in &batch.ancestor_diffs {
-                for (key, entry) in ancestor_diff.iter() {
-                    if seen.insert(key.clone()) {
-                        self.snapshot
-                            .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
-                    }
+        for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+            if batch.ancestor_seg_ends[i] <= db_size {
+                continue;
+            }
+            for (key, entry) in ancestor_diff.iter() {
+                if seen.insert(key.clone()) {
+                    self.snapshot
+                        .insert_and_prune(key, entry.loc, |v| *v < bounds.start);
                 }
             }
         }
@@ -1785,7 +1789,7 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_immutable_stale_partial_ancestor_commit<F: Family, V, C>(
+    pub(crate) async fn test_immutable_partial_ancestor_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1800,28 +1804,25 @@ pub(super) mod test {
         let key1 = Sha256::hash(&[1]);
         let key2 = Sha256::hash(&[2]);
         let key3 = Sha256::hash(&[3]);
+        let v1 = Sha256::fill(1u8);
+        let v2 = Sha256::fill(2u8);
+        let v3 = Sha256::fill(3u8);
 
         // Chain: DB <- A <- B <- C
-        let a = db
-            .new_batch()
-            .set(key1, Sha256::fill(1u8))
-            .merkleize(None, &db);
-        let b = a
-            .new_batch::<Sha256>()
-            .set(key2, Sha256::fill(2u8))
-            .merkleize(None, &db);
-        let c = b
-            .new_batch::<Sha256>()
-            .set(key3, Sha256::fill(3u8))
-            .merkleize(None, &db);
+        let a = db.new_batch().set(key1, v1).merkleize(None, &db);
+        let b = a.new_batch::<Sha256>().set(key2, v2).merkleize(None, &db);
+        let c = b.new_batch::<Sha256>().set(key3, v3).merkleize(None, &db);
 
-        // Apply only A, then try to apply C (skipping B).
+        let expected_root = c.root();
+
+        // Apply only A, then apply C directly (B uncommitted).
         db.apply_batch(a).await.unwrap();
-        let result = db.apply_batch(c).await;
-        assert!(
-            matches!(result, Err(Error::StaleBatch { .. })),
-            "expected StaleBatch for partial ancestor commit, got {result:?}"
-        );
+        db.apply_batch(c).await.unwrap();
+
+        assert_eq!(db.root(), expected_root);
+        assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
+        assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
+        assert_eq!(db.get(&key3).await.unwrap(), Some(v3));
 
         db.destroy().await.unwrap();
     }

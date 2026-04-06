@@ -310,6 +310,7 @@ where
             base_size: journal_size,
             total_size: journal_size,
             db_size: journal_size,
+            ancestor_seg_ends: Vec::new(),
         })
     }
 
@@ -329,7 +330,10 @@ where
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, V>>,
     ) -> Result<core::ops::Range<Location<F>>, Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        if db_size != batch.db_size && db_size != batch.base_size {
+        let valid = db_size == batch.db_size
+            || db_size == batch.base_size
+            || batch.ancestor_seg_ends.contains(&db_size);
+        if !valid {
             return Err(Error::StaleBatch {
                 db_size,
                 batch_db_size: batch.db_size,
@@ -887,7 +891,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    pub(crate) async fn test_keyless_stale_partial_ancestor_commit<F: Family, V, C, H>(
+    pub(crate) async fn test_keyless_partial_ancestor_commit<F: Family, V, C, H>(
         mut db: Keyless<F, deterministic::Context, V, C, H>,
     ) where
         V: ValueEncoding<Value: TestValue>,
@@ -909,13 +913,14 @@ pub(crate) mod tests {
             .append(V::Value::make(30))
             .merkleize(None, &db);
 
-        // Apply only A (partial prefix), then try to apply C (skipping B).
+        let expected_root = c.root();
+
+        // Apply only A, then apply C directly (B's items applied via ancestor segments).
         db.apply_batch(a).await.unwrap();
-        let result = db.apply_batch(c).await;
-        assert!(
-            matches!(result, Err(Error::StaleBatch { .. })),
-            "expected StaleBatch for partial ancestor commit, got {result:?}"
-        );
+        db.apply_batch(c).await.unwrap();
+
+        // Root must match what the full chain produces.
+        assert_eq!(db.root(), expected_root);
 
         db.destroy().await.unwrap();
     }

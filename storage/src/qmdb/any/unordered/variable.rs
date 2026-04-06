@@ -533,11 +533,11 @@ pub(crate) mod test {
         });
     }
 
-    /// Applying a batch after only a partial prefix of its ancestor chain
-    /// was committed must be rejected. Regression test: partial ancestor
-    /// commitment (apply A, skip B, apply C) corrupts the snapshot.
+    /// Applying C (grandchild of A) after only A is committed must
+    /// apply B's data + C's data. Uncommitted ancestor B's snapshot
+    /// entries are applied via ancestor_diffs with committed_locs override.
     #[test_traced]
-    fn test_stale_changeset_partial_ancestor_commit() {
+    fn test_partial_ancestor_commit() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let mut db = open_db(context.clone()).await;
@@ -566,13 +566,16 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Apply only A (partial prefix), then try to apply C (skipping B).
+            let expected_root = c.root();
+
+            // Apply only A, then apply C directly (B uncommitted).
             db.apply_batch(a).await.unwrap();
-            let result = db.apply_batch(c).await;
-            assert!(
-                matches!(result, Err(Error::StaleBatch { .. })),
-                "expected StaleBatch for partial ancestor commit, got {result:?}"
-            );
+            db.apply_batch(c).await.unwrap();
+
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
+            assert_eq!(db.get(&key2).await.unwrap(), Some(vec![20]));
+            assert_eq!(db.get(&key3).await.unwrap(), Some(vec![30]));
 
             db.destroy().await.unwrap();
         });

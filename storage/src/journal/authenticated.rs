@@ -441,10 +441,17 @@ where
             .into());
         };
 
-        if !skip_ancestors {
-            for seg in &batch.ancestor_items {
-                self.journal.append_many(seg).await?;
+        // Apply ancestor item segments in root-to-tip order. Already-committed
+        // segments are skipped by tracking cumulative leaf count.
+        let committed_leaves = self.journal.size().await;
+        let base_leaves = *Location::<F>::try_from(base_size)?;
+        let mut seg_leaf_end = base_leaves;
+        for seg in &batch.ancestor_items {
+            seg_leaf_end += seg.len() as u64;
+            if skip_ancestors && seg_leaf_end <= committed_leaves {
+                continue;
             }
+            self.journal.append_many(seg).await?;
         }
         if !batch.items.is_empty() {
             self.journal.append_many(&batch.items).await?;
@@ -2624,5 +2631,48 @@ mod tests {
     fn test_merkleize_with_shares_arc_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_merkleize_with_shares_arc_inner::<mmb::Family>);
+    }
+
+    /// Apply C (grandchild of A) after only A is committed. B's journal items
+    /// must still be applied -- skip only A's items.
+    async fn test_apply_batch_skips_only_committed_ancestor_items_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let mut journal = create_empty_journal::<F>(context.clone(), "skip-partial").await;
+
+        // Build chain: A -> B -> C
+        let a_batch = journal.new_batch().add(create_operation::<F>(1));
+        let a = journal.merkle.with_mem(|mem| a_batch.merkleize(mem));
+        let b_batch = a.new_batch::<Sha256>().add(create_operation::<F>(2));
+        let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
+        let c_batch = b.new_batch::<Sha256>().add(create_operation::<F>(3));
+        let c = journal.merkle.with_mem(|mem| c_batch.merkleize(mem));
+
+        // Apply A, then apply C directly (skipping B's apply_batch).
+        journal.apply_batch(&a).await.unwrap();
+        journal.apply_batch(&c).await.unwrap();
+
+        // All 3 items should be in the journal.
+        assert_eq!(*journal.size().await, 3);
+
+        // Build a reference that applies all three sequentially.
+        let mut reference =
+            create_empty_journal::<F>(context.with_label("ref"), "skip-partial-ref").await;
+        for i in 1..=3u8 {
+            reference.append(&create_operation::<F>(i)).await.unwrap();
+        }
+        assert_eq!(journal.root(), reference.root());
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_skips_only_committed_ancestor_items_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_skips_only_committed_ancestor_items_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_skips_only_committed_ancestor_items_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_skips_only_committed_ancestor_items_inner::<mmb::Family>);
     }
 }

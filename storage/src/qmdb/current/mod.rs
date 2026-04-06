@@ -2404,4 +2404,49 @@ pub mod tests {
             db.destroy().await.unwrap();
         });
     }
+
+    /// Apply C (grandchild of A) after only A is committed. B's data (any-layer
+    /// snapshot diff + current-layer bitmap) must still be applied.
+    #[test_traced("INFO")]
+    fn test_current_partial_ancestor_commit() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>("pac", &ctx))
+                    .await
+                    .unwrap();
+
+            let a = db
+                .new_batch()
+                .write(key(0), Some(val(0)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+            let b = a
+                .new_batch::<Sha256>()
+                .write(key(1), Some(val(1)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+            let c = b
+                .new_batch::<Sha256>()
+                .write(key(2), Some(val(2)))
+                .merkleize(None, &db)
+                .await
+                .unwrap();
+
+            let expected_root = c.root();
+
+            db.apply_batch(a).await.unwrap();
+            db.apply_batch(c).await.unwrap();
+
+            assert_eq!(db.root(), expected_root);
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+            assert_eq!(db.get(&key(2)).await.unwrap(), Some(val(2)));
+
+            db.destroy().await.unwrap();
+        });
+    }
 }

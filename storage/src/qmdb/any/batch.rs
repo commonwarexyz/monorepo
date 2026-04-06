@@ -235,15 +235,15 @@ where
     /// ancestors have been committed.
     pub(crate) db_size: u64,
 
-    /// For each key in this batch's diff that an ancestor also touched, the ancestor's
-    /// location for that key. Used by `apply_batch` to adjust `base_old_loc` when ancestors
-    /// have been committed.
-    pub(crate) ancestor_locs: Arc<BTreeMap<U::Key, Option<Location<F>>>>,
-
     /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are
-    /// alive. Used by `apply_batch` when `!skip_ancestors` to apply ancestor snapshot diffs
-    /// without walking the `Weak` parent chain (which may be dead).
+    /// alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
+    /// 1:1 with `ancestor_seg_ends` (same length, same ordering).
     ancestor_diffs: Vec<Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>>,
+
+    /// Each ancestor's `total_size` (operation count after that ancestor).
+    /// 1:1 with `ancestor_diffs`: `ancestor_seg_ends[i]` is the boundary for
+    /// `ancestor_diffs[i]`. A segment is committed when `ancestor_seg_ends[i] <= db_size`.
+    pub(crate) ancestor_seg_ends: Vec<u64>,
 }
 
 // Manual Clone: #[derive(Clone)] would require U::Key: Clone and
@@ -263,8 +263,8 @@ where
             total_size: self.total_size,
             total_active_keys: self.total_active_keys,
             db_size: self.db_size,
-            ancestor_locs: Arc::clone(&self.ancestor_locs),
             ancestor_diffs: self.ancestor_diffs.clone(),
+            ancestor_seg_ends: self.ancestor_seg_ends.clone(),
         }
     }
 }
@@ -612,19 +612,8 @@ where
             .log
             .with_mem(|base| self.journal_batch.merkleize_with(ops, base));
 
-        // Precompute ancestor_locs: for each key in this batch's diff that an ancestor also
-        // touched, record the ancestor's location. Used by apply_batch when ancestors have
-        // been committed.
-        let mut ancestor_locs = BTreeMap::new();
-        if !self.ancestors.is_empty() {
-            for key in diff.keys() {
-                if let Some(entry) = resolve_in_ancestors(&self.ancestors, key) {
-                    ancestor_locs.insert(key.clone(), entry.loc());
-                }
-            }
-        }
-
         let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
+        let ancestor_seg_ends: Vec<_> = self.ancestors.iter().map(|a| a.total_size).collect();
 
         debug_assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(Arc::new(MerkleizedBatch {
@@ -637,8 +626,8 @@ where
             total_size: *commit_loc + 1,
             total_active_keys: total_active_keys as usize,
             db_size: self.db_size,
-            ancestor_locs: Arc::new(ancestor_locs),
             ancestor_diffs,
+            ancestor_seg_ends,
         }))
     }
 }
@@ -1257,55 +1246,64 @@ where
         batch: Arc<MerkleizedBatch<F, H::Digest, U>>,
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let db_size = *self.last_commit_loc + 1;
-        // Only two db_size values are valid: batch.db_size (nothing committed from this chain)
-        // or batch.base_size (all ancestors committed sequentially). Anything else means a
-        // different fork was committed, or ancestors were only partially committed.
-        if db_size != batch.db_size && db_size != batch.base_size {
+        // Valid db_size values: batch.db_size (nothing committed), batch.base_size
+        // (all ancestors committed), or any ancestor_seg_ends[i] (partial commit).
+        let valid = db_size == batch.db_size
+            || db_size == batch.base_size
+            || batch.ancestor_seg_ends.contains(&db_size);
+        if !valid {
             return Err(crate::qmdb::Error::StaleBatch {
                 db_size,
                 batch_db_size: batch.db_size,
                 batch_base_size: batch.base_size,
             });
         }
-        // If the DB advanced past the batch's original fork point, ancestors in this chain
-        // have already been committed. Their diffs are already in the snapshot; skip them and
-        // adjust base_old_loc using the precomputed ancestor_locs map.
-        let skip_ancestors = db_size > batch.db_size;
         let start_loc = Location::new(db_size);
 
-        // 1. Apply journal.
+        // 1. Apply journal (handles its own partial ancestor skipping).
         self.log.apply_batch(&batch.journal_batch).await?;
 
-        // 2. Apply snapshot diffs.
+        // 2. Build committed_locs: for each key in a committed ancestor segment,
+        //    record the nearest (to child) committed ancestor's final state.
+        //    Some(loc) = Active at loc, None = Deleted.
+        let mut committed_locs: BTreeMap<&U::Key, Option<Location<F>>> = BTreeMap::new();
+        for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+            if batch.ancestor_seg_ends[i] <= db_size {
+                for (key, entry) in ancestor_diff.iter() {
+                    // parent-first order: .or_insert keeps the nearest committed.
+                    committed_locs.entry(key).or_insert(entry.loc());
+                }
+            }
+        }
+
+        // 3. Apply child's diff (child wins via seen set).
         let mut seen = BTreeSet::<&U::Key>::new();
         for (key, entry) in batch.diff.iter() {
-            if skip_ancestors {
-                if entry.loc().is_some_and(|loc| *loc < db_size) {
+            if entry.loc().is_some_and(|loc| *loc < db_size) {
+                continue;
+            }
+            seen.insert(key);
+            let base_old_loc = committed_locs
+                .get(key)
+                .copied()
+                .unwrap_or_else(|| entry.base_old_loc());
+            apply_snapshot_diff(&mut self.snapshot, key, entry, base_old_loc);
+        }
+
+        // 4. Apply uncommitted ancestor diffs (skip committed segments, skip seen keys).
+        for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+            if batch.ancestor_seg_ends[i] <= db_size {
+                continue;
+            }
+            for (key, entry) in ancestor_diff.iter() {
+                if !seen.insert(key) {
                     continue;
                 }
-                // If this key was also touched by a committed ancestor, ancestor_locs has
-                // the ancestor's location (now the key's committed location). Use it as
-                // base_old_loc instead of the original pre-ancestor value.
-                let base_old_loc = batch
-                    .ancestor_locs
+                let base_old_loc = committed_locs
                     .get(key)
                     .copied()
                     .unwrap_or_else(|| entry.base_old_loc());
-                seen.insert(key);
                 apply_snapshot_diff(&mut self.snapshot, key, entry, base_old_loc);
-            } else {
-                seen.insert(key);
-                apply_snapshot_diff(&mut self.snapshot, key, entry, entry.base_old_loc());
-            }
-        }
-        if !skip_ancestors {
-            for ancestor_diff in &batch.ancestor_diffs {
-                for (key, entry) in ancestor_diff.iter() {
-                    // Skip keys already handled by this batch (child wins).
-                    if seen.insert(key) {
-                        apply_snapshot_diff(&mut self.snapshot, key, entry, entry.base_old_loc());
-                    }
-                }
             }
         }
 
@@ -1345,8 +1343,8 @@ where
             total_size: journal_size,
             total_active_keys: self.active_keys,
             db_size: journal_size,
-            ancestor_locs: Arc::new(BTreeMap::new()),
             ancestor_diffs: Vec::new(),
+            ancestor_seg_ends: Vec::new(),
         })
     }
 }

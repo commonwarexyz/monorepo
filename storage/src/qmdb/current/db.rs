@@ -555,25 +555,30 @@ where
     ) -> Result<Range<Location>, Error> {
         // Staleness is checked by self.any.apply_batch() below.
         let db_size = *self.any.last_commit_loc + 1;
-        let skip_ancestors = db_size > batch.inner.db_size;
 
-        // 1. Apply inner any-layer batch.
+        // 1. Apply inner any-layer batch (handles snapshot + journal partial skipping).
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
-        // 2. Apply bitmap. When ancestors are committed, their bitmap changes are already
-        // applied; only push this batch's local changes.
-        if skip_ancestors {
-            self.status.push_changeset(
-                batch.bitmap_pushes.as_ref().clone(),
-                (*batch.bitmap_clears).clone(),
-            );
-        } else {
+        // 2. Apply bitmap. Skip committed ancestor segments using ancestor_seg_ends
+        //    from the inner any-layer batch.
+        {
             let mut pushes = Vec::new();
             let mut clears = super::batch::ClearSet::with_capacity(0);
-            for p in &batch.ancestor_bitmap_pushes {
+            for (i, (p, c)) in batch
+                .ancestor_bitmap_pushes
+                .iter()
+                .zip(&batch.ancestor_bitmap_clears)
+                .enumerate()
+            {
+                if batch
+                    .inner
+                    .ancestor_seg_ends
+                    .get(i)
+                    .is_some_and(|&seg_end| seg_end <= db_size)
+                {
+                    continue;
+                }
                 pushes.extend_from_slice(p);
-            }
-            for c in &batch.ancestor_bitmap_clears {
                 clears.merge(c);
             }
             pushes.extend_from_slice(&batch.bitmap_pushes);
@@ -581,14 +586,8 @@ where
             self.status.push_changeset(pushes, clears);
         }
 
-        // 3. Apply grafted MMR.
-        if skip_ancestors && self.grafted_mmr.size() == batch.grafted.size() {
-            // Ancestors committed (validated by any-layer). Batch has only
-            // overwrites -- apply_batch rejects self.size() == batch.size().
-            self.grafted_mmr.apply_overwrites(&batch.grafted);
-        } else {
-            self.grafted_mmr.apply_batch(&batch.grafted)?;
-        }
+        // 3. Apply grafted MMR (merkle layer handles partial ancestor skipping).
+        self.grafted_mmr.apply_batch(&batch.grafted)?;
 
         // 4. Canonical root.
         self.root = batch.canonical_root;

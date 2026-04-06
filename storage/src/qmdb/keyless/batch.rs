@@ -60,6 +60,10 @@ where
 
     /// The database size when the initial batch was created.
     pub(super) db_size: u64,
+
+    /// Each ancestor's `total_size` (operation count after that ancestor).
+    /// Used by `apply_batch` to validate partial ancestor commits.
+    pub(super) ancestor_seg_ends: Vec<u64>,
 }
 
 // Manual Clone: derive would add unnecessary Clone bounds on generic params.
@@ -74,6 +78,7 @@ where
             base_size: self.base_size,
             total_size: self.total_size,
             db_size: self.db_size,
+            ancestor_seg_ends: self.ancestor_seg_ends.clone(),
         }
     }
 }
@@ -222,12 +227,22 @@ where
         }
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
+        let mut ancestor_seg_ends = Vec::new();
+        if let Some(parent) = &self.parent {
+            ancestor_seg_ends.push(parent.total_size);
+            for batch in parent.ancestors() {
+                ancestor_seg_ends.push(batch.total_size);
+            }
+            ancestor_seg_ends.reverse();
+        }
+
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
             parent: self.parent.as_ref().map(Arc::downgrade),
             base_size: self.base_size,
             total_size,
             db_size: self.db_size,
+            ancestor_seg_ends,
         })
     }
 }

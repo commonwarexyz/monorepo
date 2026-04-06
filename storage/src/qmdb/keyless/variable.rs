@@ -310,10 +310,10 @@ mod test {
     }
 
     #[test_traced]
-    fn test_stale_partial_ancestor_commit() {
+    fn test_partial_ancestor_commit() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.with_label("db")).await;
-            tests::test_keyless_stale_partial_ancestor_commit(db).await;
+            tests::test_keyless_partial_ancestor_commit(db).await;
         });
     }
 
