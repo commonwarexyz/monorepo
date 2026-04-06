@@ -23,12 +23,15 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use core::ops::Range;
-use futures::future::try_join_all;
+use futures::{future::try_join_all, stream::FuturesOrdered, StreamExt as _};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
 use tracing::debug;
+
+/// Maximum number of journal reads to issue concurrently during floor raising.
+const MAX_CONCURRENT_READS: u64 = 64;
 
 /// Strategy for finding the next active location during floor raising.
 pub(crate) trait FloorScan<F: Family> {
@@ -414,9 +417,9 @@ where
 
             while moved < total_steps {
                 // Collect candidates, capped to bound concurrent I/O.
-                const MAX_BATCH: usize = 64;
                 let mut candidates = Vec::new();
-                let limit = (total_steps - moved).min(MAX_BATCH as u64) as usize;
+                let limit =
+                    (total_steps - moved).min(MAX_CONCURRENT_READS) as usize;
                 while candidates.len() < limit {
                     let Some(candidate) = scan.next_candidate(floor, fixed_tip) else {
                         break;
@@ -428,21 +431,19 @@ where
                     break;
                 }
 
-                // Batch-read on-disk candidates through a single reader.
-                let mut disk_ops = {
-                    let reader = db.log.reader().await;
-                    let futures = candidates
-                        .iter()
-                        .filter(|loc| **loc < self.db_size)
-                        .map(|loc| reader.read(**loc));
-                    try_join_all(futures).await?
-                }
-                .into_iter();
+                // Perform on-disk reads concurrently via FuturesOrdered so results are yielded in
+                // insertion order as they resolve.
+                let reader = db.log.reader().await;
+                let mut disk_reads: FuturesOrdered<_> = candidates
+                    .iter()
+                    .filter(|loc| **loc < self.db_size)
+                    .map(|loc| reader.read(**loc))
+                    .collect();
 
-                // Process results sequentially, moving active ops to the tip.
+                // Process results in order, moving active ops to the tip.
                 for candidate in candidates {
                     let op = if *candidate < self.db_size {
-                        disk_ops.next().unwrap()
+                        disk_reads.next().await.unwrap()?
                     } else {
                         self.read_op(candidate, &ops, db).await?
                     };
