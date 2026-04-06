@@ -143,6 +143,7 @@ use commonware_parallel::Strategy;
 /// We can support inner products of different sizes, as long as we have enough generators.
 ///
 /// To construct this type, see [`Self::new`].
+#[derive(Debug, PartialEq)]
 pub struct Setup<G> {
     g: Vec<G>,
     h: Vec<G>,
@@ -193,17 +194,14 @@ impl<G: Read> Read for Setup<G> {
     }
 }
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl<G> arbitrary::Arbitrary<'_> for Setup<G>
 where
     G: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self {
-            g: u.arbitrary()?,
-            h: u.arbitrary()?,
-            product_generator: u.arbitrary()?,
-        })
+        let g_and_h = u.arbitrary::<Vec<(G, G)>>()?;
+        Ok(Self::new(u.arbitrary()?, g_and_h))
     }
 }
 
@@ -240,6 +238,7 @@ impl<G> Setup<G> {
 ///
 /// We claim that our commitment `P` is equal to `<a_i, G_i> + <b_i, H_i>`,
 /// and that our product `c` is equal to `<a_i, b_i>`.
+#[derive(Debug, PartialEq)]
 pub struct Claim<F, G> {
     pub commitment: G,
     pub product: F,
@@ -276,7 +275,7 @@ impl<F: Read, G: Read> Read for Claim<F, G> {
     }
 }
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl<F, G> arbitrary::Arbitrary<'_> for Claim<F, G>
 where
     F: for<'a> arbitrary::Arbitrary<'a>,
@@ -354,6 +353,7 @@ impl<F: Field> Witness<F> {
 }
 
 /// A proof for the inner product argument.
+#[derive(Debug, PartialEq)]
 pub struct Proof<F, G> {
     l_r_coms: Vec<(G, G)>,
     /// Summary of the transcript after the public statement and all proof messages.
@@ -403,15 +403,19 @@ impl<F: Read, G: Read> Read for Proof<F, G> {
     }
 }
 
-#[cfg(feature = "arbitrary")]
+#[cfg(any(test, feature = "arbitrary"))]
 impl<F, G> arbitrary::Arbitrary<'_> for Proof<F, G>
 where
     F: for<'a> arbitrary::Arbitrary<'a>,
     G: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let rounds = u.int_in_range(0..=usize::BITS as usize - 1)?;
+        let l_r_coms = (0..rounds)
+            .map(|_| u.arbitrary())
+            .collect::<arbitrary::Result<Vec<_>>>()?;
         Ok(Self {
-            l_r_coms: u.arbitrary()?,
+            l_r_coms,
             transcript_summary: u.arbitrary()?,
             a_final: u.arbitrary()?,
             b_final: u.arbitrary()?,
@@ -790,6 +794,8 @@ mod conformance {
 pub mod fuzz {
     use super::*;
     use arbitrary::{Arbitrary, Unstructured};
+    #[cfg(test)]
+    use commonware_codec::Decode;
     use commonware_math::{
         algebra::Additive,
         test::{F, G},
@@ -999,6 +1005,51 @@ pub mod fuzz {
             }
             Ok(())
         }
+    }
+
+    #[cfg(test)]
+    fn assert_setup_roundtrip(setup: &Setup<G>) {
+        let encoded = setup.encode();
+        let decoded: Setup<G> = Setup::decode_cfg(encoded.clone(), &(setup.g.len(), ()))
+            .expect("setup should decode with its own length bound");
+        assert_eq!(setup, &decoded);
+        assert_eq!(decoded.encode(), encoded);
+    }
+
+    #[cfg(test)]
+    fn assert_claim_roundtrip(claim: &Claim<F, G>) {
+        let encoded = claim.encode();
+        let decoded: Claim<F, G> = Claim::decode_cfg(encoded.clone(), &((), ()))
+            .expect("claim should decode with unit cfg");
+        assert_eq!(claim, &decoded);
+        assert_eq!(decoded.encode(), encoded);
+    }
+
+    #[cfg(test)]
+    fn assert_proof_roundtrip(proof: &Proof<F, G>) {
+        let max_len = if proof.l_r_coms.is_empty() {
+            0
+        } else {
+            1usize
+                .checked_shl(proof.l_r_coms.len() as u32)
+                .expect("proof arbitrary bounds rounds to fit in usize")
+        };
+        let encoded = proof.encode();
+        let decoded: Proof<F, G> = Proof::decode_cfg(encoded.clone(), &(max_len, ((), ())))
+            .expect("proof should decode with a matching round bound");
+        assert_eq!(proof, &decoded);
+        assert_eq!(decoded.encode(), encoded);
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn test_codec_roundtrip() {
+        commonware_invariants::minifuzz::test(|u| {
+            assert_setup_roundtrip(&u.arbitrary::<Setup<G>>()?);
+            assert_claim_roundtrip(&u.arbitrary::<Claim<F, G>>()?);
+            assert_proof_roundtrip(&u.arbitrary::<Proof<F, G>>()?);
+            Ok(())
+        });
     }
 
     #[test]
