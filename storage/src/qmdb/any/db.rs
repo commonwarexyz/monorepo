@@ -91,7 +91,7 @@ pub struct Db<
     /// `None` when this `any::Db` is embedded inside a `current::Db`, which maintains its own
     /// bitmap with a different chunk size (for authenticated proofs). In that case the caller
     /// injects a floor scan externally via [`crate::qmdb::any::batch::UnmerkleizedBatch::merkleize_with_floor_scan`].
-    pub(crate) status: Option<BitmapBatch<{ commonware_utils::bitmap::DEFAULT_CHUNK_SIZE }>>,
+    pub(crate) status: Option<BitmapBatch<F, { commonware_utils::bitmap::DEFAULT_CHUNK_SIZE }>>,
 
     /// Marker for the update type parameter.
     pub(crate) _update: core::marker::PhantomData<U>,

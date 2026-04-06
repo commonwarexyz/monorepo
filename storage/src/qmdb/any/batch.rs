@@ -186,7 +186,7 @@ where
     /// Activity bitmap state from the parent (committed DB or prior batch).
     /// Used for `BitmapScan` during floor raising.
     /// `None` when the any layer is embedded inside a `current::Db` that provides its own scan.
-    bitmap_parent: Option<BitmapBatch<{ bitmap::DEFAULT_CHUNK_SIZE }>>,
+    bitmap_parent: Option<BitmapBatch<F, { bitmap::DEFAULT_CHUNK_SIZE }>>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -221,7 +221,7 @@ where
 
     /// Activity bitmap state after this batch (parent bitmap + this batch's layer).
     /// `None` when the any layer is embedded inside a `current::Db`.
-    bitmap: Option<BitmapBatch<{ bitmap::DEFAULT_CHUNK_SIZE }>>,
+    bitmap: Option<BitmapBatch<F, { bitmap::DEFAULT_CHUNK_SIZE }>>,
 }
 
 /// An owned changeset that can be applied to the database.
@@ -230,7 +230,7 @@ pub struct Changeset<F: Family, K, D: Digest, Item: Send> {
     journal_finalized: authenticated::Changeset<F, D, Item>,
 
     /// Snapshot mutations to apply, in order.
-    snapshot_diffs: Vec<SnapshotDiff<F, K>>,
+    pub(crate) snapshot_diffs: Vec<SnapshotDiff<F, K>>,
 
     /// Net change in active key count.
     active_keys_delta: isize,
@@ -239,16 +239,10 @@ pub struct Changeset<F: Family, K, D: Digest, Item: Send> {
     new_inactivity_floor_loc: Location<F>,
 
     /// Location of the CommitFloor operation appended by this batch.
-    new_last_commit_loc: Location<F>,
+    pub(crate) new_last_commit_loc: Location<F>,
 
     /// The database size when the batch was created. Used to detect stale changesets.
-    db_size: u64,
-
-    /// Activity bitmap: bits pushed by this batch chain.
-    pub(crate) bitmap_pushes: Vec<bool>,
-
-    /// Activity bitmap: bit indices cleared by this batch chain, with per-chunk masks.
-    pub(crate) bitmap_clears: ClearSet<{ bitmap::DEFAULT_CHUNK_SIZE }>,
+    pub(crate) db_size: u64,
 }
 
 /// Batch-infrastructure state used during merkleization.
@@ -270,7 +264,7 @@ where
     db_size: u64,
     base_inactivity_floor_loc: Location<F>,
     base_active_keys: usize,
-    bitmap_parent: Option<BitmapBatch<{ bitmap::DEFAULT_CHUNK_SIZE }>>,
+    bitmap_parent: Option<BitmapBatch<F, { bitmap::DEFAULT_CHUNK_SIZE }>>,
 }
 
 impl<F: Family, H, U> Merkleizer<F, H, U>
@@ -554,10 +548,10 @@ where
                 .expect("chain should not be empty");
             let segment_base = *commit_loc + 1 - this_segment.len() as u64;
             let mut bitmap_pushes = Vec::with_capacity(this_segment.len());
-            let mut bitmap_clears = ClearSet::default();
+            let mut bitmap_clears: ClearSet<F, { bitmap::DEFAULT_CHUNK_SIZE }> = ClearSet::default();
 
             // Clear the previous commit bit.
-            bitmap_clears.push(segment_base - 1);
+            bitmap_clears.push(Location::new(segment_base - 1));
 
             // Push one bit per operation in this segment.
             for (i, op) in this_segment.iter().enumerate() {
@@ -581,7 +575,7 @@ where
             // Clear bits for base-DB operations superseded by this chain's diff.
             for entry in diff.values() {
                 if let Some(old) = entry.base_old_loc() {
-                    bitmap_clears.push(*old);
+                    bitmap_clears.push(old);
                 }
             }
 
@@ -595,7 +589,7 @@ where
                             let ancestor_loc = Location::new(seg_base + j as u64);
                             if let Some(entry) = diff.get(key) {
                                 if entry.loc() != Some(ancestor_loc) {
-                                    bitmap_clears.push(*ancestor_loc);
+                                    bitmap_clears.push(ancestor_loc);
                                 }
                             }
                         }
@@ -1229,11 +1223,6 @@ where
             })
             .sum::<isize>();
 
-        let (bitmap_pushes, bitmap_clears) = self
-            .bitmap
-            .as_ref()
-            .map(|bm| bm.collect_mutations_since(self.db_size))
-            .unwrap_or_default();
         Changeset {
             journal_finalized: self.journal_batch.finalize(),
             snapshot_diffs,
@@ -1241,8 +1230,6 @@ where
             new_inactivity_floor_loc: self.new_inactivity_floor_loc,
             new_last_commit_loc: self.new_last_commit_loc,
             db_size: self.db_size,
-            bitmap_pushes,
-            bitmap_clears,
         }
     }
 
@@ -1346,18 +1333,6 @@ where
             })
             .sum::<isize>();
 
-        // Collect bitmap mutations, skipping pushes for already-committed operations.
-        // Clears are kept in full since set_bit(loc, false) is idempotent.
-        // When bitmap is None (embedded in current::Db), the any layer has no bitmap
-        // mutations -- the current layer manages its own bitmap.
-        let (bitmap_pushes, bitmap_clears) =
-            self.bitmap
-                .as_ref()
-                .map_or_else(Default::default, |bm| {
-                    let (all_pushes, clears) = bm.collect_mutations_since(self.db_size);
-                    (all_pushes[items_to_skip as usize..].to_vec(), clears)
-                });
-
         let mmr_base = crate::merkle::Position::try_from(Location::new(current_db_size))
             .expect("valid leaf count");
         Changeset {
@@ -1367,8 +1342,6 @@ where
             new_inactivity_floor_loc: self.new_inactivity_floor_loc,
             new_last_commit_loc: self.new_last_commit_loc,
             db_size: current_db_size,
-            bitmap_pushes,
-            bitmap_clears,
         }
     }
 }
@@ -1436,7 +1409,18 @@ where
         // 1. Write all operations to the authenticated journal + apply Merkle changeset.
         self.log.apply_batch(batch.journal_finalized).await?;
 
-        // 2. Apply snapshot diffs to the in-memory index.
+        // 2. Derive and apply bitmap changes (only when maintaining a bitmap at this layer).
+        if let Some(status) = &mut self.status {
+            let (pushed_bits, clears) = derive_bitmap_changes::<F, U, { bitmap::DEFAULT_CHUNK_SIZE }>(
+                self.last_commit_loc,
+                journal_size,
+                batch.new_last_commit_loc,
+                &batch.snapshot_diffs,
+            );
+            status.push_changeset(pushed_bits, clears);
+        }
+
+        // 3. Apply snapshot diffs to the in-memory index.
         for diff in batch.snapshot_diffs {
             match diff {
                 SnapshotDiff::Update {
@@ -1455,7 +1439,7 @@ where
             }
         }
 
-        // 3. Update DB metadata.
+        // 4. Update DB metadata.
         let new_active_keys = self.active_keys as isize + batch.active_keys_delta;
         debug_assert!(
             new_active_keys >= 0,
@@ -1467,12 +1451,7 @@ where
         self.inactivity_floor_loc = batch.new_inactivity_floor_loc;
         self.last_commit_loc = batch.new_last_commit_loc;
 
-        // 4. Apply bitmap mutations (only when maintaining a bitmap at this layer).
-        if let Some(status) = &mut self.status {
-            status.push_changeset(batch.bitmap_pushes, batch.bitmap_clears);
-        }
-
-        // 5. Return range of operations that were written to the log.
+        // 4. Return range of operations that were written to the log.
         let end_loc = Location::new(*self.last_commit_loc + 1);
         Ok(start_loc..end_loc)
     }
@@ -1662,6 +1641,61 @@ mod trait_impls {
             self.apply_batch(batch)
         }
     }
+}
+
+/// Derives the bitmap changes (pushed bits and clears) from a batch's snapshot diffs.
+///
+/// Each new operation in the batch gets a pushed bit (true for active updates/inserts,
+/// false otherwise). Historical locations that are superseded get cleared.
+///
+/// # Panics
+///
+/// This function assumes `batch_start` exactly matches the base size against which `snapshot_diffs`
+/// and `new_last_commit_loc` were derived, and may panic or produce incorrect results otherwise.
+pub(crate) fn derive_bitmap_changes<F: Family, U: update::Update, const N: usize>(
+    previous_commit_loc: Location<F>,
+    batch_start: u64,
+    new_last_commit_loc: Location<F>,
+    snapshot_diffs: &[SnapshotDiff<F, U::Key>],
+) -> (Vec<bool>, ClearSet<F, N>) {
+    let mut clears = ClearSet::default();
+
+    let num_ops = (*new_last_commit_loc)
+        .checked_sub(batch_start)
+        .expect("batch start exceeds new last commit loc") as usize
+        + 1;
+    let mut pushed_bits = vec![false; num_ops];
+
+    // The last operation is the new CommitFloor, always active.
+    pushed_bits[num_ops - 1] = true;
+
+    // The previous CommitFloor stops being current once this batch is applied.
+    clears.push(previous_commit_loc);
+
+    for diff in snapshot_diffs {
+        match diff {
+            SnapshotDiff::Update {
+                old_loc, new_loc, ..
+            } => {
+                let offset = (**new_loc)
+                    .checked_sub(batch_start)
+                    .expect("new_loc is before batch start") as usize;
+                pushed_bits[offset] = true;
+                clears.push(*old_loc);
+            }
+            SnapshotDiff::Insert { new_loc, .. } => {
+                let offset = (**new_loc)
+                    .checked_sub(batch_start)
+                    .expect("new_loc is before batch start") as usize;
+                pushed_bits[offset] = true;
+            }
+            SnapshotDiff::Delete { old_loc, .. } => {
+                clears.push(*old_loc);
+            }
+        }
+    }
+
+    (pushed_bits, clears)
 }
 
 #[cfg(test)]
@@ -1922,5 +1956,104 @@ mod tests {
 
             db.destroy().await.unwrap();
         });
+    }
+
+    mod derive_bitmap {
+        use super::*;
+        use crate::qmdb::any::operation::update;
+        use crate::qmdb::any::value::FixedEncoding;
+        use commonware_codec::FixedSize;
+        use commonware_utils::{bitmap::Prunable as PrunableBitMap, sequence::FixedBytes};
+        use std::sync::Arc;
+
+        const N: usize = sha256::Digest::SIZE;
+        type TestKey = FixedBytes<4>;
+        type TestUpdate = update::Unordered<TestKey, FixedEncoding<u64>>;
+        type Loc = crate::merkle::mmr::Location;
+
+        fn key(byte: u8) -> TestKey {
+            FixedBytes::from([byte, 0, 0, 0])
+        }
+
+        fn all_true_bitmap(len: u64) -> PrunableBitMap<N> {
+            let mut bitmap = PrunableBitMap::<N>::new();
+            for _ in 0..len {
+                bitmap.push(true);
+            }
+            bitmap
+        }
+
+        #[test]
+        fn mixed_diffs() {
+            let diffs = vec![
+                SnapshotDiff::Insert {
+                    key: key(1),
+                    new_loc: Loc::new(10),
+                },
+                SnapshotDiff::Update {
+                    key: key(2),
+                    old_loc: Loc::new(3),
+                    new_loc: Loc::new(11),
+                },
+                SnapshotDiff::Delete {
+                    key: key(3),
+                    old_loc: Loc::new(8),
+                },
+            ];
+
+            let (pushed_bits, clears) =
+                derive_bitmap_changes::<mmr::Family, TestUpdate, N>(
+                    Loc::new(9), 10, Loc::new(13), &diffs,
+                );
+
+            assert_eq!(pushed_bits, vec![true, true, false, true]);
+
+            let mut bitmap = BitmapBatch::Base(Arc::new(all_true_bitmap(10)));
+            bitmap.push_changeset(pushed_bits, clears);
+
+            assert!(!bitmap.get_bit(3));
+            assert!(!bitmap.get_bit(8));
+            assert!(!bitmap.get_bit(9));
+            assert!(bitmap.get_bit(10));
+            assert!(bitmap.get_bit(11));
+            assert!(!bitmap.get_bit(12));
+            assert!(bitmap.get_bit(13));
+        }
+
+        #[test]
+        fn delete_only_batch() {
+            let diffs = vec![SnapshotDiff::Delete {
+                key: key(7),
+                old_loc: Loc::new(4),
+            }];
+
+            let (pushed_bits, clears) =
+                derive_bitmap_changes::<mmr::Family, TestUpdate, N>(
+                    Loc::new(19), 20, Loc::new(21), &diffs,
+                );
+
+            assert_eq!(pushed_bits, vec![false, true]);
+
+            let mut bitmap = BitmapBatch::Base(Arc::new(all_true_bitmap(20)));
+            bitmap.push_changeset(pushed_bits, clears);
+
+            assert!(!bitmap.get_bit(4));
+            assert!(!bitmap.get_bit(19));
+            assert!(!bitmap.get_bit(20));
+            assert!(bitmap.get_bit(21));
+        }
+
+        #[test]
+        #[should_panic(expected = "new_loc is before batch start")]
+        fn panics_when_new_loc_precedes_batch_start() {
+            let diffs = vec![SnapshotDiff::Insert {
+                key: key(9),
+                new_loc: Loc::new(9),
+            }];
+
+            let _ = derive_bitmap_changes::<mmr::Family, TestUpdate, N>(
+                Loc::new(9), 10, Loc::new(10), &diffs,
+            );
+        }
     }
 }

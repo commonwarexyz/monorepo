@@ -4,6 +4,7 @@
 //! push thin diff layers (pushed bits + cleared bits) on top of a parent's bitmap without
 //! cloning. Reads walk the layer chain.
 
+use crate::merkle::{Family, Location};
 use commonware_utils::bitmap::{Prunable as PrunableBitMap, Readable as BitmapReadable};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -12,41 +13,45 @@ use std::{collections::BTreeMap, sync::Arc};
 /// `locations` preserves the original clear operations so batch chaining, flattening, and
 /// finalization can replay them in order. `masks` indexes the same clears by chunk, allowing
 /// [`apply_push_clear`] to zero an entire chunk without rescanning every cleared location.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct ClearSet<const N: usize> {
-    locations: Vec<u64>,
+#[derive(Clone, Debug)]
+pub(crate) struct ClearSet<F: Family, const N: usize> {
+    locations: Vec<Location<F>>,
     masks: BTreeMap<usize, [u8; N]>,
 }
 
-impl<const N: usize> ClearSet<N> {
+impl<F: Family, const N: usize> Default for ClearSet<F, N> {
+    fn default() -> Self {
+        Self {
+            locations: Vec::new(),
+            masks: BTreeMap::new(),
+        }
+    }
+}
+
+impl<F: Family, const N: usize> ClearSet<F, N> {
     /// Push a location to the clear set.
-    pub(crate) fn push(&mut self, loc: u64) {
+    pub(crate) fn push(&mut self, loc: Location<F>) {
+        let raw = *loc;
         self.locations.push(loc);
 
-        let chunk_idx = PrunableBitMap::<N>::to_chunk_index(loc);
-        let rel = (loc % PrunableBitMap::<N>::CHUNK_SIZE_BITS) as usize;
+        let chunk_idx = PrunableBitMap::<N>::to_chunk_index(raw);
+        let rel = (raw % PrunableBitMap::<N>::CHUNK_SIZE_BITS) as usize;
         let chunk = self.masks.entry(chunk_idx).or_insert([0u8; N]);
         chunk[rel / 8] |= 1 << (rel % 8);
     }
 
-    /// Merge another clear set into this one.
-    pub(crate) fn merge(&mut self, other: &Self) {
-        self.locations.extend_from_slice(&other.locations);
-        for (&idx, other_mask) in &other.masks {
-            let chunk = self.masks.entry(idx).or_insert([0u8; N]);
-            for (byte, &m) in chunk.iter_mut().zip(other_mask) {
-                *byte |= m;
-            }
-        }
+    /// Whether the clear set is empty.
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.locations.is_empty()
     }
 
     /// Return the locations in the clear set.
-    pub(crate) fn locations(&self) -> &[u64] {
+    pub(crate) fn locations(&self) -> &[Location<F>] {
         &self.locations
     }
 
     /// Return the mask for the given chunk index.
-    fn mask(&self, idx: usize) -> Option<&[u8; N]> {
+    pub(crate) fn mask(&self, idx: usize) -> Option<&[u8; N]> {
         self.masks.get(&idx)
     }
 }
@@ -90,30 +95,30 @@ fn apply_push_clear<const N: usize>(
 ///
 /// Mirrors the [`crate::merkle::mmr::batch::MerkleizedBatch`] pattern.
 #[derive(Clone, Debug)]
-pub(crate) enum BitmapBatch<const N: usize> {
+pub(crate) enum BitmapBatch<F: Family, const N: usize> {
     /// Committed bitmap (chain terminal).
     Base(Arc<PrunableBitMap<N>>),
     /// Speculative layer on top of a parent batch.
-    Layer(Arc<BitmapBatchLayer<N>>),
+    Layer(Arc<BitmapBatchLayer<F, N>>),
 }
 
 /// The data behind a [`BitmapBatch::Layer`].
 #[derive(Debug)]
-pub(crate) struct BitmapBatchLayer<const N: usize> {
-    parent: BitmapBatch<N>,
+pub(crate) struct BitmapBatchLayer<F: Family, const N: usize> {
+    parent: BitmapBatch<F, N>,
     /// Cached `parent.len()` at layer creation time.
     parent_len: u64,
     /// New bits appended contiguously from `parent_len`.
     pushed_bits: Arc<Vec<bool>>,
     /// Bit indices of parent bits that were deactivated, with per-chunk masks.
-    clears: Arc<ClearSet<N>>,
+    clears: Arc<ClearSet<F, N>>,
 }
 
-impl<const N: usize> BitmapBatch<N> {
+impl<F: Family, const N: usize> BitmapBatch<F, N> {
     const CHUNK_SIZE_BITS: u64 = PrunableBitMap::<N>::CHUNK_SIZE_BITS;
 }
 
-impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
+impl<F: Family, const N: usize> BitmapReadable<N> for BitmapBatch<F, N> {
     fn complete_chunks(&self) -> usize {
         (self.len() / Self::CHUNK_SIZE_BITS) as usize
     }
@@ -175,11 +180,11 @@ impl<const N: usize> BitmapReadable<N> for BitmapBatch<N> {
     }
 }
 
-impl<const N: usize> BitmapBatch<N> {
+impl<F: Family, const N: usize> BitmapBatch<F, N> {
     /// Push a changeset as a new layer on top of this bitmap, mutating `self` in place.
     ///
     /// The old value becomes the parent of the new layer.
-    pub(crate) fn push_changeset(&mut self, pushed_bits: Vec<bool>, clears: ClearSet<N>) {
+    pub(crate) fn push_changeset(&mut self, pushed_bits: Vec<bool>, clears: ClearSet<F, N>) {
         if pushed_bits.is_empty() && clears.locations().is_empty() {
             return;
         }
@@ -191,36 +196,6 @@ impl<const N: usize> BitmapBatch<N> {
             pushed_bits: Arc::new(pushed_bits),
             clears: Arc::new(clears),
         }));
-    }
-
-    /// Collect layer pushes and clears added after the bitmap reached length
-    /// `cutoff`. Layers whose `parent_len < cutoff` (i.e. pre-existing DB
-    /// layers) are excluded.
-    ///
-    /// Returns `(pushed_bits, clear_set)` in base-to-tip order.
-    pub(crate) fn collect_mutations_since(&self, cutoff: u64) -> (Vec<bool>, ClearSet<N>) {
-        let mut layers = Vec::new();
-        let mut current = self;
-        loop {
-            match current {
-                Self::Base(_) => break,
-                Self::Layer(layer) => {
-                    if layer.parent_len < cutoff {
-                        break;
-                    }
-                    layers.push((&*layer.pushed_bits, &*layer.clears));
-                    current = &layer.parent;
-                }
-            }
-        }
-        layers.reverse();
-        let mut pushes = Vec::new();
-        let mut clears = ClearSet::default();
-        for (p, c) in layers {
-            pushes.extend_from_slice(p);
-            clears.merge(c);
-        }
-        (pushes, clears)
     }
 
     /// Flatten all layers back to a single `Base(Arc<PrunableBitMap<N>>)`.
@@ -237,7 +212,7 @@ impl<const N: usize> BitmapBatch<N> {
         let mut owned = std::mem::replace(self, Self::Base(Arc::new(PrunableBitMap::default())));
 
         // Collect layers from tip to base.
-        let mut layers: Vec<(Arc<Vec<bool>>, Arc<ClearSet<N>>)> = Vec::new();
+        let mut layers = Vec::new();
         let base = loop {
             match owned {
                 Self::Base(bm) => break bm,
@@ -261,7 +236,7 @@ impl<const N: usize> BitmapBatch<N> {
                 bitmap.push(bit);
             }
             for &bit_idx in clears.locations() {
-                bitmap.set_bit(bit_idx, false);
+                bitmap.set_bit(*bit_idx, false);
             }
         }
         *self = Self::Base(Arc::new(bitmap));
