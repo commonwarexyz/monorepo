@@ -124,7 +124,10 @@ where
         }
     }
 
-    /// Number of committed DB operations when the ancestor chain was created.
+    /// Effective number of committed DB operations at the base of the batch chain.
+    /// For `Db`, this is the DB size when `new_batch()` was called.
+    /// For `Child`, this is inherited from the parent (which may be higher than
+    /// the original DB size if ancestors were dropped before merkleize).
     fn db_size(&self) -> u64 {
         match self {
             Self::Db { db_size, .. } => *db_size,
@@ -193,14 +196,14 @@ where
 ///
 /// # Committing batches
 ///
-/// [`Db::apply_batch`] applies the batch. Already-committed ancestors are skipped automatically.
+/// [`Db::apply_batch`] applies the batch and any uncommitted ancestors automatically.
 ///
 /// ```text
 /// db.apply_batch(b1).await.unwrap();
-/// db.apply_batch(b2).await.unwrap();  // Ancestors skipped automatically.
-/// db.apply_batch(b3).await.unwrap();
+/// db.apply_batch(b3).await.unwrap();  // Also applies b2's changes.
 /// ```
 #[allow(clippy::type_complexity)]
+#[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update + Send + Sync>
 where
     Operation<F, U>: Send + Sync,
@@ -229,10 +232,10 @@ where
     /// Total active keys after this batch.
     pub(crate) total_active_keys: usize,
 
-    /// Number of committed DB operations when the root of this batch's ancestor chain was
-    /// created (via `db.new_batch()` or `db.to_batch()`). Inherited unchanged by all
-    /// descendants. When `apply_batch` sees the current DB size exceeds this value, it knows
-    /// ancestors have been committed.
+    /// Effective DB size at the base of this batch's ancestor chain. Equals `base_size`
+    /// when all ancestors are alive, but shifts up if ancestors were dropped before
+    /// merkleize (to account for the gap left by dead ancestors). Used by `apply_batch`
+    /// to validate that the DB hasn't diverged from this batch's chain.
     pub(crate) db_size: u64,
 
     /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are
@@ -244,29 +247,6 @@ where
     /// 1:1 with `ancestor_diffs`: `ancestor_seg_ends[i]` is the boundary for
     /// `ancestor_diffs[i]`. A segment is committed when `ancestor_seg_ends[i] <= db_size`.
     pub(crate) ancestor_seg_ends: Vec<u64>,
-}
-
-// Manual Clone: #[derive(Clone)] would require U::Key: Clone and
-// U::Value: Clone, but Arc::clone doesn't need inner Clone bounds.
-impl<F: Family, D: Digest, U: update::Update + Send + Sync> Clone for MerkleizedBatch<F, D, U>
-where
-    Operation<F, U>: Send + Sync,
-{
-    fn clone(&self) -> Self {
-        Self {
-            journal_batch: Arc::clone(&self.journal_batch),
-            diff: Arc::clone(&self.diff),
-            parent: self.parent.clone(),
-            new_inactivity_floor_loc: self.new_inactivity_floor_loc,
-            new_last_commit_loc: self.new_last_commit_loc,
-            base_size: self.base_size,
-            total_size: self.total_size,
-            total_active_keys: self.total_active_keys,
-            db_size: self.db_size,
-            ancestor_diffs: self.ancestor_diffs.clone(),
-            ancestor_seg_ends: self.ancestor_seg_ends.clone(),
-        }
-    }
 }
 
 /// Batch-infrastructure state used during merkleization.

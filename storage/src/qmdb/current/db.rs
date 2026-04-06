@@ -70,7 +70,7 @@ pub struct Db<
     /// order to further prove whether a key _currently_ has a specific value.
     ///
     /// Stored as a [`BitmapBatch`] so that `apply_batch` can
-    /// push layers in O(changeset) instead of deep-cloning.
+    /// push layers in O(batch) instead of deep-cloning.
     pub(super) status: BitmapBatch<N>,
 
     /// Each leaf corresponds to a complete bitmap chunk at the grafting height.

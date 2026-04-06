@@ -768,10 +768,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Journaled<F, E, D> {
 
     /// Apply a merkleized batch to the structure.
     ///
-    /// A batch is only valid if the structure has not been modified since the
-    /// batch that produced it was created. Multiple batches can be forked from
-    /// the same parent for speculative execution, but only one may be applied.
-    /// Applying a stale batch returns [`Error::StaleBatch`].
+    /// A batch is valid if the structure has not been modified since the batch
+    /// chain was created, or if only ancestors of this batch have been applied.
+    /// Already-committed ancestors are skipped automatically.
+    /// Applying a batch from a different fork returns [`Error::StaleBatch`].
     pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D>) -> Result<(), Error<F>> {
         self.inner.get_mut().mem.apply_batch(batch)?;
         Ok(())
@@ -3016,7 +3016,7 @@ mod tests {
         executor.start(journaled_init_sync_recovers_from_invalid_journal_size_inner::<mmb::Family>);
     }
 
-    async fn journaled_stale_changeset_inner<F: Family>(context: deterministic::Context) {
+    async fn journaled_stale_batch_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new();
         let mut mmr = Journaled::<F, _, Digest>::init(
             context.clone(),
@@ -3046,15 +3046,15 @@ mod tests {
     }
 
     #[test]
-    fn test_stale_changeset_mmr() {
+    fn test_stale_batch_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_stale_changeset_inner::<mmr::Family>);
+        executor.start(journaled_stale_batch_inner::<mmr::Family>);
     }
 
     #[test]
-    fn test_stale_changeset_mmb() {
+    fn test_stale_batch_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(journaled_stale_changeset_inner::<mmb::Family>);
+        executor.start(journaled_stale_batch_inner::<mmb::Family>);
     }
 
     /// Regression: `new_batch` must return the append-only journaled wrapper.

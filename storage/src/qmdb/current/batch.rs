@@ -397,6 +397,7 @@ where
 ///
 /// Wraps an [`any::batch::MerkleizedBatch`] and adds the bitmap and grafted MMR state needed
 /// to compute the canonical root.
+#[derive(Clone)]
 pub struct MerkleizedBatch<D: Digest, U: update::Update + Send + Sync, const N: usize>
 where
     Operation<mmr::Family, U>: Send + Sync,
@@ -429,26 +430,6 @@ where
     /// Arc refs to each ancestor's bitmap clears, collected during
     /// `compute_current_layer()` while the parent is alive.
     pub(crate) ancestor_bitmap_clears: Vec<Arc<ClearSet<N>>>,
-}
-
-// Manual Clone: derive would add unnecessary Clone bounds on generic params.
-impl<D: Digest, U: update::Update + Send + Sync, const N: usize> Clone for MerkleizedBatch<D, U, N>
-where
-    Operation<mmr::Family, U>: Send + Sync,
-{
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            parent: self.parent.clone(),
-            bitmap_pushes: Arc::clone(&self.bitmap_pushes),
-            bitmap_clears: Arc::clone(&self.bitmap_clears),
-            grafted: Arc::clone(&self.grafted),
-            bitmap: self.bitmap.clone(),
-            canonical_root: self.canonical_root,
-            ancestor_bitmap_pushes: self.ancestor_bitmap_pushes.clone(),
-            ancestor_bitmap_clears: self.ancestor_bitmap_clears.clone(),
-        }
-    }
 }
 
 impl<H, U, const N: usize> UnmerkleizedBatch<H, U, N>

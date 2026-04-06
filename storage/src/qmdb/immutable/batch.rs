@@ -49,12 +49,13 @@ where
     /// This batch's i-th operation lands at location `base_size + i`.
     base_size: u64,
 
-    /// The database size when this batch was created, used to detect stale changesets.
+    /// The database size when this batch was created, used to detect stale batches.
     db_size: u64,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
+#[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// Authenticated journal batch (Merkle state + local items).
     pub(super) journal_batch: Arc<authenticated::MerkleizedBatch<F, D, Operation<K, V>>>,
@@ -84,22 +85,6 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// 1:1 with `ancestor_diffs`: `ancestor_seg_ends[i]` is the boundary for
     /// `ancestor_diffs[i]`. A segment is committed when `ancestor_seg_ends[i] <= db_size`.
     pub(super) ancestor_seg_ends: Vec<u64>,
-}
-
-// Manual Clone: derive would add unnecessary Clone bounds on generic params.
-impl<F: Family, D: Digest, K: Key, V: ValueEncoding> Clone for MerkleizedBatch<F, D, K, V> {
-    fn clone(&self) -> Self {
-        Self {
-            journal_batch: Arc::clone(&self.journal_batch),
-            diff: Arc::clone(&self.diff),
-            parent: self.parent.clone(),
-            base_size: self.base_size,
-            total_size: self.total_size,
-            db_size: self.db_size,
-            ancestor_diffs: self.ancestor_diffs.clone(),
-            ancestor_seg_ends: self.ancestor_seg_ends.clone(),
-        }
-    }
 }
 
 impl<F, H, K, V> UnmerkleizedBatch<F, H, K, V>

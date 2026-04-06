@@ -139,12 +139,12 @@ pub enum Error<F: Family> {
     #[error("invalid pinned nodes")]
     InvalidPinnedNodes,
 
-    /// Batch was created against a different state.
-    #[error("stale batch: expected size {expected}, actual {actual}")]
+    /// Structure has diverged incompatibly from the batch's ancestor chain.
+    #[error("stale batch: base size {expected}, current size {actual}")]
     StaleBatch {
-        /// The size the batch was built against.
+        /// The base size when the batch chain was forked.
         expected: Position<F>,
-        /// The current size.
+        /// The current structure size.
         actual: Position<F>,
     },
 

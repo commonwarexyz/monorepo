@@ -143,7 +143,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new();
         let mut mmr = Mmr::new(&hasher);
         let digest = [1u8; 32];
-        let (changeset, loc_to_pos) = {
+        let (batch, loc_to_pos) = {
             let mut batch = mmr.new_batch();
             let mut positions = Vec::with_capacity(1000);
             for _ in 0..1000 {
@@ -153,7 +153,7 @@ mod tests {
             }
             (batch.merkleize(&hasher, &mmr), positions)
         };
-        mmr.apply_batch(&changeset).unwrap();
+        mmr.apply_batch(&batch).unwrap();
 
         let mut last_leaf_pos = 0;
         for (leaf_loc_expected, leaf_pos) in loc_to_pos.into_iter().enumerate() {

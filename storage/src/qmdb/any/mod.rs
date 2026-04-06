@@ -1638,7 +1638,7 @@ pub(crate) mod test {
         });
     }
 
-    /// 3-level chain: parent -> child -> grandchild, finalize grandchild and apply.
+    /// 3-level chain: parent -> child -> grandchild, merkleize grandchild and apply.
     #[test_traced("INFO")]
     fn test_any_batch_deep_chain() {
         let executor = deterministic::Runner::default();

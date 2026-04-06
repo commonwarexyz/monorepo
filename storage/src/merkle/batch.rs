@@ -32,14 +32,20 @@
 //!
 //! # Parent chain and memory
 //!
-//! Each [`MerkleizedBatch`] stores only its own local data (appended nodes and overwrites),
-//! not a flattened copy of all ancestors. A `Weak` pointer to the parent allows reads to
-//! walk the live chain; committed-and-dropped ancestors simply truncate the walk.
+//! Each [`MerkleizedBatch`] stores its own local data (appended nodes and overwrites)
+//! plus `Arc` refs to each ancestor's data, collected during
+//! [`UnmerkleizedBatch::merkleize`]. These ancestor segments are used by
+//! [`Mem::apply_batch`] to replay uncommitted ancestors without requiring the
+//! ancestor batches to still be alive.
 //!
-//! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc` (keeping
-//! it alive), and the `Weak` chain is walked to collect `Arc` refs to each ancestor's
-//! data. These ancestor segments are stored on the resulting [`MerkleizedBatch`] for use
-//! by [`Mem::apply_batch`]. After merkleize, the parent is downgraded to `Weak`.
+//! A `Weak` pointer to the parent is kept for [`MerkleizedBatch::get_node`] lookups
+//! (used during a child's merkleize) and for walking the chain to collect ancestor
+//! segments. Committed-and-dropped ancestors truncate the `Weak` walk, but their
+//! data is already captured in `ancestor_appended` / `ancestor_overwrites`.
+//!
+//! During [`UnmerkleizedBatch::merkleize`], the parent is held as a strong `Arc`
+//! (keeping it alive for the walk), and the `Weak` chain is walked to collect
+//! ancestor data. After merkleize, the parent is downgraded to `Weak`.
 //!
 //! In a pipelining pattern (build next batch from prev, apply prev, repeat), each batch
 //! holds at most one ancestor segment (its immediate parent's data, as an `Arc` ref).
@@ -471,7 +477,8 @@ pub struct MerkleizedBatch<F: Family, D: Digest> {
     /// by all descendants. Used by `apply_batch` to detect already-committed ancestors.
     pub(crate) base_size: Position<F>,
 
-    /// Pruning boundary inherited from the committed Mem.
+    /// Pruning boundary of the [`Mem`] when the batch chain was forked. Inherited
+    /// unchanged by all descendants, like `base_size`.
     pruning_boundary: Location<F>,
 
     /// Arc refs to each ancestor's appended nodes, collected during merkleize while

@@ -21,11 +21,7 @@
 //! 3. Merkleize the batch -- this resolves mutations against the current state and computes
 //!    the Merkle root that would result from applying them.
 //! 4. Inspect the root or create child batches.
-//! 5. Finalize the batch into a changeset.
-//! 6. Apply the changeset to the database.
-//!
-//! A merkleized batch can spawn child batches, forming a tree of speculative states that
-//! share a common ancestor. Only the finalized leaf needs to be applied.
+//! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
 //!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.

@@ -36,12 +36,13 @@ where
     /// This batch's i-th operation lands at location `base_size + i`.
     base_size: u64,
 
-    /// The database size when this batch was created, used to detect stale changesets.
+    /// The database size when this batch was created, used to detect stale batches.
     db_size: u64,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
+#[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding>
 where
     Operation<V>: EncodeShared,
@@ -64,23 +65,6 @@ where
     /// Each ancestor's `total_size` (operation count after that ancestor).
     /// Used by `apply_batch` to validate partial ancestor commits.
     pub(super) ancestor_seg_ends: Vec<u64>,
-}
-
-// Manual Clone: derive would add unnecessary Clone bounds on generic params.
-impl<F: Family, D: Digest, V: ValueEncoding> Clone for MerkleizedBatch<F, D, V>
-where
-    Operation<V>: EncodeShared,
-{
-    fn clone(&self) -> Self {
-        Self {
-            journal_batch: Arc::clone(&self.journal_batch),
-            parent: self.parent.clone(),
-            base_size: self.base_size,
-            total_size: self.total_size,
-            db_size: self.db_size,
-            ancestor_seg_ends: self.ancestor_seg_ends.clone(),
-        }
-    }
 }
 
 impl<F: Family, D: Digest, V: ValueEncoding> MerkleizedBatch<F, D, V>

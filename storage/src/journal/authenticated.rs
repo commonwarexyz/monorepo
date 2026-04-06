@@ -133,7 +133,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
 }
 
 /// A speculative batch whose root digest has been computed, in contrast to [`UnmerkleizedBatch`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync> {
     /// The inner batch of Merkle leaf digests.
     pub(crate) inner: Arc<batch::MerkleizedBatch<F, D>>,
@@ -143,18 +143,6 @@ pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync> {
     parent: Option<Weak<Self>>,
     /// Ancestor item segments collected at merkleize time (root-to-tip order).
     pub(crate) ancestor_items: Vec<Arc<Vec<Item>>>,
-}
-
-// Manual Clone: derive would require Item: Clone, but Arc::clone doesn't.
-impl<F: Family, D: Digest, Item: Send + Sync> Clone for MerkleizedBatch<F, D, Item> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            items: Arc::clone(&self.items),
-            parent: self.parent.clone(),
-            ancestor_items: self.ancestor_items.clone(),
-        }
-    }
 }
 
 impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
@@ -402,8 +390,10 @@ where
 
         // Append item to the journal, then update the Merkle structure state.
         let loc = self.journal.append(item).await?;
-        let ub = self.merkle.new_batch().add(&self.hasher, &encoded_item);
-        let batch = self.merkle.with_mem(|mem| ub.merkleize(&self.hasher, mem));
+        let unmerkleized_batch = self.merkle.new_batch().add(&self.hasher, &encoded_item);
+        let batch = self
+            .merkle
+            .with_mem(|mem| unmerkleized_batch.merkleize(&self.hasher, mem));
         self.merkle.apply_batch(&batch)?;
 
         Ok(Location::new(loc))
@@ -411,10 +401,10 @@ where
 
     /// Apply a batch to the journal.
     ///
-    /// A batch is only valid if the journal has not been modified since the
-    /// batch that produced it was created. Multiple batches can be forked from the
-    /// same parent for speculative execution, but only one may be applied. Applying
-    /// a stale batch returns an error.
+    /// A batch is valid if the journal has not been modified since the batch
+    /// chain was created, or if only ancestors of this batch have been applied.
+    /// Already-committed ancestors are skipped automatically.
+    /// Applying a batch from a different fork returns an error.
     pub async fn apply_batch(
         &mut self,
         batch: &MerkleizedBatch<F, H::Digest, C::Item>,
@@ -2200,7 +2190,7 @@ mod tests {
     }
 
     /// Verify stacking: create batch A, merkleize, create batch B from merkleized A,
-    /// merkleize, finalize, and apply. Verify root and items.
+    /// merkleize, and apply. Verify root and items.
     async fn test_speculative_batch_stacking_inner<F: Family + PartialEq>(context: Context) {
         let mut journal = create_journal_with_ops::<F>(context, "batch_stacking", 10).await;
 
@@ -2431,7 +2421,7 @@ mod tests {
     }
 
     /// Apply parent then child: child skips already-committed ancestor items.
-    async fn test_finalize_from_skip_ancestor_items_inner<F: Family + PartialEq>(context: Context) {
+    async fn test_apply_batch_skip_ancestor_items_inner<F: Family + PartialEq>(context: Context) {
         let mut journal = create_journal_with_ops::<F>(context, "rp-skip", 3).await;
 
         // Parent: 2 items.
@@ -2464,19 +2454,19 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_finalize_from_skip_ancestor_items_mmr() {
+    fn test_apply_batch_skip_ancestor_items_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(test_finalize_from_skip_ancestor_items_inner::<mmr::Family>);
+        executor.start(test_apply_batch_skip_ancestor_items_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
-    fn test_finalize_from_skip_ancestor_items_mmb() {
+    fn test_apply_batch_skip_ancestor_items_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_finalize_from_skip_ancestor_items_inner::<mmb::Family>);
+        executor.start(test_apply_batch_skip_ancestor_items_inner::<mmb::Family>);
     }
 
-    /// `finalize_from` works correctly across a 3-level chain.
-    async fn test_finalize_from_cross_segment_inner<F: Family + PartialEq>(context: Context) {
+    /// `apply_batch` works correctly across a 3-level chain.
+    async fn test_apply_batch_cross_segment_inner<F: Family + PartialEq>(context: Context) {
         let mut journal = create_journal_with_ops::<F>(context, "rp-cross", 2).await;
 
         // Grandparent: 3 items.
@@ -2523,15 +2513,15 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_finalize_from_cross_segment_mmr() {
+    fn test_apply_batch_cross_segment_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(test_finalize_from_cross_segment_inner::<mmr::Family>);
+        executor.start(test_apply_batch_cross_segment_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
-    fn test_finalize_from_cross_segment_mmb() {
+    fn test_apply_batch_cross_segment_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_finalize_from_cross_segment_inner::<mmb::Family>);
+        executor.start(test_apply_batch_cross_segment_inner::<mmb::Family>);
     }
 
     /// merkleize_with produces the same root as add + merkleize.
@@ -2572,7 +2562,7 @@ mod tests {
         executor.start(test_merkleize_with_matches_add_inner::<mmb::Family>);
     }
 
-    /// merkleize_with items are readable after finalize + apply.
+    /// merkleize_with items are readable after apply.
     async fn test_merkleize_with_apply_inner<F: Family + PartialEq>(context: Context) {
         let mut journal = create_journal_with_ops::<F>(context, "mw-apply", 5).await;
 
