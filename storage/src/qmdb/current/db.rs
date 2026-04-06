@@ -445,7 +445,7 @@ where
             let BitmapBatch::Base(base) = &mut self.status else {
                 unreachable!("flatten() guarantees Base");
             };
-            let status = Arc::get_mut(base).expect("flatten ensures sole owner");
+            let status = Arc::make_mut(base);
             status.truncate(rewind_size);
             for loc in &restored_locs {
                 status.set_bit(**loc, true);

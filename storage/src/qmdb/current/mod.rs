@@ -1669,6 +1669,50 @@ pub mod tests {
         });
     }
 
+    /// Regression: rewind must not panic when a live snapshot (new_batch/to_batch)
+    /// shares the committed Base bitmap Arc.
+    #[test_traced("INFO")]
+    fn test_current_rewind_with_live_snapshot() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let partition = "current-rewind-live-snapshot";
+            let ctx = context.with_label("db");
+            let mut db: UnorderedVariableDb =
+                UnorderedVariableDb::init(ctx.clone(), variable_config::<OneCap>(partition, &ctx))
+                    .await
+                    .unwrap();
+
+            commit_writes_with_metadata(
+                &mut db,
+                [(key(0), Some(val(0))), (key(1), Some(val(1)))],
+                None,
+            )
+            .await;
+            let size_before = db.bounds().await.end;
+            let root_before = db.root();
+
+            commit_writes_with_metadata(
+                &mut db,
+                [(key(0), Some(val(100)))],
+                None,
+            )
+            .await;
+
+            // Hold a live snapshot that shares the Base bitmap Arc.
+            let _live_batch = db.new_batch();
+
+            // Rewind while the snapshot is alive. Before the fix this panicked
+            // because flatten() was a no-op on Base and Arc::get_mut failed.
+            db.rewind(size_before).await.unwrap();
+            assert_eq!(db.bounds().await.end, size_before);
+            assert_eq!(db.root(), root_before);
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// MerkleizedBatch::root() returns the canonical root that matches db.root()
     /// after apply. ops_root() differs from root() because the canonical root
     /// includes the bitmap/grafted MMR layers.
