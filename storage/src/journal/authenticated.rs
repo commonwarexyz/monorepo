@@ -48,8 +48,6 @@ pub struct UnmerkleizedBatch<F: Family, H: Hasher, Item: Send + Sync> {
     items: Vec<Item>,
     // This batch's parent, or None if the parent is the journal itself.
     parent: Option<Arc<MerkleizedBatch<F, H::Digest, Item>>>,
-    // The committed Mem when the batch chain was forked, passed to inner merkleize.
-    committed_mem: merkle::mem::Mem<F, H::Digest>,
 }
 
 impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, Item> {
@@ -85,16 +83,19 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
     }
 
     /// Merkleize the batch, computing the root digest.
-    pub fn merkleize(self) -> MerkleizedBatch<F, H::Digest, Item> {
-        let merkle = self.inner.merkleize(&self.hasher, &self.committed_mem);
+    /// `base` provides committed node data as fallback during hash computation.
+    pub fn merkleize(
+        self,
+        base: &merkle::mem::Mem<F, H::Digest>,
+    ) -> Arc<MerkleizedBatch<F, H::Digest, Item>> {
+        let merkle = self.inner.merkleize(&self.hasher, base);
         let ancestor_items = Self::collect_ancestor_items(&self.parent);
-        MerkleizedBatch {
+        Arc::new(MerkleizedBatch {
             inner: merkle,
             items: Arc::new(self.items),
             parent: self.parent.as_ref().map(Arc::downgrade),
             ancestor_items,
-            committed_mem: self.committed_mem,
-        }
+        })
     }
 
     /// Like [`merkleize`](Self::merkleize), but the caller supplies the items instead of
@@ -110,7 +111,8 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
     pub(crate) fn merkleize_with(
         mut self,
         items: Arc<Vec<Item>>,
-    ) -> MerkleizedBatch<F, H::Digest, Item> {
+        base: &merkle::mem::Mem<F, H::Digest>,
+    ) -> Arc<MerkleizedBatch<F, H::Digest, Item>> {
         assert!(
             self.items.is_empty(),
             "merkleize_with expects no items added via add"
@@ -119,15 +121,14 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync> UnmerkleizedBatch<F, H, I
             let encoded = item.encode();
             self.inner = self.inner.add(&self.hasher, &encoded);
         }
-        let merkle = self.inner.merkleize(&self.hasher, &self.committed_mem);
+        let merkle = self.inner.merkleize(&self.hasher, base);
         let ancestor_items = Self::collect_ancestor_items(&self.parent);
-        MerkleizedBatch {
+        Arc::new(MerkleizedBatch {
             inner: merkle,
             items,
             parent: self.parent.as_ref().map(Arc::downgrade),
             ancestor_items,
-            committed_mem: self.committed_mem,
-        }
+        })
     }
 }
 
@@ -142,8 +143,6 @@ pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync> {
     parent: Option<Weak<Self>>,
     /// Ancestor item segments collected at merkleize time (root-to-tip order).
     pub(crate) ancestor_items: Vec<Arc<Vec<Item>>>,
-    /// The committed Mem when the batch chain was forked, inherited by all descendants.
-    committed_mem: merkle::mem::Mem<F, D>,
 }
 
 // Manual Clone: derive would require Item: Clone, but Arc::clone doesn't.
@@ -154,7 +153,6 @@ impl<F: Family, D: Digest, Item: Send + Sync> Clone for MerkleizedBatch<F, D, It
             items: Arc::clone(&self.items),
             parent: self.parent.clone(),
             ancestor_items: self.ancestor_items.clone(),
-            committed_mem: self.committed_mem.clone(),
         }
     }
 }
@@ -185,7 +183,6 @@ impl<F: Family, D: Digest, Item: Send + Sync> MerkleizedBatch<F, D, Item> {
             hasher: StandardHasher::new(),
             items: Vec::new(),
             parent: Some(Arc::clone(self)),
-            committed_mem: self.committed_mem.clone(),
         }
     }
 }
@@ -272,30 +269,31 @@ where
     where
         C::Item: Encode,
     {
-        let committed_mem = self.merkle.mem();
         let root = self.merkle.to_batch();
         UnmerkleizedBatch {
             inner: root.new_batch(),
             hasher: StandardHasher::new(),
             items: Vec::new(),
             parent: None,
-            committed_mem,
         }
+    }
+
+    /// Borrow the committed Mem through the read lock.
+    pub(crate) fn with_mem<R>(&self, f: impl FnOnce(&merkle::mem::Mem<F, H::Digest>) -> R) -> R {
+        self.merkle.with_mem(f)
     }
 
     /// Create an owned [`MerkleizedBatch`] representing the current committed state.
     ///
     /// The batch has no items (the committed items are on disk, not in memory).
     /// This is the starting point for building owned batch chains.
-    pub(crate) fn to_merkleized_batch(&self) -> MerkleizedBatch<F, H::Digest, C::Item> {
-        let committed_mem = self.merkle.mem();
-        MerkleizedBatch {
+    pub(crate) fn to_merkleized_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, C::Item>> {
+        Arc::new(MerkleizedBatch {
             inner: self.merkle.to_batch(),
             items: Arc::new(Vec::new()),
             parent: None,
             ancestor_items: Vec::new(),
-            committed_mem,
-        }
+        })
     }
 }
 
@@ -384,8 +382,9 @@ where
                         merkle_leaves += 1;
                         count += 1;
                     }
-                    batch.merkleize(hasher)
+                    batch
                 };
+                let batch = merkle.with_mem(|mem| batch.merkleize(hasher, mem));
                 merkle.apply_batch(&batch)?;
             }
             return Ok(());
@@ -403,11 +402,8 @@ where
 
         // Append item to the journal, then update the Merkle structure state.
         let loc = self.journal.append(item).await?;
-        let batch = self
-            .merkle
-            .new_batch()
-            .add(&self.hasher, &encoded_item)
-            .merkleize(&self.hasher);
+        let ub = self.merkle.new_batch().add(&self.hasher, &encoded_item);
+        let batch = self.merkle.with_mem(|mem| ub.merkleize(&self.hasher, mem));
         self.merkle.apply_batch(&batch)?;
 
         Ok(Location::new(loc))
@@ -975,8 +971,9 @@ mod tests {
                     batch = batch.add(&hasher, &encoded);
                     journal.append(&op).await.unwrap();
                 }
-                batch.merkleize(&hasher)
+                batch
             };
+            let batch = merkle.with_mem(|mem| batch.merkleize(&hasher, mem));
             merkle.apply_batch(&batch).unwrap();
         }
 
@@ -2165,8 +2162,8 @@ mod tests {
         let b2 = b2.add(op_b);
 
         // Merkleize and verify independent roots.
-        let m1 = b1.merkleize();
-        let m2 = b2.merkleize();
+        let m1 = journal.merkle.with_mem(|mem| b1.merkleize(mem));
+        let m2 = journal.merkle.with_mem(|mem| b2.merkleize(mem));
         assert_ne!(m1.root(), m2.root());
         assert_ne!(m1.root(), original_root);
         assert_ne!(m2.root(), original_root);
@@ -2204,11 +2201,11 @@ mod tests {
         let op_b = create_operation::<F>(200);
 
         let merkleized_b = {
-            let batch_a = journal.new_batch();
-            let merkleized_a = Arc::new(batch_a.add(op_a.clone()).merkleize());
+            let batch_a = journal.new_batch().add(op_a.clone());
+            let merkleized_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
 
-            let batch_b = merkleized_a.new_batch::<Sha256>();
-            batch_b.add(op_b.clone()).merkleize()
+            let batch_b = merkleized_a.new_batch::<Sha256>().add(op_b.clone());
+            journal.merkle.with_mem(|mem| batch_b.merkleize(mem))
         };
 
         let expected_root = merkleized_b.root();
@@ -2245,12 +2242,14 @@ mod tests {
         let op_b = create_operation::<F>(200);
 
         // Apply batch A.
-        let merkleized_a = journal.new_batch().add(op_a.clone()).merkleize();
+        let batch_a = journal.new_batch().add(op_a.clone());
+        let merkleized_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
         journal.apply_batch(&merkleized_a).await.unwrap();
         assert_eq!(*journal.size().await, 11);
 
         // Apply batch B (built on top of the committed A).
-        let merkleized_b = journal.new_batch().add(op_b.clone()).merkleize();
+        let batch_b = journal.new_batch().add(op_b.clone());
+        let merkleized_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
         let expected_root = merkleized_b.root();
         journal.apply_batch(&merkleized_b).await.unwrap();
 
@@ -2282,8 +2281,10 @@ mod tests {
         let op_b = create_operation::<F>(2);
 
         // Create two batches from the same base.
-        let merkleized_a = journal.new_batch().add(op_a.clone()).merkleize();
-        let merkleized_b = journal.new_batch().add(op_b).merkleize();
+        let batch_a = journal.new_batch().add(op_a.clone());
+        let merkleized_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
+        let batch_b = journal.new_batch().add(op_b);
+        let merkleized_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
 
         // Apply A -- should succeed.
         journal.apply_batch(&merkleized_a).await.unwrap();
@@ -2326,20 +2327,12 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "stale-chained", 5).await;
 
         // Parent batch, then fork two children.
-        let parent = Arc::new(
-            journal
-                .new_batch()
-                .add(create_operation::<F>(10))
-                .merkleize(),
-        );
-        let child_a = parent
-            .new_batch::<Sha256>()
-            .add(create_operation::<F>(20))
-            .merkleize();
-        let child_b = parent
-            .new_batch::<Sha256>()
-            .add(create_operation::<F>(30))
-            .merkleize();
+        let parent_batch = journal.new_batch().add(create_operation::<F>(10));
+        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let batch_a = parent.new_batch::<Sha256>().add(create_operation::<F>(20));
+        let child_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
+        let batch_b = parent.new_batch::<Sha256>().add(create_operation::<F>(30));
+        let child_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
         drop(parent);
 
         // Apply child_a, then child_b should be stale.
@@ -2370,16 +2363,10 @@ mod tests {
         let mut journal = create_empty_journal::<F>(context, "stale-parent-first").await;
 
         // Create parent, then child.
-        let parent = Arc::new(
-            journal
-                .new_batch()
-                .add(create_operation::<F>(1))
-                .merkleize(),
-        );
-        let child = parent
-            .new_batch::<Sha256>()
-            .add(create_operation::<F>(2))
-            .merkleize();
+        let parent_batch = journal.new_batch().add(create_operation::<F>(1));
+        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let child_batch = parent.new_batch::<Sha256>().add(create_operation::<F>(2));
+        let child = journal.merkle.with_mem(|mem| child_batch.merkleize(mem));
 
         let expected_root = child.root();
 
@@ -2407,16 +2394,10 @@ mod tests {
         let mut journal = create_empty_journal::<F>(context, "stale-child-first").await;
 
         // Create parent, then child.
-        let parent = Arc::new(
-            journal
-                .new_batch()
-                .add(create_operation::<F>(1))
-                .merkleize(),
-        );
-        let child = parent
-            .new_batch::<Sha256>()
-            .add(create_operation::<F>(2))
-            .merkleize();
+        let parent_batch = journal.new_batch().add(create_operation::<F>(1));
+        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let child_batch = parent.new_batch::<Sha256>().add(create_operation::<F>(2));
+        let child = journal.merkle.with_mem(|mem| child_batch.merkleize(mem));
 
         // Apply child first (full chain) -- parent should now be stale.
         journal.apply_batch(&child).await.unwrap();
@@ -2447,21 +2428,19 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "rp-skip", 3).await;
 
         // Parent: 2 items.
-        let parent = Arc::new(
-            journal
-                .new_batch()
-                .add(create_operation::<F>(10))
-                .add(create_operation::<F>(11))
-                .merkleize(),
-        );
+        let parent_batch = journal
+            .new_batch()
+            .add(create_operation::<F>(10))
+            .add(create_operation::<F>(11));
+        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
 
         // Child: 3 more items.
-        let child = parent
+        let child_batch = parent
             .new_batch::<Sha256>()
             .add(create_operation::<F>(20))
             .add(create_operation::<F>(21))
-            .add(create_operation::<F>(22))
-            .merkleize();
+            .add(create_operation::<F>(22));
+        let child = journal.merkle.with_mem(|mem| child_batch.merkleize(mem));
 
         // Apply parent.
         journal.apply_batch(&parent).await.unwrap();
@@ -2494,29 +2473,25 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "rp-cross", 2).await;
 
         // Grandparent: 3 items.
-        let grandparent = Arc::new(
-            journal
-                .new_batch()
-                .add(create_operation::<F>(3))
-                .add(create_operation::<F>(4))
-                .add(create_operation::<F>(5))
-                .merkleize(),
-        );
+        let grandparent_batch = journal
+            .new_batch()
+            .add(create_operation::<F>(3))
+            .add(create_operation::<F>(4))
+            .add(create_operation::<F>(5));
+        let grandparent = journal
+            .merkle
+            .with_mem(|mem| grandparent_batch.merkleize(mem));
 
         // Parent: 2 items.
-        let parent = Arc::new(
-            grandparent
-                .new_batch::<Sha256>()
-                .add(create_operation::<F>(6))
-                .add(create_operation::<F>(7))
-                .merkleize(),
-        );
+        let parent_batch = grandparent
+            .new_batch::<Sha256>()
+            .add(create_operation::<F>(6))
+            .add(create_operation::<F>(7));
+        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
 
         // Child: 1 item.
-        let child = parent
-            .new_batch::<Sha256>()
-            .add(create_operation::<F>(8))
-            .merkleize();
+        let child_batch = parent.new_batch::<Sha256>().add(create_operation::<F>(8));
+        let child = journal.merkle.with_mem(|mem| child_batch.merkleize(mem));
 
         // Apply grandparent, then parent, then child sequentially.
         journal.apply_batch(&grandparent).await.unwrap();
@@ -2567,10 +2542,13 @@ mod tests {
         for op in &ops {
             batch = batch.add(op.clone());
         }
-        let expected = batch.merkleize();
+        let expected = journal.merkle.with_mem(|mem| batch.merkleize(mem));
 
         // merkleize_with
-        let actual = journal.new_batch().merkleize_with(Arc::new(ops));
+        let batch = journal.new_batch();
+        let actual = journal
+            .merkle
+            .with_mem(|mem| batch.merkleize_with(Arc::new(ops), mem));
 
         assert_eq!(actual.root(), expected.root());
     }
@@ -2592,7 +2570,10 @@ mod tests {
         let mut journal = create_journal_with_ops::<F>(context, "mw-apply", 5).await;
 
         let ops = vec![create_operation::<F>(10), create_operation::<F>(11)];
-        let merkleized = journal.new_batch().merkleize_with(Arc::new(ops.clone()));
+        let batch = journal.new_batch();
+        let merkleized = journal
+            .merkle
+            .with_mem(|mem| batch.merkleize_with(Arc::new(ops.clone()), mem));
 
         let expected_root = merkleized.root();
         journal.apply_batch(&merkleized).await.unwrap();
@@ -2624,7 +2605,10 @@ mod tests {
 
         let ops = Arc::new(vec![create_operation::<F>(20), create_operation::<F>(21)]);
         let ops_clone = Arc::clone(&ops);
-        let merkleized = journal.new_batch().merkleize_with(ops_clone);
+        let batch = journal.new_batch();
+        let merkleized = journal
+            .merkle
+            .with_mem(|mem| batch.merkleize_with(ops_clone, mem));
 
         // The batch should hold the same Arc allocation, not a copy.
         assert!(Arc::ptr_eq(&merkleized.items, &ops));

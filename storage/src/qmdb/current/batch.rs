@@ -318,6 +318,56 @@ impl<
     }
 }
 
+/// Layers a [`mmr::batch::MerkleizedBatch`] over a [`mmr::mem::Mmr`] for node resolution.
+///
+/// [`mmr::batch::MerkleizedBatch::get_node`] only covers the batch chain; committed positions
+/// return `None`. This adapter falls through to the committed Mem for those positions.
+struct BatchOverMem<'a, D: Digest> {
+    batch: &'a mmr::batch::MerkleizedBatch<D>,
+    mem: &'a mmr::mem::Mmr<D>,
+}
+
+impl<D: Digest> Readable for BatchOverMem<'_, D> {
+    type Family = mmr::Family;
+    type Digest = D;
+    type Error = mmr::Error;
+
+    fn size(&self) -> Position {
+        self.batch.size()
+    }
+
+    fn get_node(&self, pos: Position) -> Option<D> {
+        if let Some(d) = self.batch.get_node(pos) {
+            return Some(d);
+        }
+        self.mem.get_node(pos)
+    }
+
+    fn root(&self) -> D {
+        self.batch.root()
+    }
+
+    fn pruning_boundary(&self) -> Location {
+        self.batch.pruning_boundary()
+    }
+
+    fn proof(
+        &self,
+        _hasher: &impl crate::merkle::hasher::Hasher<mmr::Family, Digest = D>,
+        _loc: Location,
+    ) -> Result<crate::merkle::Proof<mmr::Family, D>, mmr::Error> {
+        unreachable!("proof not used in compute_current_layer")
+    }
+
+    fn range_proof(
+        &self,
+        _hasher: &impl crate::merkle::hasher::Hasher<mmr::Family, Digest = D>,
+        _range: core::ops::Range<Location>,
+    ) -> Result<crate::merkle::Proof<mmr::Family, D>, mmr::Error> {
+        unreachable!("range_proof not used in compute_current_layer")
+    }
+}
+
 /// A speculative batch of mutations whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
 ///
@@ -706,9 +756,14 @@ where
         grafted_batch.merkleize(&gh, &current_db.grafted_mmr)
     };
 
-    // 7. Compute canonical root using the grafted batch directly.
+    // 7. Compute canonical root. The grafted batch alone cannot resolve committed nodes,
+    //    so layer it over the committed grafted MMR.
     let ops_root = inner.root();
-    let grafted_storage = grafting::Storage::new(&grafted_batch, grafting_height, &ops_mmr_adapter);
+    let layered = BatchOverMem {
+        batch: &grafted_batch,
+        mem: &current_db.grafted_mmr,
+    };
+    let grafted_storage = grafting::Storage::new(&layered, grafting_height, &ops_mmr_adapter);
     let partial = partial_chunk(&bitmap);
     let canonical_root =
         compute_db_root::<H, _, _, N>(&hasher, &grafted_storage, partial, &ops_root).await?;

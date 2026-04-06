@@ -247,7 +247,7 @@ mod tests {
                 }
             }
         }
-        let merkleized = batch.merkleize(metadata);
+        let merkleized = batch.merkleize(metadata, db);
         db.apply_batch(merkleized).await.unwrap();
     }
 

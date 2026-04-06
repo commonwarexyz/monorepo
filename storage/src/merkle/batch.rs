@@ -46,11 +46,9 @@
 //! When that batch is applied and dropped, the ancestor segment is freed. Memory per
 //! batch is O(batch size), never growing with chain depth.
 //!
-//! A `committed` [`Mem`] snapshot (from when the chain was forked) is inherited by all
-//! descendants. This allows [`MerkleizedBatch::get_node`] to resolve positions in the
-//! original committed structure without walking the full `Weak` chain, which is needed
-//! for proof generation against speculative batches. The snapshot is `Arc`-backed, so
-//! all batches in a chain share a single underlying allocation.
+//! [`MerkleizedBatch::get_node`] resolves positions stored in the batch chain only.
+//! For positions in the committed structure, callers fall through to [`Mem::get_node`]
+//! (or an adapter that layers a batch over a `Mem`).
 //!
 //! # Example (MMR)
 //!
@@ -328,7 +326,6 @@ impl<F: Family, D: Digest> UnmerkleizedBatch<F, D> {
             pruning_boundary: self.parent.pruning_boundary(),
             ancestor_appended,
             ancestor_overwrites,
-            committed: self.parent.committed.clone(),
             #[cfg(feature = "std")]
             pool: self.pool,
         })
@@ -485,10 +482,6 @@ pub struct MerkleizedBatch<F: Family, D: Digest> {
     /// ancestors are alive. Root-to-tip order.
     pub(crate) ancestor_overwrites: Vec<Arc<BTreeMap<Position<F>, D>>>,
 
-    /// The committed Mem when the batch chain was forked, inherited by all descendants.
-    /// Used by [`get_node`](Self::get_node) as fallback when the Weak chain is truncated.
-    committed: Option<Mem<F, D>>,
-
     #[cfg(feature = "std")]
     pub(crate) pool: Option<ThreadPool>,
 }
@@ -506,7 +499,6 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
             pruning_boundary: Readable::pruning_boundary(mem),
             ancestor_appended: Vec::new(),
             ancestor_overwrites: Vec::new(),
-            committed: Some(mem.clone()),
             #[cfg(feature = "std")]
             pool: None,
         })
@@ -517,7 +509,11 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
         Position::new(*self.parent_size + self.appended.len() as u64)
     }
 
-    /// Resolve a node: own data -> Weak parent chain -> committed Mem.
+    /// Resolve a node: own data -> Weak parent chain.
+    ///
+    /// Returns `None` for positions that only exist in the committed [`Mem`].
+    /// Callers that need committed data should fall back to [`Mem::get_node`]
+    /// (or use a layered adapter such as the one in `qmdb::current::batch`).
     pub fn get_node(&self, pos: Position<F>) -> Option<D> {
         if pos >= self.size() {
             return None;
@@ -539,14 +535,7 @@ impl<F: Family, D: Digest> MerkleizedBatch<F, D> {
                 let i = (*pos - *batch.parent_size) as usize;
                 return batch.appended.get(i).copied();
             }
-            if let Some(ref mem) = batch.committed {
-                return mem.get_node(pos);
-            }
             current = batch.parent.as_ref().and_then(Weak::upgrade);
-        }
-        // Fall back to committed Mem on this batch (inherited from root).
-        if let Some(ref mem) = self.committed {
-            return mem.get_node(pos);
         }
         None
     }
@@ -691,11 +680,14 @@ mod tests {
             }
             let merkleized = batch.merkleize(&hasher, &base);
             assert_ne!(merkleized.root(), base_root);
+            assert_eq!(*base.root(), base_root);
+            // Apply and verify proof from the resulting Mem.
+            let mut applied = base;
+            applied.apply_batch(&merkleized).unwrap();
             let loc = Location::<F>::new(55);
             let element = hasher.digest(&55u64.to_be_bytes());
-            let proof = merkleized.proof(&hasher, loc).unwrap();
+            let proof = applied.proof(&hasher, loc).unwrap();
             assert!(proof.verify_element_inclusion(&hasher, &element, loc, &merkleized.root()));
-            assert_eq!(*base.root(), base_root);
         });
     }
 
@@ -761,10 +753,14 @@ mod tests {
             let mb = bb.merkleize(&hasher, &base);
             let reference = build_reference::<F>(&hasher, 70);
             assert_eq!(mb.root(), *reference.root());
+            // Apply both batches and verify proofs from the resulting Mem.
+            let mut applied = base;
+            applied.apply_batch(&ma).unwrap();
+            applied.apply_batch(&mb).unwrap();
             for i in [0u64, 25, 55, 65, 69] {
                 let loc = Location::<F>::new(i);
                 let element = hasher.digest(&i.to_be_bytes());
-                let proof = mb.proof(&hasher, loc).unwrap();
+                let proof = applied.proof(&hasher, loc).unwrap();
                 assert!(proof.verify_element_inclusion(&hasher, &element, loc, &mb.root()));
             }
         });
@@ -859,12 +855,15 @@ mod tests {
                 batch = batch.add(&hasher, &element);
             }
             let m = batch.merkleize(&hasher, &base);
+            // Apply and verify proofs from the resulting Mem.
+            let mut applied = base;
+            applied.apply_batch(&m).unwrap();
             let loc = Location::<F>::new(55);
             let element = hasher.digest(&55u64.to_be_bytes());
-            let proof = m.proof(&hasher, loc).unwrap();
+            let proof = applied.proof(&hasher, loc).unwrap();
             assert!(proof.verify_element_inclusion(&hasher, &element, loc, &m.root()));
             let range = Location::<F>::new(50)..Location::new(55);
-            let rp = m.range_proof(&hasher, range.clone()).unwrap();
+            let rp = applied.range_proof(&hasher, range.clone()).unwrap();
             let elements: Vec<D> = (50u64..55)
                 .map(|i| hasher.digest(&i.to_be_bytes()))
                 .collect();
@@ -943,12 +942,15 @@ mod tests {
                 batch = batch.add(&hasher, &element);
             }
             let m = batch.merkleize(&hasher, &base);
+            // Apply and verify proofs from the resulting Mem.
+            let mut applied = base;
+            applied.apply_batch(&m).unwrap();
             let loc = Location::<F>::new(80);
             let element = hasher.digest(&80u64.to_be_bytes());
-            let proof = m.proof(&hasher, loc).unwrap();
+            let proof = applied.proof(&hasher, loc).unwrap();
             assert!(proof.verify_element_inclusion(&hasher, &element, loc, &m.root()));
             assert!(matches!(
-                m.proof(&hasher, Location::new(0)),
+                applied.proof(&hasher, Location::new(0)),
                 Err(Error::ElementPruned(_))
             ));
         });

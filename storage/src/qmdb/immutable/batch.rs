@@ -165,7 +165,17 @@ where
     }
 
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
-    pub fn merkleize(self, metadata: Option<V::Value>) -> Arc<MerkleizedBatch<F, H::Digest, K, V>> {
+    pub fn merkleize<E, C, T>(
+        self,
+        metadata: Option<V::Value>,
+        db: &Immutable<F, E, K, V, C, H, T>,
+    ) -> Arc<MerkleizedBatch<F, H::Digest, K, V>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<K, V>> + Persistable<Error = JournalError>,
+        C::Item: EncodeShared,
+        T: Translator,
+    {
         let base = self.base_size;
 
         // Build operations: one Set per key (BTreeMap iterates in sorted order), then Commit.
@@ -187,7 +197,7 @@ where
         for op in &ops {
             journal_batch = journal_batch.add(op.clone());
         }
-        let journal_merkleized = Arc::new(journal_batch.merkleize());
+        let journal_merkleized = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
         let mut ancestor_diffs = Vec::new();
         if let Some(parent) = &self.parent {
@@ -283,7 +293,7 @@ where
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V>> {
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
-            journal_batch: Arc::new(self.journal.to_merkleized_batch()),
+            journal_batch: self.journal.to_merkleized_batch(),
             diff: Arc::new(BTreeMap::new()),
             parent: None,
             base_size: journal_size,

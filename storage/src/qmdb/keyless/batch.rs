@@ -195,7 +195,15 @@ where
     }
 
     /// Resolve appends into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
-    pub fn merkleize(self, metadata: Option<V::Value>) -> Arc<MerkleizedBatch<F, H::Digest, V>> {
+    pub fn merkleize<E, C>(
+        self,
+        metadata: Option<V::Value>,
+        db: &Keyless<F, E, V, C, H>,
+    ) -> Arc<MerkleizedBatch<F, H::Digest, V>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<V>> + Persistable<Error = JournalError>,
+    {
         let base = self.base_size;
 
         // Build operations: one Append per value, then Commit.
@@ -212,7 +220,7 @@ where
         for op in &ops {
             journal_batch = journal_batch.add(op.clone());
         }
-        let journal = Arc::new(journal_batch.merkleize());
+        let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,

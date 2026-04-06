@@ -140,7 +140,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let size_before = merkle.size();
                         let batch = merkle.new_batch();
                         let loc = batch.leaves();
-                        let batch = batch.add(&hasher, limited_data).merkleize(&hasher);
+                        let batch = merkle.with_mem(|mem| {
+                            batch.add(&hasher, limited_data).merkleize(&hasher, mem)
+                        });
                         merkle.apply_batch(&batch).unwrap();
                         leaves.push(limited_data.to_vec());
                         historical_sizes.push(merkle.leaves());
@@ -173,7 +175,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                                 locations.push(batch.leaves());
                                 batch = batch.add(&hasher, item);
                             }
-                            (locations, batch.merkleize(&hasher))
+                            (
+                                locations,
+                                merkle.with_mem(|mem| batch.merkleize(&hasher, mem)),
+                            )
                         };
                         merkle.apply_batch(&batch).unwrap();
                         assert!(merkle.size() > size_before);

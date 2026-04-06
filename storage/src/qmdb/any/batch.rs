@@ -608,7 +608,9 @@ where
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
         let ops = Arc::new(ops);
-        let journal = Arc::new(self.journal_batch.merkleize_with(ops));
+        let journal = db
+            .log
+            .with_mem(|base| self.journal_batch.merkleize_with(ops, base));
 
         // Precompute ancestor_locs: for each key in this batch's diff that an ancestor also
         // touched, record the ancestor's location. Used by apply_batch when ancestors have
@@ -1334,7 +1336,7 @@ where
         // The DB is always committed, so journal size = last_commit_loc + 1.
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(MerkleizedBatch {
-            journal_batch: Arc::new(self.log.to_merkleized_batch()),
+            journal_batch: self.log.to_merkleized_batch(),
             diff: Arc::new(BTreeMap::new()),
             parent: None,
             new_inactivity_floor_loc: self.inactivity_floor_loc,
