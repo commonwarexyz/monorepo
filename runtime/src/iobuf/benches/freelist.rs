@@ -1,3 +1,24 @@
+//! Focused microbenchmarks for the shared global freelist.
+//!
+//! `BufferPool` keeps free pooled buffers in a global freelist that is shared
+//! across threads. Threads hit this structure when they refill or spill their
+//! thread-local caches.
+//!
+//! This module benchmarks that global freelist directly and compares three
+//! implementations behind the same batch-oriented slot-id interface:
+//!
+//! - [`Freelist`]: a striped atomic bitmap freelist
+//! - `Mutex<Vec<u32>>`: a simple locked batched baseline
+//! - [`ArrayQueue<u32>`]: a bounded lock-free queue baseline
+//!
+//! Each worker repeatedly removes `batch` entries, then returns the same
+//! entries, keeping occupancy stable throughout the run. This matches the
+//! steady-state shape of multi-threaded freelist reuse.
+//!
+//! The benchmarked entries are synthetic slot ids paired with a small
+//! [`AlignedBuffer`]. That keeps the shape close to the real pooled freelist
+//! while avoiding unrelated `BufferPool` logic.
+
 use super::utils::{measure, Threading};
 use commonware_runtime::iobuf::bench::{AlignedBuffer, Freelist};
 use commonware_utils::sync::Mutex;

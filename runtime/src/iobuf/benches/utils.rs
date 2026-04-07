@@ -1,3 +1,22 @@
+//! Shared helpers for `iobuf` benchmarks.
+//!
+//! The benchmark modules in this directory share the same small set of
+//! threading presets and the same timing harness:
+//!
+//! - [`Threading`] defines the single-threaded and multi-threaded benchmark
+//!   shapes used by both suites.
+//! - [`Pattern`] describes the multi-threaded synchronization style:
+//!   - `Lockstep`: all workers enter the hot path together, maximizing
+//!     contention.
+//!   - `Staggered`: workers add a small variable spin delay between iterations
+//!     to decorrelate access timing.
+//! - [`measure`] runs the benchmark body under those presets, including the
+//!   barrier synchronization used by the multi-threaded cases.
+//!
+//! Keeping these helpers in one place ensures that the `pool` and `freelist`
+//! benchmarks use the same contention patterns and wall-clock measurement
+//! rules.
+
 use std::{
     hint::spin_loop,
     sync::{Arc, Barrier},
@@ -10,7 +29,9 @@ const MAX_BENCH_THREADS: usize = 8;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Pattern {
+    /// All workers enter the hot path together, maximizing contention.
     Lockstep,
+    /// Workers add a small spin delay to decorrelate access timing.
     Staggered,
 }
 

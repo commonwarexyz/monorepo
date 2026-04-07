@@ -1,3 +1,42 @@
+//! End-to-end `BufferPool` allocation benchmarks.
+//!
+//! This module compares pooled allocation against direct aligned allocation for
+//! the steady-state hot path we care about here: allocate, touch the requested
+//! bytes at page granularity, and drop.
+//!
+//! # Metrics
+//!
+//! - **raw**: end-to-end time for allocate + page-touch + drop.
+//! - **adjusted**: raw time minus the cost of repeatedly touching pages on an
+//!   already-materialized buffer. This isolates allocator overhead. The
+//!   baseline is always measured single-threaded because each thread writes to
+//!   private memory, so the touch cost is the same per iteration regardless of
+//!   thread count, and single-threaded measurement avoids scheduling noise that
+//!   would swamp the subtraction signal.
+//!
+//! # Thread Configurations
+//!
+//! For each buffer size, the benchmark runs:
+//!
+//! - one single-threaded case
+//! - one multi-threaded lockstep case
+//! - one multi-threaded staggered case
+//!
+//! The shared [`Threading`] presets and timing harness come from [`super::utils`].
+//!
+//! # Why Touch Pages?
+//!
+//! Large allocations may be backed by lazily materialized virtual memory once
+//! the allocator starts using `mmap`, so timing allocation alone can undercount
+//! the real cost of actually using the buffer. Touching each page forces
+//! materialization and makes the comparison between direct aligned allocation
+//! and pooled reuse fairer.
+//!
+//! For large sizes this means much of the raw benchmark measures page writes
+//! rather than allocator bookkeeping. That is acceptable because both
+//! implementations pay the same page-touch cost, so the relative comparison
+//! still isolates the allocation strategy.
+
 use super::utils::{measure, Threading};
 use commonware_runtime::{
     tokio, BufferPool, BufferPoolConfig, BufferPooler, IoBufMut, Runner as _,
