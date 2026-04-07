@@ -220,7 +220,7 @@ module tests {
         // All replicas see notarize quorum; certification fails -> all send nullify.
         .then(all {
             assert(store_certificates.get("n0").exists(c => cert_kind(c) == NotarizationKind and cert_view(c) == FIRST_VIEW and cert_payload(c) == Some("val_b3_part"))),
-            assert(replica_state.get("n0").certified.get(FIRST_VIEW) == None),
+            assert(replica_state.get("n0").certified.get(FIRST_VIEW) == Some(false)),
             assert(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == FIRST_VIEW)),
             assert(sent_nullify_votes.exists(v => v.sig == "n1" and v.view == FIRST_VIEW)),
             assert(sent_nullify_votes.exists(v => v.sig == "n2" and v.view == FIRST_VIEW)),

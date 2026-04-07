@@ -186,8 +186,6 @@ module types {
         leader_proposal_conflicted: ViewNumber -> bool,
         // local certification result for a view:
         // Some(true) = certified, Some(false) = certification failed, None = no result yet
-        certify: ViewNumber -> Option[bool],
-        // payload this replica has certified per view
-        certified: ViewNumber -> Option[Payload]
+        certified: ViewNumber -> Option[bool]
     }
 }

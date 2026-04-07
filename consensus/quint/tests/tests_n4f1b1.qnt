@@ -322,8 +322,8 @@ module tests {
                 assert(sent_nullify_votes.exists(v => v.sig == "n0" and v.view == 1)),
                 // No finalize vote was sent.
                 assert(not(sent_finalize_votes.exists(v => v.sig == "n0" and v.proposal.view == 1))),
-                // Certify recorded as failed.
-                assert(replica_state.get("n0").certify.get(1) == Some(false)),
+                // Certification recorded as failed.
+                assert(replica_state.get("n0").certified.get(1) == Some(false)),
                 unchanged_all,
             })
             .expect(test_invariants)

@@ -486,7 +486,14 @@ module replica {
           else
               match (finalized_payload_at(parent_view, certificates)) {
                   | Some(p) => Some(p)
-                  | None => self.certified.get(parent_view)
+                  | None =>
+                      if (self.certified.get(parent_view) == Some(true))
+                          match (self.proposal.get(parent_view)) {
+                              | Some(proposal) => Some(proposal.payload)
+                              | None => None
+                          }
+                      else
+                          None
               }
       }
 
@@ -739,7 +746,6 @@ module replica {
                 proposal: VIEWS.mapBy(_ => None),
                 leader_proposal: VIEWS.mapBy(_ => None),
                 leader_proposal_conflicted: VIEWS.mapBy(_ => false),
-                certify: VIEWS.mapBy(_ => None),
                 certified: VIEWS.mapBy(_ => None),
                 leader_timeout: VIEWS.mapBy(_ => Some(false)),
                 certification_timeout: VIEWS.mapBy(_ => Some(false))
@@ -1237,7 +1243,6 @@ module replica {
     ): NotarizeEffect = {
         val cert: Certificate = Notarization(notarization)
         val cert_view_num = notarization.proposal.view
-        val cert_payload_val = notarization.proposal.payload
         val seen_notarization = if (self.ghost_last_seen_notarization < cert_view_num) cert_view_num else self.ghost_last_seen_notarization
         val cert_prop = notarization.proposal
         val proposal_conflicted = has_leader_proposal_conflict(self, cert_prop)
@@ -1273,8 +1278,7 @@ module replica {
                     leader_timeout: self.leader_timeout.set(cert_view_num, None),
                     certification_timeout: self.certification_timeout.set(cert_view_num, None),
                     ghost_last_seen_notarization: seen_notarization,
-                    certify: self.certify.set(cert_view_num, Some(true)),
-                    certified: self.certified.put(cert_view_num, Some(cert_payload_val))
+                    certified: self.certified.put(cert_view_num, Some(true))
                 }, cert_view_num + 1),
                 next_sent_nullify: sent_nullify_votes,
                 next_sent_finalize: sent_finalize_votes.union(Set({
@@ -1297,8 +1301,7 @@ module replica {
                     leader_timeout: self.leader_timeout.set(cert_view_num, None),
                     certification_timeout: self.certification_timeout.set(cert_view_num, None),
                     ghost_last_seen_notarization: seen_notarization,
-                    certify: self.certify.set(cert_view_num, Some(true)),
-                    certified: self.certified.put(cert_view_num, Some(cert_payload_val)),
+                    certified: self.certified.put(cert_view_num, Some(true)),
                 }, cert_view_num + 1),
                 next_sent_nullify: sent_nullify_votes,
                 next_sent_finalize: sent_finalize_votes,
@@ -1312,7 +1315,7 @@ module replica {
                         observe_round_proposal(timer.next_self, cert_prop, true),
                         cert_prop
                     ),
-                    certify: timer.next_self.certify.set(cert_view_num, Some(false)),
+                    certified: timer.next_self.certified.set(cert_view_num, Some(false)),
                     ghost_last_seen_notarization: seen_notarization
                 },
                 next_sent_nullify: timer.next_sent_nullify,

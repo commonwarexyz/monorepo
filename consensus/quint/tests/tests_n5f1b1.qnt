@@ -45,7 +45,7 @@ module tests {
                     cert_view(c) == FIRST_VIEW,
                     cert_ghost_sender(c) == "n3",
                 })),
-                assert(replica_state.get("n3").certified.get(FIRST_VIEW) == Some("val_b1")),
+                assert(replica_state.get("n3").certified.get(FIRST_VIEW) == Some(true)),
                 assert(replica_state.get("n3").view == 2),
                 unchanged_all,
             })
@@ -225,7 +225,7 @@ module tests {
                 assert(sent_finalize_votes.exists(v =>
                     v.sig == "n3" and v.proposal == bad_proposal
                 )),
-                assert(replica_state.get("n3").certified.get(2) == Some("val_b1")),
+                assert(replica_state.get("n3").certified.get(2) == Some(true)),
                 assert(replica_state.get("n3").view == 3),
                 unchanged_all,
             })
