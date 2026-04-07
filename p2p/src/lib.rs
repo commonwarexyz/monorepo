@@ -233,19 +233,13 @@ stability_scope!(BETA {
 
     /// Primary and secondary peers registered together for [`Manager::track`].
     ///
-    /// Primary peers participate in primary-only transport policies such as
-    /// outbound dialing. Secondary peers remain transport-eligible and are
-    /// preserved separately in [`PeerSetUpdate`] notifications, but callers
-    /// should not assume they are included anywhere a consumer intentionally
-    /// reads only `latest.primary`.
-    ///
     /// The same public key may appear in both `primary` and `secondary`. [`Manager::track`]
     /// treats the peer as primary only (it is omitted from the stored secondary set).
     #[derive(Clone, Debug)]
     pub struct TrackedPeers<P: PublicKey> {
         /// Peers eligible for primary-only policies.
         pub primary: Set<P>,
-        /// Additional transport-eligible peers listed separately from `primary`.
+        /// Peers eligible for secondary-only policies.
         pub secondary: Set<P>,
     }
 
@@ -272,18 +266,13 @@ stability_scope!(BETA {
 
     /// Primary and secondary peers registered together for [`AddressableManager::track`].
     ///
-    /// Role semantics match [`TrackedPeers`]: primary peers participate in
-    /// primary-only policies such as outbound dialing, while secondary peers
-    /// remain transport-eligible and preserved separately in
-    /// [`PeerSetUpdate`] notifications.
-    ///
     /// If the same public key appears in both maps, the primary entry is authoritative
     /// for address and role (the key is not registered as secondary).
     #[derive(Clone, Debug)]
     pub struct AddressableTrackedPeers<P: PublicKey> {
         /// Addresses for peers eligible for primary-only policies.
         pub primary: Map<P, Address>,
-        /// Addresses for additional transport-eligible peers listed separately from `primary`.
+        /// Addresses for peers eligible for secondary-only policies.
         pub secondary: Map<P, Address>,
     }
 
@@ -308,7 +297,7 @@ stability_scope!(BETA {
         /// Public key type used to identify peers.
         type PublicKey: PublicKey;
 
-        /// Fetch the ordered set of peers for a given ID.
+        /// Fetch the ordered set of primary peers for a given ID.
         fn peer_set(
             &mut self,
             id: u64,
@@ -327,7 +316,7 @@ stability_scope!(BETA {
 
     /// Interface for managing peer set membership (where peer addresses are not known).
     pub trait Manager: Provider {
-        /// Track a primary peer set and secondary peers with the given ID.
+        /// Track a primary and secondary peer set with the given ID.
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
         /// of the consensus engine. It must be monotonically increasing as new peer sets are
@@ -335,7 +324,7 @@ stability_scope!(BETA {
         ///
         /// For good connectivity, all peers must register the same peer sets at the same ID.
         ///
-        /// Callers may pass either a bare [`Set`] (registering only primary peers)
+        /// Callers may pass either a list of primary peers or a [`TrackedPeers`] value containing both primary and
         /// or a [`TrackedPeers`] value containing both primary and secondary peers.
         ///
         /// Overlapping keys in [`TrackedPeers`] are allowed; primary takes precedence for role
@@ -359,9 +348,8 @@ stability_scope!(BETA {
         ///
         /// For good connectivity, all peers must register the same peer sets at the same ID.
         ///
-        /// Callers may pass either a bare [`Map`] (registering only primary peers)
-        /// or an [`AddressableTrackedPeers`] value containing both primary and
-        /// secondary peers.
+        /// Callers may pass either a list of primary peers or a [`AddressableTrackedPeers`] value containing
+        /// both primary and secondary peers.
         ///
         /// The same key may appear in both maps; see [`AddressableTrackedPeers`].
         fn track<R>(
