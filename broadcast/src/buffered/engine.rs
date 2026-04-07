@@ -245,7 +245,11 @@ where
     ) {
         // `digest` keys the shared item table and refcounts; same digest from our key is one row.
         let digest = msg.digest();
-        self.insert_message(self.public_key.clone(), digest, msg.clone());
+        let outcome = self.insert_message(self.public_key.clone(), digest, msg.clone());
+        if matches!(outcome, InsertMessageResult::Ineligible) {
+            responder.send_lossy(vec![]);
+            return;
+        }
 
         // Broadcast the message to the network
         let sent_to = sender
@@ -316,8 +320,10 @@ where
             }
         }
 
-        // Ourselves and peers in `latest_primary_peers` may keep buffered entries resident.
-        if peer != self.public_key && self.latest_primary_peers.position(&peer).is_none() {
+        // Only peers listed in `latest.primary` may buffer. An empty set means no peer-set
+        // snapshot yet (or an explicit empty primary); nobody is a member, so inserts are
+        // ineligible until a non-empty primary arrives.
+        if self.latest_primary_peers.position(&peer).is_none() {
             return InsertMessageResult::Ineligible;
         }
 
@@ -364,9 +370,10 @@ where
     }
 
     fn update_latest_primary_peers(&mut self, peers: Set<P>) {
-        for (peer, deque) in self.deques.extract_if(.., |peer, _| {
-            peer != &self.public_key && peers.position(peer).is_none()
-        }) {
+        for (peer, deque) in self
+            .deques
+            .extract_if(.., |peer, _| peers.position(peer).is_none())
+        {
             debug!(?peer, digests = deque.len(), "evicting disconnected peer");
             for digest in deque {
                 decrement_digest_refcount(&mut self.counts, &mut self.items, &digest);
