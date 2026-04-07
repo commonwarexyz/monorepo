@@ -118,64 +118,56 @@ fn fuzz(input: FuzzInput) {
 
         // Seed the committed base state so parent/child batching sees both
         // translated-key collisions and ordinary committed lookups.
-        let initial = {
-            let mut batch = db.new_batch();
-            for write in &input.initial {
-                batch = batch.write(
-                    key_from_seed(write.key),
-                    Some(value_from_bytes(write.value)),
-                );
-            }
-            batch.merkleize(None, &db).await.unwrap().finalize()
-        };
+        let mut batch = db.new_batch();
+        for write in &input.initial {
+            batch = batch.write(
+                key_from_seed(write.key),
+                Some(value_from_bytes(write.value)),
+            );
+        }
+        let initial = batch.merkleize(&db, None).await.unwrap();
         db.apply_batch(initial).await.unwrap();
         db.commit().await.unwrap();
 
         // Build a parent batch, then build the child while the parent is still
         // pending so the child must resolve through base_diff plus the stale
         // committed snapshot.
-        let parent = {
-            let mut batch = db.new_batch();
-            for mutation in &input.parent {
-                batch = match mutation {
-                    Mutation::Write { key, value } => {
-                        batch.write(key_from_seed(*key), Some(value_from_bytes(*value)))
-                    }
-                    Mutation::Delete { key } => batch.write(key_from_seed(*key), None),
-                };
-            }
-            batch.merkleize(None, &db).await.unwrap()
-        };
-        let pending_child = {
-            let mut batch = parent.new_batch::<Sha256>();
-            for mutation in &input.child {
-                batch = match mutation {
-                    Mutation::Write { key, value } => {
-                        batch.write(key_from_seed(*key), Some(value_from_bytes(*value)))
-                    }
-                    Mutation::Delete { key } => batch.write(key_from_seed(*key), None),
-                };
-            }
-            batch.merkleize(None, &db).await.unwrap()
-        };
+        let mut batch = db.new_batch();
+        for mutation in &input.parent {
+            batch = match mutation {
+                Mutation::Write { key, value } => {
+                    batch.write(key_from_seed(*key), Some(value_from_bytes(*value)))
+                }
+                Mutation::Delete { key } => batch.write(key_from_seed(*key), None),
+            };
+        }
+        let parent = batch.merkleize(&db, None).await.unwrap();
+        let mut batch = parent.new_batch::<Sha256>();
+        for mutation in &input.child {
+            batch = match mutation {
+                Mutation::Write { key, value } => {
+                    batch.write(key_from_seed(*key), Some(value_from_bytes(*value)))
+                }
+                Mutation::Delete { key } => batch.write(key_from_seed(*key), None),
+            };
+        }
+        let pending_child = batch.merkleize(&db, None).await.unwrap();
 
         // Commit the parent, then rebuild the same logical child from the
         // committed DB state. Both speculative roots must match.
-        db.apply_batch(parent.finalize()).await.unwrap();
+        db.apply_batch(parent).await.unwrap();
         db.commit().await.unwrap();
 
-        let committed_child = {
-            let mut batch = db.new_batch();
-            for mutation in &input.child {
-                batch = match mutation {
-                    Mutation::Write { key, value } => {
-                        batch.write(key_from_seed(*key), Some(value_from_bytes(*value)))
-                    }
-                    Mutation::Delete { key } => batch.write(key_from_seed(*key), None),
-                };
-            }
-            batch.merkleize(None, &db).await.unwrap()
-        };
+        let mut batch = db.new_batch();
+        for mutation in &input.child {
+            batch = match mutation {
+                Mutation::Write { key, value } => {
+                    batch.write(key_from_seed(*key), Some(value_from_bytes(*value)))
+                }
+                Mutation::Delete { key } => batch.write(key_from_seed(*key), None),
+            };
+        }
+        let committed_child = batch.merkleize(&db, None).await.unwrap();
 
         assert_eq!(
             pending_child.root(),
@@ -183,16 +175,12 @@ fn fuzz(input: FuzzInput) {
             "child root depended on pending-vs-committed parent path"
         );
 
-        // Rebase the pending child onto the committed parent and ensure the
-        // applied root still matches the committed-path child root.
-        let current_db_size = *db.bounds().await.end;
-        db.apply_batch(pending_child.finalize_from(current_db_size))
-            .await
-            .unwrap();
+        // Apply the pending child and verify the DB state matches.
+        db.apply_batch(pending_child).await.unwrap();
         assert_eq!(
             db.root(),
             committed_child.root(),
-            "rebased pending child diverged from committed-path child root"
+            "pending child root diverged"
         );
 
         db.destroy().await.unwrap();

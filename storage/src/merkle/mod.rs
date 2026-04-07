@@ -139,12 +139,22 @@ pub enum Error<F: Family> {
     #[error("invalid pinned nodes")]
     InvalidPinnedNodes,
 
-    /// Changeset was created against a different state.
-    #[error("stale changeset: expected size {expected}, actual {actual}")]
-    StaleChangeset {
-        /// The size the changeset was built against.
+    /// Structure has diverged incompatibly from the batch's ancestor chain.
+    #[error("stale batch: base size {expected}, current size {actual}")]
+    StaleBatch {
+        /// The base size when the batch chain was forked.
         expected: Position<F>,
-        /// The current size.
+        /// The current structure size.
+        actual: Position<F>,
+    },
+
+    /// An ancestor batch was dropped before this batch was applied, causing
+    /// data loss. All ancestors must be kept alive until descendants are applied.
+    #[error("ancestor dropped: expected size {expected}, actual size {actual}")]
+    AncestorDropped {
+        /// The expected size after applying all ancestors + this batch.
+        expected: Position<F>,
+        /// The actual size (less than expected due to missing ancestor data).
         actual: Position<F>,
     },
 

@@ -93,14 +93,14 @@ fn historical_root<F: MerkleFamily>(
 ) -> <Sha256 as commonware_cryptography::Hasher>::Digest {
     let hasher = Standard::<Sha256>::new();
     let mut mem = Mem::<F, _>::new(&hasher);
-    let changeset = {
+    let batch = {
         let mut batch = mem.new_batch();
         for element in leaves.iter().take(requested_leaves.as_u64() as usize) {
             batch = batch.add(&hasher, element);
         }
-        batch.merkleize(&hasher).finalize()
+        batch.merkleize(&mem, &hasher)
     };
-    mem.apply(changeset).unwrap();
+    mem.apply_batch(&batch).unwrap();
     *mem.root()
 }
 
@@ -140,11 +140,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let size_before = merkle.size();
                         let batch = merkle.new_batch();
                         let loc = batch.leaves();
-                        let changeset = batch
-                            .add(&hasher, limited_data)
-                            .merkleize(&hasher)
-                            .finalize();
-                        merkle.apply(changeset).unwrap();
+                        let batch = merkle.with_mem(|mem| {
+                            batch.add(&hasher, limited_data).merkleize(mem, &hasher)
+                        });
+                        merkle.apply_batch(&batch).unwrap();
                         leaves.push(limited_data.to_vec());
                         historical_sizes.push(merkle.leaves());
                         assert!(merkle.size() > size_before);
@@ -169,16 +168,19 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         }
 
                         let size_before = merkle.size();
-                        let (locations, changeset) = {
+                        let (locations, batch) = {
                             let mut batch = merkle.new_batch();
                             let mut locations = Vec::with_capacity(items.len());
                             for item in &items {
                                 locations.push(batch.leaves());
                                 batch = batch.add(&hasher, item);
                             }
-                            (locations, batch.merkleize(&hasher).finalize())
+                            (
+                                locations,
+                                merkle.with_mem(|mem| batch.merkleize(mem, &hasher)),
+                            )
                         };
-                        merkle.apply(changeset).unwrap();
+                        merkle.apply_batch(&batch).unwrap();
                         assert!(merkle.size() > size_before);
 
                         for (item, loc) in items.iter().zip(&locations) {
