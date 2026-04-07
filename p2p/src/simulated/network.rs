@@ -2106,7 +2106,7 @@ mod tests {
     }
 
     #[test]
-    fn test_secondary_sets_remain_tracked_until_eviction() {
+    fn test_secondary_sets_remain_until_eviction() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {

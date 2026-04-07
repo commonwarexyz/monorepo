@@ -28,8 +28,8 @@
 //!   secondary peers.
 //! - [`AddressableManager::overwrite`](crate::AddressableManager::overwrite): Update multiple
 //!   peers' addresses in-place without creating a new peer set. Use this when only peer IPs change but
-//!   the peer set composition stays the same. Untracked or unchanged peers are silently skipped (so the application doesn't
-//!   need to track what their last submitted peer set was).
+//!   the peer set composition stays the same. Peers not in the directory (or unchanged) are silently skipped (so the application doesn't
+//!   need to remember what their last submitted peer set was).
 //!
 //! Secondary peers remain visible in [`PeerSetUpdate`](crate::PeerSetUpdate)
 //! notifications, are accepted for inbound connections, and may receive

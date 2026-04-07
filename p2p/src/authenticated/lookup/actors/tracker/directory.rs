@@ -136,7 +136,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// # Panics
     ///
-    /// Panics if the peer is not tracked or if the peer is not in the reserved state.
+    /// Panics if the peer has no record or if the peer is not in the reserved state.
     pub fn connect(&mut self, peer: &C) {
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
@@ -151,7 +151,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Track new primary and secondary peer sets for the given index.
     ///
     /// Returns the peers whose connections should be reset because they were
-    /// removed from all tracked peer sets or had their address changed.
+    /// removed from all retained peer sets or had their address changed.
     ///
     /// Returns `None` if the index is invalid.
     ///
@@ -176,7 +176,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             }
         }
 
-        // Create and store new primary peer set (all peers are tracked regardless of address
+        // Create and store new primary peer set (all peers are registered regardless of address
         // validity).
         let mut reset_peers = Vec::new();
         let primary_keys = primaries.keys().clone();
@@ -200,8 +200,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // Create and store new secondary peer set.
         for (secondary, addr) in &secondaries {
-            // When a peer is tracked in both roles for the same index, the
-            // primary address remains authoritative.
+            // When a peer appears in both roles for the same index, the primary address remains
+            // authoritative.
             if primary_keys.position(secondary).is_some() {
                 self.peers.get_mut(secondary).unwrap().increment_secondary();
                 continue;
@@ -251,13 +251,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         Some(Set::from_iter_dedup(reset_peers))
     }
 
-    /// Update a tracked peer's address.
+    /// Update a registered peer's address.
     ///
     /// Returns `true` if the peer exists and the address actually changed.
     /// The caller should sever any existing connection to this peer since it
     /// was established to the old address.
     ///
-    /// Returns `false` if the peer is not tracked, is ourselves, or the
+    /// Returns `false` if the peer has no record, is ourselves, or the
     /// new address is identical to the existing one.
     pub fn overwrite(&mut self, peer: &C, address: Address) -> bool {
         let Some(record) = self.peers.get_mut(peer) else {
@@ -326,7 +326,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to block a peer for the configured duration, updating the metrics accordingly.
     ///
     /// Peers can be blocked even if they don't have a record yet. The block will be applied
-    /// when they are later tracked in a peer set.
+    /// when they are later added to a peer set.
     pub fn block(&mut self, peer: &C) {
         // Already blocked
         if self.is_blocked(peer) {
@@ -629,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn test_secondary_sets_remain_tracked_until_eviction() {
+    fn test_secondary_sets_remain_until_eviction() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -1133,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dns_addresses_tracked_but_not_dialable_when_disabled() {
+    fn test_dns_addresses_registered_but_not_dialable_when_disabled() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -1182,14 +1182,14 @@ mod tests {
                 .unwrap();
             assert!(reset_peers.is_empty());
 
-            // Both peers should be tracked (for peer set consistency)
+            // Both peers should be in the peer set (for consistency)
             assert!(
                 directory.peers.contains_key(&pk_socket),
-                "Socket peer should be tracked"
+                "Socket peer should be in the peer set"
             );
             assert!(
                 directory.peers.contains_key(&pk_dns),
-                "DNS peer should be tracked for peer set consistency"
+                "DNS peer should be in the peer set for consistency"
             );
 
             // Only socket peer should be dialable (DNS ingress invalid when disabled)
@@ -1200,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn test_private_egress_ip_tracked_but_not_dialable_or_registered() {
+    fn test_private_egress_ip_in_peer_set_but_not_dialable_or_registered() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();
@@ -1246,14 +1246,14 @@ mod tests {
                 .unwrap();
             assert!(reset_peers.is_empty());
 
-            // Both peers should be tracked (for peer set consistency)
+            // Both peers should be in the peer set (for consistency)
             assert!(
                 directory.peers.contains_key(&pk_public),
-                "Public peer should be tracked"
+                "Public peer should be in the peer set"
             );
             assert!(
                 directory.peers.contains_key(&pk_private),
-                "Private peer should be tracked for peer set consistency"
+                "Private peer should be in the peer set for consistency"
             );
 
             // Only public peer should be dialable (private ingress IP not allowed)
@@ -2370,7 +2370,7 @@ mod tests {
     }
 
     #[test]
-    fn test_overwrite_untracked_peer() {
+    fn test_overwrite_unregistered_peer() {
         let runtime = deterministic::Runner::default();
         let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
         let (tx, _rx) = UnboundedMailbox::new();

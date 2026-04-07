@@ -988,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn test_overwrite_untracked_peer_silently_ignored() {
+    fn test_overwrite_unregistered_peer_silently_ignored() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
@@ -997,7 +997,7 @@ mod tests {
             let (_, pk) = new_signer_and_pk(1);
             let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
 
-            // Untracked peer is silently skipped (no error, no effect)
+            // Peer not in the directory is silently skipped (no error, no effect)
             oracle
                 .overwrite([(pk, addr.into())].try_into().unwrap())
                 .await;
@@ -1173,7 +1173,7 @@ mod tests {
             let (unchanged_mailbox, mut unchanged_rx) = Mailbox::new(1);
             mailbox.connect(pk_unchanged.clone(), unchanged_mailbox);
 
-            // Call overwrite with mix of tracked+changed, tracked+unchanged, and untracked peers
+            // Call overwrite with mix of registered+changed, registered+unchanged, and unknown peers
             oracle
                 .overwrite(
                     [
@@ -1186,7 +1186,7 @@ mod tests {
                 )
                 .await;
 
-            // Only tracked+changed peer (pk_tracked) gets killed
+            // Only registered+changed peer (pk_tracked) gets killed
             assert!(matches!(tracked_rx.recv().await, Some(peer::Message::Kill)));
 
             // Unchanged peer should NOT receive kill - verify the receiver has no pending messages

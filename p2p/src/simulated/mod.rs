@@ -2796,7 +2796,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sender_removed_from_tracked_peer_set_drops_message() {
+    fn test_sender_removed_from_peer_set_drops_message() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Create a simulated network
@@ -2876,7 +2876,7 @@ mod tests {
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 2);
 
-            // Send message from untracked peer
+            // Send message from a peer no longer in any peer set
             let sent = sender
                 .send(
                     Recipients::One(recipient_pk.clone()),
@@ -2905,7 +2905,7 @@ mod tests {
             let update = subscription.recv().await.unwrap();
             assert_eq!(update.index, 3);
 
-            // Send message from tracked peer (now back in a peer set)
+            // Send message from a peer now back in a peer set
             let sent = sender
                 .send(
                     Recipients::One(recipient_pk.clone()),

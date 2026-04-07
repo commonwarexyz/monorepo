@@ -2041,8 +2041,8 @@ mod tests {
 
             context.sleep(Duration::from_millis(100)).await;
 
-            // Track peer 3 as the latest primary while keeping the requester tracked. Peer 2
-            // remains in the provider's overlap window (`all.primary`), but new resolver traffic
+            // Track peer 3 as the latest primary while keeping the requester in the peer set.
+            // Peer 2 remains in the provider's overlap window (`all.primary`), but new resolver traffic
             // should use only `latest.primary`.
             oracle
                 .manager()
@@ -2115,8 +2115,8 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
 
-            // Keep the requester tracked across the cutover while peer 2 remains connected only
-            // through the overlap window after the latest primary advances to peer 3.
+            // Keep the requester in the peer set across the cutover while peer 2 remains connected
+            // only through the overlap window after the latest primary advances to peer 3.
             oracle
                 .manager()
                 .track(

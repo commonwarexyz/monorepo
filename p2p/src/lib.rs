@@ -242,7 +242,7 @@ stability_scope!(BETA {
     pub struct TrackedPeers<P: PublicKey> {
         /// Peers eligible for primary-only policies.
         pub primary: Set<P>,
-        /// Additional transport-eligible peers tracked separately from `primary`.
+        /// Additional transport-eligible peers listed separately from `primary`.
         pub secondary: Set<P>,
     }
 
@@ -277,8 +277,7 @@ stability_scope!(BETA {
     pub struct AddressableTrackedPeers<P: PublicKey> {
         /// Addresses for peers eligible for primary-only policies.
         pub primary: Map<P, Address>,
-        /// Addresses for additional transport-eligible peers tracked separately
-        /// from `primary`.
+        /// Addresses for additional transport-eligible peers listed separately from `primary`.
         pub secondary: Map<P, Address>,
     }
 
@@ -313,7 +312,7 @@ stability_scope!(BETA {
         ///
         /// Returns a receiver of [`PeerSetUpdate`] notifications. The aggregate
         /// primary and secondary sets preserve role information. If a peer is
-        /// tracked as both primary and secondary, it will appear in both sets.
+        /// present in both primary and secondary roles, it will appear in both sets.
         /// Callers that need a deduplicated recipient list should union the
         /// sets explicitly, while callers that intentionally exclude
         /// secondaries should read `latest.primary`.
@@ -327,9 +326,10 @@ stability_scope!(BETA {
         /// Track a primary peer set and secondary peers with the given ID.
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
-        /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
+        /// of the consensus engine. It must be monotonically increasing as new peer sets are
+        /// registered.
         ///
-        /// For good connectivity, all peers must track the same peer sets at the same ID.
+        /// For good connectivity, all peers must register the same peer sets at the same ID.
         ///
         /// Callers may pass either a bare [`Set`] (registering only primary peers)
         /// or a [`TrackedPeers`] value containing both primary and secondary peers.
@@ -347,9 +347,10 @@ stability_scope!(BETA {
         /// Track a primary peer set and secondary peers with the given ID.
         ///
         /// The peer set ID passed to this function should be strictly managed, ideally matching the epoch
-        /// of the consensus engine. It must be monotonically increasing as new peer sets are tracked.
+        /// of the consensus engine. It must be monotonically increasing as new peer sets are
+        /// registered.
         ///
-        /// For good connectivity, all peers must track the same peer sets at the same ID.
+        /// For good connectivity, all peers must register the same peer sets at the same ID.
         ///
         /// Callers may pass either a bare [`Map`] (registering only primary peers)
         /// or an [`AddressableTrackedPeers`] value containing both primary and

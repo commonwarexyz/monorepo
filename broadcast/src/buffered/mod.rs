@@ -978,7 +978,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_peer_set_update_evicts_peers_not_in_latest_set_even_if_still_tracked() {
+    fn test_peer_set_update_evicts_peers_not_in_latest_set_even_if_still_in_overlap() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             // Use tracked_peer_sets=2 so old sets are retained in the window.
@@ -1105,7 +1105,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_initial_latest_peer_set_blocks_untracked_sender_caching() {
+    fn test_initial_latest_peer_set_blocks_sender_not_in_latest_primary() {
         let runner = deterministic::Runner::timed(Duration::from_secs(5));
         runner.start(|context| async move {
             let (network, oracle) = Network::<deterministic::Context, PublicKey>::new(

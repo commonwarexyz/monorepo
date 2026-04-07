@@ -801,7 +801,7 @@ mod tests {
             let conn3 = connections.next().unwrap();
             let mut res_conn3 = conn3.1;
 
-            // Send request from peer 1 to peer 2 (this gets tracked)
+            // Send request from peer 1 to peer 2 (collector records the in-flight request)
             let request_to_peer2 = Request { id: 42, data: 42 };
             let recipients = mailbox1
                 .send(Recipients::One(peers[1].clone()), request_to_peer2.clone())

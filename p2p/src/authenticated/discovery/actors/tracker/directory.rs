@@ -165,7 +165,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// # Panics
     ///
-    /// Panics if the peer is not tracked or if the peer is not in the reserved state.
+    /// Panics if the peer has no record or if the peer is not in the reserved state.
     pub fn connect(&mut self, peer: &C, dialer: bool) {
         // Set the record as connected
         let record = self.peers.get_mut(peer).unwrap();
@@ -339,7 +339,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Attempt to block a peer for the configured duration, updating the metrics accordingly.
     ///
     /// Peers can be blocked even if they don't have a record yet. The block will be applied
-    /// when they are later tracked in a peer set.
+    /// when they are later added to a peer set.
     pub fn block(&mut self, peer: &C) {
         // Already blocked
         if self.is_blocked(peer) {
@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn test_secondary_sets_remain_tracked_until_eviction() {
+    fn test_secondary_sets_remain_until_eviction() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
         let my_info = create_myself_info(&signer, test_socket(), 100);
