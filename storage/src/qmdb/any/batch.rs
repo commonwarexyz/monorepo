@@ -685,9 +685,8 @@ where
         // keys being re-created. Both get an Update op and active_keys_delta += 1.
         // Merge into a single sorted Vec so iteration order is deterministic
         // regardless of whether the parent is pending or committed.
-        let mut creates: Vec<(K, V::Value, Option<Location<F>>)> = Vec::with_capacity(
-            mutations.len() + parent_deleted_creates.len(),
-        );
+        let mut creates: Vec<(K, V::Value, Option<Location<F>>)> =
+            Vec::with_capacity(mutations.len() + parent_deleted_creates.len());
         for (key, value) in mutations {
             if let Some(value) = value {
                 creates.push((key, value, None));
@@ -811,9 +810,8 @@ where
         // base_old_loc (None for fresh creates, Some for parent-deleted recreates).
         // Merge into a single sorted Vec so iteration order is deterministic
         // regardless of whether the parent is pending or committed.
-        let mut created: Vec<(K, V::Value, Option<Location<F>>)> = Vec::with_capacity(
-            mutations.len() + parent_deleted_creates.len(),
-        );
+        let mut created: Vec<(K, V::Value, Option<Location<F>>)> =
+            Vec::with_capacity(mutations.len() + parent_deleted_creates.len());
         for (key, value) in mutations {
             let Some(value) = value else {
                 continue; // delete of non-existent key
