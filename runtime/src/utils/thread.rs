@@ -112,18 +112,36 @@ where
         .expect("failed to spawn thread")
 }
 
+/// Returns the number of online CPUs, or `None` if it cannot be determined.
+#[cfg(target_os = "linux")]
+pub fn available_cores() -> Option<usize> {
+    // SAFETY: `sysconf(_SC_NPROCESSORS_ONLN)` is a read-only query with no
+    // preconditions.
+    let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    if n <= 0 {
+        None
+    } else {
+        Some(n as usize)
+    }
+}
+
+/// Returns the number of online CPUs, or `None` if it cannot be determined.
+///
+/// Always returns `None` on non-Linux platforms.
+#[cfg(not(target_os = "linux"))]
+pub fn available_cores() -> Option<usize> {
+    None
+}
+
 /// Best-effort attempt to pin the current thread to the given core.
 /// The `core` value wraps around the number of available CPUs.
 #[cfg(target_os = "linux")]
 pub(crate) fn pin_to_core(core: usize) {
-    // SAFETY: `sysconf(_SC_NPROCESSORS_ONLN)` is a read-only query with no
-    // preconditions.
-    let num_cpus = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-    if num_cpus <= 0 {
+    let Some(num_cores) = available_cores() else {
         tracing::warn!("failed to query CPU count, skipping core pinning");
         return;
-    }
-    let cpu = core % (num_cpus as usize);
+    };
+    let cpu = core % num_cores;
 
     // SAFETY: `cpu_set` is zeroed and then a single valid CPU index is set.
     unsafe {

@@ -182,6 +182,8 @@ stability_scope!(BETA {
         /// Return a [`Spawner`] that runs tasks on a dedicated thread pinned to the given core
         /// (best-effort, Linux only). The core value wraps around the number of available CPUs.
         ///
+        /// Use [`available_cores`] to query the number of online CPUs.
+        ///
         /// Implies [`Spawner::dedicated`].
         fn pinned(self, core: usize) -> Self;
 
