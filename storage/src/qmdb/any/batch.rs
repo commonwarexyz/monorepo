@@ -22,22 +22,13 @@ use crate::{
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
-use core::ops::Range;
+use core::{iter, ops::Range};
 use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 use tracing::debug;
-
-/// Snapshot diff and boundary for a single ancestor batch.
-#[derive(Clone)]
-pub(crate) struct Ancestor<K, F: Family, V> {
-    /// Key-level changes from this ancestor.
-    pub(crate) diff: Arc<BTreeMap<K, DiffEntry<F, V>>>,
-    /// Total operation count after this ancestor (used to detect committed ancestors).
-    pub(crate) end_index: u64,
-}
 
 /// Strategy for finding the next active location during floor raising.
 pub(crate) trait FloorScan<F: Family> {
@@ -223,6 +214,9 @@ where
     /// This batch's local key-level changes only (not accumulated from ancestors).
     pub(crate) diff: Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>,
 
+    /// The parent batch in the chain, if any.
+    parent: Option<Weak<Self>>,
+
     /// Inactivity floor location after this batch's floor raise.
     pub(crate) new_inactivity_floor_loc: Location<F>,
 
@@ -244,10 +238,15 @@ where
     /// to validate that the DB hasn't diverged from this batch's chain.
     pub(crate) db_size: u64,
 
-    /// Ancestor diffs collected during `finish()` while ancestors are alive.
-    /// Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
-    /// Tip-to-root order (nearest ancestor first).
-    pub(crate) ancestors: Vec<Ancestor<U::Key, F, U::Value>>,
+    /// Arc refs to each ancestor's diff, collected during `finish()` while ancestors are
+    /// alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
+    /// 1:1 with `ancestor_seg_ends` (same length, same ordering).
+    ancestor_diffs: Vec<Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>>,
+
+    /// Each ancestor's `total_size` (operation count after that ancestor).
+    /// 1:1 with `ancestor_diffs`: `ancestor_seg_ends[i]` is the boundary for
+    /// `ancestor_diffs[i]`. A segment is committed when `ancestor_seg_ends[i] <= db_size`.
+    pub(crate) ancestor_seg_ends: Vec<u64>,
 }
 
 /// Batch-infrastructure state used during merkleization.
@@ -256,7 +255,6 @@ where
 /// from the resolution/merkleization machinery. Helpers that need access to the parent
 /// chain, DB snapshot, or operation log are methods on this struct, eliminating parameter
 /// threading.
-#[allow(clippy::type_complexity)]
 struct Merkleizer<F: Family, H, U>
 where
     U: update::Update + Send + Sync,
@@ -264,26 +262,23 @@ where
     Operation<F, U>: Codec,
 {
     journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, U>>,
-    /// The immediate parent, if any. Used in `finish()` to build the output ancestors.
-    parent: Option<Arc<MerkleizedBatch<F, H::Digest, U>>>,
-    /// Ancestor diffs in root-to-tip order. Used for key lookups during merkleize.
-    ancestor_diffs: Vec<Arc<BTreeMap<U::Key, DiffEntry<F, U::Value>>>>,
-    /// Ancestor journal items in root-to-tip order. Used for reading ops during merkleize.
-    ancestor_items: Vec<Arc<Vec<Operation<F, U>>>>,
+    ancestors: Vec<Arc<MerkleizedBatch<F, H::Digest, U>>>,
     base_size: u64,
     db_size: u64,
     base_inactivity_floor_loc: Location<F>,
     base_active_keys: usize,
 }
 
-/// Look up a key in the ancestor diffs (nearest ancestor first via reverse iteration).
-/// `ancestor_diffs` is in root-to-tip order; reverse gives tip-to-root (nearest first).
-fn resolve_in_ancestors<'a, F: Family, K: Ord, V>(
-    ancestor_diffs: &'a [Arc<BTreeMap<K, DiffEntry<F, V>>>],
-    key: &K,
-) -> Option<&'a DiffEntry<F, V>> {
-    for diff in ancestor_diffs.iter().rev() {
-        if let Some(entry) = diff.get(key) {
+/// Look up a key in the ancestor chain (immediate parent first).
+fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update + Send + Sync>(
+    ancestors: &'a [Arc<MerkleizedBatch<F, D, U>>],
+    key: &U::Key,
+) -> Option<&'a DiffEntry<F, U::Value>>
+where
+    Operation<F, U>: Send + Sync,
+{
+    for batch in ancestors {
+        if let Some(entry) = batch.diff.get(key) {
             return Some(entry);
         }
     }
@@ -310,24 +305,31 @@ fn apply_snapshot_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>>(
     }
 }
 
-/// Read a single operation item from ancestor journal items at the given location.
+/// Read a single operation item from the ancestor chain at the given location.
 ///
-/// `ancestors` is in root-to-tip (oldest-first) order. The items cover
-/// `[db_size, base_size)` contiguously.
-fn read_chain_item<F: Family, U: update::Update>(
-    ancestor_items: &[Arc<Vec<Operation<F, U>>>],
+/// `db_size` is the number of committed operations in the DB. The location must be in
+/// `[db_size, tip)` where `tip = ancestors[0].journal_batch.size()`.
+fn read_chain_item_from_ancestors<F: Family, D: Digest, U: update::Update + Send + Sync>(
+    ancestors: &[Arc<MerkleizedBatch<F, D, U>>],
     loc: u64,
     db_size: u64,
-) -> &Operation<F, U> {
-    let mut ancestor_base = db_size;
-    for items in ancestor_items {
-        let ancestor_end = ancestor_base + items.len() as u64;
-        if loc >= ancestor_base && loc < ancestor_end {
-            return &items[(loc - ancestor_base) as usize];
+) -> &Operation<F, U>
+where
+    Operation<F, U>: Send + Sync,
+{
+    // ancestors is ordered parent-first: [parent, grandparent, ...].
+    // Each batch's items span [next_batch.size(), this_batch.size()).
+    // The last ancestor's base is db_size (committed DB boundary).
+    for (i, batch) in ancestors.iter().enumerate() {
+        let batch_base = ancestors
+            .get(i + 1)
+            .map_or(db_size, |b| b.journal_batch.size());
+        let batch_end = batch.journal_batch.size();
+        if loc >= batch_base && loc < batch_end {
+            return &batch.journal_batch.items()[(loc - batch_base) as usize];
         }
-        ancestor_base = ancestor_end;
     }
-    unreachable!("location {loc} not found in ancestor items (db_size={db_size})")
+    unreachable!("location {loc} not found in ancestor chain (db_size={db_size})")
 }
 
 impl<F: Family, H, U> Merkleizer<F, H, U>
@@ -367,8 +369,8 @@ where
             // This batch's own operations (user mutations, or earlier floor-raise ops).
             Ok(current_ops[(loc_val - self.base_size) as usize].clone())
         } else if loc_val >= self.db_size {
-            // Parent batch chain's operations (in-memory). Use journal ancestor items.
-            Ok(read_chain_item(&self.ancestor_items, loc_val, self.db_size).clone())
+            // Parent batch chain's operations (in-memory). Walk the ancestors.
+            Ok(read_chain_item_from_ancestors(&self.ancestors, loc_val, self.db_size).clone())
         } else {
             // Base DB's journal (on-disk async read).
             let reader = db.log.reader().await;
@@ -400,13 +402,13 @@ where
         // Extra slack (*3/2) avoids re-allocations when index collisions cause more than one
         // location per key.
         let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
-        if self.ancestor_diffs.is_empty() {
+        if self.ancestors.is_empty() {
             for key in mutations.keys() {
                 locations.extend(db.snapshot.get(key).copied());
             }
         } else {
             for key in mutations.keys() {
-                match resolve_in_ancestors(&self.ancestor_diffs, key) {
+                match resolve_in_ancestors(&self.ancestors, key) {
                     Some(DiffEntry::Deleted { .. }) => {
                         // Stale; handled via extract_parent_deleted_creates.
                     }
@@ -449,7 +451,7 @@ where
     {
         if let Some(entry) = batch_diff
             .get(key)
-            .or_else(|| resolve_in_ancestors(&self.ancestor_diffs, key))
+            .or_else(|| resolve_in_ancestors(&self.ancestors, key))
         {
             return entry.loc() == Some(loc);
         }
@@ -464,13 +466,13 @@ where
         &self,
         mutations: &mut BTreeMap<U::Key, Option<U::Value>>,
     ) -> BTreeMap<U::Key, (U::Value, Option<Location<F>>)> {
-        if self.ancestor_diffs.is_empty() {
+        if self.ancestors.is_empty() {
             return BTreeMap::new();
         }
         let mut creates = BTreeMap::new();
         mutations.retain(|key, value| {
             if let Some(DiffEntry::Deleted { base_old_loc }) =
-                resolve_in_ancestors(&self.ancestor_diffs, key)
+                resolve_in_ancestors(&self.ancestors, key)
             {
                 if let Some(v) = value.take() {
                     creates.insert(key.clone(), (v, *base_old_loc));
@@ -516,7 +518,7 @@ where
                 let new_loc = Location::new(self.base_size + ops.len() as u64);
                 let base_old_loc = diff
                     .get(&key)
-                    .or_else(|| resolve_in_ancestors(&self.ancestor_diffs, &key))
+                    .or_else(|| resolve_in_ancestors(&self.ancestors, &key))
                     .map_or(Some(candidate), DiffEntry::base_old_loc);
                 let value = extract_update_value(&op);
                 ops.push(op);
@@ -590,27 +592,22 @@ where
             .log
             .with_mem(|base| self.journal_batch.merkleize_with(base, ops));
 
-        // Build output ancestors (tip-to-root) from the parent's stored data.
-        let ancestors = self.parent.as_ref().map_or_else(Vec::new, |parent| {
-            let mut out = vec![Ancestor {
-                diff: Arc::clone(&parent.diff),
-                end_index: parent.total_size,
-            }];
-            out.extend(parent.ancestors.iter().cloned());
-            out
-        });
+        let ancestor_diffs: Vec<_> = self.ancestors.iter().map(|a| Arc::clone(&a.diff)).collect();
+        let ancestor_seg_ends: Vec<_> = self.ancestors.iter().map(|a| a.total_size).collect();
 
         debug_assert!(total_active_keys >= 0, "active_keys underflow");
         Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
             diff: Arc::new(diff),
+            parent: self.ancestors.first().map(Arc::downgrade),
             new_inactivity_floor_loc: floor,
             new_last_commit_loc: commit_loc,
             base_size: self.base_size,
             total_size: *commit_loc + 1,
             total_active_keys: total_active_keys as usize,
             db_size: self.db_size,
-            ancestors,
+            ancestor_diffs,
+            ancestor_seg_ends,
         }))
     }
 }
@@ -633,53 +630,29 @@ where
     /// Split into pending mutations and the merkleization machinery.
     #[allow(clippy::type_complexity)]
     fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U>) {
-        let parent = self.base.parent().cloned();
+        let ancestors: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
+            let mut v = vec![Arc::clone(parent)];
+            v.extend(parent.ancestors());
+            v
+        });
+        // If the Weak parent chain was truncated (an ancestor was committed and freed), the
+        // oldest alive ancestor's items don't start at db_size. Example: chain A -> B -> C,
+        // A committed and dropped. ancestors() yields [B] (A's Weak is dead). B's items start
+        // at A.size(), not db_size. We use the journal (strong Arcs, always intact) to compute
+        // the actual base so read_op falls through to disk for locations in the gap.
         let db_size = self.base.db_size();
-
-        // Build ancestor diffs and journal items (both root-to-tip) for reads
-        // during merkleize.
-        let (ancestor_diffs, ancestor_items) = parent.as_ref().map_or_else(
-            || (Vec::new(), Vec::new()),
-            |p| {
-                // Journal ancestor_items is root-to-tip, excluding empty ancestors.
-                // Append the parent's own items to complete the chain.
-                let mut items = p.journal_batch.ancestor_items.clone();
-                let parent_items = p.journal_batch.items();
-                if !parent_items.is_empty() {
-                    items.push(Arc::clone(parent_items));
-                }
-
-                // Build diffs in root-to-tip order, excluding empty diffs (matching
-                // the journal's convention of skipping empty ancestors).
-                let mut diffs: Vec<_> = p
-                    .ancestors
-                    .iter()
-                    .rev()
-                    .filter(|a| !a.diff.is_empty())
-                    .map(|a| Arc::clone(&a.diff))
-                    .collect();
-                if !p.diff.is_empty() {
-                    diffs.push(Arc::clone(&p.diff));
-                }
-
-                assert_eq!(
-                    items.len(),
-                    diffs.len(),
-                    "journal items and diffs must be 1:1"
-                );
-                (diffs, items)
-            },
-        );
-
+        let effective_db_size = ancestors.last().map_or(db_size, |oldest| {
+            let oldest_base =
+                oldest.journal_batch.size() - oldest.journal_batch.items().len() as u64;
+            db_size.max(oldest_base)
+        });
         (
             self.mutations,
             Merkleizer {
                 journal_batch: self.journal_batch,
-                parent,
-                ancestor_diffs,
-                ancestor_items,
+                ancestors,
                 base_size: self.base.base_size(),
-                db_size,
+                db_size: effective_db_size,
                 base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
                 base_active_keys: self.base.active_keys(),
             },
@@ -712,8 +685,8 @@ where
             if let Some(entry) = parent.diff.get(key) {
                 return Ok(entry.value().cloned());
             }
-            for ancestor in &parent.ancestors {
-                if let Some(entry) = ancestor.diff.get(key) {
+            for batch in parent.ancestors() {
+                if let Some(entry) = batch.diff.get(key) {
                     return Ok(entry.value().cloned());
                 }
             }
@@ -783,7 +756,7 @@ where
             // wrong sort position, changing the operation order relative to the committed-state
             // path. When the ancestor diff entry does match, use it to trace `base_old_loc`
             // back to the key's location in the committed DB snapshot.
-            let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestor_diffs, key) {
+            let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, key) {
                 if entry.loc() != Some(old_loc) {
                     continue;
                 }
@@ -994,8 +967,8 @@ where
         // state for each key (closest ancestor wins).
         let ancestor_entries = {
             let mut entries: BTreeMap<&K, &DiffEntry<F, V::Value>> = BTreeMap::new();
-            for diff in m.ancestor_diffs.iter().rev() {
-                for (key, entry) in diff.iter() {
+            for batch in &m.ancestors {
+                for (key, entry) in batch.diff.iter() {
                     entries.entry(key).or_insert(entry);
                 }
             }
@@ -1047,7 +1020,7 @@ where
         for (key, old_loc) in &deleted {
             ops.push(Operation::Delete(key.clone()));
 
-            let base_old_loc = resolve_in_ancestors(&m.ancestor_diffs, key)
+            let base_old_loc = resolve_in_ancestors(&m.ancestors, key)
                 .map_or(Some(*old_loc), DiffEntry::base_old_loc);
 
             diff.insert(key.clone(), DiffEntry::Deleted { base_old_loc });
@@ -1065,7 +1038,7 @@ where
                 next_key,
             }));
 
-            let base_old_loc = resolve_in_ancestors(&m.ancestor_diffs, &key)
+            let base_old_loc = resolve_in_ancestors(&m.ancestors, &key)
                 .map_or(Some(old_loc), DiffEntry::base_old_loc);
 
             diff.insert(
@@ -1119,7 +1092,7 @@ where
                     next_key: prev_next_key,
                 }));
 
-                let prev_base_old_loc = resolve_in_ancestors(&m.ancestor_diffs, prev_key)
+                let prev_base_old_loc = resolve_in_ancestors(&m.ancestors, prev_key)
                     .map_or(Some(*prev_loc), DiffEntry::base_old_loc);
 
                 diff.insert(
@@ -1148,6 +1121,17 @@ where
     pub fn root(&self) -> D {
         self.journal_batch.root()
     }
+
+    /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
+    /// Weak ref fails to upgrade (ancestor was freed).
+    pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+        let mut next = self.parent.as_ref().and_then(Weak::upgrade);
+        iter::from_fn(move || {
+            let batch = next.take()?;
+            next = batch.parent.as_ref().and_then(Weak::upgrade);
+            Some(batch)
+        })
+    }
 }
 
 impl<F: Family, D: Digest, U: update::Update + Send + Sync> MerkleizedBatch<F, D, U>
@@ -1166,7 +1150,7 @@ where
         }
     }
 
-    /// Read through: local diff -> ancestor diffs -> committed DB.
+    /// Read through: local diff -> parent chain -> committed DB.
     pub async fn get<E, C, I, H>(
         &self,
         key: &U::Key,
@@ -1181,9 +1165,10 @@ where
         if let Some(entry) = self.diff.get(key) {
             return Ok(entry.value().cloned());
         }
-        // ancestors is tip-to-root, so nearest ancestor is checked first.
-        for ancestor in &self.ancestors {
-            if let Some(entry) = ancestor.diff.get(key) {
+        // Walk parent chain. If a parent was freed (committed and dropped), the iterator
+        // stops and we fall through to DB.
+        for batch in self.ancestors() {
+            if let Some(entry) = batch.diff.get(key) {
                 return Ok(entry.value().cloned());
             }
         }
@@ -1242,10 +1227,10 @@ where
     ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let db_size = *self.last_commit_loc + 1;
         // Valid db_size values: batch.db_size (nothing committed), batch.base_size
-        // (all ancestors committed), or any ancestor end_index (partial commit).
+        // (all ancestors committed), or any ancestor_seg_ends[i] (partial commit).
         let valid = db_size == batch.db_size
             || db_size == batch.base_size
-            || batch.ancestors.iter().any(|s| s.end_index == db_size);
+            || batch.ancestor_seg_ends.contains(&db_size);
         if !valid {
             return Err(crate::qmdb::Error::StaleBatch {
                 db_size,
@@ -1258,14 +1243,14 @@ where
         // 1. Apply journal (handles its own partial ancestor skipping).
         self.log.apply_batch(&batch.journal_batch).await?;
 
-        // 2. Build committed_locs: for each key in a committed ancestor,
+        // 2. Build committed_locs: for each key in a committed ancestor segment,
         //    record the nearest (to child) committed ancestor's final state.
         //    Some(loc) = Active at loc, None = Deleted.
         let mut committed_locs: BTreeMap<&U::Key, Option<Location<F>>> = BTreeMap::new();
-        for ancestor in &*batch.ancestors {
-            if ancestor.end_index <= db_size {
-                for (key, entry) in ancestor.diff.iter() {
-                    // tip-to-root order: .or_insert keeps the nearest committed.
+        for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+            if batch.ancestor_seg_ends[i] <= db_size {
+                for (key, entry) in ancestor_diff.iter() {
+                    // parent-first order: .or_insert keeps the nearest committed.
                     committed_locs.entry(key).or_insert(entry.loc());
                 }
             }
@@ -1282,12 +1267,12 @@ where
             apply_snapshot_diff(&mut self.snapshot, key, entry, base_old_loc);
         }
 
-        // 4. Apply uncommitted ancestor diffs (skip committed ancestors, skip seen keys).
-        for ancestor in &*batch.ancestors {
-            if ancestor.end_index <= db_size {
+        // 4. Apply uncommitted ancestor diffs (skip committed segments, skip seen keys).
+        for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+            if batch.ancestor_seg_ends[i] <= db_size {
                 continue;
             }
-            for (key, entry) in ancestor.diff.iter() {
+            for (key, entry) in ancestor_diff.iter() {
                 if !seen.insert(key) {
                     continue;
                 }
@@ -1328,13 +1313,15 @@ where
         Arc::new(MerkleizedBatch {
             journal_batch: self.log.to_merkleized_batch(),
             diff: Arc::new(BTreeMap::new()),
+            parent: None,
             new_inactivity_floor_loc: self.inactivity_floor_loc,
             new_last_commit_loc: self.last_commit_loc,
             base_size: journal_size,
             total_size: journal_size,
             total_active_keys: self.active_keys,
             db_size: journal_size,
-            ancestors: Vec::new(),
+            ancestor_diffs: Vec::new(),
+            ancestor_seg_ends: Vec::new(),
         })
     }
 }

@@ -10,16 +10,11 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher as CHasher};
-use std::{collections::BTreeMap, sync::Arc};
-
-/// Snapshot diff and boundary for a single ancestor batch.
-#[derive(Clone)]
-pub(super) struct Ancestor<K: Key, F: Family, V: ValueEncoding> {
-    /// Key-level changes from this ancestor.
-    pub(super) diff: Arc<BTreeMap<K, DiffEntry<F, V::Value>>>,
-    /// Total operation count after this ancestor (used to detect committed ancestors).
-    pub(super) end_index: u64,
-}
+use core::iter;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+};
 
 /// What happened to a key in this batch.
 #[derive(Clone)]
@@ -68,6 +63,9 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// This batch's local key-level changes only (not accumulated from ancestors).
     pub(super) diff: Arc<BTreeMap<K, DiffEntry<F, V::Value>>>,
 
+    /// The parent batch in the chain, if any.
+    pub(super) parent: Option<Weak<Self>>,
+
     /// Total operations before this batch's own ops (DB + ancestor batches).
     pub(super) base_size: u64,
 
@@ -77,10 +75,16 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding> {
     /// The database size when the initial batch was created.
     pub(super) db_size: u64,
 
-    /// Ancestor diffs collected during `merkleize()` while the parent is alive.
-    /// Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
-    /// Tip-to-root order (nearest ancestor first).
-    pub(super) ancestors: Vec<Ancestor<K, F, V>>,
+    /// Arc refs to each ancestor's diff, collected during `merkleize()` while the parent
+    /// is alive. Used by `apply_batch` to apply uncommitted ancestor snapshot diffs.
+    /// 1:1 with `ancestor_seg_ends` (same length, same ordering).
+    #[allow(clippy::type_complexity)]
+    pub(super) ancestor_diffs: Vec<Arc<BTreeMap<K, DiffEntry<F, V::Value>>>>,
+
+    /// Each ancestor's `total_size` (operation count after that ancestor).
+    /// 1:1 with `ancestor_diffs`: `ancestor_seg_ends[i]` is the boundary for
+    /// `ancestor_diffs[i]`. A segment is committed when `ancestor_seg_ends[i] <= db_size`.
+    pub(super) ancestor_seg_ends: Vec<u64>,
 }
 
 impl<F, H, K, V> UnmerkleizedBatch<F, H, K, V>
@@ -136,13 +140,14 @@ where
         if let Some(value) = self.mutations.get(key) {
             return Ok(Some(value.clone()));
         }
-        // Check parent diff and ancestor diffs (tip-to-root ordering).
+        // Walk parent chain. The first parent is a strong Arc (held by UnmerkleizedBatch),
+        // subsequent parents are Weak refs.
         if let Some(parent) = self.parent.as_ref() {
             if let Some(entry) = parent.diff.get(key) {
                 return Ok(Some(entry.value.clone()));
             }
-            for ancestor in &parent.ancestors {
-                if let Some(entry) = ancestor.diff.get(key) {
+            for batch in parent.ancestors() {
+                if let Some(entry) = batch.diff.get(key) {
                     return Ok(Some(entry.value.clone()));
                 }
             }
@@ -186,22 +191,26 @@ where
         }
         let journal_merkleized = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
-        let ancestors = self.parent.as_ref().map_or_else(Vec::new, |parent| {
-            let mut out = vec![Ancestor {
-                diff: Arc::clone(&parent.diff),
-                end_index: parent.total_size,
-            }];
-            out.extend(parent.ancestors.iter().cloned());
-            out
-        });
+        let mut ancestor_diffs = Vec::new();
+        let mut ancestor_seg_ends = Vec::new();
+        if let Some(parent) = &self.parent {
+            ancestor_diffs.push(Arc::clone(&parent.diff));
+            ancestor_seg_ends.push(parent.total_size);
+            for batch in parent.ancestors() {
+                ancestor_diffs.push(Arc::clone(&batch.diff));
+                ancestor_seg_ends.push(batch.total_size);
+            }
+        }
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal_merkleized,
             diff: Arc::new(diff),
+            parent: self.parent.as_ref().map(Arc::downgrade),
             base_size: self.base_size,
             total_size,
             db_size: self.db_size,
-            ancestors,
+            ancestor_diffs,
+            ancestor_seg_ends,
         })
     }
 }
@@ -213,6 +222,16 @@ where
     /// Return the speculative root.
     pub fn root(&self) -> D {
         self.journal_batch.root()
+    }
+
+    /// Iterate over ancestor batches (parent first, then grandparent, etc.).
+    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> {
+        let mut next = self.parent.as_ref().and_then(Weak::upgrade);
+        iter::from_fn(move || {
+            let batch = next.take()?;
+            next = batch.parent.as_ref().and_then(Weak::upgrade);
+            Some(batch)
+        })
     }
 
     /// Read through: local diff -> ancestor diffs -> committed DB.
@@ -231,9 +250,8 @@ where
         if let Some(entry) = self.diff.get(key) {
             return Ok(Some(entry.value.clone()));
         }
-        // ancestors is tip-to-root, so nearest ancestor is checked first.
-        for ancestor in &self.ancestors {
-            if let Some(entry) = ancestor.diff.get(key) {
+        for batch in self.ancestors() {
+            if let Some(entry) = batch.diff.get(key) {
                 return Ok(Some(entry.value.clone()));
             }
         }
@@ -272,10 +290,12 @@ where
         Arc::new(MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),
             diff: Arc::new(BTreeMap::new()),
+            parent: None,
             base_size: journal_size,
             total_size: journal_size,
             db_size: journal_size,
-            ancestors: Vec::new(),
+            ancestor_diffs: Vec::new(),
+            ancestor_seg_ends: Vec::new(),
         })
     }
 }

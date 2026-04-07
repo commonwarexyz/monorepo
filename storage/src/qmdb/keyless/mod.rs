@@ -306,10 +306,11 @@ where
         let journal_size = *self.last_commit_loc + 1;
         Arc::new(batch::MerkleizedBatch {
             journal_batch: self.journal.to_merkleized_batch(),
+            parent: None,
             base_size: journal_size,
             total_size: journal_size,
             db_size: journal_size,
-            ancestor_end_indices: Vec::new(),
+            ancestor_seg_ends: Vec::new(),
         })
     }
 
@@ -331,7 +332,7 @@ where
         let db_size = *self.last_commit_loc + 1;
         let valid = db_size == batch.db_size
             || db_size == batch.base_size
-            || batch.ancestor_end_indices.contains(&db_size);
+            || batch.ancestor_seg_ends.contains(&db_size);
         if !valid {
             return Err(Error::StaleBatch {
                 db_size,
@@ -914,7 +915,7 @@ pub(crate) mod tests {
 
         let expected_root = c.root();
 
-        // Apply only A, then apply C directly (B's items applied via ancestors).
+        // Apply only A, then apply C directly (B's items applied via ancestor segments).
         db.apply_batch(a).await.unwrap();
         db.apply_batch(c).await.unwrap();
 

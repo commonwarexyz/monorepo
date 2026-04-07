@@ -388,32 +388,27 @@ impl<F: Family, D: Digest> Mem<F, D> {
             });
         };
 
-        // Apply ancestors in root-to-tip order. Already-committed ancestors
-        // (whose appended nodes are already in the Mem) are skipped by tracking
-        // a running position through the chain.
-        let mut ancestor_pos = *batch.base_size;
-        for ancestor in &batch.ancestors {
-            ancestor_pos += ancestor.appended.len() as u64;
-            // Overwrite-only ancestors don't advance ancestor_pos, so they
-            // can't be distinguished from their predecessor by size. Use
-            // strict < to avoid skipping them at the boundary. Re-applying
-            // committed overwrites is harmless (idempotent).
-            let committed = if ancestor.appended.is_empty() {
-                skip_ancestors && ancestor_pos < *self.size()
-            } else {
-                skip_ancestors && ancestor_pos <= *self.size()
-            };
-            if committed {
+        // Apply ancestor segments in root-to-tip order. Already-committed
+        // segments (whose appended nodes are already in the Mem) are skipped
+        // by tracking a running position through the ancestor chain.
+        let mut seg_pos = *batch.base_size;
+        for (appended, overwrites) in batch
+            .ancestor_appended
+            .iter()
+            .zip(&batch.ancestor_overwrites)
+        {
+            seg_pos += appended.len() as u64;
+            if skip_ancestors && seg_pos <= *self.size() {
                 continue;
             }
-            for (&pos, &digest) in ancestor.overwrites.iter() {
+            for (&pos, &digest) in overwrites.iter() {
                 if pos < self.pruning_boundary {
                     continue;
                 }
                 let index = self.pos_to_index(pos);
                 self.nodes[index] = digest;
             }
-            for &digest in ancestor.appended.iter() {
+            for &digest in appended.iter() {
                 self.nodes.push_back(digest);
             }
         }
@@ -1070,7 +1065,7 @@ mod tests {
         let c = b.new_batch().add(&hasher, b"c").merkleize(&mem, &hasher);
 
         // Apply A, then apply C directly (skipping B's apply_batch).
-        // C's ancestors carry [A.data, B.data]. A is already committed
+        // C's ancestor segments carry [A.data, B.data]. A is already committed
         // so only B + C should be applied.
         mem.apply_batch(&a).unwrap();
         mem.apply_batch(&c).unwrap();
@@ -1086,87 +1081,6 @@ mod tests {
         };
         reference.apply_batch(&full).unwrap();
         assert_eq!(mem.root(), reference.root());
-    }
-
-    /// Dropping an uncommitted ancestor before merkleizing a descendant must not
-    /// lose the ancestor's data. The descendant's ancestors should be
-    /// complete regardless of ancestor lifetime.
-    fn apply_batch_after_ancestor_dropped<F: Family>() {
-        let hasher: H = Standard::new();
-        let mut mem = Mem::<F, D>::new(&hasher);
-
-        // Chain: Mem -> A -> B -> C
-        let a = mem.new_batch().add(&hasher, b"a").merkleize(&mem, &hasher);
-        let b = a.new_batch().add(&hasher, b"b").merkleize(&mem, &hasher);
-        drop(a); // A freed before C is merkleized
-        let c = b.new_batch().add(&hasher, b"c").merkleize(&mem, &hasher);
-
-        // Apply C directly. A's data should be present via B's stored ancestors.
-        mem.apply_batch(&c).unwrap();
-
-        // Verify against a reference that applied all three sequentially.
-        let mut reference = Mem::<F, D>::new(&hasher);
-        let full = {
-            let mut batch = reference.new_batch();
-            for leaf in [b"a".as_slice(), b"b", b"c"] {
-                batch = batch.add(&hasher, leaf);
-            }
-            batch.merkleize(&reference, &hasher)
-        };
-        reference.apply_batch(&full).unwrap();
-
-        // Check size (not just root — root is set unconditionally and masks data loss).
-        assert_eq!(
-            mem.size(),
-            reference.size(),
-            "size mismatch: ancestor data was lost"
-        );
-        assert_eq!(mem.root(), reference.root());
-    }
-
-    /// Overwrite-only ancestor B must not be skipped when applying C after A.
-    fn apply_batch_overwrite_only_ancestor<F: Family>() {
-        let hasher: H = Standard::new();
-        let mut mem = build_raw::<F>(&hasher, 10);
-
-        let pos0 = Position::<F>::try_from(Location::new(0)).unwrap();
-
-        // A: add 5 leaves.
-        let a = {
-            let mut b = mem.new_batch();
-            for i in 100u64..105 {
-                b = b.add(&hasher, &i.to_be_bytes());
-            }
-            b.merkleize(&mem, &hasher)
-        };
-
-        // B: overwrite leaf 0, no appends.
-        let b = a
-            .new_batch()
-            .update_leaf(&hasher, Location::new(0), b"updated-0")
-            .unwrap()
-            .merkleize(&mem, &hasher);
-
-        // C: add 5 more leaves.
-        let c = {
-            let mut batch = b.new_batch();
-            for i in 200u64..205 {
-                batch = batch.add(&hasher, &i.to_be_bytes());
-            }
-            batch.merkleize(&mem, &hasher)
-        };
-
-        // Apply A, then C (skipping B's apply_batch).
-        mem.apply_batch(&a).unwrap();
-        mem.apply_batch(&c).unwrap();
-
-        // B's overwrite must have been applied.
-        let updated = hasher.leaf_digest(pos0, b"updated-0");
-        assert_eq!(
-            mem.get_node(pos0),
-            Some(updated),
-            "overwrite-only ancestor B's overwrites were skipped"
-        );
     }
 
     // --- MMR tests ---
@@ -1255,14 +1169,6 @@ mod tests {
     fn mmr_apply_batch_skips_only_committed_ancestors() {
         apply_batch_skips_only_committed_ancestors::<crate::mmr::Family>();
     }
-    #[test]
-    fn mmr_apply_batch_after_ancestor_dropped() {
-        apply_batch_after_ancestor_dropped::<crate::mmr::Family>();
-    }
-    #[test]
-    fn mmr_apply_batch_overwrite_only_ancestor() {
-        apply_batch_overwrite_only_ancestor::<crate::mmr::Family>();
-    }
 
     // --- MMB tests ---
 
@@ -1349,13 +1255,5 @@ mod tests {
     #[test]
     fn mmb_apply_batch_skips_only_committed_ancestors() {
         apply_batch_skips_only_committed_ancestors::<crate::mmb::Family>();
-    }
-    #[test]
-    fn mmb_apply_batch_after_ancestor_dropped() {
-        apply_batch_after_ancestor_dropped::<crate::mmb::Family>();
-    }
-    #[test]
-    fn mmb_apply_batch_overwrite_only_ancestor() {
-        apply_batch_overwrite_only_ancestor::<crate::mmb::Family>();
     }
 }

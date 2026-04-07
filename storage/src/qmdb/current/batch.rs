@@ -29,19 +29,10 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use std::{
     collections::{BTreeMap, HashSet},
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 
 type Error = crate::qmdb::Error<mmr::Family>;
-
-/// Bitmap pushes and clears for a single ancestor batch.
-#[derive(Clone)]
-pub(crate) struct AncestorBitmap<const N: usize> {
-    /// Bits pushed by this ancestor (one per operation).
-    pub(crate) pushes: Arc<Vec<bool>>,
-    /// Bits cleared by this ancestor.
-    pub(crate) clears: Arc<ClearSet<N>>,
-}
 
 /// Cleared bitmap bits tracked in two synchronized views.
 ///
@@ -391,9 +382,8 @@ where
     /// The inner any-layer batch that handles mutations, journal, and floor raise.
     inner: any::batch::UnmerkleizedBatch<mmr::Family, H, U>,
 
-    /// Bitmap ancestor data inherited from the parent. Tip-to-root order
-    /// (matching `ancestors`). Empty for batches created from the DB.
-    ancestor_bitmaps: Vec<AncestorBitmap<N>>,
+    /// Parent batch in the chain. `None` for batches created directly from the DB.
+    parent: Option<Weak<MerkleizedBatch<H::Digest, U, N>>>,
 
     /// Parent's grafted MMR state.
     grafted_parent: Arc<mmr::batch::MerkleizedBatch<H::Digest>>,
@@ -415,6 +405,9 @@ where
     /// Inner any-layer batch (ops MMR, diff, floor, commit loc, sizes).
     pub(crate) inner: Arc<any::batch::MerkleizedBatch<mmr::Family, D, U>>,
 
+    /// The parent batch in the chain, if any.
+    pub(crate) parent: Option<Weak<Self>>,
+
     /// This batch's local bitmap pushes.
     pub(crate) bitmap_pushes: Arc<Vec<bool>>,
 
@@ -430,9 +423,15 @@ where
     /// The canonical root (ops root + grafted root + partial chunk).
     pub(crate) canonical_root: D,
 
-    /// Ancestor bitmap data collected during `compute_current_layer()` while the
-    /// parent is alive. Tip-to-root order (matching `ancestors`).
-    pub(crate) ancestor_bitmaps: Vec<AncestorBitmap<N>>,
+    /// Arc refs to each ancestor's bitmap pushes, collected during
+    /// `compute_current_layer()` while the parent is alive. Parent-first order
+    /// (matching `ancestor_seg_ends`).
+    pub(crate) ancestor_bitmap_pushes: Vec<Arc<Vec<bool>>>,
+
+    /// Arc refs to each ancestor's bitmap clears, collected during
+    /// `compute_current_layer()` while the parent is alive. Parent-first order
+    /// (matching `ancestor_seg_ends`).
+    pub(crate) ancestor_bitmap_clears: Vec<Arc<ClearSet<N>>>,
 }
 
 impl<H, U, const N: usize> UnmerkleizedBatch<H, U, N>
@@ -443,13 +442,13 @@ where
 {
     pub(super) const fn new(
         inner: any::batch::UnmerkleizedBatch<mmr::Family, H, U>,
-        ancestor_bitmaps: Vec<AncestorBitmap<N>>,
+        parent: Option<Weak<MerkleizedBatch<H::Digest, U, N>>>,
         grafted_parent: Arc<mmr::batch::MerkleizedBatch<H::Digest>>,
         bitmap_parent: BitmapBatch<N>,
     ) -> Self {
         Self {
             inner,
-            ancestor_bitmaps,
+            parent,
             grafted_parent,
             bitmap_parent,
         }
@@ -500,7 +499,7 @@ where
     {
         let Self {
             inner,
-            ancestor_bitmaps,
+            parent,
             grafted_parent,
             bitmap_parent,
         } = self;
@@ -508,7 +507,7 @@ where
         let inner = inner
             .merkleize_with_floor_scan(&db.any, metadata, scan)
             .await?;
-        compute_current_layer(inner, db, ancestor_bitmaps, &grafted_parent, &bitmap_parent).await
+        compute_current_layer(inner, db, parent, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -547,7 +546,7 @@ where
     {
         let Self {
             inner,
-            ancestor_bitmaps,
+            parent,
             grafted_parent,
             bitmap_parent,
         } = self;
@@ -555,7 +554,7 @@ where
         let inner = inner
             .merkleize_with_floor_scan(&db.any, metadata, scan)
             .await?;
-        compute_current_layer(inner, db, ancestor_bitmaps, &grafted_parent, &bitmap_parent).await
+        compute_current_layer(inner, db, parent, &grafted_parent, &bitmap_parent).await
     }
 }
 
@@ -606,7 +605,7 @@ fn clear_base_old_locs<K, V, B, const N: usize>(
     }
 }
 
-/// Clear bits for ancestor operations superseded by a later batch in the chain.
+/// Clear bits for ancestor-segment operations superseded by a later segment.
 /// Only relevant for chained batches (chain length > 1).
 #[allow(clippy::type_complexity)]
 fn clear_ancestor_superseded<U, B, const N: usize>(
@@ -619,11 +618,11 @@ fn clear_ancestor_superseded<U, B, const N: usize>(
     B: BitmapReadable<N>,
     Operation<mmr::Family, U>: Codec,
 {
-    let mut ancestor_base = db_base;
-    for ancestor_ops in &chain[..chain.len() - 1] {
-        for (j, op) in ancestor_ops.iter().enumerate() {
+    let mut seg_base = db_base;
+    for ancestor_seg in &chain[..chain.len() - 1] {
+        for (j, op) in ancestor_seg.iter().enumerate() {
             if let Some(key) = op.key() {
-                let ancestor_loc = Location::new(ancestor_base + j as u64);
+                let ancestor_loc = Location::new(seg_base + j as u64);
                 if let Some(entry) = diff.get(key) {
                     if entry.loc() != Some(ancestor_loc) {
                         bitmap.clear_bit(ancestor_loc);
@@ -631,7 +630,7 @@ fn clear_ancestor_superseded<U, B, const N: usize>(
                 }
             }
         }
-        ancestor_base += ancestor_ops.len() as u64;
+        seg_base += ancestor_seg.len() as u64;
     }
 }
 
@@ -645,7 +644,7 @@ fn clear_ancestor_superseded<U, B, const N: usize>(
 async fn compute_current_layer<E, U, C, I, H, const N: usize>(
     inner: Arc<any::batch::MerkleizedBatch<mmr::Family, H::Digest, U>>,
     current_db: &super::db::Db<E, C, I, H, U, N>,
-    ancestor_bitmaps: Vec<AncestorBitmap<N>>,
+    parent: Option<Weak<MerkleizedBatch<H::Digest, U, N>>>,
     grafted_parent: &Arc<mmr::batch::MerkleizedBatch<H::Digest>>,
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<Arc<MerkleizedBatch<H::Digest, U, N>>, Error>
@@ -673,16 +672,31 @@ where
     // 3. Clear superseded base-DB operations.
     clear_base_old_locs(&mut bitmap, &inner.diff);
 
-    // 4. Clear ancestor operations superseded by later operations in the chain.
-    if !inner.journal_batch.ancestor_items.is_empty() {
-        let mut chain: Vec<_> = inner
-            .journal_batch
-            .ancestor_items
-            .iter()
-            .map(Arc::clone)
-            .collect();
-        chain.push(inner.journal_batch.items().clone());
-        clear_ancestor_superseded(&mut bitmap, &chain, &inner.diff, inner.db_size);
+    // 4. Clear ancestor-segment superseded operations (chaining only).
+    // Collect ancestor segments from the parent chain to clear superseded ops.
+    let db_base_leaves = *current_db.any.last_commit_loc + 1;
+    let has_ancestors = inner
+        .ancestors()
+        .next()
+        .is_some_and(|p| p.journal_batch.size() > db_base_leaves);
+    if has_ancestors {
+        // Build the chain of segments (ancestor-first order) for clear_ancestor_superseded.
+        let mut ancestor_segments: Vec<Arc<Vec<Operation<mmr::Family, U>>>> = Vec::new();
+        for batch in inner.ancestors() {
+            let items = batch.journal_batch.items();
+            if !items.is_empty() && batch.journal_batch.size() > db_base_leaves {
+                ancestor_segments.push(items.clone());
+            }
+        }
+        ancestor_segments.reverse();
+        // Append this segment to form the full chain (ancestors + this).
+        ancestor_segments.push(inner.journal_batch.items().clone());
+        clear_ancestor_superseded(
+            &mut bitmap,
+            &ancestor_segments,
+            &inner.diff,
+            *current_db.any.last_commit_loc + 1,
+        );
     }
 
     // 5. Compute grafted leaves for dirty + new chunks.
@@ -749,18 +763,28 @@ where
         clears: Arc::clone(&clears),
     }));
 
-    // Ancestor bitmap data was pre-collected by the caller (inherited from the
-    // parent's stored ancestors + the parent's own data). Append this batch's
-    // own data to complete the chain.
+    // Collect ancestor bitmap data by walking the Weak parent chain. Dead refs
+    // truncate the walk (committed-and-dropped ancestors are skipped). The walk
+    // yields parent-first order, matching ancestor_seg_ends.
+    let mut ancestor_bitmap_pushes = Vec::new();
+    let mut ancestor_bitmap_clears = Vec::new();
+    let mut current = parent.as_ref().and_then(Weak::upgrade);
+    while let Some(batch) = current {
+        ancestor_bitmap_pushes.push(Arc::clone(&batch.bitmap_pushes));
+        ancestor_bitmap_clears.push(Arc::clone(&batch.bitmap_clears));
+        current = batch.parent.as_ref().and_then(Weak::upgrade);
+    }
 
     Ok(Arc::new(MerkleizedBatch {
         inner,
+        parent,
         bitmap_pushes: pushed_bits,
         bitmap_clears: clears,
         grafted: grafted_batch,
         bitmap: bitmap_batch,
         canonical_root,
-        ancestor_bitmaps,
+        ancestor_bitmap_pushes,
+        ancestor_bitmap_clears,
     }))
 }
 
@@ -944,16 +968,9 @@ where
     where
         H: Hasher<Digest = D>,
     {
-        // Pre-collect bitmap ancestor data: this batch's own data + stored ancestors.
-        let mut bitmaps = vec![AncestorBitmap {
-            pushes: Arc::clone(&self.bitmap_pushes),
-            clears: Arc::clone(&self.bitmap_clears),
-        }];
-        bitmaps.extend(self.ancestor_bitmaps.iter().cloned());
-
         UnmerkleizedBatch::new(
             self.inner.new_batch::<H>(),
-            bitmaps,
+            Some(Arc::downgrade(self)),
             Arc::clone(&self.grafted),
             self.bitmap.clone(),
         )
@@ -989,12 +1006,14 @@ where
         let grafted = self.grafted_snapshot();
         Arc::new(MerkleizedBatch {
             inner: self.any.to_batch(),
+            parent: None,
             bitmap_pushes: Arc::new(Vec::new()),
             bitmap_clears: Arc::new(ClearSet::default()),
             grafted,
             bitmap: self.status.clone(),
             canonical_root: self.root,
-            ancestor_bitmaps: Vec::new(),
+            ancestor_bitmap_pushes: Vec::new(),
+            ancestor_bitmap_clears: Vec::new(),
         })
     }
 }

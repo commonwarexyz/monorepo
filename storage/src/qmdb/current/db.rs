@@ -186,7 +186,7 @@ where
     pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<H, U, N> {
         super::batch::UnmerkleizedBatch::new(
             self.any.new_batch(),
-            Vec::new(),
+            None, // No parent -- created from DB.
             self.grafted_snapshot(),
             self.status.clone(),
         )
@@ -559,24 +559,24 @@ where
         // 1. Apply inner any-layer batch (handles snapshot + journal partial skipping).
         let range = self.any.apply_batch(Arc::clone(&batch.inner)).await?;
 
-        // 2. Apply bitmap. Both ancestor_bitmaps and ancestors are in
-        //    tip-to-root order. Iterate in reverse (root-to-tip) so that pushes
-        //    are concatenated in chronological order.
+        // 2. Apply bitmap. Both ancestor_bitmap_{pushes,clears} and ancestor_seg_ends
+        //    are in parent-first order. Iterate in reverse (root-to-tip) so that
+        //    pushes are concatenated in chronological order.
         {
             let mut pushes = Vec::new();
             let mut clears = super::batch::ClearSet::with_capacity(0);
-            let n_ancestors = batch.ancestor_bitmaps.len();
+            let n_ancestors = batch.ancestor_bitmap_pushes.len();
             for i in (0..n_ancestors).rev() {
                 if batch
                     .inner
-                    .ancestors
+                    .ancestor_seg_ends
                     .get(i)
-                    .is_some_and(|ancestor| ancestor.end_index <= db_size)
+                    .is_some_and(|&seg_end| seg_end <= db_size)
                 {
                     continue;
                 }
-                pushes.extend_from_slice(&batch.ancestor_bitmaps[i].pushes);
-                clears.merge(&batch.ancestor_bitmaps[i].clears);
+                pushes.extend_from_slice(&batch.ancestor_bitmap_pushes[i]);
+                clears.merge(&batch.ancestor_bitmap_clears[i]);
             }
             pushes.extend_from_slice(&batch.bitmap_pushes);
             clears.merge(&batch.bitmap_clears);
