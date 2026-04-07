@@ -24,6 +24,12 @@ use std::{
 };
 use tracing::{debug, warn};
 
+/// Primary and secondary sets registered under a single peer-set index.
+struct PeerSetsAtIndex<C: PublicKey> {
+    primary: Set<C>,
+    secondary: OrderedSet<C>,
+}
+
 /// Configuration for the [Directory].
 pub struct Config {
     /// Whether private IPs are connectable.
@@ -74,14 +80,11 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// The records of all peers.
     peers: HashMap<C, Record<C>>,
 
-    /// Primary peer sets indexed by their ID.
-    primary_sets: BTreeMap<u64, Set<C>>,
-
-    /// Secondary peer sets indexed by their ID.
+    /// Primary and secondary peer sets indexed by peer-set ID.
     ///
-    /// Unlike [`Self::primary_sets`], secondaries do not participate in BitVec knowledge gossip;
-    /// they are stored as plain ordered sets (same type as [`TrackedPeers::secondary`]).
-    secondary_sets: BTreeMap<u64, OrderedSet<C>>,
+    /// Secondaries do not participate in BitVec knowledge gossip; they are stored as plain
+    /// ordered sets (same type as [`TrackedPeers::secondary`]).
+    peer_sets: BTreeMap<u64, PeerSetsAtIndex<C>>,
 
     /// Tracks blocked peers and their unblock time. This is the source of truth for
     /// whether a peer is blocked, persisting even if the peer record is deleted.
@@ -129,8 +132,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             block_duration: cfg.block_duration,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
             peers,
-            primary_sets: BTreeMap::new(),
-            secondary_sets: BTreeMap::new(),
+            peer_sets: BTreeMap::new(),
             blocked: PrioritySet::new(),
             releaser,
             metrics,
@@ -156,8 +158,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // We may have to update the primary sets.
         let want = record.want(self.dial_fail_limit);
-        for set in self.primary_sets.values_mut() {
-            set.update(peer, !want);
+        for entry in self.peer_sets.values_mut() {
+            entry.primary.update(peer, !want);
         }
         self.delete_if_needed(peer);
     }
@@ -182,8 +184,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
         // We may have to update the primary sets.
         let want = record.want(self.dial_fail_limit);
-        for set in self.primary_sets.values_mut() {
-            set.update(peer, !want);
+        for entry in self.peer_sets.values_mut() {
+            entry.primary.update(peer, !want);
         }
     }
 
@@ -209,8 +211,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
             // We may have to update the primary sets.
             let want = record.want(self.dial_fail_limit);
-            for set in self.primary_sets.values_mut() {
-                set.update(&peer, !want);
+            for entry in self.peer_sets.values_mut() {
+                entry.primary.update(&peer, !want);
             }
             debug!(?peer, "updated peer record");
         }
@@ -224,13 +226,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         secondaries: OrderedSet<C>,
     ) -> bool {
         // Check if peer set already exists
-        if self.primary_sets.contains_key(&index) {
+        if self.peer_sets.contains_key(&index) {
             warn!(index, "peer set already exists");
             return false;
         }
 
         // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.primary_sets.last_key_value() {
+        if let Some((last, _)) = self.peer_sets.last_key_value() {
             if index <= *last {
                 warn!(?index, ?last, "index must monotonically increase");
                 return false;
@@ -247,7 +249,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             record.increment_primary();
             primary_set.update(primary, !record.want(self.dial_fail_limit));
         }
-        self.primary_sets.insert(index, primary_set);
 
         // Create and store new secondary peer set. Peers listed in both roles keep only primary
         // (handled above); they must not appear in the stored secondary set or secondary counts.
@@ -264,22 +265,23 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             });
             record.increment_secondary();
         }
-        self.secondary_sets.insert(index, secondary_ordered);
+        self.peer_sets.insert(
+            index,
+            PeerSetsAtIndex {
+                primary: primary_set,
+                secondary: secondary_ordered,
+            },
+        );
 
         // Remove oldest tracked peer sets if necessary.
-        while self.primary_sets.len() > self.max_sets.get() {
-            let (primary_index, primary_set) = self.primary_sets.pop_first().unwrap();
-            let (secondary_index, secondary_set) = self.secondary_sets.pop_first().unwrap();
-            assert_eq!(
-                primary_index, secondary_index,
-                "primary and secondary peer sets must be evicted in lockstep"
-            );
-            debug!(index = primary_index, "removed oldest tracked peer sets");
-            primary_set.into_iter().for_each(|primary| {
+        while self.peer_sets.len() > self.max_sets.get() {
+            let (index, sets) = self.peer_sets.pop_first().unwrap();
+            debug!(index, "removed oldest tracked peer sets");
+            sets.primary.into_iter().for_each(|primary| {
                 self.peers.get_mut(primary).unwrap().decrement_primary();
                 self.delete_if_needed(primary);
             });
-            secondary_set.iter().for_each(|secondary| {
+            sets.secondary.iter().for_each(|secondary| {
                 self.peers.get_mut(secondary).unwrap().decrement_secondary();
                 self.delete_if_needed(secondary);
             });
@@ -290,17 +292,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Gets a primary peer set by index.
     pub fn get_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
-        self.primary_sets.get(index).map(Deref::deref)
+        self.peer_sets.get(index).map(|e| e.primary.deref())
     }
 
     /// Gets a secondary peer set by index.
     pub fn get_secondary_set(&self, index: &u64) -> Option<&OrderedSet<C>> {
-        self.secondary_sets.get(index)
+        self.peer_sets.get(index).map(|e| &e.secondary)
     }
 
     /// Returns the latest primary peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
-        self.primary_sets.keys().last().copied()
+        self.peer_sets.keys().last().copied()
     }
 
     /// Returns a [`PeerSetUpdate`] for the latest peer set (by id), if any.
@@ -333,10 +335,10 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Returns a [types::BitVec] for a random peer set.
     pub fn get_random_bit_vec(&mut self) -> Option<types::BitVec> {
-        let (&index, set) = self.primary_sets.iter().choose(&mut self.context)?;
+        let (&index, entry) = self.peer_sets.iter().choose(&mut self.context)?;
         Some(types::BitVec {
             index,
-            bits: set.knowledge(),
+            bits: entry.primary.knowledge(),
         })
     }
 
@@ -402,17 +404,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Returns `None` if the bit vector is malformed.
     pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::Info<C>>> {
-        let Some(set) = self.primary_sets.get(&bit_vec.index) else {
+        let Some(entry) = self.peer_sets.get(&bit_vec.index) else {
             // Don't consider unknown indices as errors, just ignore them.
             debug!(index = bit_vec.index, "requested peer set not found");
             return Some(vec![]);
         };
 
         // Ensure that the bit vector is the same size as the peer set
-        if bit_vec.bits.len() != set.len() as u64 {
+        if bit_vec.bits.len() != entry.primary.len() as u64 {
             debug!(
                 index = bit_vec.index,
-                expected = set.len(),
+                expected = entry.primary.len(),
                 actual = bit_vec.bits.len(),
                 "bit vector length mismatch"
             );
@@ -425,7 +427,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .iter()
             .enumerate()
             .filter_map(|(i, b)| {
-                let peer = (!b).then_some(&set[i])?; // Only consider peers that the requester wants
+                let peer = (!b).then_some(&entry.primary[i])?; // Only consider peers that the requester wants
                 let info = self.peers.get(peer).and_then(|r| r.sharable());
                 // We may have information signed over a timestamp greater than the current time,
                 // but within our synchrony bound. Avoid sharing this information as it could get us
@@ -490,8 +492,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             // Update primary-set knowledge (BitVec gossip); secondaries have no bitmap.
             if let Some(record) = self.peers.get(&peer) {
                 let want = record.want(self.dial_fail_limit);
-                for set in self.primary_sets.values_mut() {
-                    set.update(&peer, !want);
+                for entry in self.peer_sets.values_mut() {
+                    entry.primary.update(&peer, !want);
                 }
             }
         }

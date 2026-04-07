@@ -85,6 +85,12 @@ impl<P: PublicKey, F> SplitRouter<P> for F where
 {
 }
 
+/// Primary and secondary sets registered under a single peer-set index.
+struct PeerSetsAtIndex<P: PublicKey> {
+    primary: Set<P>,
+    secondary: Set<P>,
+}
+
 /// Configuration for the simulated network.
 pub struct Config {
     /// Maximum size of a message that can be sent over the network.
@@ -136,14 +142,11 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // A map from a public key to a peer
     peers: BTreeMap<P, Peer<P>>,
 
-    // Primary peer sets indexed by their ID.
-    primary_sets: BTreeMap<u64, Set<P>>,
+    // Primary and secondary peer sets indexed by peer-set ID.
+    peer_sets: BTreeMap<u64, PeerSetsAtIndex<P>>,
 
     // Reference count for each peer (number of primary peer sets they belong to).
     primary_refs: BTreeMap<P, usize>,
-
-    // Secondary peer sets indexed by their ID.
-    secondary_sets: BTreeMap<u64, Set<P>>,
 
     // Reference count for each peer (number of secondary peer sets they belong to).
     secondary_refs: BTreeMap<P, usize>,
@@ -201,9 +204,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 receiver,
                 links: HashMap::new(),
                 peers: BTreeMap::new(),
-                primary_sets: BTreeMap::new(),
+                peer_sets: BTreeMap::new(),
                 primary_refs: BTreeMap::new(),
-                secondary_sets: BTreeMap::new(),
                 secondary_refs: BTreeMap::new(),
                 blocks: BTreeSet::new(),
                 transmitter: transmitter::State::new(),
@@ -261,13 +263,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         let tracked_peer_sets = self.tracked_peer_sets;
 
         // Check if peer set already exists
-        if self.primary_sets.contains_key(&id) {
+        if self.peer_sets.contains_key(&id) {
             warn!(id, "peer set already exists");
             return false;
         }
 
         // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.primary_sets.last_key_value() {
+        if let Some((last, _)) = self.peer_sets.last_key_value() {
             if id <= *last {
                 warn!(
                     new_id = id,
@@ -283,9 +285,8 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             self.ensure_peer_exists(public_key).await;
             *self.primary_refs.entry(public_key.clone()).or_insert(0) += 1;
         }
-        self.primary_sets.insert(id, primary.clone());
 
-        // Create and store new secondary peer set. Peers in both roles count only as primary.
+        // Secondary peers: Peers in both roles count only as primary.
         let secondary_filtered = Set::from_iter_dedup(
             secondary
                 .iter()
@@ -296,16 +297,20 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
             self.ensure_peer_exists(public_key).await;
             *self.secondary_refs.entry(public_key.clone()).or_insert(0) += 1;
         }
-        self.secondary_sets.insert(id, secondary_filtered);
+        self.peer_sets.insert(
+            id,
+            PeerSetsAtIndex {
+                primary: primary.clone(),
+                secondary: secondary_filtered,
+            },
+        );
 
         // Remove oldest tracked peer sets if we exceed the limit.
-        while self.primary_sets.len() > tracked_peer_sets.get() {
-            let (primary_index, primary_set) = self.primary_sets.pop_first().unwrap();
-            let (secondary_index, secondary_set) = self.secondary_sets.pop_first().unwrap();
-            assert_eq!(primary_index, secondary_index);
-            debug!(index = primary_index, "removed oldest tracked peer sets");
+        while self.peer_sets.len() > tracked_peer_sets.get() {
+            let (removed_index, sets) = self.peer_sets.pop_first().unwrap();
+            debug!(index = removed_index, "removed oldest tracked peer sets");
 
-            for public_key in primary_set.iter() {
+            for public_key in sets.primary.iter() {
                 let refs = self.primary_refs.get_mut(public_key).unwrap();
                 *refs = refs.checked_sub(1).expect("reference count underflow");
 
@@ -318,7 +323,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 }
             }
 
-            for public_key in secondary_set.iter() {
+            for public_key in sets.secondary.iter() {
                 let refs = self.secondary_refs.get_mut(public_key).unwrap();
                 *refs = refs.checked_sub(1).expect("reference count underflow");
                 if *refs == 0 {
@@ -430,7 +435,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 send_result(result, Ok((sender, receiver)))
             }
             ingress::Message::PeerSet { id, response } => {
-                let _ = response.send(self.primary_sets.get(&id).cloned());
+                let _ = response.send(self.peer_sets.get(&id).map(|e| e.primary.clone()));
             }
             ingress::Message::Subscribe { response } => {
                 // Create a new subscription channel
@@ -589,13 +594,10 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
 
     /// Returns a [`PeerSetUpdate`] for the latest peer set (by id), if any.
     fn latest_update(&self) -> Option<PeerSetUpdate<P>> {
-        let (index, peers) = self.primary_sets.last_key_value()?;
+        let (index, entry) = self.peer_sets.last_key_value()?;
         Some(PeerSetUpdate {
             index: *index,
-            latest: TrackedPeers::new(
-                peers.clone(),
-                self.secondary_sets.get(index).cloned().unwrap_or_default(),
-            ),
+            latest: TrackedPeers::new(entry.primary.clone(), entry.secondary.clone()),
             all: self.aggregate_peer_membership(),
         })
     }

@@ -24,6 +24,12 @@ use std::{
 };
 use tracing::{debug, warn};
 
+/// Primary and secondary sets registered under a single peer-set index.
+struct PeerSetsAtIndex<C: PublicKey> {
+    primary: Set<C>,
+    secondary: Set<C>,
+}
+
 /// Configuration for the [Directory].
 pub struct Config {
     /// Whether private IPs are connectable.
@@ -72,11 +78,8 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// The records of all peers.
     peers: HashMap<C, Record>,
 
-    /// Primary peer sets indexed by their ID.
-    primary_sets: BTreeMap<u64, Set<C>>,
-
-    /// Secondary peer sets indexed by their ID.
-    secondary_sets: BTreeMap<u64, Set<C>>,
+    /// Primary and secondary peer sets indexed by peer-set ID.
+    peer_sets: BTreeMap<u64, PeerSetsAtIndex<C>>,
 
     /// Tracks blocked peers and their unblock time. This is the source of truth for
     /// whether a peer is blocked, persisting even if the peer record is deleted.
@@ -110,8 +113,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             block_duration: cfg.block_duration,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
             peers,
-            primary_sets: BTreeMap::new(),
-            secondary_sets: BTreeMap::new(),
+            peer_sets: BTreeMap::new(),
             blocked: PrioritySet::new(),
             releaser,
             metrics,
@@ -163,13 +165,13 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         secondaries: Map<C, Address>,
     ) -> Option<Set<C>> {
         // Check if peer set already exists
-        if self.primary_sets.contains_key(&index) {
+        if self.peer_sets.contains_key(&index) {
             warn!(index, "peer set already exists");
             return None;
         }
 
         // Ensure that peer set is monotonically increasing
-        if let Some((last, _)) = self.primary_sets.last_key_value() {
+        if let Some((last, _)) = self.peer_sets.last_key_value() {
             if index <= *last {
                 warn!(?index, ?last, "index must monotonically increase");
                 return None;
@@ -196,7 +198,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             };
             record.increment_primary();
         }
-        self.primary_sets.insert(index, primaries.into_keys());
+        let primary_keys_set = primaries.into_keys();
 
         // Create and store new secondary peer set.
         for (secondary, addr) in &secondaries {
@@ -220,31 +222,33 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             };
             record.increment_secondary();
         }
-        self.secondary_sets.insert(
+        let secondary_set = Set::from_iter_dedup(
+            secondaries
+                .keys()
+                .iter()
+                .filter(|k| primary_keys.position(k).is_none())
+                .cloned(),
+        );
+        self.peer_sets.insert(
             index,
-            Set::from_iter_dedup(
-                secondaries
-                    .keys()
-                    .iter()
-                    .filter(|k| primary_keys.position(k).is_none())
-                    .cloned(),
-            ),
+            PeerSetsAtIndex {
+                primary: primary_keys_set,
+                secondary: secondary_set,
+            },
         );
 
         // Remove oldest tracked peer sets if necessary.
-        while self.primary_sets.len() > self.max_sets.get() {
-            let (primary_index, primaries) = self.primary_sets.pop_first().unwrap();
-            let (secondary_index, secondaries) = self.secondary_sets.pop_first().unwrap();
-            assert_eq!(primary_index, secondary_index);
-            debug!(index = primary_index, "removed oldest tracked peer sets");
-            primaries.into_iter().for_each(|primary| {
+        while self.peer_sets.len() > self.max_sets.get() {
+            let (removed_index, sets) = self.peer_sets.pop_first().unwrap();
+            debug!(index = removed_index, "removed oldest tracked peer sets");
+            sets.primary.into_iter().for_each(|primary| {
                 self.peers.get_mut(&primary).unwrap().decrement_primary();
                 let deleted = self.delete_if_needed(&primary);
                 if deleted {
                     reset_peers.push(primary);
                 }
             });
-            secondaries.into_iter().for_each(|secondary| {
+            sets.secondary.into_iter().for_each(|secondary| {
                 self.peers
                     .get_mut(&secondary)
                     .unwrap()
@@ -276,12 +280,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Gets a primary peer set by index.
     pub fn get_set(&self, index: &u64) -> Option<&Set<C>> {
-        self.primary_sets.get(index)
+        self.peer_sets.get(index).map(|e| &e.primary)
     }
 
     /// Returns the latest primary peer set index.
     pub fn latest_set_index(&self) -> Option<u64> {
-        self.primary_sets.keys().last().copied()
+        self.peer_sets.keys().last().copied()
     }
 
     /// Returns a [`PeerSetUpdate`] for the latest peer set (by id), if any.
@@ -299,7 +303,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
 
     /// Gets a secondary peer set by index.
     pub fn get_secondary_set(&self, index: &u64) -> Option<&Set<C>> {
-        self.secondary_sets.get(index)
+        self.peer_sets.get(index).map(|e| &e.secondary)
     }
 
     /// Attempt to reserve a peer for the dialer.
