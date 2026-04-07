@@ -316,6 +316,7 @@ where
             }
         }
 
+        // Ourselves and peers in `latest_primary_peers` may keep buffered entries resident.
         if peer != self.public_key && self.latest_primary_peers.position(&peer).is_none() {
             return InsertMessageResult::Ineligible;
         }
