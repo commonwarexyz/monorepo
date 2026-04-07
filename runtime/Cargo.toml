@@ -69,7 +69,7 @@ arbitrary = [
 	"dep:arbitrary",
 	"dep:commonware-conformance",
 ]
-bench = ["dep:crossbeam-queue"]
+bench = [ "dep:crossbeam-queue" ]
 external = [ "pin-project" ]
 test-utils = []
 iouring = [ "iouring-network", "iouring-storage" ]
